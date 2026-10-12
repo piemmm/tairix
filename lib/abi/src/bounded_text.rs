@@ -235,11 +235,6 @@ impl<const MIN: usize, const MAX: usize, const NEWLINE: bool> WideText<MIN, MAX,
     pub(crate) const fn len_u16(&self) -> u16 {
         self.len
     }
-
-    /// The fixed-width wire buffer backing this text.
-    pub(crate) const fn raw_bytes(&self) -> &[u8; MAX] {
-        &self.bytes
-    }
 }
 
 impl<const MIN: usize, const MAX: usize, const NEWLINE: bool> core::fmt::Debug
@@ -314,10 +309,15 @@ b"
         );
         assert_eq!(Wide::new("a	b"), Err(Errno::OutOfRange));
 
-        let decoded =
-            Wide::from_wire(text.len_u16(), text.raw_bytes()).expect("well-formed wire image");
+        let image = [b'x'; 300];
+        let decoded = Wide::from_wire(text.len_u16(), &image).expect("well-formed wire image");
         assert_eq!(decoded, text);
-        let mut dirty = *Wide::new("hi").expect("short").raw_bytes();
+        let mut dirty = [0u8; 300];
+        dirty[..2].copy_from_slice(b"hi");
+        assert_eq!(
+            Wide::from_wire(2, &dirty).map(|text| text.as_str() == "hi"),
+            Ok(true)
+        );
         dirty[2] = 0xAA;
         assert_eq!(Wide::from_wire(2, &dirty), Err(Errno::BadMagic));
     }

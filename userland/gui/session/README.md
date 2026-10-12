@@ -277,7 +277,7 @@ it got to; the seat is handed on cleared regardless, so the screen still
 ends black. Under a reduced-motion theme it is black from its first frame
 and parks not at all.
 
-`SeatPresentation` (`switchuser.rs`) orders the two into the switch: the
+`SeatDeparture` and `SeatReturn` (`switchuser.rs`) order the two into the switch: the
 dim runs only after the authority *accepted* the step-aside — a refusal must
 leave the screen exactly as the user left it — and before `suspend`, while
 the seat and the frame ring are still up. Coming back, the arrival is begun

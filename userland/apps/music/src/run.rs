@@ -56,7 +56,7 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_music::view::{Command, Device, Outcome, Player, Request, Saved};
     use tairix_music::{Edit, Layout, Playlist, Repeat, WIN_HEIGHT, WIN_WIDTH};
-    use tairix_player::rt::{draw_seed, live, EngineWaits, HeldFiles, RtEngine, Tokens};
+    use tairix_player::rt::{live, EngineWaits, HeldFiles, RtEngine, Tokens};
     use tairix_player::{Control, EntryId, Failure, Note, Outcome as Ended, Settings, Status};
     use tairix_raster::{Color, Surface};
     use tairix_reclaim::desktop::working_set_ui_cache;
@@ -71,6 +71,7 @@ mod program {
     use tairix_sandbox::imagerender::{
         render_thumbnail, upload_document, ImageRenderService, MAX_ICON_SIDE,
     };
+    use tairix_sandbox::rt::draw_seed;
     use tairix_sandbox::rt::{
         serve_session_stdio, serve_stdio, session_worker_role, worker_role, RtLauncher,
         RtSessionLauncher, SessionMembers,
@@ -220,6 +221,8 @@ mod program {
     struct Board {
         status: Option<Status>,
         notes: Vec<Note>,
+        /// What further links of chained files say of themselves.
+        links: Vec<(EntryId, u32, Metadata)>,
         ended: Option<Ended>,
         /// The thread stopped for good, and why.
         gone: Option<Failure>,
@@ -268,13 +271,15 @@ mod program {
         /// Post what the engine has to say since it last said anything.
         fn post(&self, engine: &mut Engine) {
             let notes = engine.take_notes();
-            if !engine.take_changed() && notes.is_empty() {
+            let links = engine.take_link_metadata();
+            if !engine.take_changed() && notes.is_empty() && links.is_empty() {
                 return;
             }
             let wake = {
                 let mut board = self.board.lock();
                 board.status = Some(engine.status().clone());
                 board.notes.extend(notes);
+                board.links.extend(links);
                 board.ended = engine.outcome();
                 !core::mem::replace(&mut board.woken, true)
             };
@@ -887,16 +892,21 @@ mod program {
 
         /// Adopt what the playback thread posted.
         fn adopt_board(&mut self, reported: &mut Region) {
-            let (status, notes, ended, gone) = {
+            let (status, notes, links, ended, gone) = {
                 let mut board = self.link.board.lock();
                 board.woken = false;
                 (
                     board.status.take(),
                     core::mem::take(&mut board.notes),
+                    core::mem::take(&mut board.links),
                     board.ended.take(),
                     board.gone.take(),
                 )
             };
+            for (entry, link, metadata) in &links {
+                self.player
+                    .link_read(*entry, *link, metadata, &self.layout, reported);
+            }
             if let Some(status) = status {
                 let outcome = self.player.adopt(status, &self.layout, reported);
                 self.act(outcome);

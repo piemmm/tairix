@@ -88,8 +88,8 @@ mod program {
         ServiceControlRequest, ServiceEnrolRequest,
     };
     use tairix_abi::{
-        ActivationMode, CapabilityId, Duration64, Errno, ReadinessKind, ServiceNotice,
-        ServiceState, Signal, WaitSetOp, WaitSourceKind,
+        ActivationMode, CapabilityId, Duration64, Errno, NoticeTopic, ReadyCondition,
+        ServiceNotice, ServiceState, Signal, WaitSetOp, WaitSourceKind,
     };
     use tairix_caps::CapabilitySet;
     use tairix_enrolment::{Enrolment, EnrolmentOverride};
@@ -100,7 +100,8 @@ mod program {
     };
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
-    use tairix_util::retry::RetryLadder;
+    use tairix_soundtheme::cue::RtCuePost;
+    use tairix_soundtheme::{Answer, PostedCues, SoundEvent, CUE_ANSWER_DEADLINE_NS};
 
     // Aliased: the supervisor has its own `Launch` (a session to start on a
     // console), and these are floor-description entries.
@@ -183,24 +184,15 @@ mod program {
             ));
             return false;
         };
-        if engine
-            .register_enrolled(enrolled, vendor, EnrolmentOverride::empty())
-            .is_err()
-        {
+        if engine.register_enrolled(enrolled, vendor, None).is_err() {
             let _ = Stderr.write_fmt(format_args!(
                 "init: an enrolled service clashes with the boot floor or is out of scope; refusing to boot\n"
             ));
             return false;
         }
         for entry in config.ondemand() {
-            let spec = floor_spec(entry)
-                .with_activation(ActivationMode::on_demand(ONDEMAND_LINGER))
-                // A client's connect is answered when the service's endpoint
-                // is answerable, which only the service can say — treating
-                // the spawn as readiness would hand back an endpoint that is
-                // not bound yet, the very race on-demand activation exists
-                // to close.
-                .with_readiness(ReadinessKind::Notify);
+            let spec =
+                floor_spec(entry).with_activation(ActivationMode::on_demand(ONDEMAND_LINGER));
             if engine.register(spec).is_err() {
                 let _ = Stderr.write_fmt(format_args!(
                     "init: duplicate service name for {}; refusing to boot a surprising system\n",
@@ -224,7 +216,7 @@ mod program {
         ServiceSpec::new(service_name(entry.path), entry.path, entry.uid, Vec::new())
             .with_watchdog(entry.watchdog)
             .with_restart(entry.restart)
-            .with_readiness(entry.readiness())
+            .with_readiness(entry.readiness)
             .requiring(entry.requires.iter().collect::<Vec<_>>())
             .providing(entry.provides.iter().collect::<Vec<_>>())
     }
@@ -306,46 +298,41 @@ mod program {
         }
     }
 
-    /// How long PID 1 waits before its first attempt to read the
-    /// administrator's enrolment overrides, and the base its retry doubles.
+    /// Read the administrator's override layer off the mounted root volume:
+    /// the empty layer where it holds none, or why a document that is there
+    /// could not be read, so nothing is written over it.
     ///
-    /// The document lives on the root volume, which is mounted shortly after
-    /// PID 1 starts — later still while an encrypted root waits for its
-    /// passphrase — and no userland event says when, so the
-    /// wait is a bounded doubling one-shot ladder, never a poll.
-    const OVERRIDE_RETRY_BASE: Duration64 = Duration64::from_secs(1);
-
-    /// How many rungs that ladder climbs before it stops asking.
-    ///
-    /// Six doublings from one second span about a minute, which comfortably
-    /// covers an unlock; a machine that never unlocks (a recovery session, a
-    /// volume-less test guest) has no such document at all, and the ladder's
-    /// own finite length is what bounds that case rather than a guess at the
-    /// error `open` returns — an unmounted root and an absent one look
-    /// identical from here.
-    const OVERRIDE_RETRY_ATTEMPTS: u32 = 6;
-
-    /// Read the administrator's override layer off the root volume, or
-    /// `None` while the document is unreachable.
-    ///
-    /// A document that is present but malformed resolves to the empty layer —
-    /// obey the signed image — rather than being retried for ever.
-    fn read_overrides() -> Option<EnrolmentOverride> {
-        let text = read_document(tairix_abi::SERVICE_OVERRIDES_PATH)?;
-        Some(EnrolmentOverride::parse(&text).unwrap_or_else(|_| EnrolmentOverride::empty()))
-    }
-
-    /// Read a whole enrolment document as UTF-8 text, or `None` if it cannot
-    /// be opened, read, or decoded.
-    fn read_document(path: &str) -> Option<alloc::string::String> {
-        let file = tairix_rt::open(path.as_bytes()).ok()?;
-        let bytes =
-            tairix_rt::read_fd_to_end(file.fd(), tairix_enrolment::MAX_DOCUMENT_LEN).ok()?;
+    /// A document that is present but malformed — oversize, not UTF-8, or
+    /// refused by the grammar — resolves to the empty layer: obey the signed
+    /// image.
+    fn read_overrides() -> Result<EnrolmentOverride, Errno> {
+        let malformed = || Ok(EnrolmentOverride::empty());
+        let file = match tairix_rt::open(tairix_abi::SERVICE_OVERRIDES_PATH.as_bytes()) {
+            Ok(file) => file,
+            Err(raw) => {
+                return match Errno::from_syscall(raw) {
+                    Errno::NotFound => Ok(EnrolmentOverride::empty()),
+                    err => Err(err),
+                };
+            }
+        };
+        let bytes = tairix_rt::read_fd_to_end(file.fd(), tairix_enrolment::MAX_DOCUMENT_LEN)
+            .map_err(Errno::from_syscall)?;
         // The reader answers *past* the cap, so an oversize document is
         // refused whole rather than parsed as a shortened one.
-        (bytes.len() <= tairix_enrolment::MAX_DOCUMENT_LEN)
-            .then(|| alloc::string::String::from_utf8(bytes).ok())
-            .flatten()
+        if bytes.len() > tairix_enrolment::MAX_DOCUMENT_LEN {
+            return malformed();
+        }
+        let Ok(text) = core::str::from_utf8(&bytes) else {
+            return malformed();
+        };
+        EnrolmentOverride::parse(text).or_else(|_| malformed())
+    }
+
+    /// Whether the writable root is mounted: before the unlock every path it
+    /// backs, `/` among them, fails closed.
+    fn writable_root_mounted() -> bool {
+        tairix_rt::open_dir(b"/").is_ok()
     }
 
     /// Persist the administrator's override document, creating its directory
@@ -402,10 +389,12 @@ mod program {
     struct EngineServices<'a, 'cfg> {
         engine: &'a mut Init<'cfg>,
         reaper: &'a LoopReaper,
-        /// The bounded one-shot schedule for reading the administrator's
-        /// enrolment overrides off the root volume, or `None` once they
-        /// have been adopted or the ladder is spent.
-        override_retry: Option<RetryLadder>,
+        /// Whether the writable root has been seen mounted, which asserted
+        /// the filesystems' readiness and adopted the administrator's
+        /// enrolment overrides once.
+        mounted: bool,
+        /// Whether the machine's start sound has been asked for.
+        start_sounded: bool,
         /// Call tickets of clients the engine parked, awaiting their
         /// service's readiness.
         ///
@@ -416,6 +405,13 @@ mod program {
         /// it cannot grow past it however the calls are spread across
         /// clients.
         parked: Vec<ParkedClient>,
+        /// The boot floor's service names: the machine has started once all
+        /// of them have settled.
+        floor: Vec<String>,
+        /// The machine's start sound, posted so the sound authority never
+        /// stalls the loop that owes every other endpoint an answer.
+        cues: PostedCues,
+        cue_post: RtCuePost,
     }
 
     /// A client parked on its service's readiness, and the call ticket its
@@ -440,7 +436,7 @@ mod program {
             // abandonment, or as a connection if a restart carried it back
             // to ready.
             self.release_parked_clients();
-            self.engine.arm_watchdogs(now);
+            self.settled(now);
         }
 
         fn any_running(&self) -> bool {
@@ -448,23 +444,18 @@ mod program {
         }
 
         fn next_timeout_ns(&mut self) -> u64 {
-            let engine_at = self
+            let Some(at) = self
                 .engine
                 .next_deadline()
-                .map(|d| d.saturating_total_nanos());
-            let soonest = match (engine_at, self.override_retry.map(|l| l.at)) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (only, None) | (None, only) => only,
-            };
-            let Some(at) = soonest else {
+                .map(|d| d.saturating_total_nanos())
+            else {
                 return tairix_abi::WAITSET_TIMEOUT_NONE;
             };
             // The deadlines are absolute monotonic instants and the park takes
             // a relative span, so an already-lapsed deadline is a zero-length
             // wait that returns at once and is served on the next turn. That
             // cannot spin: `expire_due` consumes or drops every deadline it
-            // finds lapsed, and the override ladder either advances a rung or
-            // disarms, so the same wakeup is never served twice.
+            // finds lapsed, so the same wakeup is never served twice.
             at.saturating_sub(tairix_rt::clock_get())
         }
 
@@ -504,7 +495,7 @@ mod program {
                 ticket,
                 &reply[..written.unwrap_or(0)],
             );
-            self.engine.arm_watchdogs(now);
+            self.settled(now);
         }
 
         fn serve_enrol(&mut self) {
@@ -538,7 +529,7 @@ mod program {
                 ticket,
                 &reply[..written.unwrap_or(0)],
             );
-            self.engine.arm_watchdogs(now);
+            self.settled(now);
         }
 
         fn serve_activation(&mut self) {
@@ -558,7 +549,7 @@ mod program {
                 Err(err) => Self::reply_state(ENDPOINT, ticket, Err(err)),
             }
             self.release_parked_clients();
-            self.engine.arm_watchdogs(now);
+            self.settled(now);
         }
 
         fn serve_notice(&mut self) {
@@ -582,21 +573,108 @@ mod program {
             // waiting for it — this is the wake the whole on-demand path
             // turns on.
             self.release_parked_clients();
-            self.engine.arm_watchdogs(now);
+            self.settled(now);
         }
 
         fn expire_deadlines(&mut self) {
             let now = Duration64::from_nanos(tairix_rt::clock_get());
-            self.try_adopt_overrides(now);
             state_refused(&self.engine.expire_due(now).failed, "restarted");
             // A lapsed deadline can restart a service into readiness, which
             // releases whoever was parked waiting for it.
             self.release_parked_clients();
-            self.engine.arm_watchdogs(now);
+            self.settled(now);
+        }
+
+        fn serve_cue(&mut self) {
+            self.cues.collect(&mut self.cue_post, |event, answer| {
+                if let Err(err) = answer {
+                    let _ = Stderr.write_fmt(format_args!(
+                        "init: {} sound refused ({err:?})\n",
+                        event.name()
+                    ));
+                }
+            });
+        }
+
+        fn serve_mounts(&mut self) {
+            if (self.mounted && self.engine.overrides_read()) || !writable_root_mounted() {
+                return;
+            }
+            let now = Duration64::from_nanos(tairix_rt::clock_get());
+            // The administrator's layer narrows what the image's enrolled
+            // the moment the root holding it is up. One that is there but
+            // will not read leaves the image's standing and every change
+            // refused, rather than written over a record nobody has seen,
+            // and is read again on the next change to the mounts.
+            if !self.engine.overrides_read() {
+                match read_overrides() {
+                    Ok(overrides) => {
+                        for name in self.engine.adopt_overrides(overrides, now) {
+                            let _ = Stderr.write_fmt(format_args!(
+                                "init: service {name} stopped: disabled by the administrator\n"
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        let _ = Stderr.write_fmt(format_args!(
+                            "init: the administrator's service overrides could not be read ({err:?}); the image's enrolment stands\n"
+                        ));
+                    }
+                }
+            }
+            if self.mounted {
+                return;
+            }
+            self.mounted = true;
+            let report = self
+                .engine
+                .satisfy_condition(ReadyCondition::FilesystemsMounted);
+            state_refused(&report.failed, "started");
+            self.release_parked_clients();
+            self.settled(now);
         }
     }
 
     impl EngineServices<'_, '_> {
+        /// Mark the machine started once its floor has settled, sound its
+        /// start once it is also ready for a user, then arm the watchdogs
+        /// whatever the event left running.
+        ///
+        /// Ready for a user is the floor settled — the hardware present at
+        /// boot among it — and the filesystems mounted: the root volume is
+        /// up, so a user may log in and the machine's own sound policy, which
+        /// lives on that volume, can be read. The sound is asked for once.
+        fn settled(&mut self, now: Duration64) {
+            if let Some(report) = self
+                .engine
+                .complete_boot(self.floor.iter().map(String::as_str))
+            {
+                state_refused(&report.failed, "started");
+                self.release_parked_clients();
+            }
+            if !self.start_sounded
+                && self
+                    .engine
+                    .condition_satisfied(ReadyCondition::BootComplete)
+                && self
+                    .engine
+                    .condition_satisfied(ReadyCondition::FilesystemsMounted)
+            {
+                self.start_sounded = true;
+                if let Err(err) = self.cues.post(
+                    &mut self.cue_post,
+                    SoundEvent::Startup,
+                    Answer::Started,
+                    CUE_ANSWER_DEADLINE_NS,
+                ) {
+                    let _ = Stderr.write_fmt(format_args!(
+                        "init: start sound not cued ({err:?}); booting on\n"
+                    ));
+                }
+            }
+            self.engine.arm_watchdogs(now);
+        }
+
         /// Serve one decoded activation frame, answering with the service's
         /// resulting state — or `None` when the client has been parked and
         /// its ticket is owed a later reply.
@@ -768,35 +846,6 @@ mod program {
             };
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply[..written.unwrap_or(0)]);
         }
-
-        /// Try once to read the administrator's enrolment overrides, if the
-        /// ladder is armed and its rung is due.
-        ///
-        /// Pre-unlock the manager obeys the image's layer alone, so this is
-        /// where a service the administrator disabled is stopped. A rung that
-        /// finds nothing advances; a spent ladder disarms and the image's layer
-        /// stands for the rest of the boot, which is the honest answer for a
-        /// machine that never unlocks.
-        fn try_adopt_overrides(&mut self, now: Duration64) {
-            let Some(mut ladder) = self.override_retry else {
-                return;
-            };
-            if now.saturating_total_nanos() < ladder.at {
-                return;
-            }
-            if let Some(overrides) = read_overrides() {
-                self.override_retry = None;
-                for name in self.engine.adopt_overrides(overrides, now) {
-                    let _ = Stderr.write_fmt(format_args!(
-                        "init: service {name} stopped: disabled by the administrator\n"
-                    ));
-                }
-                return;
-            }
-            self.override_retry = ladder
-                .advance(now.saturating_total_nanos())
-                .then_some(ladder);
-        }
     }
 
     /// The reserved endpoint clients broker their connections over.
@@ -819,6 +868,12 @@ mod program {
 
     /// Wait-set token for "a service has announced its own readiness".
     const TOKEN_NOTICE: u64 = 5;
+
+    /// Wait-set token for "a posted cue was answered".
+    const TOKEN_CUE: u64 = 6;
+
+    /// Wait-set token for "the mount table moved".
+    const TOKEN_MOUNTS: u64 = 7;
 
     /// The production [`Sessions`] backing: the real `tairix-rt` syscall
     /// wrappers (`console_count`, and `spawn_in` with the console-selecting
@@ -925,6 +980,11 @@ mod program {
                     tairix_abi::WAITSET_CHILD_ANY,
                     TOKEN_CHILD,
                 ),
+                (
+                    WaitSourceKind::SystemNotice,
+                    u64::from(NoticeTopic::Mounts.as_u32()),
+                    TOKEN_MOUNTS,
+                ),
             ] {
                 let added = tairix_rt::waitset_ctl(set, WaitSetOp::Add, kind, id, token);
                 if added != 0 {
@@ -973,6 +1033,8 @@ mod program {
                 TOKEN_ENROL => Woke::Enrol,
                 TOKEN_ACTIVATION => Woke::Activation,
                 TOKEN_NOTICE => Woke::Notice,
+                TOKEN_CUE => Woke::Cue,
+                TOKEN_MOUNTS => Woke::Mounts,
                 TOKEN_CHILD => {
                     // A child member's readiness is a peek, so the reap is a
                     // separate non-blocking call — it must never park the one
@@ -1124,14 +1186,22 @@ mod program {
         let mut services = EngineServices {
             engine: &mut engine,
             reaper: &reaper,
-            override_retry: RetryLadder::arm(
-                tairix_rt::clock_get(),
-                OVERRIDE_RETRY_BASE.saturating_total_nanos(),
-                OVERRIDE_RETRY_ATTEMPTS,
-                false,
-            ),
+            mounted: false,
+            start_sounded: false,
             parked: Vec::new(),
+            floor: config
+                .services()
+                .iter()
+                .map(|entry| service_name(entry.path).to_string())
+                .collect(),
+            cues: PostedCues::new(),
+            cue_post: RtCuePost::new(sessions.set, TOKEN_CUE),
         };
+        // The notice wakes for a mount that moves after the member joined;
+        // one already mounted, and a floor of `immediate` services already
+        // settled, are looked at now.
+        services.serve_mounts();
+        services.settled(Duration64::from_nanos(tairix_rt::clock_get()));
         let session = Launch {
             path: config.session().path.as_bytes(),
             uid: config.session().uid,
@@ -1201,6 +1271,8 @@ struct StubServices {
     activation: usize,
     notice: usize,
     deadlines: usize,
+    cues: usize,
+    mounts: usize,
     exits: usize,
 }
 
@@ -1230,6 +1302,12 @@ impl supervisor::Services for StubServices {
     fn expire_deadlines(&mut self) {
         self.deadlines += 1;
     }
+    fn serve_cue(&mut self) {
+        self.cues += 1;
+    }
+    fn serve_mounts(&mut self) {
+        self.mounts += 1;
+    }
 }
 
 #[cfg(not(freestanding))]
@@ -1247,7 +1325,7 @@ fn main() {
         {
             let _ = (
                 startup::service_name(entry.path),
-                entry.readiness(),
+                entry.readiness,
                 entry.requires.iter().count(),
                 entry.provides.is_empty(),
             );
@@ -1259,9 +1337,9 @@ fn main() {
     }
     // Drive the reactor's dispatch over a scripted seam so an ordinary host
     // build covers every arm: a control request, an enrolment request, a
-    // client activation, a service's own readiness notice, a lapsed
-    // deadline, a non-session child exit, then a failed park that ends the
-    // loop.
+    // client activation, a service's own readiness notice, a cue's answer, a
+    // mount-table move, a lapsed deadline, a non-session child exit, then a
+    // failed park that ends the loop.
     let mut services = StubServices::default();
     let mut sessions = StubSessions {
         script: &[
@@ -1269,6 +1347,8 @@ fn main() {
             supervisor::Woke::Enrol,
             supervisor::Woke::Activation,
             supervisor::Woke::Notice,
+            supervisor::Woke::Cue,
+            supervisor::Woke::Mounts,
             supervisor::Woke::Deadline,
             supervisor::Woke::Child(4242),
             supervisor::Woke::Failed,
@@ -1292,9 +1372,11 @@ fn main() {
             services.enrol,
             services.activation,
             services.notice,
+            services.cues,
+            services.mounts,
             services.deadlines,
             services.exits
         ),
-        (1, 1, 1, 1, 1, 1)
+        (1, 1, 1, 1, 1, 1, 1, 1)
     );
 }

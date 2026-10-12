@@ -80,7 +80,9 @@ use tairix_cursor::{CursorImage, CursorRegistry, CursorRegistryError, CURSOR_BAS
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
 use tairix_raster::ResampleScratch;
-use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
+use tairix_reclaim::{
+    disposable_ui_budget, disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache,
+};
 use tairix_theme::{CursorKind, CursorSetId};
 
 use crate::geometry::Point;
@@ -266,6 +268,13 @@ pub struct CursorController {
 }
 
 impl CursorController {
+    /// Hold the cursor cache to what an output of `fb_bytes` allows, the
+    /// output having changed size: the budget [`cursor_cache`] builds it
+    /// under.
+    pub fn rescale_cache(&mut self, fb_bytes: usize) {
+        let _ = self.cache.rebudget(disposable_ui_budget(fb_bytes));
+    }
+
     /// A controller for the built-in cursor set, before any cursor is shown,
     /// caching rasterised images in `cache`.
     ///

@@ -17,7 +17,7 @@ use core::cell::RefCell;
 use tairix_abi::audio::{
     decode_enumerate_reply, decode_open_reply, decode_state_reply, decode_streams_reply,
     AudioBaseline, AudioDeviceDescriptor, AudioGain, AudioLocation, AudioNotify, AudioRequest,
-    ControlAccess, DefaultChoice, OpenParams, StreamGrant, StreamRole, StreamState,
+    ControlAccess, DefaultChoice, OpenParams, StreamGrant, StreamRole, StreamState, Tenancy,
     AUDIO_MAX_REPLY, AUDIO_MAX_REQUEST,
 };
 use tairix_abi::driver::audio::{
@@ -30,6 +30,7 @@ use tairix_abi::driver::audio_ring::{aligned_region, PcmGeometry, PcmRing, REGIO
 use tairix_abi::origin::{CapabilitySummary, Origin, ProcId, TrustDomain};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::seat::{DisplayLease, ReleaseSurface};
+use tairix_abi::sound_cue::SOUNDD_UID;
 use tairix_abi::time::{MonotonicClock, Time64};
 use tairix_abi::{CapabilityId, DriverError, Errno};
 use tairix_audio::route::Room;
@@ -40,6 +41,9 @@ use crate::{AudioChannelTransport, AudioService, Notifier, RegionHost, RegionId}
 
 /// The rate the fixture device is clocked at.
 const DEVICE_HZ: u32 = 48_000;
+
+/// The port the fixture's device channel is bound to tell.
+const FIXTURE_NOTIFY: u64 = tairix_abi::driver::audio_channel::notify_endpoint_for(1, 1);
 /// Frames the fixture device interrupts on.
 const PERIOD: u32 = 256;
 /// Frames the fixture device will hold in flight.
@@ -75,6 +79,12 @@ struct FixtureDevice {
     control: Option<GainRange>,
     /// Every setting the mixer programmed: endpoint, level, mute.
     programmed: Vec<(u16, i32, bool)>,
+    /// Whether the sink's connector is occupied.
+    jack: JackState,
+    /// The one encoding the endpoints take.
+    format: SampleFormat,
+    /// The bits of it the endpoints resolve, where fewer.
+    resolution: Option<u8>,
 }
 
 impl FixtureDevice {
@@ -91,6 +101,9 @@ impl FixtureDevice {
             fixed_rate: true,
             control: None,
             programmed: Vec::new(),
+            jack: JackState::Unknown,
+            format: SampleFormat::S16,
+            resolution: None,
         }
     }
 }
@@ -122,8 +135,9 @@ impl Audio for FixtureDevice {
         Ok(AudioEndpointFacts {
             index: endpoint,
             direction,
-            jack: JackState::Unknown,
-            formats: SampleFormats::EMPTY.with(SampleFormat::S16),
+            jack: self.jack,
+            formats: SampleFormats::EMPTY.with(self.format),
+            resolution: self.resolution,
             channel_map: ChannelMap::STEREO,
             rates,
             min_period_frames: PERIOD,
@@ -279,6 +293,7 @@ impl AudioChannelTransport for LoopbackChannel {
                 mute,
             } => server.set_gain(endpoint, millibel, mute).to_vec(),
             Req::Detach { endpoint } => server.detach(endpoint).to_vec(),
+            Req::Watch { notify_endpoint } => server.watch(notify_endpoint).to_vec(),
         };
         let len = body.len().min(reply.len());
         reply[..len].copy_from_slice(&body[..len]);
@@ -301,6 +316,8 @@ struct FixtureRegions {
     adopted_from: Vec<ProcId>,
     /// A region the host no longer holds, as if its mapping were gone.
     withdrawn: Option<RegionId>,
+    /// Every region it is asked to hand a driver is refused.
+    refuses_grants: bool,
 }
 
 impl FixtureRegions {
@@ -311,6 +328,7 @@ impl FixtureRegions {
             device_rings: Vec::new(),
             adopted_from: Vec::new(),
             withdrawn: None,
+            refuses_grants: false,
         }
     }
 
@@ -358,6 +376,9 @@ impl RegionHost for FixtureRegions {
 
     fn grant(&mut self, region: RegionId, _endpoint: u64) -> Result<u64, Errno> {
         self.slot(region).ok_or(Errno::NotFound)?;
+        if self.refuses_grants {
+            return Err(Errno::PermissionDenied);
+        }
         Ok(u64::from(region.0))
     }
 
@@ -539,7 +560,7 @@ impl Fixture {
             .bind_device(
                 0x4143_4841_4E00_0000,
                 FIXTURE_LOCATION,
-                0x0A55_0001,
+                FIXTURE_NOTIFY,
                 Box::new(transport),
                 &DiscardSink,
             )
@@ -556,7 +577,7 @@ impl Fixture {
             .bind_device(
                 endpoint,
                 location,
-                0x0A55_0002,
+                tairix_abi::driver::audio_channel::notify_endpoint_for(1, 2),
                 Box::new(transport),
                 &DiscardSink,
             )
@@ -627,6 +648,20 @@ impl Fixture {
         hz: u32,
         latency: u32,
     ) -> StreamGrant {
+        self.open_for(caller, Tenancy::Caller, role, hz, latency)
+            .expect("the open is granted")
+    }
+
+    /// Open a playback stream of `role` for `tenancy` and adopt a ring for
+    /// it, or answer why the open was refused.
+    fn open_for(
+        &mut self,
+        caller: &Origin,
+        tenancy: Tenancy,
+        role: StreamRole,
+        hz: u32,
+        latency: u32,
+    ) -> Result<StreamGrant, Errno> {
         let reply = self.call(
             caller,
             &AudioRequest::Open(OpenParams {
@@ -637,9 +672,10 @@ impl Fixture {
                 channel_map: ChannelMap::STEREO,
                 role,
                 latency_target_frames: latency,
+                tenancy,
             }),
         );
-        let grant = decode_open_reply(&reply).expect("the open is granted");
+        let grant = decode_open_reply(&reply)?;
         let geometry = PcmGeometry::new(grant.ring_frames, grant.format, 2).expect("geometry");
         let region = self.regions.borrow_mut().add(geometry.region_len());
         let reply = self.call(
@@ -656,7 +692,7 @@ impl Fixture {
             "the ring is adopted as the calling client's own"
         );
         self.rings.push((grant.stream_id, region));
-        grant
+        Ok(grant)
     }
 
     /// The client ring `grant`'s stream was opened with.
@@ -785,6 +821,19 @@ fn session(tag: u8) -> ProcId {
 /// A caller with no capability, in the login session tagged `tag`.
 fn in_session(pid: u64, tag: u8) -> Origin {
     caller(pid, &[]).with_login_session(session(tag))
+}
+
+/// The cue authority, attested by its service account and in no session.
+fn cue_authority(pid: u64) -> Origin {
+    Origin::new(
+        TrustDomain::User,
+        SOUNDD_UID,
+        SOUNDD_UID,
+        pid,
+        instance_of(pid),
+        CapabilitySummary::EMPTY,
+        0,
+    )
 }
 
 /// A second deterministic stereo `s16` signal, unlike [`signal`] in every
@@ -995,6 +1044,7 @@ fn a_capture_open_is_refused_without_the_capability_and_granted_with_it() {
         channel_map: ChannelMap::STEREO,
         role: StreamRole::Media,
         latency_target_frames: 2_048,
+        tenancy: Tenancy::Caller,
     };
     let plain = caller(7, &[]);
     let reply = fixture.call(&plain, &AudioRequest::Open(params));
@@ -1280,6 +1330,168 @@ fn a_paused_stream_resumes_into_the_configuration_it_left() {
     );
 }
 
+/// The connector the driver reports changed, as a changed jack tells it.
+fn jack_changed(fixture: &mut Fixture, endpoint: u16) {
+    let jack = fixture.device.borrow().audio().jack;
+    let frame =
+        tairix_abi::driver::audio_channel::AudioChannelNotify::JackChanged { endpoint, jack }
+            .encode();
+    fixture.service.on_device_notify(0, &frame, &DiscardSink);
+}
+
+#[test]
+fn a_bound_channel_is_watched_before_its_endpoints_are_read() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    assert_eq!(
+        fixture.device.borrow().watch_endpoint(),
+        Some(FIXTURE_NOTIFY)
+    );
+}
+
+/// A changed connector may carry changed facts: they are read again, and an
+/// endpoint whose new facts still admit its stream keeps playing it.
+#[test]
+fn a_jack_change_reads_the_endpoint_again() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let owner = caller(7, &[]);
+    let grant = fixture.open_playback(&owner, DEVICE_HZ, 2_048);
+    fixture.device.borrow_mut().audio_mut().jack = JackState::Present;
+    let before = fixture.service.changes();
+    jack_changed(&mut fixture, 0);
+    assert_eq!(fixture.sink(&owner, SINK).jack, JackState::Present);
+    assert_ne!(fixture.service.changes(), before);
+    assert_ne!(fixture.state(&owner, &grant), StreamState::DeviceLost);
+}
+
+/// Whether every sample of `played` lies on a `bits`-bit grid of sixteen.
+fn on_grid(played: &[u8], bits: u32) -> bool {
+    let unsent = (1i16 << (16 - bits)) - 1;
+    played
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|pair| i16::from_le_bytes(*pair) & unsent == 0)
+}
+
+/// A device resolving fewer bits than its encoding carries is mixed onto
+/// that grid, and a sink replugged on the connector with another resolution
+/// moves the running stream onto its own without losing it.
+#[test]
+fn a_sink_resolving_fewer_bits_is_mixed_onto_its_grid_and_follows_a_replug() {
+    let mut fixture = Fixture::new();
+    fixture.device.borrow_mut().audio_mut().resolution = Some(12);
+    fixture.bind();
+    let owner = caller(7, &[]);
+    let grant = fixture.open_playback(&owner, DEVICE_HZ, 2_048);
+    let samples = signal(1_000);
+    assert!(!on_grid(&samples, 12), "the signal itself is off the grid");
+    assert_eq!(fixture.client_write(&grant, &samples), 1_000);
+    let reply = fixture.call(
+        &owner,
+        &AudioRequest::Start {
+            stream_id: grant.stream_id,
+            at: Frames::ZERO,
+        },
+    );
+    decode_status_reply(&reply).expect("started");
+    fixture.period();
+    let narrow = fixture.played();
+    assert!(
+        !narrow.is_empty() && on_grid(&narrow, 12),
+        "dithered onto twelve bits"
+    );
+    fixture.device.borrow_mut().audio_mut().resolution = None;
+    jack_changed(&mut fixture, 0);
+    assert_ne!(fixture.state(&owner, &grant), StreamState::DeviceLost);
+    assert_eq!(fixture.client_write(&grant, &samples), 1_000);
+    for _ in 0..4 {
+        fixture.period();
+    }
+    let wide = fixture.played();
+    assert!(wide.len() > narrow.len());
+    assert!(!on_grid(&wide, 12), "back at sixteen bits");
+}
+
+/// A sink replugged that no longer plays the configuration its streams run
+/// under: they hold their positions as lost, and the endpoint is released for
+/// the next stream to program afresh.
+#[test]
+fn a_sink_that_no_longer_plays_its_configuration_loses_its_streams() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let owner = caller(7, &[]);
+    let grant = fixture.open_playback(&owner, DEVICE_HZ, 2_048);
+    fixture.device.borrow_mut().audio_mut().format = SampleFormat::S24In32;
+    jack_changed(&mut fixture, 0);
+    assert_lost(&mut fixture, &[(&owner, grant.stream_id)]);
+    assert!(
+        fixture.device.borrow().audio().configured.is_none(),
+        "the endpoint was given back"
+    );
+    let sink = fixture.sink(&owner, SINK);
+    assert!(sink.formats.contains(SampleFormat::S24In32));
+}
+
+/// An attach the mixer could not complete leaves nothing programmed in the
+/// driver: it is detached, not left holding a configuration.
+#[test]
+fn an_attach_that_fails_detaches_the_driver() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    fixture.regions.borrow_mut().refuses_grants = true;
+    let owner = caller(7, &[]);
+    let reply = fixture.call(
+        &owner,
+        &AudioRequest::Open(OpenParams {
+            device_id: SINK,
+            direction: StreamDirection::Playback,
+            format: SampleFormat::S16,
+            rate: rate(DEVICE_HZ),
+            channel_map: ChannelMap::STEREO,
+            role: StreamRole::Media,
+            latency_target_frames: 2_048,
+            tenancy: Tenancy::Caller,
+        }),
+    );
+    assert!(decode_open_reply(&reply).is_err());
+    assert!(fixture.device.borrow().audio().configured.is_none());
+}
+
+/// A stream refused after its endpoint was programmed for it leaves the
+/// endpoint programmed for nobody no longer.
+#[test]
+fn a_stream_refused_after_its_endpoint_was_programmed_gives_it_back() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let recorder = caller(8, &[CapabilityId::AUDIO_CAPTURE]);
+    let reply = fixture.call(
+        &recorder,
+        &AudioRequest::Open(OpenParams {
+            device_id: 0,
+            direction: StreamDirection::Capture,
+            format: SampleFormat::S16,
+            rate: rate(DEVICE_HZ),
+            channel_map: ChannelMap::new(&[
+                tairix_abi::driver::audio::ChannelPosition::LowFrequency,
+            ])
+            .expect("a layout"),
+            role: StreamRole::Media,
+            latency_target_frames: 2_048,
+            tenancy: Tenancy::Caller,
+        }),
+    );
+    assert_eq!(
+        decode_open_reply(&reply).map(|_| ()),
+        Err(Errno::NotSupported)
+    );
+    assert!(
+        fixture.device.borrow().audio().configured.is_none(),
+        "no stereo source has anywhere to go in a lone LFE channel"
+    );
+}
+
 #[test]
 fn the_last_stream_closing_gives_the_device_back() {
     // Holding a configured stream and its shared region after the last
@@ -1316,6 +1528,7 @@ fn open_capture(fixture: &mut Fixture, recorder: &Origin) -> StreamGrant {
             channel_map: ChannelMap::STEREO,
             role: StreamRole::Media,
             latency_target_frames: 2_048,
+            tenancy: Tenancy::Caller,
         }),
     );
     decode_open_reply(&reply).expect("the capture open is granted")
@@ -1651,6 +1864,164 @@ fn a_notification_outside_the_room_is_dropped_not_queued() {
         },
     );
     assert_eq!(decode_status_reply(&reply), Err(Errno::SeatNotOwner));
+}
+
+/// Playing for the machine or for another session is the cue authority's
+/// alone, and only for a notification: anyone else asking is refused, whatever
+/// capabilities it holds and whichever room it is in.
+#[test]
+fn a_tenancy_not_the_callers_own_is_the_cue_authoritys_alone() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let impostors = [
+        caller(7, &[]),
+        in_session(8, 0xA1),
+        caller(9, &[CapabilityId::AUDIO_CAPTURE, CapabilityId::DRV_LOAD]),
+    ];
+    for tenancy in [Tenancy::Machine, Tenancy::Session(session(0xA1))] {
+        for impostor in &impostors {
+            assert_eq!(
+                fixture.open_for(
+                    impostor,
+                    tenancy,
+                    StreamRole::Notification,
+                    DEVICE_HZ,
+                    4_096
+                ),
+                Err(Errno::PermissionDenied),
+                "{tenancy:?} for uid {}",
+                impostor.uid()
+            );
+        }
+        for role in [
+            StreamRole::Media,
+            StreamRole::Communication,
+            StreamRole::Accessibility,
+        ] {
+            assert_eq!(
+                fixture.open_for(&cue_authority(10), tenancy, role, DEVICE_HZ, 4_096),
+                Err(Errno::PermissionDenied),
+                "the cue authority plays notifications, not {role:?}"
+            );
+        }
+    }
+    let reply = fixture.call(
+        &cue_authority(10),
+        &AudioRequest::Open(OpenParams {
+            device_id: 0,
+            direction: StreamDirection::Capture,
+            format: SampleFormat::S16,
+            rate: rate(DEVICE_HZ),
+            channel_map: ChannelMap::STEREO,
+            role: StreamRole::Notification,
+            latency_target_frames: 2_048,
+            tenancy: Tenancy::Machine,
+        }),
+    );
+    assert_eq!(decode_open_reply(&reply), Err(Errno::PermissionDenied));
+}
+
+/// The machine's own sound plays whoever holds the room: under the login
+/// screen, through a handover, and in a session's room alike.
+#[test]
+fn the_machines_own_sound_plays_in_every_room() {
+    for lease in [
+        DisplayLease::ended(1, ReleaseSurface::Handover),
+        DisplayLease::held(2, ProcId::KERNEL),
+        DisplayLease::held(3, session(0xA1)),
+        DisplayLease::UNHELD,
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.bind();
+        fixture.seat(lease);
+        let authority = cue_authority(10);
+        let chime = fixture
+            .open_for(
+                &authority,
+                Tenancy::Machine,
+                StreamRole::Notification,
+                DEVICE_HZ,
+                4_096,
+            )
+            .expect("the machine's sound is admitted");
+        let samples = signal(1_000);
+        fixture.client_write(&chime, &samples);
+        start(&mut fixture, &authority, &chime);
+        run(&mut fixture, 8);
+        assert_eq!(fixture.state(&authority, &chime), StreamState::Running);
+        assert_eq!(
+            fixture.played()[..samples.len()],
+            samples[..],
+            "{lease:?} hears it bit-exact"
+        );
+    }
+}
+
+/// A cue played for a session is that session's sound: it plays in its
+/// room, is refused at open in another's, and is dropped rather than held
+/// when the room moves away from it.
+#[test]
+fn a_cue_for_a_session_plays_only_in_that_sessions_room() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let authority = cue_authority(10);
+    let alice = Tenancy::Session(session(0xA1));
+    fixture.seat(DisplayLease::held(1, session(0xB0)));
+    assert_eq!(
+        fixture.open_for(
+            &authority,
+            alice,
+            StreamRole::Notification,
+            DEVICE_HZ,
+            4_096
+        ),
+        Err(Errno::SeatNotOwner),
+        "one user's cue never sounds in another's room"
+    );
+
+    fixture.seat(DisplayLease::held(2, session(0xA1)));
+    let chime = fixture
+        .open_for(
+            &authority,
+            alice,
+            StreamRole::Notification,
+            DEVICE_HZ,
+            4_096,
+        )
+        .expect("admitted in its own room");
+    let samples = signal(3_000);
+    fixture.client_write(&chime, &samples);
+    start(&mut fixture, &authority, &chime);
+    let heard = fixture.played().len();
+    assert!(heard > 0 && fixture.played()[..] == samples[..heard]);
+
+    fixture.seat(DisplayLease::held(3, session(0xB0)));
+    assert_eq!(
+        fixture.told(&chime).last(),
+        Some(&(StreamState::SeatInactive, Frames::new(3_000))),
+        "what it queued was dropped with the room"
+    );
+}
+
+/// The cue authority's own tenancy is a daemon's, which no login encloses:
+/// it plays only where the room is unclaimed.
+#[test]
+fn the_cue_authoritys_own_stream_is_a_daemons() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let authority = cue_authority(10);
+    let open = |fixture: &mut Fixture| {
+        fixture.open_for(
+            &authority,
+            Tenancy::Caller,
+            StreamRole::Notification,
+            DEVICE_HZ,
+            4_096,
+        )
+    };
+    assert!(open(&mut fixture).is_ok(), "an unclaimed room is anybody's");
+    fixture.seat(DisplayLease::held(1, session(0xA1)));
+    assert_eq!(open(&mut fixture), Err(Errno::SeatNotOwner));
 }
 
 /// A notification the room leaves while it plays out its tail has nothing

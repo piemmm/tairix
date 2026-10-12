@@ -1,0 +1,30 @@
+[package]
+name = "tairix-encoder"
+description = "TAIRiX encoder-v1 driver side: the server every display encoder driver runs under its node's encoder duty — the caller's link attested by the kernel, one display engine holding the encoder at a time, the mode set's phases held to their order from the phase the hardware was found in, the connector's moves answered to a posted wait — and the freestanding serve loop around it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `encoder-v1` frames, the `Encoder` class trait and the link records.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The supplier seam the server asks the kernel about its callers through.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fake kernel the server's tests are answered through.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0", features = ["test-support"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The device channel an encoder's audio is served on beside it.
+tairix-audiochan = { path = "../audiochan", version = "=0.0.0" }
+# The bounded list of event sources the serve loop waits on.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+# Every decision, recorded with a stable event id.
+tairix-log = { path = "../log", version = "=0.0.0" }

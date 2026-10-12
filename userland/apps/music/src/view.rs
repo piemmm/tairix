@@ -113,6 +113,17 @@ impl Known {
     }
 }
 
+/// What a further link of a chained file says of itself: an internet radio
+/// recording's songs each carry their own names.
+#[derive(Clone, Debug, PartialEq)]
+struct LinkNames {
+    entry: EntryId,
+    link: u32,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+}
+
 /// One entry as the window shows it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
@@ -287,6 +298,9 @@ pub struct Player {
     /// Where the pointer last was, which a press acts at.
     pointer: Point,
     controls: Controls,
+    /// The names of the heard entry's further links read ahead of the ear,
+    /// none behind the link heard.
+    links: Vec<LinkNames>,
 }
 
 impl Player {
@@ -329,6 +343,7 @@ impl Player {
             clicks: DoubleClickTracker::new(),
             double_click,
             menu_for: None,
+            links: Vec::new(),
             pointer: Point::ORIGIN,
             controls,
         }
@@ -384,6 +399,70 @@ impl Player {
     #[must_use]
     pub fn heard(&self) -> Option<EntryId> {
         self.status.heard.map(|(entry, _)| entry)
+    }
+
+    /// What is heard is called, and its artist and album line: a chained
+    /// file's later link by the names it carries, else its entry's.
+    #[must_use]
+    pub fn heard_names(&self) -> Option<(String, String)> {
+        let entry = self.heard()?;
+        let row = self.playlist.get(entry)?;
+        let own = self.links.iter().find(|names| {
+            names.entry == entry && names.link == self.status.link && names.title.is_some()
+        });
+        let Some(names) = own else {
+            return Some((
+                String::from(row.title()),
+                names_line(
+                    row.artist(),
+                    row.known().and_then(|known| known.album.as_deref()),
+                    &row.name,
+                ),
+            ));
+        };
+        let title = names.title.clone().unwrap_or_default();
+        Some((
+            title,
+            names_line(
+                names.artist.as_deref().unwrap_or(""),
+                names.album.as_deref(),
+                &row.name,
+            ),
+        ))
+    }
+
+    /// The names a further link of `entry`'s file carries, read as the link
+    /// opened.
+    pub fn link_read(
+        &mut self,
+        entry: EntryId,
+        link: u32,
+        metadata: &Metadata,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        let tag = |wanted: TagKind| {
+            metadata
+                .tags
+                .iter()
+                .find(|tag| tag.kind == wanted)
+                .map(|tag| tag.value.clone())
+        };
+        self.links.retain(|names| names.entry == entry);
+        if self.links.try_reserve(1).is_err() {
+            return;
+        }
+        self.links.push(LinkNames {
+            entry,
+            link,
+            title: tag(TagKind::Title),
+            artist: tag(TagKind::Artist),
+            album: tag(TagKind::Album),
+        });
+        if self.heard() == Some(entry) && self.status.link == link {
+            damage.add(layout.title());
+            damage.add(layout.subtitle());
+        }
     }
 
     /// The line the status bar shows instead of the playlist's summary.
@@ -534,7 +613,10 @@ impl Player {
         let before = core::mem::replace(&mut self.status, status);
         let heard = self.heard();
         let was = before.heard.map(|(entry, _)| entry);
-        if heard != was {
+        let (entry_now, link_now) = (heard, self.status.link);
+        self.links
+            .retain(|names| Some(names.entry) == entry_now && names.link >= link_now);
+        if heard != was || before.link != self.status.link {
             for part in [
                 layout.art(),
                 layout.title(),
@@ -1346,6 +1428,17 @@ fn mark(button: &mut IconButton, on: bool) {
 fn travel_span(length: Span, permille: u16) -> Span {
     let nanos = u128::from(length.nanos()) * u128::from(permille.min(TRAVEL)) / u128::from(TRAVEL);
     Span::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
+/// The artist and album line from `artist` and `album`, or `name` where they
+/// give neither.
+fn names_line(artist: &str, album: Option<&str>, name: &str) -> String {
+    match (artist, album) {
+        ("", None) => String::from(name),
+        ("", Some(only)) => String::from(only),
+        (artist, None) => String::from(artist),
+        (artist, Some(album)) => alloc::format!("{artist} \u{2014} {album}"),
+    }
 }
 
 #[cfg(test)]

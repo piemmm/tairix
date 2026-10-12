@@ -253,6 +253,12 @@ impl SkippedPortRetry {
         self.due_ns.map(|due| due.saturating_sub(now_ns))
     }
 
+    /// Whether the re-attach is still owed: armed and not yet spent.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        self.due_ns.is_some()
+    }
+
     /// Whether the retry is due at `now_ns`, spending it if so — so the
     /// caller performs the re-attach exactly once.
     pub fn take_if_due(&mut self, now_ns: u64) -> bool {
@@ -371,8 +377,22 @@ mod tests {
     #[test]
     fn an_unarmed_skipped_port_retry_bounds_no_park_and_is_never_due() {
         let retry = SkippedPortRetry::default();
+        assert!(!retry.is_pending());
         assert_eq!(retry.wait_timeout(0), None);
         assert_eq!(retry.wait_timeout(u64::MAX), None);
+    }
+
+    #[test]
+    fn the_skipped_port_retry_is_owed_from_its_arming_until_it_is_spent() {
+        let mut retry = SkippedPortRetry::default();
+        retry.arm(100);
+        assert!(retry.is_pending());
+        assert!(!retry.take_if_due(100));
+        assert!(retry.is_pending(), "owed until it comes due");
+        assert!(retry.take_if_due(100 + SKIPPED_PORT_RETRY_NS));
+        assert!(!retry.is_pending());
+        retry.arm(u64::MAX);
+        assert!(!retry.is_pending(), "a spent retry is never owed again");
     }
 
     #[test]

@@ -1005,6 +1005,34 @@ impl Tty for ResizeTty {
     }
 }
 
+/// What `getch` would answer without reading — a key buffered from an
+/// earlier read, or a resize a render latched — is reported, so a program
+/// waiting on the descriptor itself knows not to park over it.
+#[test]
+fn pending_input_reports_buffered_keys_and_a_latched_resize() {
+    let size = Size::new(2, 2);
+    let report = size_report();
+    *report.borrow_mut() = Ok(Some(size));
+    let mut screen = Screen::new(
+        ResizeTty::with_input(b"ab", report.clone()),
+        TermType::Xterm256Color,
+        size,
+    );
+    assert!(!screen.has_pending_input());
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('a'))));
+    assert!(
+        screen.has_pending_input(),
+        "the read's second key is buffered"
+    );
+    assert_eq!(screen.getch(), Ok(Some(Event::Char('b'))));
+    assert!(!screen.has_pending_input());
+    *report.borrow_mut() = Ok(Some(Size::new(4, 8)));
+    screen.doupdate().expect("render");
+    assert!(screen.has_pending_input(), "the render latched the resize");
+    assert_eq!(screen.getch(), Ok(Some(Event::Resize(Size::new(4, 8)))));
+    assert!(!screen.has_pending_input());
+}
+
 #[test]
 fn no_resize_event_when_the_size_is_unchanged() {
     let size = Size::new(2, 3);

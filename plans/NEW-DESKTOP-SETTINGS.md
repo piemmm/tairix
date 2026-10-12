@@ -64,6 +64,7 @@ dropped is a category the surface then has to lie about.
 | **DS26** | Text — the desktop font and its size (`font.family`, `font.size`, in points) on Appearance's TEXT group, resolved by the session against the font store and carried to every application in the desktop notice; the shipped base one point smaller (16 px, 10 pt of Inter) | DS3, `plans/FONT-SERVICE.md` | DS26 | done |
 | **DS27** | Sound — one plate per sink and source (default, level, mute) and a Recording plate, acting on `audio-v1` directly under the room the session holds | DS11 | §0, §2; `plans/SOUND.md` SND15 | done |
 | **DS28** | Displays — the desktop's Resolution over the output's own modes, applied at once behind the session's Keep/Revert trial | DS3, `plans/DISPLAY.md` D11 | DS28 | done |
+| **DS29** | Sound Effects — the user's own sound choices (switch, theme, each event's switch, level and file), read and changed through the desktop session's pinboard sound requests, a file chosen in the session's own picker; the Sound category's two panes, *Output & Input* and *Sound Effects* | DS27, `plans/SOUND.md` SND23 | §2; `plans/SOUND.md` SND23 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -423,7 +424,8 @@ owner the change goes to; the last column is what a refusal looks like.
 | Networking → DNS | ungated `NET_RESOLVER_SERVERS` (the live aggregated set) | elevated `configure` over each interface's own `dns.servers` (DS8) | reading renders unmeasured; a refused apply keeps the working copy and states why |
 | Networking → TCP/IP | ungated `SYSTEM_CONFIG`, parsed by `lib/sysconfig` | elevated `configure`, which also hands the policy to the running stack | working copy stands, refusal stated; a stack that did not take it keeps the saved value for next boot and says so |
 | Bluetooth | — | — | pane states absence (§3) |
-| Sound | `audio-v1` `Enumerate` (each device as the service shows this session), the user's own `SELF_AUDIO_STREAMS` captures, the `AudioCapture` count; re-read on the `AudioDevices` and `AudioCapture` notices | `audio-v1` `SetDefault`, `SetLevel`, `SetMute`, admitted by the room's tenancy | another session's room: controls drawn disabled under an Authority Mark; a refused control stated |
+| Sound → Output & Input | `audio-v1` `Enumerate` (each device as the service shows this session), the user's own `SELF_AUDIO_STREAMS` captures, the `AudioCapture` count; re-read on the `AudioDevices` and `AudioCapture` notices | `audio-v1` `SetDefault`, `SetLevel`, `SetMute`, admitted by the room's tenancy | another session's room: controls drawn disabled under an Authority Mark; a refused control stated |
+| Sound → Sound Effects | the session's `SoundRead` (the user's choices over the machine's, each file by name) and `SoundThemes` pages; re-read after every answered change | session `SoundApply`, `SoundPick` (the session's own picker), `SoundUseTheme` | a refused change stated, and the pane re-read |
 | Notifications | the session's published settings document (`notify.*`); the sources that have notified from the session's `QueryNotifySources`, answered to Settings alone | session apply | apply refused, stated |
 | Keyboard | the session's published settings document (`key.*`) | session apply (repeat) | layout, remap, shortcuts: no registry (§3), stated on the pane |
 | Mouse | the session's published settings document (`pointer.*`) | session apply | apply refused, stated |
@@ -522,7 +524,7 @@ white on a plate of the category's hue, the way macOS draws its settings panes
 `Sharing`, `Users`, `Storage` (DS15). A pane a category discloses as a row of
 its own carries a badge of its own, in its subject's kin rather than its
 category's: `About`, `Startup`, `Caching`, `DateTime`, `Ethernet`, `WiFi`,
-`Dns`, `TcpIp` (DS17). None of them is the tray reading or the single thing
+`Dns`, `TcpIp` (DS17), `SoundDevices`, `SoundEffects` (DS29). None of them is the tray reading or the single thing
 it stands beside (`Network`, `Volume`, `Bell`, `User`, `Disk`): a category's
 symbol is drawn to stand on its badge. The badge is the kind's built-in
 picture — compiled in, so the sidebar can never blank and Settings needs no
@@ -717,8 +719,8 @@ re-derives:
   `lib/cursor`, so the settings registry can hold one without linking a
   rasteriser.
 - **The store is `<set>/<asset-id>.svg`, a categorised graphics family.**
-  `GraphicsFamilyKind::Cursor` is the third family, discovered from
-  `lib/cursor/assets/` by the same `GRAPHICS_FAMILIES` walk, and validated as
+  `AssetFamilyKind::Cursor` is the third family, discovered from
+  `lib/cursor/assets/` by the same `ASSET_FAMILIES` walk, and validated as
   it is discovered: an asset name no kind asks for, a set directory no chooser
   could offer, an over-large file, or two files claiming one kind fails the
   *build*. `tools/xtask` additionally decodes and rasterises every shipped

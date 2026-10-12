@@ -406,6 +406,19 @@ mod tests {
         // a codec's input.
         assert_eq!(argv[controller + 2], "hda-output,audiodev=snd0,bus=hda0.0");
         assert_eq!(SoundCard::Hda.capture_label_hz(), 48_000);
+        // The codec's own losses are logged where the harness reads them.
+        let trace = argv
+            .iter()
+            .position(|a| a == "-trace")
+            .expect("the codec's overrun trace");
+        assert_eq!(
+            argv[trace + 1],
+            "enable=hda_audio_overrun,file=/tmp/k.wav.overruns"
+        );
+        assert_eq!(
+            crate::hda_overrun_log(Path::new("/tmp/k.wav")),
+            Path::new("/tmp/k.wav.overruns")
+        );
     }
 
     #[test]

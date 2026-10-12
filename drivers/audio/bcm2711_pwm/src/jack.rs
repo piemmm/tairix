@@ -50,6 +50,10 @@ impl FrameCodec for Duties {
         SampleFormat::S32
     }
 
+    fn channels(&self) -> u8 {
+        ChannelMap::STEREO.channels()
+    }
+
     fn encode(&mut self, frame: &mut [u8]) {
         let (words, _) = frame.as_chunks::<4>();
         let &[left, right] = words else {
@@ -148,6 +152,7 @@ impl<D: DmaPort> Audio for Jack<D> {
             direction: StreamDirection::Playback,
             jack: JackState::Unknown,
             formats: SampleFormats::EMPTY.with(SampleFormat::S32),
+            resolution: None,
             channel_map: ChannelMap::STEREO,
             rates: RateSupport::Discrete(
                 RateSet::new(&[self.rate]).map_err(|_| DriverError::DeviceFault)?,
@@ -166,7 +171,7 @@ impl<D: DmaPort> Audio for Jack<D> {
         params: &ConfigureParams,
     ) -> Result<ConfigureGrant, DriverError> {
         sole_endpoint(endpoint)?;
-        if params.channel_map.channels() != 2 {
+        if params.channel_map != ChannelMap::STEREO {
             return Err(DriverError::Unsupported);
         }
         let period_frames = params

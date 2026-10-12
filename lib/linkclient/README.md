@@ -22,10 +22,15 @@ of its own choosing.
   framing and clock sides from the link's selector. Its refusals are decoded
   by `codec-v1`'s own `refusal`, so a codec with no gain is told apart from
   one that failed.
+- `I2cClient` (`i2c-v1`) opens the channel the node's I²C link names, maps the
+  buffer it is granted, and runs transactions through it; `I2cTarget` is one
+  that reaches a single target, the `I2cPort` a register-addressed chip is
+  driven through, refusing at open a bus that cannot follow a write with a
+  read.
 
 `LinkCall` is the seam a client reaches its supplier through; `RtLinkCall` is
 the production one, over `ipc_call` and the posted `call_post` and `call_reap`
 pair, and every blocking request is framed, sent and decoded by one shared
-path. The PWM and I²S drivers link this crate rather than re-deriving the
-frames, so they cannot drift on them. Everything a supplier answers is decoded
+path. Every consumer links this crate rather than re-deriving the frames, so
+none can drift on them. Everything a supplier answers is decoded
 by the protocol's own fail-closed decoders before a caller sees it.

@@ -1,0 +1,29 @@
+[package]
+name = "tairix-drv-bus-i2c-brcmstb"
+description = "TAIRiX autoloaded user-space driver for the Broadcom set-top BSC I2C controllers that are the BCM2711 HDMI blocks' DDC buses (brcm,bcm2711-hdmi-i2c): serves i2c-v1 under the node's I2C duty, every transaction shape native, each command's completion read after sleeping its time on the wire."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Two targets, one crate, on cargo's default paths and names like every sibling
+# driver: the bundle builder cross-compiles `--bin <package>`. The controller
+# (`src/lib.rs`) is host-testable against a simulated controller; the `Run`
+# binary (`src/main.rs`) links the userland runtime, so it is freestanding-only
+# and an inert host stub elsewhere (`build.rs`).
+
+[dependencies]
+# The transaction, its messages and faults, the register-window and timing
+# seams, and the capability ids.
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The `i2c-v1` endpoint the controller is served through, and the step budget.
+tairix-i2cbus = { path = "../../../../lib/i2cbus", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# `_start` and the parking delay a command's wait sleeps on.
+tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }

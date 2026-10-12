@@ -197,6 +197,46 @@ removal find a whole subtree in one ascending pass. A refused seed, or no
 memory to take it, leaves the inventory empty so nothing autoloads, and is
 logged as `4209` `BOOT_TREE_REFUSED` carrying the `errno`.
 
+### Presence: removable, settled, hot
+
+Each node carries three presence bits, and only one is the emitter's to state:
+
+| Bit | Set by | Meaning |
+|---|---|---|
+| removable | the emitter (`HwNode::set_removable`) | the device can leave a running machine: a USB device on a port its hub does not mark fixed (`PORTSC.DR` at a root port, the hub descriptor's `DeviceRemovable` map below one) |
+| settled | the kernel | the node's driver has brought up what was present when it started |
+| hot arrival | the kernel | the node was published under a parent that had already settled |
+
+The kernel takes both of its bits back from whatever a publish carried
+(`HwNode::admit_published`), so an emitter can neither forge a hot arrival nor
+claim its own children settled. A node whose driver may publish (`CAP_HW_EMIT`,
+or any bundle driver) is unsettled from admission; one whose driver cannot is
+settled at once. The driver says it has settled with `hw_node_settle` (no. 140,
+`CAP_HW_EMIT`, no arguments): the kernel marks the caller's own matched node
+and bumps the generation on the edge only. A bus driver calls it after its
+initial walk — xHCI once no skipped-port retry is armed — a channel driver once
+its channel node is published, and a driver with nothing to enumerate as it
+starts.
+
+### Readiness and device sounds
+
+The device manager is a `ready=notify` service, so init counts it started only
+once it says so, and the machine's startup sound waits on that
+(`plans/SOUND.md` SND22). It says so when the catalogue is in hand, every node
+it loaded a driver for has settled, every node held for a supplier is bound,
+and no device channel is still owed to a service (`13026` `DEVICES_SETTLED`).
+Each thing is waited on for at most `SETTLE_BUDGET_NS` (five seconds) and then
+given up on for the boot, logged once (`13027` `SETTLE_LAPSED`), so a wedged
+driver delays the start rather than stopping it.
+
+Past that the manager cues `DeviceAttached` and `DeviceDetached` for removable
+devices, once per device however many nodes it is published as, keyed by its
+parent and bus address. A device arrives only as a hot arrival under a parent
+already present, and leaves only from a parent still present, so a hub
+unplugged with three devices on it is one sound. Departures are cued before
+arrivals, and every cue is posted rather than awaited: a slow or absent cue
+authority never holds the match loop.
+
 ## Audit surface
 
 Every match, load, skip, and failure is logged through `lib/log` with
@@ -212,6 +252,9 @@ range (`tairix_devmgr::events`):
 | `13020` `NODE_LOAD_RACED_REMOVAL` | the node left the tree before its driver was admitted (`errno` `DeviceOffline`); `Info` |
 | `13021` `NODE_ALREADY_DRIVEN` | another live driver already holds the node (`errno` `Busy`); `Info` |
 | `13022` `NODE_HELD` | the node waits for the `supplier` its links name: in the tree and matched but not yet bound, or not in the tree; `Debug` |
+| `13026` `DEVICES_SETTLED` | the hardware present at boot has settled; the manager announces its readiness |
+| `13027` `SETTLE_LAPSED` | a `node`, or the `channels` hand-offs, did not settle within the budget; the boot settles without it; `Warn` |
+| `13028` `READINESS_REFUSED` | the service manager did not record the announcement |
 
 The drvhost gate's own `7000`-range records interleave with these on a
 shared sink, giving audit consumers the full causal chain from match
@@ -274,6 +317,16 @@ PPI by 16 through the one shared decoder the boot path itself uses, so a
 driver that parks on its granted line waits on the interrupt its device
 actually raises. A specifier this GICv2 port cannot represent (a GICv3-only
 extended-SPI binding) is dropped rather than guessed at.
+
+Each register window carries its entry in the node's `reg-names`
+(`HwResource::mmio_named`), so a driver of a device with several windows finds
+each by name (`tairix_abi::driver::named_register_window`) rather than by an
+order nothing guarantees. The name rides in a field coverage does not compare,
+so a named window authorises exactly what the unnamed one would; a name longer
+than eight bytes leaves its window unnamed. A node carries up to thirty-two
+resources (`HW_NODE_MAX_RESOURCES`), enough for the largest device described
+whole: an HDMI controller's ten windows, six interrupt lines, four clocks,
+reset, DMA line and DDC bus.
 
 Each `Irq` resource carries the specifier's position in the node's
 `interrupts` list (`HwResource::interrupt_position`), because a binding
@@ -345,14 +398,24 @@ bound or refused something is followed by another, and a supplier that
 vanishes takes its bound consumers down before itself (`NODE_HELD`,
 `13022`).
 
-Two further facts ride on a node when its tree declares them, so a
-user-space driver learns them from discovery rather than a board constant.
-A **DMA constraint** is read from the node's *parent bus* `dma-ranges` —
+Further facts ride on a node when its tree declares them, so a user-space
+driver learns them from discovery rather than a board constant. A **DMA
+constraint** is read from the node's *parent bus* `dma-ranges` —
 Devicetree Spec v0.4 §2.3.9 puts the property on the bus, not on the
 mastering device — and a network node's **link-layer address** from the
 standard `mac-address` / `local-mac-address` ethernet-controller binding, the
 only place a SoC MAC like the BCM2711's GENET publishes its factory
-address.
+address. An I²C controller's `clock-frequency` becomes its **bus speed**, and
+a node carrying `wifi-2.4ghz-coexistence` states **radio coexistence**: an
+HDMI transmitter on that board keeps its TMDS clock clear of the 2.4 GHz
+band its harmonics would otherwise land in.
+
+Two facts are the kernel's alone, and a node a driver publishes carrying
+either is refused: **kernel-driven**, on a device the kernel programs itself
+(an interrupt controller), and **boot console**, on the display engine that
+takes the screen over from the firmware which lit it, whose driver alone may
+have the kernel move its framebuffer console off the firmware's memory
+(`console_relocate`).
 
 ## The user-space driver chain
 

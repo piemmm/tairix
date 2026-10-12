@@ -1,7 +1,8 @@
 # `tairix-drv-bus-i2c-bcm2835`
 
-Autoloaded user-space I²C bus driver for the **Broadcom Serial Controller**
-(BSC), the I²C master every Raspberry Pi generation exposes.
+Autoloaded user-space I²C controller driver for the **Broadcom Serial
+Controller** (BSC), the I²C master every Raspberry Pi generation exposes.
+Stability tier: `experimental`.
 
 ## Supported hardware
 
@@ -16,86 +17,82 @@ match (`BIND_KEYS`); it names no board and no address.
 |---|---|
 | `CAP_DRV_LOAD` | the load-time gate every driver clears |
 | `CAP_MMIO_MAP` | the controller's register window, from the matched node's grant |
-| `CAP_IRQ_BIND` | the controller's interrupt line, which every transfer parks on |
-| `CAP_IPC_BIND_PRIVILEGED` | binding each child's reserved transfer endpoint |
+| `CAP_IRQ_BIND` | the controller's interrupt line, which every transaction parks on |
+| `CAP_IPC_BIND_PRIVILEGED` | the node's `i2c-v1` endpoint, under its I²C duty |
+| `CAP_SHM` | each channel's buffer, made and granted to its client |
+| `CAP_IPC_ENDPOINT` | the VPU clock, described over the node's clock link |
+| `CAP_LOG_EMIT` | the record of every decision |
 
-It holds **no** clock, filesystem, or network authority, and no capability
-that would let it reach a device other than the one it was matched to.
+It holds no capability that would let it reach a device other than the one it
+was matched to.
 
-## One endpoint per child, and why the address stays here
+## What it serves
 
-I²C has no enumeration protocol, and probing every address is forbidden and
-can be destructive, so a bus's children are known only from the platform's
-device tree. Discovery therefore splits each child in two: the **duty** goes
-on this bus's node (a `BusChild` resource pairing an endpoint id with that
-child's bus address) and the **authority** goes on the child's own node (a
-plain endpoint grant naming the same id).
+`i2c-v1` through the shared endpoint (`lib/i2cbus`, `plans/I2C.md`): a channel
+per link, a buffer per channel, every message held to the address its link
+reaches. The bus states its speed — the node's `clock-frequency`, 100 kHz when
+it declares none — and that it issues a repeated START after a write that
+moved bytes: between writes, and before a read that ends the transaction.
 
-This driver binds one restricted-sender endpoint per duty. The transfer wire
-frame carries no address at all — the address comes from the duty grant, on
-the endpoint the request arrived on — so a chip driver has no field in which
-it could name a neighbour, and a compromised one still reaches only its own
-part. The kernel refuses the bind unless the duty grant covers the id, so a
-second privileged driver cannot impersonate the bus to a chip either.
+## Repeated START by chaining
 
-A duty whose address the tree spelled unusably, or whose endpoint the kernel
-refused, leaves that child unserved and is logged; its chip driver then fails
-closed rather than talking to the wrong part.
+The BSC has no repeated-START command. A message started while the one before
+it is active follows it with a repeated START instead of a STOP, which is how
+Linux's `i2c-bcm2835` issues one. The chain must be in place before the
+message before it can end, so the driver withholds each write's last byte
+until the next message is started: the controller cannot finish a write it
+has not been given, however late this process runs. A read must end the
+transaction, so any other shape is refused before the bus is touched.
 
-## Interrupt-driven, never a spin
+## Interrupt-paced, bounded by progress
 
-A transfer arms the controller and parks on its bound interrupt line. The
-FIFO-service and completion interrupts are what advance it. The per-phase
-deadline exists only to catch a controller that has stopped answering: a
-slave that legitimately stretches the clock is bounded by the controller's
-own stretch-timeout register, which raises its own status bit long before the
-deadline could fire. Recovery drops the enable bit — the only way to abort a
-transfer in flight — then clears and re-enables, so a wedged transfer never
-runs on under the next caller.
+The FIFO is refilled at its write threshold and drained at its read threshold
+and at completion, the transaction parking on the interrupt in between. Its
+budget is per step of progress: a FIFO's worth of bytes at the bus's speed and
+the longest a target may hold the bus still, one second, the Linux I²C core's
+default. While the controller waits on this driver it holds the clock, so a
+late wake finds work rather than a timeout; only a bus that makes no progress
+for a whole step is abandoned, its controller reset, and the transaction
+reported timed out. The controller's own clock-stretch timeout is off, as
+Linux leaves it, so every stall is reported against the message it stalled.
+
+## Bus speed
+
+The divider is set from the VPU clock before every transaction, the rate
+described through the node's clock link: the firmware may move that clock, and
+the bus must not follow it past its declared speed. It rounds up, then up to
+even as the register reads it, so the bus never runs faster than declared; a
+speed the divider cannot reach from the clock's rate refuses the transaction
+before the bus is touched.
+
+## What a fault names
+
+A fault names the earliest message the controller has not been seen to finish.
+The controller gives no sign of moving to the next message until that message
+asks for its bytes or delivers one, so a read's address refused straight after
+a write is reported against the write.
 
 ## Limitations
 
-- **No true repeated START.** The BSC drops a STOP between the two phases of
-  a write-then-read. On a single-master bus, which is what a board wiring an
-  RTC to the Pi's BSC has, that is indistinguishable — nothing else can move
-  a chip's register pointer between the phases. A **multi-master** bus is out
-  of scope for this controller.
-- **The clock divider is left as the firmware programmed it.** The bus speed
-  is a property of the board's wiring and the slowest part on it, and nothing
-  in discovery tells a driver either, so overriding it could clock a part past
-  its rating. The transfer deadline is sized for a bus an order of magnitude
-  slower than 100 kHz standard mode so a slow board is never abandoned.
-- **A zero-length (address-only) transfer depends on the controller.** The
-  seam admits one — it is how a caller asks whether a part answers at all —
-  and this driver issues it as a zero-length write phase. A controller that
-  never reports such a phase complete reaches the deadline and fails closed
-  rather than reporting an answer it did not get. No in-tree caller uses it;
-  every chip driver names a register.
+- **A read must end the transaction.** The chaining that issues a repeated
+  START cannot follow a read.
 - **10-bit addressing is not supported.** No part this class reaches uses it,
   and the address type refuses the escape prefix rather than mis-addressing
   the bus.
-- **Runtime unload** takes the endpoints with it: the kernel revokes the
-  per-endpoint grants when the driver exits, so a chip driver's next call
-  fails closed rather than reaching a stale server.
+- **Not exercisable under QEMU.** No emulated machine presents a
+  `brcm,bcm2835-i2c` node, so the controller is proven against a simulated BSC
+  — the FIFO a real queue, each status bit as the silicon sets it, messages
+  chained as the silicon chains them, and an eager mode that moves every byte
+  the instant it can, which is what a driver preempted at the worst moment
+  faces — and the live bus is the on-metal acceptance item (`plans/PI.md`).
 
-## Testing
+## Events
 
-Host unit tests drive the controller against a **simulated BSC** that
-intercepts every register access — the FIFO is a real queue, the status bits
-change as they would on silicon, and the controller advances exactly where it
-would raise its interrupt. They cover the two-phase register read, a transfer
-longer than the 16-byte FIFO (which must park), an absent part, a part that
-stops acknowledging part-way, a clock-stretch timeout, and a wedged
-controller reaching its deadline.
-
-**QEMU does not model the BSC**, so there is no integration test for this
-driver: no emulated machine in the matrix presents a `brcm,bcm2835-i2c` node.
-The protocol and every fail-closed path are host-proven and the live bus is
-an on-metal acceptance item, exactly as for the rest of `plans/PI.md`'s
-mailbox work.
+The endpoint's records are `lib/i2cbus`'s (`docs/src/lib/i2cbus.md`).
 
 ## References
 
 - BCM2835 ARM Peripherals, §3 (Broadcom Serial Controller).
+- Linux `drivers/i2c/busses/i2c-bcm2835.c`.
 - I²C-bus specification and user manual, NXP UM10204.
-- `plans/TIMESYNC.md` TS-4 — the staged design this driver lands.
+- `plans/I2C.md` I1, I4.

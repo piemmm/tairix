@@ -738,7 +738,15 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
-    fn hw_self_node(&self, _c: &CallerContext<'_>) -> SyscallResult {
+    fn hw_self_node(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn hw_node_settle(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn console_relocate(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         self.bump();
         Ok(0)
     }

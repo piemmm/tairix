@@ -11,8 +11,10 @@ play — reproducir archivos de sonido
 Reproduce cada archivo por turno en una salida. Cada archivo se descodifica en
 un proceso aislado que no tiene autoridad alguna, de modo que un archivo hostil
 solo puede, como mucho, terminar su propia descodificación: se omite indicando
-el motivo y se reproduce el resto de la lista. Se leen archivos AU, WAV y FLAC, este
-último nativo o en Ogg.
+el motivo y se reproduce el resto de la lista. Se leen archivos AU, WAV, FLAC,
+Vorbis, Opus y de audio MPEG (MP1, MP2 y MP3), FLAC nativo o en Ogg, y Vorbis y
+Opus en Ogg; los flujos
+encadenados de un archivo Ogg se reproducen uno tras otro.
 
 Los archivos consecutivos con la misma frecuencia, el mismo formato de muestra
 y la misma disposición de canales se reproducen sin pausa, en un solo flujo. Un

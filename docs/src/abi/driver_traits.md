@@ -26,6 +26,23 @@ capability model, kinds) lives in
 | [`tairix_abi::driver::virtio_pci`]    | `VirtioPciBus` transport-provisioning seam. |
 | [`tairix_abi::driver::virtio_mmio`]   | `VirtioMmioBus` transport-provisioning seam. |
 | [`tairix_abi::driver::pci`]           | `PciBus` generic BAR / bus-master seam. |
+| `tairix_abi::driver::msix`            | `MsixBus` MSI-X interrupt-routing seam. |
+| `tairix_abi::driver::port_io`         | `PortIo` legacy port-I/O seam.         |
+| `tairix_abi::driver::dma`             | `DmaHost` + owned DMA regions.         |
+| `tairix_abi::driver::virtio`          | `VirtioHost` virtio host seam.         |
+| `tairix_abi::driver::mailbox`         | `MailboxChannel` firmware property-mailbox seam. |
+| `tairix_abi::driver::timing`          | `Delay` microsecond timed waits.       |
+| `tairix_abi::driver::register`        | The driver register-reply record.      |
+| [`tairix_abi::driver::audio`]         | `Audio` trait + the PCM vocabulary.    |
+| [`tairix_abi::driver::audio_channel`] | The `audiochan-v1` device channel.     |
+| [`tairix_abi::driver::audio_ring`]    | The shared-memory PCM ring.            |
+| [`tairix_abi::driver::net_channel`]   | The network device channel.            |
+| [`tairix_abi::driver::net_ring`]      | The shared-memory frame ring.          |
+| [`tairix_abi::driver::clock`]         | The `clock-v1` link protocol.          |
+| [`tairix_abi::driver::codec`]         | `Codec` trait + the `codec-v1` link protocol. |
+| [`tairix_abi::driver::encoder`]       | `Encoder` trait + the `encoder-v1` link protocol. |
+| [`tairix_abi::driver::i2c`]           | `I2cPort` + the `i2c-v1` transaction protocol. |
+| [`tairix_abi::driver::irqline`]       | The `irqline-v1` link protocol.        |
 
 [`tairix_abi::driver`]: #shared-types
 [`tairix_abi::driver::display`]: #display
@@ -41,6 +58,16 @@ capability model, kinds) lives in
 [`tairix_abi::driver::virtio_pci`]: #virtio-pci-provisioning
 [`tairix_abi::driver::virtio_mmio`]: #virtio-mmio-provisioning
 [`tairix_abi::driver::pci`]: #generic-pci-provisioning
+[`tairix_abi::driver::audio`]: ../drivers/audio.md
+[`tairix_abi::driver::audio_channel`]: ../drivers/audio.md
+[`tairix_abi::driver::audio_ring`]: ../drivers/audio.md
+[`tairix_abi::driver::net_channel`]: ../lib/netchan.md
+[`tairix_abi::driver::net_ring`]: ../lib/netchan.md
+[`tairix_abi::driver::clock`]: ../drivers/clock.md
+[`tairix_abi::driver::codec`]: ../drivers/audio.md
+[`tairix_abi::driver::encoder`]: ../lib/encoder.md
+[`tairix_abi::driver::i2c`]: ../lib/i2cbus.md
+[`tairix_abi::driver::irqline`]: ../drivers/irq.md
 
 ## Shared types
 
@@ -313,16 +340,27 @@ endpoint id its host handed it through its startup arguments
 
 | Method               | Returns                            | Capability gate                       |
 |----------------------|------------------------------------|---------------------------------------|
-| `mode_info()`        | `Result<DisplayMode, DriverError>` | Driver handle.                        |
+| `output()`           | `Option<DisplayMode>`              | Driver handle.                        |
+| `service_events()`   | `Result<(), DriverError>`          | Driver handle.                        |
 | `device_report()`    | `DisplayDeviceReport`              | Driver handle.                        |
 | `present(&)`         | `Result<(), DriverError>`          | Driver handle.                        |
 | `present_rects(&, &)` | `Result<(), DriverError>`         | Driver handle.                        |
 | `set_power(power)`   | `Result<(), DriverError>`          | Driver handle.                        |
+| `released(surface)`  | `()`                               | Driver handle.                        |
 
 `DisplayMode` carries `width_px`, `height_px`, `stride_bytes`, and
-a `DisplayFormat` (`Rgba8888` or `Bgra8888`). `set_power` takes a
-`DisplayPower` (`On` or `Off`); its default refuses `Unsupported`, the answer
-for a display with no power control of its own.
+a `DisplayFormat` (`Rgba8888` or `Bgra8888`). `output` is `None` while no
+sink is connected, and moves only across `service_events`, which the service
+loop calls when one of the display's event sources (`DeviceWake`) fired; its
+default does nothing, for a display whose output never moves. A present with
+no output is refused `Stale`. `set_power` takes a `DisplayPower` (`On` or
+`Off`); its default refuses `Unsupported`, the answer for a display with no
+power control of its own. `released` tells the display that the lease its
+frames were presented under ended, and whether the seat went to its text
+console or to another presenter (`ReleaseSurface`): a driver scanning out
+frames of its own shows the console's surface or nothing, never the outgoing
+presenter's last frame. Its default does nothing, for a surface the console
+draws into itself.
 
 ## Filesystem
 

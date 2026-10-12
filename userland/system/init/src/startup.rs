@@ -51,7 +51,7 @@
 //!   readiness would hand the client an endpoint that does not exist yet.
 //!
 //! A `service`, `enrolled`, or `ondemand` directive may carry trailing
-//! `key=value` options after its account; a `session` carries none. Four are
+//! `key=value` options after its account; a `session` carries none. Five are
 //! defined:
 //!
 //! * `watchdog=<n>s` — the liveness interval the manager holds the service
@@ -69,13 +69,18 @@
 //!   establishes. A provider is `notify`-ready: what it provides holds from
 //!   its readiness announcement until it stops being ready, never from a
 //!   spawn that has established nothing.
+//! * `ready=immediate|notify` — whether a successful spawn is readiness or
+//!   the service announces it. A service whose readiness is something only it
+//!   can observe — an endpoint bound, the hardware it found settled — is
+//!   `notify`; a provider and an `ondemand` service are `notify` without
+//!   saying so, and declaring either `immediate` is a contradiction.
 //!
-//! Each defaults to off (no watchdog, `never`, no conditions). An unknown
-//! option or value, a repeated option or condition, or an option on a
-//! `session` refuses the whole config rather than being ignored: a
-//! misspelled liveness interval that silently meant "unwatched" would
-//! disable a defence without saying so, and a second `requires=` that
-//! silently replaced the first would drop a gate.
+//! Each defaults to off (no watchdog, `never`, no conditions, `immediate`).
+//! An unknown option or value, a repeated option or condition, contradictory
+//! options, or an option on a `session` refuses the whole config rather than
+//! being ignored: a misspelled liveness interval that silently meant
+//! "unwatched" would disable a defence without saying so, and a second
+//! `requires=` that silently replaced the first would drop a gate.
 //!
 //! This is the floor's own description, which is the one place a floor
 //! service's unit metadata has ever lived; a *discovered* bundle carries
@@ -155,7 +160,8 @@ pub const REGISTERED_SERVICES: usize = MAX_SERVICES + MAX_ENROLLED_SERVICES + MA
 pub const DEFAULT_CONFIG: &str = "\
 # TAIRiX PID 1 startup configuration (plans/PI.md P6b / P11).
 # Open the system console, launch the System Information, network-stack,
-# audio, device-manager, seat-manager, app-data, time, and discovery services,
+# audio, sound, device-manager, seat-manager, app-data, time, and discovery
+# services,
 # register the font service, and start the login service as the session — each
 # under its own compiled-in service account (plans/USERS.md). `sysinfod`
 # starts first so the introspection endpoint is published before any client
@@ -173,7 +179,11 @@ pub const DEFAULT_CONFIG: &str = "\
 # typed refusal until the root is mounted. `audiod`
 # (plans/SOUND.md) is the one mixer and the sole holder of CAP_AUDIO_DEVICE,
 # launched before `devmgr` for the reason `netstack` is: it must be ready to
-# adopt the sound-device channels `devmgr` hands it. `timed`
+# adopt the sound-device channels `devmgr` hands it. `soundd` (plans/SOUND.md)
+# plays the desktop's sounds through it, and restarts on failure: a crash must
+# not leave the machine silent for the rest of the boot. It and `devmgr`
+# announce readiness — its endpoint bound, the boot hardware settled — which
+# the start sound waits on. `timed`
 # (plans/TIMESYNC.md) is last, and is the one entry the enrolment record
 # governs rather than the bootstrap floor: a machine with no RTC boots knowing
 # nothing about the time, and every audit-log hash chain, filesystem timestamp,
@@ -196,7 +206,8 @@ console
 service /System/Services/sysinfod.app/Run sysinfod
 service /System/Services/netstack.app/Run netstack watchdog=30s restart=on-failure provides=network-up
 service /System/Services/audiod.app/Run audiod
-service /System/Services/devmgr.app/Run devmgr
+service /System/Services/soundd.app/Run soundd restart=on-failure ready=notify
+service /System/Services/devmgr.app/Run devmgr ready=notify
 service /System/Services/seatmgr.app/Run seatmgr
 service /System/Services/confd.app/Run confd
 enrolled /System/Services/timed.app/Run timed
@@ -329,6 +340,9 @@ pub enum ConfigError {
     /// A directive named the same option, or the same condition within one
     /// option, twice.
     RepeatedOption,
+    /// A directive's options contradict each other or its directive: an
+    /// `immediate` provider or `ondemand` service.
+    ConflictingOptions,
 }
 
 impl fmt::Display for ConfigError {
@@ -348,6 +362,7 @@ impl fmt::Display for ConfigError {
             Self::MalformedWatchdog => "a startup directive's watchdog option is malformed",
             Self::UnknownOption => "a startup directive names an unknown option",
             Self::RepeatedOption => "a startup directive repeats an option",
+            Self::ConflictingOptions => "a startup directive's options contradict each other",
         };
         f.write_str(message)
     }
@@ -375,6 +390,8 @@ pub struct Launch<'a> {
     pub requires: Conditions,
     /// The conditions the service establishes by announcing readiness.
     pub provides: Conditions,
+    /// How the service reaches readiness.
+    pub readiness: ReadinessKind,
 }
 
 impl<'a> Launch<'a> {
@@ -388,17 +405,7 @@ impl<'a> Launch<'a> {
             restart: RestartPolicy::Never,
             requires: Conditions::NONE,
             provides: Conditions::NONE,
-        }
-    }
-
-    /// How the service reaches readiness: a provider announces it, since
-    /// what it provides cannot hold before it says so.
-    #[must_use]
-    pub fn readiness(&self) -> ReadinessKind {
-        if self.provides.is_empty() {
-            ReadinessKind::Immediate
-        } else {
-            ReadinessKind::Notify
+            readiness: ReadinessKind::Immediate,
         }
     }
 }
@@ -530,7 +537,8 @@ impl<'a> StartupConfig<'a> {
                     session = Some(launch);
                 }
                 "service" => {
-                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?)?;
+                    let launch =
+                        parse_launch(argument.ok_or(ConfigError::MissingArgument)?, false)?;
                     // `service` is repeatable; overflow fails closed rather
                     // than overrunning the fixed array.
                     if service_count >= MAX_SERVICES {
@@ -540,7 +548,8 @@ impl<'a> StartupConfig<'a> {
                     service_count += 1;
                 }
                 "enrolled" => {
-                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?)?;
+                    let launch =
+                        parse_launch(argument.ok_or(ConfigError::MissingArgument)?, false)?;
                     if enrolled_count >= MAX_ENROLLED_SERVICES {
                         return Err(ConfigError::TooManyServices);
                     }
@@ -548,7 +557,7 @@ impl<'a> StartupConfig<'a> {
                     enrolled_count += 1;
                 }
                 "ondemand" => {
-                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?)?;
+                    let launch = parse_launch(argument.ok_or(ConfigError::MissingArgument)?, true)?;
                     if ondemand_count >= MAX_ONDEMAND_SERVICES {
                         return Err(ConfigError::TooManyServices);
                     }
@@ -659,13 +668,17 @@ fn parse_session(argument: &str) -> Result<Launch<'_>, ConfigError> {
 
 /// Parse a service argument — `<path> <account> [<key>=<value>…]` — into a
 /// validated [`Launch`], each option at most once.
-fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
+///
+/// `announced` is set for a directive whose service must announce its own
+/// readiness whatever its options say (`ondemand`).
+fn parse_launch(argument: &str, announced: bool) -> Result<Launch<'_>, ConfigError> {
     let mut fields = argument.split_whitespace();
     let (path, uid) = parse_target(&mut fields)?;
     let mut watchdog = None;
     let mut restart = None;
     let mut requires = None;
     let mut provides = None;
+    let mut ready = None;
     for option in fields {
         let (key, value) = option.split_once('=').ok_or(ConfigError::UnknownOption)?;
         let repeated = match key {
@@ -675,6 +688,9 @@ fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
                 .is_some(),
             "requires" => requires.replace(Conditions::parse(value)?).is_some(),
             "provides" => provides.replace(Conditions::parse(value)?).is_some(),
+            "ready" => ready
+                .replace(ReadinessKind::from_name(value).ok_or(ConfigError::UnknownOption)?)
+                .is_some(),
             _ => return Err(ConfigError::UnknownOption),
         };
         if repeated {
@@ -682,11 +698,22 @@ fn parse_launch(argument: &str) -> Result<Launch<'_>, ConfigError> {
         }
     }
     let plain = Launch::plain(path, uid);
+    let provides = provides.unwrap_or(plain.provides);
+    let must_announce = announced || !provides.is_empty();
+    let readiness = match ready {
+        Some(ReadinessKind::Immediate) if must_announce => {
+            return Err(ConfigError::ConflictingOptions)
+        }
+        Some(kind) => kind,
+        None if must_announce => ReadinessKind::Notify,
+        None => plain.readiness,
+    };
     Ok(Launch {
         watchdog: watchdog.unwrap_or(plain.watchdog),
         restart: restart.unwrap_or(plain.restart),
         requires: requires.unwrap_or(plain.requires),
-        provides: provides.unwrap_or(plain.provides),
+        provides,
+        readiness,
         ..plain
     })
 }
@@ -838,6 +865,7 @@ mod tests {
                     watchdog: Duration64::from_secs(30),
                     restart: RestartPolicy::OnFailure,
                     provides: network_up(),
+                    readiness: ReadinessKind::Notify,
                     ..Launch::plain(
                         "/System/Services/netstack.app/Run",
                         tairix_users::NETSTACK_UID.0,
@@ -847,10 +875,21 @@ mod tests {
                     "/System/Services/audiod.app/Run",
                     tairix_users::AUDIOD_UID.0
                 ),
-                Launch::plain(
-                    "/System/Services/devmgr.app/Run",
-                    tairix_users::DEVMGR_UID.0
-                ),
+                Launch {
+                    restart: RestartPolicy::OnFailure,
+                    readiness: ReadinessKind::Notify,
+                    ..Launch::plain(
+                        "/System/Services/soundd.app/Run",
+                        tairix_users::SOUNDD_UID.0,
+                    )
+                },
+                Launch {
+                    readiness: ReadinessKind::Notify,
+                    ..Launch::plain(
+                        "/System/Services/devmgr.app/Run",
+                        tairix_users::DEVMGR_UID.0,
+                    )
+                },
                 Launch::plain(
                     "/System/Services/seatmgr.app/Run",
                     tairix_users::SEATMGR_UID.0
@@ -880,10 +919,10 @@ mod tests {
         // headless machine never runs it at all.
         assert_eq!(
             config.ondemand(),
-            &[Launch::plain(
-                "/System/Services/fontd.app/Run",
-                tairix_users::FONTD_UID.0
-            )],
+            &[Launch {
+                readiness: ReadinessKind::Notify,
+                ..Launch::plain("/System/Services/fontd.app/Run", tairix_users::FONTD_UID.0)
+            }],
         );
         for started in config.services().iter().chain(config.enrolled()) {
             assert_ne!(started.path, "/System/Services/fontd.app/Run");
@@ -1063,13 +1102,82 @@ mod tests {
         };
         assert_eq!(provider.provides, network_up());
         assert!(provider.requires.is_empty());
-        assert_eq!(provider.readiness(), ReadinessKind::Notify);
+        assert_eq!(provider.readiness, ReadinessKind::Notify);
         assert_eq!(
             requirer.requires.iter().collect::<Vec<_>>(),
             [ReadyCondition::NetworkUp, ReadyCondition::SeatAvailable],
         );
-        assert_eq!(requirer.readiness(), ReadinessKind::Immediate);
-        assert_eq!(plain.readiness(), ReadinessKind::Immediate);
+        assert_eq!(requirer.readiness, ReadinessKind::Immediate);
+        assert_eq!(plain.readiness, ReadinessKind::Immediate);
+    }
+
+    #[test]
+    fn readiness_is_declared_or_implied_and_never_contradicted() {
+        let parse = |directive: &str| {
+            StartupConfig::parse(&alloc::format!("console\n{directive}\nsession /x login\n")).map(
+                |config| {
+                    config
+                        .services()
+                        .iter()
+                        .chain(config.ondemand())
+                        .map(|launch| launch.readiness)
+                        .collect::<Vec<_>>()
+                },
+            )
+        };
+        for (directive, readiness) in [
+            ("service /a.app/Run soundd", ReadinessKind::Immediate),
+            (
+                "service /a.app/Run soundd ready=immediate",
+                ReadinessKind::Immediate,
+            ),
+            (
+                "service /a.app/Run soundd ready=notify",
+                ReadinessKind::Notify,
+            ),
+            (
+                "service /a.app/Run netstack provides=network-up",
+                ReadinessKind::Notify,
+            ),
+            (
+                "service /a.app/Run netstack provides=network-up ready=notify",
+                ReadinessKind::Notify,
+            ),
+            ("ondemand /a.app/Run fontd", ReadinessKind::Notify),
+            (
+                "ondemand /a.app/Run fontd ready=notify",
+                ReadinessKind::Notify,
+            ),
+        ] {
+            assert_eq!(parse(directive), Ok(alloc::vec![readiness]), "{directive}");
+        }
+        for (directive, refusal) in [
+            // What a provider provides cannot hold before it says so.
+            (
+                "service /a.app/Run netstack provides=network-up ready=immediate",
+                ConfigError::ConflictingOptions,
+            ),
+            // A client connecting on demand waits for the endpoint, which
+            // only the service knows it has bound.
+            (
+                "ondemand /a.app/Run fontd ready=immediate",
+                ConfigError::ConflictingOptions,
+            ),
+            (
+                "service /a.app/Run soundd ready=Notify",
+                ConfigError::UnknownOption,
+            ),
+            (
+                "service /a.app/Run soundd ready=",
+                ConfigError::UnknownOption,
+            ),
+            (
+                "service /a.app/Run soundd ready=notify ready=notify",
+                ConfigError::RepeatedOption,
+            ),
+        ] {
+            assert_eq!(parse(directive), Err(refusal), "{directive}");
+        }
     }
 
     #[test]
@@ -1098,7 +1206,12 @@ mod tests {
 
     #[test]
     fn a_session_carries_no_unit_option() {
-        for option in ["restart=never", "watchdog=5s", "requires=network-up"] {
+        for option in [
+            "restart=never",
+            "watchdog=5s",
+            "requires=network-up",
+            "ready=notify",
+        ] {
             let text = alloc::format!("console\nsession /x login {option}\n");
             assert_eq!(
                 StartupConfig::parse(&text),
@@ -1116,10 +1229,10 @@ mod tests {
         // floor is never truncated by a stale magic cap.
         let floor = StartupConfig::parse(DEFAULT_CONFIG).expect("the boot floor parses");
         assert_eq!(floor.services().len(), MAX_SERVICES);
-        // The current floor is sysinfod, netstack, audiod, devmgr, seatmgr,
-        // confd; this pins the derived value so a change to the floor is a
-        // conscious one.
-        assert_eq!(MAX_SERVICES, 6);
+        // The current floor is sysinfod, netstack, audiod, soundd, devmgr,
+        // seatmgr, confd; this pins the derived value so a change to the
+        // floor is a conscious one.
+        assert_eq!(MAX_SERVICES, 7);
         // The same derivation over the `enrolled` keyword: `timed` and
         // `discoveryd`.
         assert_eq!(floor.enrolled().len(), MAX_ENROLLED_SERVICES);
@@ -1145,10 +1258,10 @@ mod tests {
         .expect("an on-demand directive parses");
         assert_eq!(
             config.ondemand(),
-            &[Launch::plain(
-                "/System/Services/fontd.app/Run",
-                tairix_users::FONTD_UID.0
-            )],
+            &[Launch {
+                readiness: ReadinessKind::Notify,
+                ..Launch::plain("/System/Services/fontd.app/Run", tairix_users::FONTD_UID.0)
+            }],
         );
         // An on-demand entry is on no other list: registering it must not
         // also start it.

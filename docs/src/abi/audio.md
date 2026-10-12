@@ -147,6 +147,21 @@ session holds the seat lease on the sink, checked at open against the
 kernel-attested caller. That is a more precise check than a capability, and a
 capability every program would hold is not a boundary.
 
+A stream's **tenancy** says whose sound it is, and the room it plays in follows
+from it. A program's is its own (`Tenancy::Caller`): the login session the
+kernel attests it lies within, or none for a daemon, whose stream plays only
+while the room is unclaimed. The other two are the cue authority's alone, for a
+notification it plays on another's behalf (`plans/SOUND.md` §Default desktop
+sounds): `Tenancy::Machine`, a sound announcing a transition the machine made,
+which plays whoever holds the room — withheld included, since the login screen
+and a session switch are exactly when such sounds play — and
+`Tenancy::Session`, another session's sound, which plays only while that
+session holds the room. `audiod` admits either only from the cue authority's
+attested service account (`sound_cue::SOUNDD_UID`) and only for a playback
+stream of the `Notification` role, refusing anyone else with
+`PermissionDenied` and an audited record. The session field is zero unless
+the tenancy is a session's, and a session's is never the zero no session is.
+
 Opening a *source* additionally demands the capture capability, and every live
 capture stream is machine state the session draws a recording indicator from —
 a recording program cannot suppress it. Monitoring a sink's own mix is

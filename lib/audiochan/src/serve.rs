@@ -41,6 +41,7 @@ use tairix_abi::driver::audio_channel::{
     is_audio_channel_endpoint, AUDIOCHAN_NODE_COMPATIBLE, AUDIO_CHANNEL_ENDPOINT_BASE,
     AUDIO_CHANNEL_MAX_REPLY, AUDIO_CHANNEL_MAX_REQUEST,
 };
+use tairix_abi::driver::DeviceWake;
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
 use tairix_abi::{
@@ -100,36 +101,77 @@ const CALL_TOKEN: u64 = 1;
 /// Wait-set token for "one of the device's event sources is ready".
 const EVENT_TOKEN: u64 = 2;
 
-/// Something that wakes the serve loop to read the device's causes.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Wake {
-    /// A bound interrupt line: the handle `irq_bind` answered.
-    Irq(u64),
-    /// A message port this process bound, which a bus driver reports the
-    /// device's progress on. The device engine drains it when it reads its
-    /// causes, so the port is quiet again before the loop re-parks.
-    Port(u64),
-    /// The answer to a call the device posted on this call endpoint, a DMA
-    /// controller's period wait. The device engine collects it when it reads
-    /// its causes, so the source is quiet again before the loop re-parks.
-    CallReply(u64),
-}
-
-impl Wake {
-    /// The wait-set member this source is.
-    const fn member(self) -> (WaitSourceKind, u64) {
-        match self {
-            Self::Irq(handle) => (WaitSourceKind::Irq, handle),
-            Self::Port(port) => (WaitSourceKind::Port, port),
-            Self::CallReply(endpoint) => (WaitSourceKind::CallReply, endpoint),
-        }
-    }
-}
-
 /// Outstanding-call capacity of the device-channel endpoint. The mixer issues
 /// one control request at a time (it blocks on the reply); a small queue
 /// absorbs a doorbell racing the previous reply — a fail-closed memory bound.
 const ENDPOINT_CAPACITY: usize = 4;
+
+/// A device channel claimed, published and served: the endpoint the mixer
+/// calls and the dispatcher its wakes go to, driven by [`serve`]'s loop or by
+/// a driver whose loop serves another protocol of the device beside it.
+pub struct Channel<A: Audio> {
+    dispatcher: Dispatcher<A, RtChannelIo>,
+    endpoint: u64,
+}
+
+impl<A: Audio> Channel<A> {
+    /// Claim a device-channel endpoint, publish the node carrying it, and
+    /// serve `audio` on it.
+    ///
+    /// # Errors
+    ///
+    /// The reserved [`exit`](crate::exit) code to end with, its reason
+    /// logged.
+    pub fn publish(audio: A) -> Result<Self, i32> {
+        let Some(endpoint) = claim_channel_endpoint() else {
+            return Err(fail(
+                exit::NO_SERVICE,
+                "audiochan: no reserved device-channel endpoint could be claimed and bound",
+                None,
+            ));
+        };
+        if emit_audiochan_node(endpoint).is_none() {
+            return Err(fail(
+                exit::NO_SERVICE,
+                "audiochan: the device-channel node could not be published to the hardware tree",
+                None,
+            ));
+        }
+        // The channel is the one child this driver publishes. A refused
+        // settle only leaves the device manager to wait out its bound.
+        let _ = tairix_rt::hw_node_settle();
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Info,
+                id: AUDIOCHAN_READY,
+                message: "audiochan: device channel published, serving",
+                fields: &[],
+            },
+        );
+        Ok(Self {
+            dispatcher: Dispatcher::new(audio, RtChannelIo { endpoint }),
+            endpoint,
+        })
+    }
+
+    /// The endpoint the mixer calls.
+    #[must_use]
+    pub const fn endpoint(&self) -> u64 {
+        self.endpoint
+    }
+
+    /// The endpoint woke: answer the call waiting.
+    pub fn on_call(&mut self) {
+        self.dispatcher.on_call();
+    }
+
+    /// One of the device's event sources woke, or something else the device
+    /// does may have changed what it reports: read its causes.
+    pub fn on_event(&mut self) {
+        self.dispatcher.on_event();
+    }
+}
 
 /// Serve the `audiochan-v1` device channel over the opened device `audio`
 /// for the life of the driver process.
@@ -140,7 +182,7 @@ const ENDPOINT_CAPACITY: usize = 4;
 /// returns a reserved [`exit`](crate::exit) code so the driver ends
 /// fail-closed with a diagnosable reason rather than degrading into a busy
 /// re-poll.
-pub fn serve<A: Audio>(audio: A, wakes: &[Wake]) -> i32 {
+pub fn serve<A: Audio>(audio: A, wakes: &[DeviceWake]) -> i32 {
     if wakes.is_empty() {
         return fail(
             exit::NO_SERVICE,
@@ -148,21 +190,10 @@ pub fn serve<A: Audio>(audio: A, wakes: &[Wake]) -> i32 {
             None,
         );
     }
-    let Some(endpoint) = claim_channel_endpoint() else {
-        return fail(
-            exit::NO_SERVICE,
-            "audiochan: no reserved device-channel endpoint could be claimed and bound",
-            None,
-        );
+    let channel = match Channel::publish(audio) {
+        Ok(channel) => channel,
+        Err(code) => return code,
     };
-    if emit_audiochan_node(endpoint).is_none() {
-        return fail(
-            exit::NO_SERVICE,
-            "audiochan: the device-channel node could not be published to the hardware tree",
-            None,
-        );
-    }
-
     let set = tairix_rt::waitset_create();
     if set < 0 {
         return fail(
@@ -177,7 +208,7 @@ pub fn serve<A: Audio>(audio: A, wakes: &[Wake]) -> i32 {
         set,
         WaitSetOp::Add,
         WaitSourceKind::Endpoint,
-        endpoint,
+        channel.endpoint(),
         CALL_TOKEN,
     ) == 0
         && wakes.iter().all(|wake| {
@@ -191,18 +222,7 @@ pub fn serve<A: Audio>(audio: A, wakes: &[Wake]) -> i32 {
             None,
         );
     }
-
-    log(
-        &LogSink,
-        &Event {
-            level: Level::Info,
-            id: AUDIOCHAN_READY,
-            message: "audiochan: device channel published, serving",
-            fields: &[],
-        },
-    );
-
-    serve_loop(Dispatcher::new(audio, RtChannelIo { endpoint }), set)
+    serve_loop(channel, set)
 }
 
 /// Claim the first free id in the reserved device-channel endpoint block and
@@ -260,7 +280,7 @@ fn emit_audiochan_node(endpoint: u64) -> Option<u32> {
 /// Park on the wait set and serve device-channel doorbells and device events
 /// for the life of the driver. Never returns on the success path; a wait-set
 /// fault exits fail-closed.
-fn serve_loop<A: Audio>(mut dispatcher: Dispatcher<A, RtChannelIo>, set: u64) -> i32 {
+fn serve_loop<A: Audio>(mut channel: Channel<A>, set: u64) -> i32 {
     loop {
         let mut token = 0u64;
         let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
@@ -275,8 +295,8 @@ fn serve_loop<A: Audio>(mut dispatcher: Dispatcher<A, RtChannelIo>, set: u64) ->
             continue;
         }
         match token {
-            EVENT_TOKEN => dispatcher.on_event(),
-            CALL_TOKEN => dispatcher.on_call(),
+            EVENT_TOKEN => channel.on_event(),
+            CALL_TOKEN => channel.on_call(),
             _ => {}
         }
     }

@@ -24,6 +24,8 @@ use crate::grid::Grid;
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct Parser {
     inner: VtParser,
+    /// Whether the shell rang the bell since it was last asked.
+    rang: bool,
 }
 
 impl Parser {
@@ -32,19 +34,34 @@ impl Parser {
     pub const fn new() -> Self {
         Self {
             inner: VtParser::new(),
+            rang: false,
         }
     }
 
     /// Feed a slice of shell output, applying each recognised operation to
     /// `grid` in stream order.
     pub fn feed(&mut self, grid: &mut Grid, bytes: &[u8]) {
-        self.inner.feed(bytes, |op| apply(grid, &op));
+        let rang = &mut self.rang;
+        self.inner.feed(bytes, |op| {
+            *rang |= matches!(op, Op::Bell);
+            apply(grid, &op);
+        });
     }
 
     /// Feed one `byte` of shell output, applying any operation it completes to
     /// `grid`.
     pub fn feed_byte(&mut self, grid: &mut Grid, byte: u8) {
-        self.inner.feed_byte(byte, |op| apply(grid, &op));
+        let rang = &mut self.rang;
+        self.inner.feed_byte(byte, |op| {
+            *rang |= matches!(op, Op::Bell);
+            apply(grid, &op);
+        });
+    }
+
+    /// Whether the shell rang the bell since this was last asked: however
+    /// many times it rang in between, which is one sound.
+    pub fn take_bell(&mut self) -> bool {
+        core::mem::take(&mut self.rang)
     }
 }
 
@@ -86,9 +103,9 @@ pub(crate) fn apply(grid: &mut Grid, op: &Op) {
             grid.set_attributes(pen);
         }
         Op::SetTitle(title) => grid.set_title(title.as_str()),
-        // Operations with no effect on the rendered display. The bell carries
-        // no screen change we model (no audible bell is wired). The rest are
-        // *input* a terminal reports to the program (named keys, mouse reports,
+        // Operations with no effect on the rendered display. The bell is
+        // heard, not drawn ([`Parser::take_bell`]). The rest are *input* a
+        // terminal reports to the program (named keys, mouse reports,
         // paste-run markers) or requests to turn input-reporting modes on and
         // off: they flow program-ward, and the emulator has no input
         // back-channel to honour the mode requests through, so a consumer that

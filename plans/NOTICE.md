@@ -49,13 +49,15 @@ filesystem's locks.
 
 | Topic | Payload | Publisher | Subscribers |
 |---|---|---|---|
-| `Desktop` | `DesktopInfo` (28 B) | the seat's **live display lease** holder | every windowed app, through `lib/window` |
+| `Desktop` | `DesktopInfo` (54 B) | the seat's **live display lease** holder | every windowed app, through `lib/window` |
 | `Mounts` | none — the generation *is* the news | the kernel, from every `MountTable` mutation | `files.app`'s places rail |
 | `MemoryPressure` | the band depth (1 B) | the kernel, from `MEM_STATS` | `lib/procinfo::pressure`, for every process holding a cache |
-| `DisplayLease` | the boot seat's lease word and its holder's login session (24 B) | the kernel, from its seat registry and capability table | the display service (`lib/display::service`), to release a configuration whose lease ended and light the display it left dark; the audio service, to mix only the holder's session into the seat's speakers |
+| `DisplayLease` | the boot seat's lease word and its holder's login session (24 B) | the kernel, from its seat registry and capability table | the display service (`lib/display::service`), to release a configuration whose lease ended and light the display it left dark; the audio service, to mix only the holder's session into the seat's speakers; the cue authority, to apply only the holder's sound choices (`plans/SOUND.md` SND23) |
 | `AudioCapture` | the capture streams moving frames (4 B) | the audio service, by its reserved rendezvous | the session's recording indicator, the Settings Sound pane |
 | `AudioDevices` | how many times a device or its controls changed (8 B) | the audio service, by its reserved rendezvous | the session, which remembers its user's controls; the Settings Sound pane |
 | `Network` | how many times an interface's presence, link, addresses or address states changed (8 B) | the network stack, by its reserved rendezvous | the Switchboard, which re-reads the interfaces it reports to the bar's network signal |
+| `DisplayOutput` | how many times the display's output arrived, left or ran another mode (8 B) | the display service, by its reserved rendezvous | the desktop session and the login screen, which re-read the output and follow it (`plans/DISPLAY.md` D12) |
+| `CueAuthority` | the cue authority's process instance (16 B) | the cue authority, by its reserved rendezvous, naming only itself | the desktop session, which delegates its user's chosen sound files to that instance and hands its choices over again when a new one starts (`plans/SOUND.md` SND23) |
 
 Authority carries **no new capability**:
 
@@ -72,17 +74,24 @@ Authority carries **no new capability**:
   principal that owns every interface, so no program can fake or hide a change
   to them. The edge says only that something moved; what moved stays behind
   the gated interface queries.
+- `DisplayOutput` admits only the process bound to `DISPLAY_ENDPOINT`, the one
+  principal that owns the output; what the output runs stays behind the
+  lease-gated display `Query`.
+- `CueAuthority` admits only the process bound to `SOUND_CUE_ENDPOINT`, and only
+  a payload naming the instance the kernel attests it is, so no program can
+  redirect a session's files; the kernel's sentinel instance is refused on
+  decode.
 - `Mounts`, `MemoryPressure` and `DisplayLease` are kernel-owned: a userland
   publish to any of them is refused outright.
 - *Reading* is ungated for every topic but `DisplayLease`. The others are
   machine-wide facts no principal owns, each already readable or, for the
   capture count, as public as a device in use is on every system — so gating
   the read would only force applications to guess. The lease's history is what
-  `SEAT_LIST` reports under `CAP_SYSINFO_HW`, so only the two services that own
-  the seat's devices — the processes bound to the reserved `DISPLAY_ENDPOINT`
-  and `AUDIO_ENDPOINT` — may read it, subscribe to it, or be woken by it
-  (`notice::may_observe`, the one definition the read, the subscription and
-  the readiness scan share).
+  `SEAT_LIST` reports under `CAP_SYSINFO_HW`, so only the services that follow
+  the seat — the processes bound to the reserved `DISPLAY_ENDPOINT`,
+  `AUDIO_ENDPOINT` and `SOUND_CUE_ENDPOINT` — may read it, subscribe to it, or
+  be woken by it (`notice::may_observe`, the one definition the read, the
+  subscription and the readiness scan share).
 
 Topics carry no seat or subject dimension. With one lease-holder per seat and
 one seat in use (`SEAT_PRIMARY`), a subject field whose only value is `0` would
@@ -121,10 +130,15 @@ copy:
 - `AudioCapture` — a counter bumped only when the published count differs, as
   `Desktop`'s is.
 - `AudioDevices` — bumped whenever the audio service's change count moves.
+- `DisplayOutput` — bumped whenever the display service's change count
+  moves. The service counts a move only when the output it would answer a
+  `Query` with differs from the one it last announced.
 - `Network` — bumped whenever the stack's change count moves. The stack
   counts a change only when the interface-state records it would answer
   differ from the last ones it published, so a reconfiguration that changes
   nothing visible wakes nobody.
+- `CueAuthority` — bumped when the published instance differs; an instance is
+  never reused, so every start of the authority is one edge.
 
 A counted topic's publisher resumes its count one past the value on the board
 (`tairix_rt::changenotice::ChangeNotice`), so a restarted audio service or

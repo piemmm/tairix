@@ -21,8 +21,7 @@ use tairix_abi::hwtree::HwResourceKind;
 use tairix_abi::raid_ipc::{MemberOffer, MembershipEnd, RAID_REGISTRY_ENDPOINT};
 use tairix_abi::reply::STATUS_REPLY_LEN;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{CapabilityId, Errno};
-use tairix_caps::CapabilitySet;
+use tairix_abi::Errno;
 use tairix_drv_storage_raid_member::{AgentStep, MemberAgent, Transport};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -60,19 +59,6 @@ const RAID_MEMBER_REFUSED: EventId = EventId(4189);
 /// previous membership for it has still to end, or it had no room); the agent
 /// offers again on its paced cadence.
 const RAID_MEMBER_DEFERRED: EventId = EventId(4214);
-
-/// The capability set the driver host re-checks up front; the kernel is the
-/// authority and re-checks every trap. It is the least-privilege set the agent
-/// needs — no MMIO, DMA, IRQ, node emission, or mount authority, and no
-/// filesystem access: it delegates the transport it was granted and nothing
-/// else.
-fn driver_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    caps.insert(CapabilityId::SHM);
-    caps.insert(CapabilityId::IPC_ENDPOINT);
-    caps.insert(CapabilityId::LOG_EMIT);
-    caps
-}
 
 /// Emit one diagnostic record carrying a single hex-rendered field.
 fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static str, value: u64) {
@@ -190,7 +176,11 @@ fn await_end(waits: &Waits, ticket: u64) -> MembershipEnd {
 }
 
 fn main() -> i32 {
-    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+    let caps = tairix_drv_storage_raid_member::REQUIRED_CAPABILITIES
+        .iter()
+        .copied()
+        .collect();
+    let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
         return EXIT_NO_HOST;
     };
     let Some(transport) = resolve_transport(&host) else {
@@ -202,7 +192,7 @@ fn main() -> i32 {
     // The agent's own node, so the composer can name this member in its audit
     // trail. Kernel-resolved from the calling task, never claimed; a node the
     // kernel will not name is simply unnamed in the record.
-    let node = u32::try_from(tairix_rt::hw_self_node()).unwrap_or(0);
+    let node = tairix_rt::hw_self_node().map_or(0, |record| record.node());
 
     let mut agent = MemberAgent::new();
     // The outstanding membership's ticket, held only between the offer that

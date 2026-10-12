@@ -9,7 +9,7 @@
 //! [`engine::Hda`] composes them.
 //!
 //! The `lib` target is the driver's identity — [`BIND_KEYS`] and
-//! [`REQUIRED_CAPS`], which the image builder authors its signed manifest
+//! [`REQUIRED_CAPABILITIES`], which the image builder authors its signed manifest
 //! from — and its host-testable engine; `src/main.rs` is the `Run` program.
 //!
 //! [`Audio`]: tairix_abi::driver::audio::Audio
@@ -50,7 +50,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
 /// requests: map its register window, carve its rings and buffers, park on
 /// its interrupt, map the mixer's regions, claim and bind the reserved
 /// device-channel endpoint, publish its node, and log.
-pub const REQUIRED_CAPS: &[CapabilityId] = &[
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::MMIO_MAP,
     CapabilityId::MEM_DMA,
     CapabilityId::IRQ_BIND,

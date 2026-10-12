@@ -20,8 +20,10 @@ Playback is `tairix-player`'s engine (`docs/src/lib/player.md`), over a fixed
 for the passes asked for. It writes what the decoder answers into one
 `audio-v1` stream while consecutive files share a rate, sample format and
 channel layout, so a list plays gapless. A file of another shape waits for the
-stream to drain — every frame already queued is heard — and opens its own. The
-ring is half a second deep: pausing, seeking and changing level act on the
+stream to drain — every frame already queued is heard — and opens its own. A
+chained Ogg file's links play in turn the same way, each named as it opens
+(`Playing radio.ogg (link 2): …`, its `schema` record carrying the link), and
+a seek moves within the link heard. The ring is half a second deep: pausing, seeking and changing level act on the
 stream rather than on what it has queued, so a deep ring costs no
 responsiveness and rides out a slow disk.
 

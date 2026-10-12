@@ -352,8 +352,10 @@ pub struct SessionOutcome {
 /// [`read_password`]: LoginView::read_password
 pub trait LoginView {
     /// Begin one authentication round: draw (or redraw) the whole view and
-    /// present the username prompt.
-    fn round_begin(&self);
+    /// present the username prompt. `may_give_way` says the prompt may end
+    /// the round, while nothing is typed in it, for a login that becomes
+    /// available (see [`LoginView::read_username`]).
+    fn round_begin(&self, may_give_way: bool);
 
     /// Read the username into `buf`, returning the number of bytes filled.
     /// The line terminator is not stored.
@@ -363,7 +365,9 @@ pub trait LoginView {
     /// Returns the implementation's [`Errno`] if the terminal cannot be
     /// read (closed, timed out, …) — login treats this as fatal and fails
     /// closed — or [`Errno::LengthOutOfRange`] for a line longer than
-    /// `buf`, which is refused rather than truncated.
+    /// `buf`, which is refused rather than truncated. [`Errno::Interrupted`]
+    /// is no failure: nothing was typed and the round gives way to a login
+    /// that became available.
     fn read_username(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 
     /// Read the password into `buf` **without displaying it**, returning
@@ -388,6 +392,13 @@ pub trait LoginView {
     ///
     /// [`round_begin`]: LoginView::round_begin
     fn session_handoff(&self);
+
+    /// Leave a round no session came of, as [`session_handoff`] does but
+    /// keeping the failed-attempt count, which runs until a session
+    /// launches.
+    ///
+    /// [`session_handoff`]: LoginView::session_handoff
+    fn round_abandoned(&self);
 
     /// Take the terminal back from a session that has ended, discarding
     /// everything it left there — the screen it drew, the screen it was not

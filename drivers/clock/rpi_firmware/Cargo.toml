@@ -1,0 +1,46 @@
+[package]
+name = "tairix-drv-clock-rpi-firmware"
+description = "TAIRiX autoloaded user-space driver for the Raspberry Pi firmware's clocks (raspberrypi,firmware-clocks): takes the kernel's frequency mechanism role for the ARM clock and serves clock-v1 for the display's core and HDMI clocks, every rate asked of the VideoCore firmware over the property mailbox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Two targets, one crate, on cargo's default paths and names like every sibling
+# driver: the bundle builder cross-compiles `--bin <package>`. The clocks
+# (`src/lib.rs`) are host-testable against the mock firmware, alone and behind
+# the shared `clock-v1` endpoint; the `Run` binary (`src/main.rs`) links the
+# userland runtime, so it is freestanding-only and an inert host stub
+# elsewhere (`build.rs`).
+
+[dependencies]
+# The frequency-range type, the mailbox channel seam and the capability ids.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `clock-v1` endpoint the display's clocks are served through, and the
+# node bring-up around it.
+tairix-clock = { path = "../../../lib/clock", version = "=0.0.0" }
+# The property protocol: the clock-rate tags, their fail-closed decode, and
+# which clocks this node's driver drives.
+tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
+
+[dev-dependencies]
+# The endpoint rig and the fake kernel the clock tests are answered through.
+tairix-clock = { path = "../../../lib/clock", version = "=0.0.0", features = ["test-support"] }
+# The protocol-faithful mock firmware the rate exchanges run against; QEMU
+# models no VideoCore.
+tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0", features = [
+    "mock-firmware",
+] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The mechanism thread's own mailbox channel, and the records it writes.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# `_start`, the mechanism's thread, and the `cpufreq_bind` / `cpufreq_wait`
+# wrappers.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

@@ -13,13 +13,15 @@ use std::vec;
 use std::vec::Vec;
 
 use tairix_hash::HashSeed;
-use tairix_sound::{CoverRange, DecodeError, Metadata, PcmSource, SoundFormat};
+use tairix_sound::flac_encode::{encode, Options, Params};
+use tairix_sound::{CoverRange, DecodeError, Link, Metadata, PcmSource, SoundFormat};
 
 use super::{
-    decode_from_wire, decode_to_wire, encode_info, encode_metadata, session_bounds,
+    decode_from_wire, decode_to_wire, encode_info, encode_link, encode_metadata, session_bounds,
     AudioDecodeClient, AudioDecodeError, AudioDecodeService, AudioRefusal, DecodeEvent,
-    CACHE_PAGES, COVER_LEN, FROM_BLOCK, FROM_NEED, FROM_OPENED, FROM_REFUSED, FROM_SOUGHT, LIMITS,
-    MAX_BLOCK_FRAMES, MAX_NEED_BYTES, MAX_OPENED_LEN, PAGE_BYTES, TO_DECODE, TO_OPEN, TO_SUPPLY,
+    CACHE_PAGES, COVER_LEN, FROM_BLOCK, FROM_LAST_LINK, FROM_NEED, FROM_OPENED, FROM_REFUSED,
+    FROM_SOUGHT, LIMITS, MAX_BLOCK_FRAMES, MAX_NEED_BYTES, MAX_OPENED_LEN, PAGE_BYTES, TO_DECODE,
+    TO_NEXT_LINK, TO_OPEN, TO_SUPPLY,
 };
 use crate::loopback::LoopbackSessionLauncher;
 use crate::proto::ProtoError;
@@ -128,6 +130,7 @@ fn direct(file: &[u8]) -> (Metadata, Vec<u8>) {
 #[derive(Debug, Eq, PartialEq)]
 enum Answered {
     Opened,
+    LastLink,
     Block(u64, Vec<u8>),
     Ended(u64),
     Sought(u64),
@@ -252,6 +255,7 @@ fn own(event: DecodeEvent<'_>) -> Owned {
         DecodeEvent::Need { offset, len } => return Owned::Need(offset, len),
         DecodeEvent::Resuming => return Owned::Resuming,
         DecodeEvent::Opened => Answered::Opened,
+        DecodeEvent::LastLink => Answered::LastLink,
         DecodeEvent::Block { position, pcm } => Answered::Block(position, pcm.to_vec()),
         DecodeEvent::Ended { position } => Answered::Ended(position),
         DecodeEvent::Sought { position } => Answered::Sought(position),
@@ -494,17 +498,20 @@ fn a_read_the_owner_cannot_make_fails_the_request_it_was_for() {
 struct Crashing {
     inner: AudioDecodeService,
     at: Option<u64>,
+    /// The link of a chain the position is in.
+    link: u32,
 }
 
 impl SessionService for Crashing {
     fn handle(&mut self, request: &[u8], out: &mut dyn FrameOut) -> SessionStep {
-        let position = self
+        let place = self
             .inner
             .file
             .as_ref()
             .and_then(|file| file.source.as_ref())
-            .map(PcmSource::position);
-        if request.first() == Some(&TO_DECODE) && position.is_some() && position == self.at {
+            .map(|source| (source.link().index, source.position()));
+        let at = self.at.map(|at| (self.link, at));
+        if request.first() == Some(&TO_DECODE) && place.is_some() && place == at {
             return SessionStep::Finished;
         }
         self.inner.handle(request, out)
@@ -524,6 +531,7 @@ fn a_replaced_worker_is_brought_back_to_where_the_stream_was() {
             Crashing {
                 inner: AudioDecodeService::new(),
                 at: (started.get() == 1).then_some(u64::from(MAX_BLOCK_FRAMES) * 3),
+                link: 0,
             }
         });
         let mut owner = Owner::new(&file);
@@ -548,6 +556,7 @@ fn a_stream_that_fails_a_worker_twice_at_one_place_is_given_up() {
     let mut session = supervised(|| Crashing {
         inner: AudioDecodeService::new(),
         at: Some(8192),
+        link: 0,
     });
     let mut owner = Owner::new(&file);
     let mut client = AudioDecodeClient::new();
@@ -617,6 +626,189 @@ fn a_replacement_that_finds_another_stream_is_not_believed_to_be_the_same() {
     );
 }
 
+/// A chain of Ogg FLAC links, each of its own rate and channel count, and
+/// the bytes each decodes to.
+fn chain() -> (Vec<u8>, Vec<Vec<u8>>) {
+    let shapes: [(u32, u8, u32); 3] = [(44_100, 2, 9000), (22_050, 1, 5000), (48_000, 2, 12_000)];
+    let mut file = Vec::new();
+    let mut links = Vec::new();
+    for (serial, (rate, channels, frames)) in (1u32..).zip(shapes) {
+        let samples: Vec<i32> = xorshift(frames as usize * usize::from(channels), serial)
+            .iter()
+            .map(|&byte| i32::from(byte) - 128)
+            .collect();
+        let params = Params {
+            rate,
+            channels,
+            bits: 16,
+        };
+        file.extend(
+            encode(params, &samples, Options::default())
+                .expect("encodes")
+                .finish_ogg(serial, 4000),
+        );
+        links.push(
+            samples
+                .iter()
+                .flat_map(|&sample| i16::try_from(sample).expect("16-bit").to_le_bytes())
+                .collect(),
+        );
+    }
+    (file, links)
+}
+
+/// Decode the open link to its end, answering every replacement with a
+/// resume.
+fn play_link<F: FnMut() -> S, S: SessionService>(
+    owner: &mut Owner<'_>,
+    session: &mut SupervisedSession<LoopbackSessionLauncher<F>, NullSink>,
+    client: &mut AudioDecodeClient,
+) -> Vec<u8> {
+    let mut pcm = Vec::new();
+    loop {
+        client.decode(MAX_BLOCK_FRAMES).expect("idle");
+        match owner.exchange(session, client).expect("an honest answer") {
+            Answered::Block(_, block) => pcm.extend(block),
+            Answered::Resumed(position) => assert_eq!(position, client.position()),
+            Answered::Ended(_) => return pcm,
+            other => panic!("a decode answered {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_chained_file_is_read_link_after_link_through_the_worker() {
+    let (file, links) = chain();
+    let mut owner = Owner::new(&file);
+    let mut session = healthy();
+    let mut client = AudioDecodeClient::new();
+    client.open(file.len() as u64, None, SEED).expect("idle");
+    assert_eq!(
+        owner.exchange(&mut session, &mut client),
+        Ok(Answered::Opened)
+    );
+    assert_eq!(client.link(), Some(Link::FIRST));
+    for (index, expected) in links.iter().enumerate() {
+        assert_eq!(
+            &play_link(&mut owner, &mut session, &mut client),
+            expected,
+            "link {index}"
+        );
+        client.next_link().expect("idle");
+        let answer = owner.exchange(&mut session, &mut client);
+        if index + 1 == links.len() {
+            assert_eq!(answer, Ok(Answered::LastLink));
+        } else {
+            assert_eq!(answer, Ok(Answered::Opened));
+            let link = client.link().expect("open");
+            assert_eq!(link.index as usize, index + 1);
+            assert_eq!(client.position(), 0);
+            let direct = PcmSource::open_link(&mut &file[..], &LIMITS, link).expect("opens");
+            assert_eq!(client.info(), Some(direct.info()));
+        }
+    }
+}
+
+/// A worker that fails part way through a later link is replaced by one
+/// opened at that link, and the stream goes on from the frame it reached.
+#[test]
+fn a_replaced_worker_is_brought_back_to_the_link_the_stream_was_in() {
+    let (file, links) = chain();
+    let generations = Rc::new(Cell::new(0));
+    let started = Rc::clone(&generations);
+    let mut session = supervised(move || {
+        started.set(started.get() + 1);
+        Crashing {
+            inner: AudioDecodeService::new(),
+            at: (started.get() == 1).then_some(u64::from(MAX_BLOCK_FRAMES)),
+            link: 2,
+        }
+    });
+    let mut owner = Owner::new(&file);
+    let mut client = AudioDecodeClient::new();
+    client.open(file.len() as u64, None, SEED).expect("idle");
+    assert_eq!(
+        owner.exchange(&mut session, &mut client),
+        Ok(Answered::Opened)
+    );
+    for expected in &links {
+        assert_eq!(&play_link(&mut owner, &mut session, &mut client), expected);
+        client.next_link().expect("idle");
+        owner
+            .exchange(&mut session, &mut client)
+            .expect("an honest answer");
+    }
+    assert_eq!(generations.get(), 2, "one worker failed in the last link");
+}
+
+#[test]
+fn a_link_that_does_not_follow_from_what_was_asked_is_not_believed() {
+    let (file, _) = chain();
+    let mut input = &file[..];
+    let mut source = PcmSource::open(&mut input, &LIMITS).expect("opens");
+    let mut sink = vec![0u8; 1 << 16];
+    while source.next_block(&mut input, &mut sink).expect("decodes") > 0 {}
+    assert!(source.next_link(&mut input).expect("a second link"));
+    let answer = |link: Link| {
+        let mut out = Writer::new();
+        out.u8(FROM_OPENED);
+        encode_link(&mut out, link);
+        encode_info(&mut out, source.info());
+        encode_metadata(&mut out, source.metadata());
+        out.finish()
+    };
+    let next = source.link();
+    let asking = || {
+        let mut client = opening(file.len() as u64);
+        assert_eq!(
+            client.on_frame(&honest_opened(&file)),
+            Ok(DecodeEvent::Opened)
+        );
+        client.next_link().expect("idle");
+        client.sent();
+        client
+    };
+    assert_eq!(asking().on_frame(&answer(next)), Ok(DecodeEvent::Opened));
+    assert_eq!(
+        asking().on_frame(&[FROM_LAST_LINK]),
+        Ok(DecodeEvent::LastLink)
+    );
+    let lies = [
+        ("a link skipped", Link { index: 2, ..next }),
+        (
+            "a link at the one before's place",
+            Link {
+                offset: 0,
+                index: 1,
+            },
+        ),
+        (
+            "a link past the file",
+            Link {
+                offset: file.len() as u64,
+                ..next
+            },
+        ),
+    ];
+    for (lie, link) in lies {
+        assert_eq!(
+            asking().on_frame(&answer(link)),
+            Err(AudioDecodeError::Unbelievable),
+            "{lie}"
+        );
+    }
+    assert_eq!(
+        opening(file.len() as u64).on_frame(&answer(next)),
+        Err(AudioDecodeError::Unbelievable),
+        "a later link answering an open of the first"
+    );
+    assert_eq!(
+        opening(file.len() as u64).on_frame(&[FROM_LAST_LINK]),
+        Err(AudioDecodeError::Unbelievable),
+        "no further link, unasked"
+    );
+}
+
 /// Records every frame a worker emits.
 #[derive(Default)]
 struct Frames(Vec<Vec<u8>>);
@@ -667,9 +859,31 @@ fn every_frame_the_protocol_does_not_admit_is_refused_and_closes_the_file() {
     ] {
         assert_eq!(served(&mut worker, frame), malformed, "{frame:?}");
     }
+    let format_at = 1 + 16 + 8;
     let mut open = open_frame(file.len() as u64);
-    *open.last_mut().expect("a format") = 9;
+    open[format_at] = 9;
     assert_eq!(served(&mut worker, &open), malformed, "an unknown format");
+    let mut open = open_frame(file.len() as u64);
+    open[format_at + 1] = 1;
+    assert_eq!(
+        served(&mut worker, &open),
+        malformed,
+        "a later link at the file's start"
+    );
+    let mut open = open_frame(file.len() as u64);
+    open[format_at] = 2;
+    open[format_at + 1] = 1;
+    open[format_at + 5] = 64;
+    assert_eq!(
+        served(&mut worker, &open),
+        malformed,
+        "a later link of a WAVE file"
+    );
+    assert_eq!(
+        served(&mut worker, &[TO_NEXT_LINK]),
+        refused(AudioRefusal::NotOpen),
+        "a next link with nothing open"
+    );
 
     let need = served(&mut worker, &open_frame(file.len() as u64));
     assert_eq!(need[0], FROM_NEED);
@@ -711,7 +925,7 @@ fn every_frame_the_protocol_does_not_admit_is_refused_and_closes_the_file() {
 }
 
 /// Every refusal a decoder can make.
-const EVERY_REFUSAL: [DecodeError; 75] = [
+const EVERY_REFUSAL: [DecodeError; 92] = [
     DecodeError::UnknownFormat,
     DecodeError::InputUnavailable,
     DecodeError::InputFailed,
@@ -783,10 +997,27 @@ const EVERY_REFUSAL: [DecodeError; 75] = [
     DecodeError::OggPageLost,
     DecodeError::OggBadPacket,
     DecodeError::OggPacketTooLarge,
-    DecodeError::OggNoFlacStream,
+    DecodeError::OggNoCodec,
     DecodeError::OggBadFlacMapping,
     DecodeError::OggNoAudio,
-    DecodeError::OggChained,
+    DecodeError::OggBadLink,
+    DecodeError::OggTooManyStreams,
+    DecodeError::OggGranuleMismatch,
+    DecodeError::MpegNoSync,
+    DecodeError::MpegFrameCrc,
+    DecodeError::MpegFrameInvalid,
+    DecodeError::MpegFrameMismatch,
+    DecodeError::MpegTruncated,
+    DecodeError::VorbisBadIdentification,
+    DecodeError::VorbisBadComment,
+    DecodeError::VorbisBadSetup,
+    DecodeError::VorbisSetupTooLarge,
+    DecodeError::VorbisPacketInvalid,
+    DecodeError::VorbisBadPacket,
+    DecodeError::OpusBadIdentification,
+    DecodeError::OpusBadComment,
+    DecodeError::OpusUnsupportedVersion,
+    DecodeError::OpusPacketInvalid,
 ];
 
 #[test]
@@ -871,6 +1102,7 @@ fn opened(file: &[u8], edit: impl FnOnce(&mut Metadata)) -> Vec<u8> {
     edit(&mut metadata);
     let mut out = Writer::new();
     out.u8(FROM_OPENED);
+    encode_link(&mut out, source.link());
     encode_info(&mut out, source.info());
     encode_metadata(&mut out, &metadata);
     out.finish()
@@ -889,20 +1121,25 @@ fn an_open_answer_that_is_not_an_honest_one_is_not_believed() {
         opening(file.len() as u64).on_frame(&honest),
         Ok(DecodeEvent::Opened)
     );
-    let lies: [Lie; 14] = [
-        ("no format", |frame| frame[1] = 0),
-        ("an unknown format", |frame| frame[1] = 9),
-        ("an unknown encoding", |frame| frame[2] = 0),
-        ("a width no sample has", |frame| frame[3] = 33),
-        ("no rate", |frame| frame[4..8].fill(0)),
-        ("no channels", |frame| frame[8] = 0),
-        ("more channels than a map names", |frame| frame[8] = 9),
-        ("an unknown sample format", |frame| frame[17] = 0xEE),
-        ("a flag that is neither", |frame| frame[18] = 2),
-        ("a count that is not stated", |frame| frame[18] = 0),
-        ("seekability that is neither", |frame| frame[27] = 2),
-        ("a disagreement that agrees", |frame| frame[28] = 1),
-        ("an unknown tag kind", |frame| frame[49] = 0),
+    let lies: [Lie; 16] = [
+        ("a link the open did not name", |frame| {
+            frame[1] = 1;
+            frame[5] = 9;
+        }),
+        ("a later link at the file's start", |frame| frame[1] = 1),
+        ("no format", |frame| frame[13] = 0),
+        ("an unknown format", |frame| frame[13] = 9),
+        ("an unknown encoding", |frame| frame[14] = 0),
+        ("a width no sample has", |frame| frame[15] = 33),
+        ("no rate", |frame| frame[16..20].fill(0)),
+        ("no channels", |frame| frame[20] = 0),
+        ("more channels than a map names", |frame| frame[20] = 9),
+        ("an unknown sample format", |frame| frame[29] = 0xEE),
+        ("a flag that is neither", |frame| frame[30] = 2),
+        ("a count that is not stated", |frame| frame[30] = 0),
+        ("seekability that is neither", |frame| frame[39] = 2),
+        ("a disagreement that agrees", |frame| frame[40] = 1),
+        ("an unknown tag kind", |frame| frame[61] = 0),
         ("an omission that is neither", |frame| {
             let at = frame.len() - COVER_LEN - 1;
             frame[at] = 2;

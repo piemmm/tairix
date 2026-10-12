@@ -490,7 +490,10 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   `SERVICE_NOT_ENROLLED` (9011) and kept known, so it can be enabled by name;
   one enabled at runtime joins the admission order. Pre-unlock the manager
   boots on the image's layer and narrows to the administrator's with
-  `adopt_overrides` once the document is readable.
+  `adopt_overrides` once the writable root is mounted; until then every
+  enrolment change is refused unwritten, so a record not yet read is never
+  replaced. The enrolment governs the enrolled tier alone: adoption never
+  stops a boot-floor service, and a change naming one is refused.
 - Discovery is the startup configuration's enrolled tier; scanning
   `/System/Services` for bundles waits on the growable registered tier
   (§3.10). The `AppInfo` unit-metadata parse is SVC-3b.
@@ -964,15 +967,17 @@ it does not.
     reader (§2.14).
   - Applying the administrator layer is bounded by the unlock and is stated
     rather than hidden: pre-unlock PID 1 obeys the vendor layer alone, and the
-    moment the override document is readable — on a bounded doubling one-shot
-    ladder (`lib/util::retry`, shared with the clock service, which waits the
-    same way for the same reason) — it re-derives the effective set and stops a
+    moment the writable root is mounted — the `Mounts` notice, which the
+    kernel publishes when the root's driver registers behind its mounts — it
+    reads the override document once, re-derives the effective set and stops a
     service the administrator disabled through the existing reverse-dependency
-    `stop`, audited. So a disabled service does run for the few seconds before
-    the unlock. Deferring the whole enrolled tier until the ladder resolves
-    would instead deny a never-unlocking machine its clock for the ladder's
-    length, which is worse; nothing is granted by the document being unreadable,
-    so this is a narrowing that arrives late, not a fail-open.
+    `stop`, audited. A root holding no document leaves the vendor layer
+    standing. So a disabled service does run for the few seconds before the
+    unlock. Deferring the whole enrolled tier until the unlock would instead
+    deny a never-unlocking machine its clock, which is worse; nothing is
+    granted by the document being unreadable, so this is a narrowing that
+    arrives late, not a fail-open. The same event asserts
+    `filesystems-mounted`, which nothing else does.
   - `status` is `SysinfoQueryId::SERVICE_STATUS`, a new spec at the **end** of
     `SYSINFO_QUERIES`, gated `CAP_SYSINFO_GLOBAL` and audited like
     `GLOBAL_PROCESS_LIST` (it names other principals and their pids). PID 1

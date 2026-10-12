@@ -126,17 +126,6 @@ mod program {
     /// capacity suffices; it is a queue bound, not a hardware capacity.
     const ENDPOINT_CAPACITY: usize = 4;
 
-    /// The capability set the host re-checks before issuing a trap: the set
-    /// the service's bundle requests. The kernel re-checks every trap
-    /// regardless.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        for &cap in SERVICE_CAPS {
-            caps.insert(cap);
-        }
-        caps
-    }
-
     /// The inbox interrupt the host bound, and the clock the reply deadlines
     /// run on.
     struct HostInbox<'a>(&'a RtDriverHost<RtGrantSyscalls>);
@@ -190,7 +179,8 @@ mod program {
     fn main() -> i32 {
         // Build the host from the grants the kernel minted. The kernel carves
         // coherent DMA, so no architecture-specific cache shim is supplied.
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = SERVICE_CAPS.iter().copied().collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         // Resolve and map the single granted doorbell window.

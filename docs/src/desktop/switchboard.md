@@ -777,6 +777,14 @@ returns; a refusal (an absent capability, a platform with no primitive for
 the transition) is stated on `stderr` naming the transition that did not
 happen, and the machine keeps running.
 
+A granted transition first sounds the machine's end ([`soundd`](../userland/soundd.md)):
+the service cues `Shutdown`, asking to be answered once it has played out, and
+performs the transition when that answer comes — played out, refused, or given
+up on at the sound's length and a second. The wait is on the loop's wait-set,
+never a blocking call, and a cue that cannot be posted performs the transition
+at once. A second request while one waits replaces the transition and cues
+nothing more.
+
 Whether the capability is genuinely held is **published, never assumed**:
 every tray summary carries a `power_capable` flag re-read from this
 service's own effective capability set at that moment, so an authority the
@@ -790,12 +798,12 @@ leaves them denied: fail closed, never optimistic.
 
 The loop is tickless and event-driven: **one** `waitset_wait` per iteration
 covers the termination signal, the command mailbox, the machine's
-memory-pressure band, the `Network` notice, and — only while a
-window is open — that window's event mailbox, with a timeout equal to the
-time until the next real sample is due. Sampling is strict: a cycle
-triggered by an input or command wake before the deadline is a no-op that
-never re-queries the system. There is no poll loop and no
-sleep. The window's event source joins the set when the window opens and
+memory-pressure band, the `Network` notice, the cue authority's answer while
+the end sound is awaited, and — only while a window is open — that window's
+event mailbox, with a timeout equal to the time until the next real sample is
+due. Sampling is strict: a cycle triggered by an input or command wake before
+the deadline is a no-op that never re-queries the system. There is no poll
+loop and no sleep. The window's event source joins the set when the window opens and
 leaves it when the window closes, so a closed window's channel is never left
 armed. Its folding event stream (`tairix_window::WindowEvents` over an
 `EventMailbox` keyed to the identity the create reply attested) is created

@@ -217,17 +217,17 @@ mod tests {
         // The reported defect's boot half: the board is found at its minimum
         // and must be asked for its own ceiling, not a board constant.
         let mut firmware = MockFirmware::healthy();
-        firmware.arm_clock_min_hz = 600_000_000;
-        firmware.arm_clock_max_hz = 1_500_000_000;
-        firmware.arm_clock_hz = 600_000_000;
+        firmware.arm.min_hz = 600_000_000;
+        firmware.arm.max_hz = 1_500_000_000;
+        firmware.arm.hz = 600_000_000;
         assert_eq!(raise_over(&mut firmware), Some(1_500_000_000));
-        assert_eq!(firmware.arm_clock_hz, 1_500_000_000);
+        assert_eq!(firmware.arm.hz, 1_500_000_000);
     }
 
     #[test]
     fn an_overclocked_board_is_raised_to_its_own_ceiling() {
         let mut firmware = MockFirmware::healthy();
-        firmware.arm_clock_max_hz = 2_000_000_000;
+        firmware.arm.max_hz = 2_000_000_000;
         assert_eq!(raise_over(&mut firmware), Some(2_000_000_000));
     }
 
@@ -236,10 +236,10 @@ mod tests {
         // Zero means "no such clock". Setting the clock to it would ask for a
         // stopped one, so nothing is asked at all.
         let mut firmware = MockFirmware::healthy();
-        firmware.arm_clock_max_hz = 0;
-        let before = firmware.arm_clock_hz;
+        firmware.arm.max_hz = 0;
+        let before = firmware.arm.hz;
         assert_eq!(raise_over(&mut firmware), None);
-        assert_eq!(firmware.arm_clock_hz, before, "the clock is left as it was");
+        assert_eq!(firmware.arm.hz, before, "the clock is left as it was");
     }
 
     #[test]

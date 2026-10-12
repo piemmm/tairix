@@ -13,7 +13,8 @@ use super::{
 };
 use tairix_fuzzseed::Prng;
 
-use crate::{DecodeError, DecodeLimits, InputError, PcmSource, SoundInput};
+use crate::input::Patchy;
+use crate::{DecodeError, DecodeLimits, PcmSource};
 
 const LIMITS: DecodeLimits = DecodeLimits::new(8, 4096, 64);
 
@@ -79,7 +80,7 @@ fn decode(file: &[u8], block: usize) -> (Vec<u8>, Result<(), DecodeError>) {
 #[test]
 fn the_chooser_round_trips_every_width_and_channel_count() {
     for bits in [4u8, 5, 8, 12, 16, 17, 20, 24, 31, 32] {
-        for channels in [1u8, 2, 3, 6, 8] {
+        for channels in [1u8, 2, 3, 6, 7, 8] {
             let samples = signal(
                 u32::from(bits) * 31 + u32::from(channels),
                 3000,
@@ -112,7 +113,10 @@ fn the_chooser_round_trips_every_width_and_channel_count() {
 }
 
 #[test]
-fn seven_channels_place_a_back_centre_the_vocabulary_lacks() {
+fn seven_channels_without_a_mask_are_six_one_with_its_back_centre() {
+    use tairix_abi::driver::audio::ChannelPosition::{
+        FrontCentre, FrontLeft, FrontRight, LowFrequency, RearCentre, SideLeft, SideRight,
+    };
     let params = Params {
         rate: 48_000,
         channels: 7,
@@ -121,9 +125,18 @@ fn seven_channels_place_a_back_centre_the_vocabulary_lacks() {
     let file = encode(params, &signal(7, 100, 7, 16), Options::default())
         .expect("encodes")
         .finish();
+    let source = PcmSource::open(&mut &file[..], &LIMITS).expect("opens");
     assert_eq!(
-        PcmSource::open(&mut &file[..], &LIMITS).map(|_| ()),
-        Err(DecodeError::ChannelLayoutUnsupported)
+        source.info().channels.positions(),
+        &[
+            FrontLeft,
+            FrontRight,
+            FrontCentre,
+            LowFrequency,
+            RearCentre,
+            SideLeft,
+            SideRight
+        ]
     );
 }
 
@@ -477,41 +490,6 @@ fn seeking_anywhere_lands_on_the_exact_sample() {
     }
 }
 
-/// An input holding a file's bytes a page at a time, which answers "not yet"
-/// for a page it has not been given and is given that page once asked.
-struct Patchy<'f> {
-    file: &'f [u8],
-    held: Vec<bool>,
-}
-
-const PAGE: usize = 512;
-
-impl SoundInput for Patchy<'_> {
-    fn len(&self) -> u64 {
-        self.file.len() as u64
-    }
-
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, InputError> {
-        let offset = usize::try_from(offset).map_err(|_| InputError::Failed)?;
-        let end = (offset + buf.len()).min(self.file.len());
-        if offset >= end {
-            return Ok(0);
-        }
-        let mut missing = false;
-        for page in offset / PAGE..=(end - 1) / PAGE {
-            if !self.held[page] {
-                self.held[page] = true;
-                missing = true;
-            }
-        }
-        if missing {
-            return Err(InputError::Unavailable);
-        }
-        buf[..end - offset].copy_from_slice(&self.file[offset..end]);
-        Ok(end - offset)
-    }
-}
-
 #[test]
 fn a_decode_through_an_input_answering_not_yet_writes_what_a_direct_one_does() {
     let params = Params {
@@ -523,10 +501,7 @@ fn a_decode_through_an_input_answering_not_yet_writes_what_a_direct_one_does() {
     let file = encode(params, &samples, Options::default())
         .expect("encodes")
         .finish();
-    let mut input = Patchy {
-        file: &file,
-        held: vec![false; file.len().div_ceil(PAGE)],
-    };
+    let mut input = Patchy::new(&file);
     let mut source = loop {
         match PcmSource::open(&mut input, &LIMITS) {
             Ok(source) => break source,

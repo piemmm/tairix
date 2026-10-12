@@ -145,7 +145,7 @@ pub enum MediaType {
     Archive7z,
     /// A RAR archive (`application/vnd.rar`).
     ArchiveRar,
-    /// An MPEG audio file — MP3 (`audio/mpeg`).
+    /// An MPEG audio file of any layer — MP3, MP2 or MP1 (`audio/mpeg`).
     AudioMpeg,
     /// A FLAC audio file (`audio/flac`).
     AudioFlac,
@@ -810,7 +810,7 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ArchiveZstd, &["zst"]),
     (MediaType::Archive7z, &["7z"]),
     (MediaType::ArchiveRar, &["rar"]),
-    (MediaType::AudioMpeg, &["mp3"]),
+    (MediaType::AudioMpeg, &["mp3", "mp2", "mp1", "mpa"]),
     (MediaType::AudioFlac, &["flac"]),
     (MediaType::AudioOgg, &["ogg", "oga"]),
     (MediaType::AudioOpus, &["opus"]),

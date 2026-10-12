@@ -29,7 +29,12 @@ impl<'b> BitReader<'b> {
 
     /// Bytes consumed, a partial one counting whole.
     pub(crate) const fn bytes_consumed(&self) -> usize {
-        (self.loaded * 8 - self.bits as usize).div_ceil(8)
+        self.bits_consumed().div_ceil(8)
+    }
+
+    /// Bits consumed.
+    pub(crate) const fn bits_consumed(&self) -> usize {
+        self.loaded * 8 - self.bits as usize
     }
 
     fn refill(&mut self) {
@@ -68,6 +73,34 @@ impl<'b> BitReader<'b> {
         let value = self.cache >> (64 - count);
         self.consume(count);
         Ok((value & 0xFFFF_FFFF) as u32)
+    }
+
+    /// The next `count` bits, `count` at most 32, without consuming them:
+    /// past the end they read as zero, so a code lookup may look further
+    /// ahead than the code it finds.
+    pub(crate) fn peek(&mut self, count: u32) -> u32 {
+        if count == 0 || count > 32 {
+            return 0;
+        }
+        if self.bits < count {
+            self.refill();
+        }
+        ((self.cache >> (64 - count)) & 0xFFFF_FFFF) as u32
+    }
+
+    /// Drop the next `count` bits.
+    pub(crate) fn skip(&mut self, count: u32) -> Result<(), Exhausted> {
+        if count > 32 {
+            return Err(Exhausted);
+        }
+        if self.bits < count {
+            self.refill();
+            if self.bits < count {
+                return Err(Exhausted);
+            }
+        }
+        self.consume(count);
+        Ok(())
     }
 
     /// The next `count` bits, `count` at most 32, as a two's-complement value.

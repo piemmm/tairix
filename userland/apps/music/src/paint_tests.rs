@@ -15,7 +15,7 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_sound::{Encoding, Metadata, SoundFormat, SoundInfo, Tag, TagKind};
 use tairix_theme::{TextRole, ThemeRegistry};
 
-use super::{paint, status_line, subtitle};
+use super::{paint, status_line};
 use crate::layout::Layout;
 use crate::view::{Player, Saved};
 
@@ -215,12 +215,55 @@ fn a_tracks_second_line_names_what_its_tags_name() {
         &layout,
         &mut damage::sink(),
     );
-    let row = player.playlist().get(added[0]).expect("a row");
-    assert_eq!(subtitle(row), "Holst \u{2014} The Planets");
-    let untagged = player.playlist().get(added[1]).expect("a row");
+    hear(&mut player, added[0], 0, &layout);
     assert_eq!(
-        subtitle(untagged),
-        "b.wav",
+        player.heard_names().map(|(_, line)| line).as_deref(),
+        Some("Holst \u{2014} The Planets")
+    );
+    hear(&mut player, added[1], 0, &layout);
+    assert_eq!(
+        player.heard_names(),
+        Some((String::from("b.wav"), String::from("b.wav"))),
         "the file's own name until it is read"
+    );
+}
+
+/// Make `entry`'s link `link` the one heard.
+fn hear(player: &mut Player, entry: tairix_player::EntryId, link: u32, layout: &Layout) {
+    let mut status = player.status().clone();
+    status.heard = Some((entry, info(60)));
+    status.link = link;
+    let _ = player.adopt(status, layout, &mut damage::sink());
+}
+
+/// A chained file's later link is named by its own tags while it is heard,
+/// and the entry's again once its first link is.
+#[test]
+fn a_later_link_is_named_by_its_own_tags_while_heard() {
+    let (layout, _registry) = setting();
+    let mut player = Player::new(Saved::default(), 1, DOUBLE_CLICK);
+    let (added, _) = player.add(
+        vec![String::from("radio.ogg")],
+        &layout,
+        &mut damage::sink(),
+    );
+    let first = tagged(&[(TagKind::Title, "First song"), (TagKind::Artist, "One")]);
+    player.probed(
+        added[0],
+        Some((info(60), &first)),
+        &layout,
+        &mut damage::sink(),
+    );
+    let second = tagged(&[(TagKind::Title, "Second song"), (TagKind::Artist, "Two")]);
+    player.link_read(added[0], 1, &second, &layout, &mut damage::sink());
+    hear(&mut player, added[0], 0, &layout);
+    assert_eq!(
+        player.heard_names(),
+        Some((String::from("First song"), String::from("One")))
+    );
+    hear(&mut player, added[0], 1, &layout);
+    assert_eq!(
+        player.heard_names(),
+        Some((String::from("Second song"), String::from("Two")))
     );
 }

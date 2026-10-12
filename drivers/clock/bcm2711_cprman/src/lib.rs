@@ -10,9 +10,10 @@
 //! PLL.
 //!
 //! [`cprman`] is the hardware: the generators, the PLL channels they divide,
-//! and the divisor a rate takes. [`controller`] is the endpoint: who holds each
-//! clock, and the rule that a clock two consumers share runs at the rate the
-//! first set. The `Run` binary wires both to the kernel.
+//! and the divisor a rate takes. [`clocks`] is what `clock-v1` serves of it;
+//! the endpoint — who holds each clock, and the rule that a clock two
+//! consumers share runs at the rate the first set — is `tairix_clock`. The
+//! `Run` binary wires them to the kernel.
 //!
 //! References: BCM2835 ARM Peripherals, section 6.3, for the generators the
 //! PCM and PWM clocks share with the general-purpose ones; Linux
@@ -22,9 +23,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-extern crate alloc;
-
-pub mod controller;
+pub mod clocks;
 pub mod cprman;
 
 #[cfg(test)]

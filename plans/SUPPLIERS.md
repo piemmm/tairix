@@ -10,10 +10,10 @@ whoever emitted the two nodes.
 
 | Id | Item | Status |
 |---|---|---|
-| SL1 | The link: a consumer node names a supplier node, a role and a selector; the supplier's node carries the role's duty to serve one endpoint, the consumer's a request naming that endpoint and the selector, and the supplier asks the kernel whether a caller holds the request it quotes; the DMA request line, the clock and the codec are its roles, and `BusChild` moves to it with the I2C target (`plans/I2C.md` I2) | in progress |
+| SL1 | The link: a consumer node names a supplier node, a role and a selector; the supplier's node carries the role's duty to serve one endpoint, the consumer's a request naming that endpoint and the selector, and the supplier asks the kernel whether a caller holds the request it quotes; the DMA request line, the clock, the codec, the interrupt line, I2C and the display encoder are its roles | done |
 | SL2 | Resolution and ordering: a supplier named by node id or by stable address (PCI segment:bus:device.function) resolves when it appears; the device manager holds a consumer until each supplier it names serves, links closing a cycle excepted, and unbinds it before one that goes; the node-id half is done, the stable address arrives with the ACPI bus driver (`plans/ACPI.md` A4) | in progress |
 | SL3 | Authority: an emitter links within its own subtree; only a platform describer — the architecture port, or the ACPI bus driver under `CAP_HW_DESCRIBE` — links across subtrees; the supplier's driver validates every selector it serves | planned |
-| SL4 | Device-tree discovery: `interrupt-parent` and `interrupts-extended` resolved to any interrupt controller — a GIC (or PLIC) line stays an `Irq`, any other controller's specifier becomes an interrupt-line link to it; I2C children become I2C-target links; the `status` property honoured (D168, done) | in progress |
+| SL4 | Device-tree discovery: `interrupt-parent` and `interrupts-extended` resolved to any interrupt controller — a GIC (or PLIC) line stays an `Irq`, any other controller's specifier becomes an interrupt-line link to it; the children of an `i2c` node become `I2c` target links, and a `ddc` phandle an `I2c` bus link to a bus with no target of its own; the `status` property honoured | done |
 | SL5 | Device facts: a node property carrying a closed key and a 64-bit value; the USB interface number is the first key, and the HID descriptor register (`hid-descr-addr`, or the ACPI `_DSM` that states it) lands with the driver that reads it (`plans/HID.md` H6) | in progress |
 
 ## The link (SL1)
@@ -27,7 +27,7 @@ whoever emitted the two nodes.
   believed only once the kernel confirms the in-service caller holds it
   (`call_peer_holds`, asked only by the holder of the endpoint's duty and only
   about the role's own requests). A record per consumer on the supplier's node
-  would not do: a node carries a fixed sixteen resources, a clock or GPIO
+  would not do: a node carries a fixed thirty-two resources, a clock or GPIO
   controller serves more consumers than that on a larger SoC, and a consumer a
   bus driver publishes later would have to amend a supplier node already
   published.
@@ -36,11 +36,16 @@ whoever emitted the two nodes.
   `Clock` (the consumer's `clocks` specifier, `clock-v1`), `Codec` (the DAI
   format, which side drives the bit and frame clocks and which runs inverted,
   `codec-v1`),
-  `I2cTarget` (7-bit address and the bus speed the target allows, served as
-  `plans/I2C.md` I1), `InterruptLine` (line, trigger and polarity, served as
-  `plans/GPIO.md` G1). A role arrives with its first supplier driver.
-- `BusChild` is the case where the supplier is the consumer's parent; it is
-  removed and its users (the I2C RTC drivers) move to `I2cTarget` links.
+  `I2c` (a target's 7-bit address, or none for a bus wired to one consumer;
+  the bus states its own speed; served as `i2c-v1`, `plans/I2C.md` I1),
+  `InterruptLine` (the controller's specifier: the line,
+  and the trigger where its binding names one, served as `irqline-v1`,
+  `plans/GPIO.md` G1),
+  `Encoder` (no selector: the link names the one encoder a display engine's
+  output feeds, served as `encoder-v1`, `plans/SOUND.md` SND19l). A role
+  arrives with its first supplier driver.
+- A target on an I²C bus links to the controller above it: the parent is the
+  supplier.
 
 ## Resolution and ordering (SL2)
 
@@ -89,7 +94,10 @@ whoever emitted the two nodes.
   root interrupt controller stays an `Irq` resource; one on any other node
   marked `interrupt-controller` becomes an `InterruptLine` link to that node,
   its cells the selector.
-- The children of an addressed bus become `I2cTarget` links to their parent.
+- The children of an addressed bus named `i2c` (the device-tree
+  specification's name for an I2C controller, which tells it from an SPI or
+  MDIO bus of the same cells) become `I2c` target links to their parent; a
+  `ddc` phandle becomes an `I2c` bus link to the controller it names.
 - A node whose `status` is neither absent nor `okay` is not emitted, and
   neither are its children (D168): a disabled controller binds no driver.
 

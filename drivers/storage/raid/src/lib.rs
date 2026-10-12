@@ -67,7 +67,7 @@ pub use service::{
     write_superblock, Assembled, MaintenanceResume, ServiceError,
 };
 
-use tairix_abi::{DriverBindKey, HwMatchKey, HW_VIRTUAL_BUS_COMPATIBLE};
+use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey, HW_VIRTUAL_BUS_COMPATIBLE};
 
 /// Bind priority of the array-composer key.
 ///
@@ -76,6 +76,17 @@ use tairix_abi::{DriverBindKey, HwMatchKey, HW_VIRTUAL_BUS_COMPATIBLE};
 /// rather than win a contest; it matches the storage policy drivers'
 /// priority so the resolution stays uniform across the class.
 const BIND_PRIORITY: u16 = 10;
+
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the members' data windows and each array's own, the reserved rendezvous and
+/// each array's endpoint, publishing each composed array, and its diagnostics.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::SHM,
+    CapabilityId::HW_EMIT,
+    CapabilityId::LOG_EMIT,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+];
 
 /// The bind table the signed bundle publishes: the one key naming the
 /// synthetic virtual bus the kernel's hardware-tree bootstrap publishes.

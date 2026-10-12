@@ -72,6 +72,7 @@ const POSITIONS: &[ChannelPosition] = &[
     ChannelPosition::RearRight,
     ChannelPosition::SideLeft,
     ChannelPosition::SideRight,
+    ChannelPosition::RearCentre,
 ];
 
 /// Rates spanning the vocabulary's whole range, including its two bounds and
@@ -210,9 +211,12 @@ fn exercise_mixer(noise: &mut [u8], rng: &mut Prng) {
     let Ok(matrix) = ChannelMatrix::derive(&map, &map) else {
         return;
     };
+    let valid_bits = usize::try_from(sink_format.valid_bits()).expect("small");
+    let resolution = 1 + u32::try_from(rng.below(valid_bits)).expect("small");
     let Ok(mut mixer) = Mixer::new(
         SinkFormat {
             format: sink_format,
+            resolution,
             rate: Rate::HZ_48000,
             channel_map: map,
         },
@@ -249,10 +253,44 @@ fn exercise_mixer(noise: &mut [u8], rng: &mut Prng) {
     ];
     let taken = 1 + rng.below(frames);
     if mixer.mix(streams.iter().copied(), taken, &mut out).is_ok() {
-        assert_deliverable(
-            sink_format,
-            &out[..taken * channels * sink_format.bytes_per_sample()],
-            "mix",
+        let delivered = &out[..taken * channels * sink_format.bytes_per_sample()];
+        assert_deliverable(sink_format, delivered, "mix");
+        assert_on_grid(sink_format, resolution, delivered);
+    }
+}
+
+/// Every sample `out` holds lies on the grid of `resolution` bits of
+/// `format`: the bits a device resolving no more are zero.
+fn assert_on_grid(format: SampleFormat, resolution: u32, out: &[u8]) {
+    let unsent = format.valid_bits() - resolution;
+    let values: Vec<i32> = match format {
+        SampleFormat::S16 => out
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i32::from(i16::from_le_bytes(*pair)))
+            .collect(),
+        SampleFormat::S24In32 | SampleFormat::S32 => out
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| i32::from_le_bytes(*word))
+            .collect(),
+        SampleFormat::S24 => out
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|bytes| i32::from_le_bytes([0, bytes[0], bytes[1], bytes[2]]) >> 8)
+            .collect(),
+        SampleFormat::U8 => out.iter().map(|&byte| i32::from(byte) - 128).collect(),
+        SampleFormat::F32 => return,
+    };
+    let mask = (1i64 << unsent) - 1;
+    for value in values {
+        assert_eq!(
+            i64::from(value) & mask,
+            0,
+            "{value:#x} off a {resolution}-bit grid"
         );
     }
 }
@@ -387,7 +425,7 @@ fn exercise_volume(rng: &mut Prng) {
     }
     // The noise source is driven too: a dithered block must stay finite.
     let mut block = vec![0.0f32; 16];
-    DitherSource::new(rng.next_u64()).apply(SampleFormat::S16, &mut block);
+    DitherSource::new(rng.next_u64()).apply(16, &mut block);
     for sample in &block {
         assert!(sample.is_finite(), "dither produced {sample}");
     }

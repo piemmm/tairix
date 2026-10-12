@@ -340,6 +340,12 @@ const NUM_HW_NODE_HEALTH: u64 = SyscallNumber::HW_NODE_HEALTH.as_u16() as u64;
 /// `hw_self_node` syscall number (as above).
 const NUM_HW_SELF_NODE: u64 = SyscallNumber::HW_SELF_NODE.as_u16() as u64;
 
+/// `hw_node_settle` syscall number (as above).
+const NUM_HW_NODE_SETTLE: u64 = SyscallNumber::HW_NODE_SETTLE.as_u16() as u64;
+
+/// `console_relocate` syscall number (as above).
+const NUM_CONSOLE_RELOCATE: u64 = SyscallNumber::CONSOLE_RELOCATE.as_u16() as u64;
+
 /// `shm_create` syscall number (as above).
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 
@@ -1105,28 +1111,79 @@ pub fn hw_node_health(health: tairix_abi::blkio::FaultDomainState) -> i64 {
     ret as i64
 }
 
-/// Report the hardware-tree node id the calling driver was autoloaded for
-/// (`SyscallNumber::HW_SELF_NODE`), returning the raw signed register: the
-/// caller's own node id (`≥ 0`) on success, else `-errno`.
+/// The calling driver's own node record (`SyscallNumber::HW_SELF_NODE`): the
+/// hardware-tree node it was autoloaded for and the keys that node is matched
+/// by.
 ///
-/// A leaf block driver uses this to locate itself in the discovered topology
-/// so it can read the published [`tairix_abi::blkio::FaultDomainState`] of its
-/// parent bus/hub/controller chain
-/// ([`tairix_abi::hwtree::ancestor_imposed_status`]) and attribute a
-/// controller-wide blip to the fault domain rather than to the disk. It needs
-/// no capability (learning one's *own* node id is the unprivileged
-/// self-identity baseline), and the kernel resolves the node from the caller's
-/// task id — never a caller-supplied id, so a driver only ever learns its own
-/// identity, never the global tree. A caller with no matched node (not an
-/// autoloaded driver) fails closed with `-errno` (`NotFound`).
+/// A leaf block driver locates itself in the topology with it, to read the
+/// fault-domain health its ancestors publish; a driver serving a binding
+/// family matches the keys against its own bind table to learn its variant.
+/// It needs no capability, and the kernel resolves the node from the caller,
+/// never from a caller-supplied id.
+///
+/// # Errors
+///
+/// `NotFound` for a caller that is not an autoloaded driver, `DeviceOffline`
+/// once its node has left the tree, or a refused record.
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding.
+pub fn hw_self_node() -> Result<tairix_abi::HwSelfNode, Errno> {
+    let mut buf = [0u8; tairix_abi::HwSelfNode::WIRE_LEN];
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing it,
+    // and `buf` is a live local array for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_HW_SELF_NODE, [ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
+    let written = usize::try_from(ret).map_err(|_| Errno::from_syscall(ret))?;
+    tairix_abi::HwSelfNode::from_bytes(buf.get(..written).ok_or(Errno::BadMagic)?)
+}
+
+/// Mark the calling driver's own node settled (`SyscallNumber::HW_NODE_SETTLE`),
+/// returning the raw signed register: `0` once recorded, else `-errno`.
+///
+/// A driver that publishes children calls this once, when everything its
+/// device presented as it came up has been published: a child published after
+/// it is one that arrived on a running machine, and the device manager knows
+/// the boot hardware has stopped appearing. Gated by
+/// [`tairix_abi::CapabilityId::HW_EMIT`]; the kernel settles the caller's own
+/// matched node only, and a caller with none fails closed.
 #[must_use]
-#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 id-or-`-errno` encoding.
-pub fn hw_self_node() -> i64 {
-    // SAFETY: `raw_syscall` is always safe to invoke; the kernel resolves the
-    // caller's own matched node on the far side of the trap. The call takes no
-    // arguments and no memory operand, so all six argument registers are zero.
-    let ret = unsafe { raw_syscall(NUM_HW_SELF_NODE, [0, 0, 0, 0, 0, 0]) };
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
+pub fn hw_node_settle() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_HW_EMIT` and resolves the caller's own matched node on the far side
+    // of the trap. The call takes no arguments and no memory operand.
+    let ret = unsafe { raw_syscall(NUM_HW_NODE_SETTLE, [0, 0, 0, 0, 0, 0]) };
     ret as i64
+}
+
+/// Move the kernel's framebuffer console off the firmware's memory onto
+/// memory the kernel owns and the caller's device reaches
+/// (`SyscallNumber::CONSOLE_RELOCATE`), answering that surface as one
+/// framebuffer [`tairix_abi::HwResource`].
+///
+/// A display engine calls it before it tells the firmware the display is the
+/// ARM's, so nothing writes or scans out the firmware's memory once the
+/// firmware may take it back. Gated by [`tairix_abi::CapabilityId::MEM_DMA`];
+/// the kernel answers only the driver of a node discovery marked
+/// [`tairix_abi::HwProperty::BootConsole`], and a second call answers the same
+/// surface.
+///
+/// # Errors
+///
+/// `PermissionDenied` for any other caller, `NotFound` with no console to
+/// move, `OutOfMemory` or `OutOfRange` with no memory below the node's reach,
+/// or a refused record.
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding.
+pub fn console_relocate() -> Result<tairix_abi::HwResource, Errno> {
+    let mut buf = [0u8; tairix_abi::HwResource::WIRE_LEN];
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(ptr, len)` pair against the caller's address space before writing it,
+    // and `buf` is a live local array for the duration of the call.
+    let ret =
+        unsafe { raw_syscall(NUM_CONSOLE_RELOCATE, [ptr, buf.len() as u64, 0, 0, 0, 0]) } as i64;
+    let written = usize::try_from(ret).map_err(|_| Errno::from_syscall(ret))?;
+    tairix_abi::HwResource::from_bytes(buf.get(..written).ok_or(Errno::BadMagic)?)
 }
 
 /// Yield the calling task's CPU back to the scheduler (`SyscallNumber::YIELD`).
@@ -3429,8 +3486,8 @@ pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize
 /// of [`ipc_call`]).
 ///
 /// `deadline_ns` is the relative timeout after which [`call_reap`] reports a
-/// timeout (`u64::MAX` = no deadline). The caller multiplexes many outstanding
-/// requests on a wait-set ([`waitset_ctl`] with
+/// timeout, or [`tairix_abi::CALL_DEADLINE_NONE`]. The caller multiplexes many
+/// outstanding requests on a wait-set ([`waitset_ctl`] with
 /// [`tairix_abi::WaitSourceKind::CallReply`]) and reaps each with
 /// [`call_reap`], so one wedged device never parks the caller (the head-of-line
 /// freedom a single blocking [`ipc_call`] cannot give).
@@ -3439,8 +3496,9 @@ pub fn ipc_call(endpoint: u64, request: &[u8], reply: &mut [u8]) -> Result<usize
 ///
 /// The raw negative kernel result (`-errno`): a missing send capability
 /// (`PermissionDenied`), an unknown or destroyed endpoint (`NotFound`), an
-/// oversize request (`MessageTooLarge`), an over-capacity endpoint
-/// (`LengthOutOfRange`), or a faulting pointer (`BadAddress`).
+/// oversize request (`MessageTooLarge`), an endpoint already holding as many
+/// calls as it takes (`WouldBlock`, which may be retried), or a faulting
+/// pointer (`BadAddress`).
 pub fn call_post(endpoint: u64, request: &[u8], deadline_ns: u64) -> Result<u64, i64> {
     let req_ptr = request.as_ptr() as usize as u64;
     let mut ticket: u64 = 0;

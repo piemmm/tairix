@@ -465,13 +465,15 @@ fn without_a_hierarchy_every_unit_comes_up_keeping_no_window() {
 fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
     let unit = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
     let mut structures = unit;
-    for device in 0..20u8 {
-        let base = 0x1000_0000 + u64::from(device) * 0x10_0000;
+    // More reserved windows than the node has room for, whatever its room.
+    let windows = tairix_abi::HW_NODE_MAX_RESOURCES + 4;
+    for function in 0..u8::try_from(windows).unwrap() {
+        let base = 0x1000_0000 + u64::from(function) * 0x10_0000;
         structures.extend(rmrr(
             0,
             base,
             base + 0xF_FFFF,
-            &scope(1, 0, 0, &[(device, 0)]),
+            &scope(1, 0, 0, &[(function / 8, function % 8)]),
         ));
     }
     let bytes = table(46, 0, &structures);
@@ -490,7 +492,10 @@ fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
         tairix_abi::HW_NODE_MAX_RESOURCES
     );
     // The registers and the unit's own DMA take two of the node's places.
-    assert_eq!(placed.dropped, 20 - (tairix_abi::HW_NODE_MAX_RESOURCES - 2));
+    assert_eq!(
+        placed.dropped,
+        windows - (tairix_abi::HW_NODE_MAX_RESOURCES - 2)
+    );
 }
 
 #[test]

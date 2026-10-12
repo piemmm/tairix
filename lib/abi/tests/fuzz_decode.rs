@@ -33,7 +33,7 @@ use tairix_abi::appdata_ipc::{
 };
 use tairix_abi::desktop::{ScreensaverKind, CURSOR_SET_NAME_MAX};
 use tairix_abi::display_ipc::{
-    decode_mode_reply, decode_stats_reply, DisplayRequest, DisplayStats,
+    decode_mode_reply, decode_stats_reply, encode_mode_reply, DisplayRequest, DisplayStats,
 };
 use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat};
 use tairix_abi::driver::net_channel::{
@@ -58,7 +58,11 @@ use tairix_abi::net::{
 };
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
-use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest};
+use tairix_abi::pinboard_ipc::{
+    decode_sound_reading, decode_sound_themes, encode_sound_reading, encode_sound_themes,
+    PinboardDocument, PinboardRequest, SoundFile, SoundReading, PINBOARD_MAX_REPLY,
+    PINBOARD_MAX_REQUEST,
+};
 use tairix_abi::power::PowerAction;
 use tairix_abi::process::{
     FdWire, ProcessStart, ProcessStartHeader, SpawnAttach, SpawnSession, StringSlot,
@@ -76,6 +80,10 @@ use tairix_abi::service_control::{
 use tairix_abi::session_ipc::{
     decode_account_page, encode_account_page, SessionRequest, SessionVerdict, SESSION_MAX_REPLY,
     SESSION_MAX_REQUEST, SESSION_VERDICT_LEN,
+};
+use tairix_abi::sound_cue::{
+    decode_cue_reply, encode_cue_reply, names_policy, Answer, CueOutcome, CueRequest, Silence,
+    SoundEvent, CUE_REQUEST_MAX,
 };
 use tairix_abi::switchboard_ipc::{
     decode_publish_reply, CommandSection, DeviceCapacity, FrameReport, MachineCommitted,
@@ -647,15 +655,22 @@ fn exercise_seatmgr(bytes: &[u8]) {
 
 /// Drive the display-service protocol decoders on `bytes` (one arm of
 /// [`exercise`]): an accepted display request must round-trip through its
-/// encoder, and the mode-reply decoder — untrusted service output a client
-/// parses — must refuse a corrupt frame cleanly, never panic.
+/// encoder, and the output-reply decoder — untrusted service output a client
+/// parses — must refuse a corrupt frame cleanly, never panic, and re-encode an
+/// accepted one, an output or none, to an answer that decodes the same.
 fn exercise_display_ipc(bytes: &[u8]) {
     if let Ok(request) = DisplayRequest::from_bytes(bytes) {
         let redecoded = DisplayRequest::from_bytes(&request.to_le_bytes())
             .expect("round-trip of an accepted request must succeed");
         assert_eq!(request, redecoded);
     }
-    let _ = decode_mode_reply(bytes);
+    if let Ok(output) = decode_mode_reply(bytes) {
+        assert_eq!(
+            decode_mode_reply(&encode_mode_reply(Ok(output))),
+            Ok(output),
+            "round-trip of an accepted output reply must succeed"
+        );
+    }
     let _ = decode_stats_reply(bytes);
     // The statistics record is also a packed `GPU_DEVICE_STATS` record a
     // monitor decodes straight out of a paged reply, so it is driven as a
@@ -816,14 +831,55 @@ fn exercise_notify_ipc(bytes: &[u8]) {
     }
 }
 
-/// Drive the pinboard-apply decoder on `bytes` (one arm of [`exercise`]):
-/// an accepted apply request must round-trip through its encoder; a
-/// corrupt frame must refuse cleanly, never panic.
+/// Drive both directions of the cue protocol on `bytes` (one arm of
+/// [`exercise`]): an accepted request or answer must round-trip through its
+/// encoder; a corrupt frame must refuse cleanly, never panic.
+fn exercise_sound_cue(bytes: &[u8]) {
+    if let Ok(request) = CueRequest::from_bytes(bytes) {
+        let mut frame = [0u8; CUE_REQUEST_MAX];
+        let len = request
+            .encode(&mut frame)
+            .expect("an accepted cue request re-encodes");
+        assert_eq!(&frame[..len], bytes, "a request has one spelling");
+        assert_eq!(
+            names_policy(bytes),
+            matches!(request, CueRequest::Policy { .. }),
+            "a request names the operation it decodes as"
+        );
+    }
+    let answer = decode_cue_reply(bytes);
+    assert_eq!(decode_cue_reply(&encode_cue_reply(answer)), answer);
+}
+
+/// Drive the pinboard channel's decoders on `bytes` (one arm of
+/// [`exercise`]): an accepted request, sound reading or theme page must
+/// re-encode to exactly the bytes accepted; a corrupt frame must refuse
+/// cleanly, never panic.
 fn exercise_pinboard_ipc(bytes: &[u8]) {
     if let Ok(request) = PinboardRequest::from_bytes(bytes) {
-        let redecoded = PinboardRequest::from_bytes(&request.to_le_bytes())
-            .expect("round-trip of an accepted pinboard request must succeed");
-        assert_eq!(request, redecoded);
+        let mut frame = [0u8; PINBOARD_MAX_REQUEST];
+        let len = request
+            .encode(&mut frame)
+            .expect("an accepted pinboard request re-encodes");
+        assert_eq!(&frame[..len], bytes, "a request has one spelling");
+    }
+    let mut frame = [0u8; PINBOARD_MAX_REPLY];
+    match decode_sound_reading(bytes) {
+        Ok(reading) => {
+            let len = encode_sound_reading(Ok(&reading), &mut frame)
+                .expect("an accepted reading re-encodes");
+            assert_eq!(&frame[..len], bytes, "a reading has one spelling");
+        }
+        Err(err) => {
+            let len = encode_sound_reading(Err(err), &mut frame).expect("a refusal encodes");
+            assert_eq!(decode_sound_reading(&frame[..len]), Err(err));
+        }
+    }
+    if let Ok(page) = decode_sound_themes(bytes) {
+        let names: Vec<&str> = page.names().collect();
+        assert_eq!(names.len(), page.len(), "every record was validated");
+        let len = encode_sound_themes(&names, &mut frame).expect("an accepted page re-encodes");
+        assert_eq!(&frame[..len], bytes, "a page has one spelling");
     }
 }
 
@@ -1045,6 +1101,7 @@ fn exercise(bytes: &[u8]) {
     exercise_window_ipc(bytes);
     exercise_notify_ipc(bytes);
     exercise_pinboard_ipc(bytes);
+    exercise_sound_cue(bytes);
     exercise_appdata_ipc(bytes);
     exercise_switchboard_ipc(bytes);
     exercise_net_socket(bytes);
@@ -2304,6 +2361,54 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
     }
 }
 
+/// Every cue request and answer, seeded and bit-flipped: a flip lands on the
+/// event, when it is answered, a reserved byte, the outcome or its silence as
+/// readily as on the header, and each must fail closed or round-trip.
+#[test]
+fn structured_cue_inputs_with_corrupted_fields_never_panic() {
+    let encoded = |request: CueRequest<'_>| {
+        let mut frame = [0u8; CUE_REQUEST_MAX];
+        let len = request.encode(&mut frame).expect("encodes");
+        frame[..len].to_vec()
+    };
+    let mut files = [0u64; SoundEvent::ALL.len()];
+    files[SoundEvent::Error.index()] = 3;
+    let requests = SoundEvent::ALL
+        .into_iter()
+        .flat_map(|event| {
+            [Answer::Started, Answer::PlayedOut]
+                .map(|answer| encoded(CueRequest::Cue { event, answer }))
+        })
+        .chain([encoded(CueRequest::Policy {
+            document: "sound.enabled = false\nsound.bell.gain = 0.5\n",
+            files,
+        })]);
+    for mut base in requests {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+    let answers = [
+        Ok(CueOutcome::Played),
+        Ok(CueOutcome::Silent(Silence::NoDevice)),
+        Err(tairix_abi::Errno::SeatNotOwner),
+    ]
+    .map(encode_cue_reply);
+    for mut base in answers {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
+        }
+    }
+}
+
 /// Every menu-open outcome, seeded and bit-flipped.
 ///
 /// The three answers share one event frame, so a flip lands as readily on the
@@ -2368,18 +2473,50 @@ fn structured_pinboard_inputs_with_corrupted_fields_never_panic() {
     // from a well-formed frame: a bit-flip of any byte — magic, version,
     // op, the reserved pair, the length prefix, or a document byte —
     // must fail closed, never panic.
-    let mut base = PinboardRequest::Apply {
-        document: PinboardDocument::new(
-            "wallpaper none\nfit fill\nbackdrop theme\nicons leading\nsort name\n",
-        )
-        .expect("a valid document"),
-    }
-    .to_le_bytes();
-    for byte in 0..base.len() {
-        for bit in 0..8u32 {
-            base[byte] ^= 1 << bit;
-            exercise(&base);
-            base[byte] ^= 1 << bit;
+    let encoded = |request: PinboardRequest| {
+        let mut frame = [0u8; PINBOARD_MAX_REQUEST];
+        let len = request.encode(&mut frame).expect("encodes");
+        frame[..len].to_vec()
+    };
+    let document = PinboardDocument::new(
+        "wallpaper none\nfit fill\nbackdrop theme\nicons leading\nsort name\n",
+    )
+    .expect("a valid document");
+    let mut files = [SoundFile::Theme; SoundEvent::ALL.len()];
+    files[SoundEvent::Bell.index()] = SoundFile::Chosen("ding.flac");
+    files[SoundEvent::Info.index()] = SoundFile::Unavailable("gone.wav");
+    let mut reading = [0u8; PINBOARD_MAX_REPLY];
+    let reading_len = encode_sound_reading(
+        Ok(&SoundReading {
+            document: "sound.enabled = true\n",
+            files,
+        }),
+        &mut reading,
+    )
+    .expect("encodes");
+    let mut themes = [0u8; PINBOARD_MAX_REPLY];
+    let themes_len = encode_sound_themes(&["TAIRiX", "Glass"], &mut themes).expect("encodes");
+    let frames = [
+        encoded(PinboardRequest::Apply { document }),
+        encoded(PinboardRequest::SoundRead),
+        encoded(PinboardRequest::SoundThemes { from: 8 }),
+        encoded(PinboardRequest::SoundApply { document }),
+        encoded(PinboardRequest::SoundPick {
+            event: SoundEvent::Error,
+        }),
+        encoded(PinboardRequest::SoundUseTheme {
+            event: SoundEvent::Bell,
+        }),
+        reading[..reading_len].to_vec(),
+        themes[..themes_len].to_vec(),
+    ];
+    for mut base in frames {
+        for byte in 0..base.len() {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base);
+                base[byte] ^= 1 << bit;
+            }
         }
     }
 }

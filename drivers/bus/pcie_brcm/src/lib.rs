@@ -76,6 +76,15 @@ const LINK_POLL_INTERVAL_US: u32 = 5_000;
 /// `compatible`-string match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the register window, the MSI vector the xHCI driver's completion interrupt
+/// rides, and publishing the USB host function it enumerates.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::MMIO_MAP,
+    CapabilityId::IRQ_BIND,
+    CapabilityId::HW_EMIT,
+];
+
 /// This driver's hardware bind table: the BCM2711 PCIe
 /// root complex, matched by its device-tree `compatible` string
 /// `brcm,bcm2711-pcie`. The single source of truth the signed-manifest

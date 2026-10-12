@@ -6,7 +6,7 @@ use tairix_abi::driver::codec::{
 };
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{Errno, ProcId};
-use tairix_drvrt::SupplierHost;
+use tairix_drvrt::{Recorder, Supplier, SupplierHost};
 
 /// A decision the server records.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -32,12 +32,6 @@ pub enum Record {
     },
 }
 
-/// Where the server's decisions go.
-pub trait Recorder {
-    /// Record a decision.
-    fn record(&mut self, record: Record);
-}
-
 enum Answer {
     Facts,
     Done,
@@ -45,7 +39,7 @@ enum Answer {
 }
 
 /// One codec's endpoint.
-pub struct CodecServer<C: Codec, S: SupplierHost, L: Recorder> {
+pub struct CodecServer<C: Codec, S: SupplierHost, L: Recorder<Record>> {
     codec: C,
     supplier: S,
     log: L,
@@ -53,7 +47,7 @@ pub struct CodecServer<C: Codec, S: SupplierHost, L: Recorder> {
     holder: Option<ProcId>,
 }
 
-impl<C: Codec, S: SupplierHost, L: Recorder> CodecServer<C, S, L> {
+impl<C: Codec, S: SupplierHost, L: Recorder<Record>> CodecServer<C, S, L> {
     /// The endpoint `endpoint` over `codec`, asking about its callers
     /// through `supplier` and recording to `log`.
     pub const fn new(codec: C, supplier: S, log: L, endpoint: u64) -> Self {
@@ -64,34 +58,6 @@ impl<C: Codec, S: SupplierHost, L: Recorder> CodecServer<C, S, L> {
             endpoint,
             holder: None,
         }
-    }
-
-    /// Serve the call `ticket` carrying `frame`, answering it.
-    pub fn serve(&mut self, ticket: u64, frame: &[u8]) {
-        let caller = match self.supplier.caller(ticket) {
-            Ok(caller) => caller,
-            Err(reason) => return self.refuse(ticket, None, None, reason),
-        };
-        let request = match CodecRequest::decode(frame) {
-            Ok(request) => request,
-            Err(reason) => return self.refuse(ticket, None, Some(caller), reason),
-        };
-        match self.answer(ticket, caller, &request) {
-            Ok(answer) => self.send(ticket, &answer),
-            Err(reason) => self.refuse(ticket, Some(request.op()), Some(caller), reason),
-        }
-    }
-
-    /// Release the codec if `peer`, which has ended, held it.
-    pub fn peer_exited(&mut self, peer: ProcId) {
-        if self.holder != Some(peer) {
-            return;
-        }
-        self.holder = None;
-        // Nothing can drive the codec now; a refusal leaves it as it is.
-        let _ = self.codec.stop();
-        self.log.record(Record::Abandoned { holder: peer });
-        self.supplier.unwatch(peer);
     }
 
     fn answer(
@@ -176,5 +142,34 @@ impl<C: Codec, S: SupplierHost, L: Recorder> CodecServer<C, S, L> {
         if let Ok(len) = encode_error_reply(&mut out, reason) {
             let _ = self.supplier.reply(ticket, &out[..len]);
         }
+    }
+}
+
+impl<C: Codec, S: SupplierHost, L: Recorder<Record>> Supplier for CodecServer<C, S, L> {
+    fn serve(&mut self, ticket: u64, frame: &[u8]) {
+        let caller = match self.supplier.caller(ticket) {
+            Ok(caller) => caller,
+            Err(reason) => return self.refuse(ticket, None, None, reason),
+        };
+        let request = match CodecRequest::decode(frame) {
+            Ok(request) => request,
+            Err(reason) => return self.refuse(ticket, None, Some(caller), reason),
+        };
+        match self.answer(ticket, caller, &request) {
+            Ok(answer) => self.send(ticket, &answer),
+            Err(reason) => self.refuse(ticket, Some(request.op()), Some(caller), reason),
+        }
+    }
+
+    /// Release the codec if `peer` held it.
+    fn peer_exited(&mut self, peer: ProcId) {
+        if self.holder != Some(peer) {
+            return;
+        }
+        self.holder = None;
+        // Nothing can drive the codec now; a refusal leaves it as it is.
+        let _ = self.codec.stop();
+        self.log.record(Record::Abandoned { holder: peer });
+        self.supplier.unwatch(peer);
     }
 }

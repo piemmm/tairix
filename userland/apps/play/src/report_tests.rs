@@ -4,7 +4,7 @@ use tairix_abi::driver::audio::{ChannelMap, Rate, SampleFormat};
 use tairix_sandbox::audiodecode::AudioRefusal;
 use tairix_sound::{Encoding, SoundFormat, SoundInfo};
 
-use super::{describe, left_out, opened, summary};
+use super::{describe, left_out, naming, opened, summary};
 use tairix_abi::audio::AudioGain;
 use tairix_player::{Outcome, Skip, Status};
 
@@ -36,18 +36,28 @@ fn a_stream_is_described_in_one_line() {
 
 #[test]
 fn the_schema_record_names_what_is_playing() {
-    let line = text(&opened("a.wav", &info(Some(144_000))));
+    let line = text(&opened("a.wav", 0, &info(Some(144_000))));
     assert!(line.ends_with('\n'));
     assert!(line.contains("\"kind\":\"schema\""), "{line}");
     assert!(line.contains("\"code\":\"audio.playing\""), "{line}");
     assert!(
         line.contains(
-            "\"ai\":{\"subject\":\"playback\",\"file\":\"a.wav\",\"format\":\"wav\",\
+            "\"ai\":{\"subject\":\"playback\",\"file\":\"a.wav\",\"link\":0,\"format\":\"wav\",\
              \"encoding\":\"pcm\",\"bits\":16,\"rate_hz\":48000,\"channels\":2,\"frames\":144000}"
         ),
         "{line}"
     );
-    assert!(text(&opened("b.wav", &info(None))).contains("\"frames\":null}"));
+    assert!(text(&opened("b.wav", 0, &info(None))).contains("\"frames\":null}"));
+}
+
+/// A chained file's later link is named by its place, counted from one for
+/// people and from zero for tools.
+#[test]
+fn a_later_link_of_a_chain_is_named_by_its_place() {
+    let line = text(&opened("radio.ogg", 2, &info(None)));
+    assert!(line.contains("Playing radio.ogg (link 3): "), "{line}");
+    assert!(line.contains("\"link\":2,"), "{line}");
+    assert_eq!(naming("radio.ogg", 0), "radio.ogg");
 }
 
 /// A file name is the user's text and may hold anything a name may.

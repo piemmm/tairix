@@ -73,6 +73,15 @@ pub const PCF85063A_COMPATIBLE: &[u8] = b"nxp,pcf85063a";
 /// match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the I²C controller its node's link names, the buffer of the channel opened
+/// over it, and the restricted-sender RTC endpoint. It owns no registers.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::SHM,
+];
+
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
@@ -128,7 +137,7 @@ impl<P: I2cPort> Pcf85063a<P> {
     ///
     /// [`DriverError::DeviceFault`] and its siblings, from the transfer.
     pub fn open(port: P) -> Result<Self, DriverError> {
-        let chip = Self {
+        let mut chip = Self {
             device: Device::new(port),
         };
         chip.device.update_one(REG_CONTROL_1, |control| {
@@ -138,7 +147,7 @@ impl<P: I2cPort> Pcf85063a<P> {
     }
 
     /// Whether the chip reports its clock integrity lost.
-    fn integrity_lost(&self) -> Result<bool, DriverError> {
+    fn integrity_lost(&mut self) -> Result<bool, DriverError> {
         Ok(self.device.read_one(REG_SECONDS)? & SECONDS_INTEGRITY_LOST != 0)
     }
 

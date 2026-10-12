@@ -13,12 +13,43 @@
 //! ships in a production image.
 
 use crate::{
-    FirmwareClock, MailboxError, MailboxTransport, RtcRegister, BLANK_STATE_BIT, CODE_RESPONSE_OK,
-    FIRMWARE_GPIO_BASE, PROPERTY_WORDS, SKIP_SETTING_TURBO, TAG_ALLOCATE, TAG_BLANK_SCREEN,
-    TAG_GET_CLOCK_RATE, TAG_GET_FIRMWARE_REVISION, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE,
-    TAG_GET_PHYSICAL_WH, TAG_GET_PITCH, TAG_GET_RTC_REG, TAG_RESPONSE_BIT, TAG_SET_CLOCK_RATE,
+    FirmwareClock, MailboxError, MailboxTransport, RtcRegister, CODE_RESPONSE_OK,
+    FIRMWARE_GPIO_BASE, PROPERTY_WORDS, SKIP_SETTING_TURBO, TAG_ALLOCATE, TAG_GET_CLOCK_RATE,
+    TAG_GET_FIRMWARE_REVISION, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE, TAG_GET_PHYSICAL_WH,
+    TAG_GET_PITCH, TAG_GET_RTC_REG, TAG_NOTIFY_DISPLAY_DONE, TAG_RESPONSE_BIT, TAG_SET_CLOCK_RATE,
     TAG_SET_GPIO_STATE, TAG_SET_RTC_REG,
 };
+
+/// One clock the mock firmware runs.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct MockClock {
+    /// The rate in Hz it runs at; zero while it is not running. Writable
+    /// through the set-clock-rate tag, so a set-then-read round trip is
+    /// faithful.
+    pub hz: u32,
+    /// The lowest rate it accepts; a request is clamped to the range.
+    pub min_hz: u32,
+    /// The highest rate it accepts.
+    pub max_hz: u32,
+    /// The granularity a request is rounded down to, as a firmware
+    /// synthesising from a PLL does, so a consumer cannot assume it gets back
+    /// exactly what it asked for.
+    pub grain_hz: u32,
+}
+
+impl MockClock {
+    /// A clock running at `hz`, accepting `min_hz..=max_hz` in steps of
+    /// `grain_hz`.
+    #[must_use]
+    pub const fn new(hz: u32, min_hz: u32, max_hz: u32, grain_hz: u32) -> Self {
+        Self {
+            hz,
+            min_hz,
+            max_hz,
+            grain_hz,
+        }
+    }
+}
 
 /// A mock firmware answering property messages with configured values.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -42,24 +73,19 @@ pub struct MockFirmware {
     /// Millivolts the RTC's backup-cell voltage register answers with;
     /// zero models a board with no cell fitted.
     pub rtc_backup_mv: u32,
-    /// Rate in Hz the ARM clock is running at. Writable through the
-    /// set-clock-rate tag — clamped to the range below and rounded down to
-    /// `arm_clock_grain_hz`, as a firmware synthesising from a PLL does — so
-    /// a consumer's set-then-read round trip is faithful.
-    pub arm_clock_hz: u32,
-    /// Lowest ARM-clock rate the modelled firmware accepts.
-    pub arm_clock_min_hz: u32,
-    /// Highest ARM-clock rate the modelled firmware accepts.
-    pub arm_clock_max_hz: u32,
-    /// Granularity the modelled firmware rounds a requested rate down to,
-    /// so a consumer cannot assume it gets back exactly what it asked for.
-    pub arm_clock_grain_hz: u32,
-    /// Whether the display output is blanked. Writable through the
-    /// blank-screen tag, which answers with the state it leaves.
-    pub blanked: bool,
-    /// Rate in Hz the EMMC2 base clock runs at; zero models a firmware that
-    /// does not know the clock.
-    pub emmc2_clock_hz: u32,
+    /// The ARM core clock.
+    pub arm: MockClock,
+    /// The core clock the display engine runs from.
+    pub core: MockClock,
+    /// The HDMI blocks' state-machine clock.
+    pub m2mc: MockClock,
+    /// The HDMI blocks' pixel-path clock.
+    pub pixel_bvb: MockClock,
+    /// The EMMC2 base clock, whose rate alone the firmware is asked.
+    pub emmc2: MockClock,
+    /// Whether the firmware was told the display engine's driver drives the
+    /// display now.
+    pub display_done: bool,
     /// How many expander lines the modelled firmware drives; a set-GPIO
     /// request for a line past them is answered with a non-zero status.
     pub gpio_lines: u8,
@@ -79,8 +105,10 @@ impl MockFirmware {
     /// A healthy firmware: a 640×480×32bpp surface at `0x1000_0000`
     /// physical under the `0xC000_0000` L2-cached alias (pitch 2560),
     /// with a 1920×1080 display attached, an RTC holding
-    /// 2026-01-01T00:00:00Z on a fitted backup cell, the EMMC2 base clock at
-    /// 100 MHz, and eight expander lines, all low.
+    /// 2026-01-01T00:00:00Z on a fitted backup cell, the ARM clock at its
+    /// floor, the core clock at its boot rate, the HDMI state-machine clock
+    /// unset (as a board booted with no monitor leaves it), the EMMC2 base
+    /// clock at 100 MHz, and eight expander lines, all low.
     #[must_use]
     pub const fn healthy() -> Self {
         Self {
@@ -92,12 +120,12 @@ impl MockFirmware {
             firmware_revision: 0x0123_4567,
             rtc_secs: 1_767_225_600,
             rtc_backup_mv: 3000,
-            arm_clock_hz: 600_000_000,
-            arm_clock_min_hz: 600_000_000,
-            arm_clock_max_hz: 1_500_000_000,
-            arm_clock_grain_hz: 2_000_000,
-            blanked: false,
-            emmc2_clock_hz: 100_000_000,
+            arm: MockClock::new(600_000_000, 600_000_000, 1_500_000_000, 2_000_000),
+            core: MockClock::new(500_000_000, 250_000_000, 550_000_000, 1_000_000),
+            m2mc: MockClock::new(0, 25_000_000, 600_000_000, 1_000_000),
+            pixel_bvb: MockClock::new(75_000_000, 75_000_000, 300_000_000, 75_000_000),
+            emmc2: MockClock::new(100_000_000, 0, 0, 1),
+            display_done: false,
             gpio_lines: 8,
             gpio_levels: 0,
             gpio_answer_code: TAG_RESPONSE_BIT | 8,
@@ -142,10 +170,9 @@ impl MockFirmware {
                     message[at + 3] = self.firmware_revision;
                     4
                 }
-                TAG_BLANK_SCREEN => {
-                    self.blanked = message[at + 3] & BLANK_STATE_BIT != 0;
-                    message[at + 3] = u32::from(self.blanked);
-                    4
+                TAG_NOTIFY_DISPLAY_DONE => {
+                    self.display_done = true;
+                    0
                 }
                 // The RTC register tags echo the selector and carry the
                 // value in the second word; an unmodelled selector is
@@ -231,25 +258,32 @@ impl MockFirmware {
         0
     }
 
-    /// The modelled rate `tag` reports for clock `selector`.
-    fn clock_rate(&self, tag: u32, selector: u32) -> u32 {
-        if selector == FirmwareClock::Emmc2.as_u32() {
-            return self.emmc2_clock_hz;
-        }
-        if selector != FirmwareClock::Arm.as_u32() {
-            return 0;
-        }
-        match tag {
-            TAG_GET_MIN_CLOCK_RATE => self.arm_clock_min_hz,
-            TAG_GET_MAX_CLOCK_RATE => self.arm_clock_max_hz,
-            _ => self.arm_clock_hz,
-        }
+    /// The modelled clock `selector` names, if any.
+    fn clock(&mut self, selector: u32) -> Option<&mut MockClock> {
+        [
+            (FirmwareClock::Arm, &mut self.arm),
+            (FirmwareClock::Core, &mut self.core),
+            (FirmwareClock::M2mc, &mut self.m2mc),
+            (FirmwareClock::PixelBvb, &mut self.pixel_bvb),
+            (FirmwareClock::Emmc2, &mut self.emmc2),
+        ]
+        .into_iter()
+        .find_map(|(clock, modelled)| (clock.as_u32() == selector).then_some(modelled))
+    }
+
+    /// The modelled rate `tag` reports for clock `selector`; zero, how the
+    /// firmware spells "no such clock", for one it does not model.
+    fn clock_rate(&mut self, tag: u32, selector: u32) -> u32 {
+        self.clock(selector).map_or(0, |clock| match tag {
+            TAG_GET_MIN_CLOCK_RATE => clock.min_hz,
+            TAG_GET_MAX_CLOCK_RATE => clock.max_hz,
+            _ => clock.hz,
+        })
     }
 
     /// Apply `rate_hz` to clock `selector`, returning the rate the modelled
-    /// firmware actually adopted: clamped to its range and rounded down to
-    /// `arm_clock_grain_hz`. An unmodelled clock adopts nothing and answers
-    /// zero.
+    /// firmware actually adopted: clamped to its range and rounded down to its
+    /// grain. An unmodelled clock adopts nothing and answers zero.
     ///
     /// `skip_turbo` carries the request's third word. Without it the firmware
     /// performs the turbo transition the word exists to inhibit, which takes
@@ -258,18 +292,14 @@ impl MockFirmware {
     /// lets a caller that under-declares the request fail here rather than
     /// only on real silicon.
     fn set_clock_rate(&mut self, selector: u32, rate_hz: u32, skip_turbo: bool) -> u32 {
-        if selector != FirmwareClock::Arm.as_u32() {
+        let Some(clock) = self.clock(selector) else {
             return 0;
-        }
-        let wanted = if skip_turbo {
-            rate_hz
-        } else {
-            self.arm_clock_max_hz
         };
-        let clamped = wanted.clamp(self.arm_clock_min_hz, self.arm_clock_max_hz);
-        let grain = self.arm_clock_grain_hz.max(1);
-        self.arm_clock_hz = (clamped / grain) * grain;
-        self.arm_clock_hz
+        let wanted = if skip_turbo { rate_hz } else { clock.max_hz };
+        let clamped = wanted.clamp(clock.min_hz, clock.max_hz);
+        let grain = clock.grain_hz.max(1);
+        clock.hz = (clamped / grain) * grain;
+        clock.hz
     }
 }
 

@@ -401,14 +401,6 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
                 }
             }
         }
-        Some(HwResourceKind::BusChild) => match resource.bus_child_pair() {
-            Some((endpoint, address)) => {
-                let _ = write!(line, "Bus child at 0x{address:x} on endpoint {endpoint}");
-            }
-            // Unreachable for a decoded `BusChild`; listed without
-            // inventing a pairing rather than dropped.
-            None => line.push_str("Bus child (no pairing published)"),
-        },
         Some(HwResourceKind::LinkDuty) => describe_link_duty(resource, line),
         Some(HwResourceKind::LinkRequest) => describe_link_request(resource, line),
         Some(HwResourceKind::IommuStream) => describe_iommu_stream(resource, line),
@@ -471,6 +463,15 @@ fn describe_property(resource: &HwResource, line: &mut String) {
                     tairix_abi::usb_urb::UsbSpeed::Super => "super",
                 });
             let _ = write!(line, "USB {name} speed");
+        }
+        Ok((HwProperty::BusSpeed, hz)) => {
+            let _ = write!(line, "Bus at {hz} Hz");
+        }
+        Ok((HwProperty::RadioCoexistence, _)) => {
+            line.push_str("Keeps clear of the 2.4 GHz radio band");
+        }
+        Ok((HwProperty::BootConsole, _)) => {
+            line.push_str("Takes the boot console's screen over");
         }
         Err(_) => line.push_str("Property (malformed)"),
     }
@@ -535,6 +536,9 @@ const fn role_names(role: LinkRole) -> (&'static str, &'static str) {
         LinkRole::Dma => ("DMA controller", "DMA request"),
         LinkRole::Clock => ("Clock controller", "Clock"),
         LinkRole::Codec => ("Audio codec", "Codec link"),
+        LinkRole::InterruptLine => ("Interrupt controller", "Interrupt line"),
+        LinkRole::I2c => ("I2C controller", "I2C link"),
+        LinkRole::Encoder => ("Display encoder", "Encoder link"),
     }
 }
 
@@ -998,6 +1002,45 @@ C 02  Network controller
         let (out, result) = run_case(&["-v"], Ok(blob), true);
         result.expect("listing succeeds");
         assert_eq!(out.lines()[1..], ["  Driven by the kernel"]);
+    }
+
+    #[test]
+    fn every_link_role_is_named_for_its_supplier_and_its_consumers() {
+        for &role in tairix_abi::hwlink::LinkRole::ALL {
+            let (supplier, link) = super::role_names(role);
+            assert!(!supplier.is_empty() && !link.is_empty(), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn verbose_names_the_speed_a_bus_is_declared_to_run_at() {
+        let mut ddc = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Bus);
+        ddc.push_match_key(HwMatchKey::pci(0x1af4, 0x1000, 0x0c_80_00))
+            .expect("key fits");
+        ddc.push_resource(HwResource::property(HwProperty::BusSpeed, 97_500))
+            .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&ddc.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(out.lines()[1..], ["  Bus at 97500 Hz"]);
+    }
+
+    #[test]
+    fn verbose_says_a_transmitter_keeps_clear_of_the_radio_band() {
+        let mut hdmi = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Display);
+        hdmi.push_match_key(HwMatchKey::pci(0x1af4, 0x1000, 0x03_00_00))
+            .expect("key fits");
+        hdmi.push_resource(HwResource::property(HwProperty::RadioCoexistence, 1))
+            .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&hdmi.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines()[1..],
+            ["  Keeps clear of the 2.4 GHz radio band"]
+        );
     }
 
     #[test]

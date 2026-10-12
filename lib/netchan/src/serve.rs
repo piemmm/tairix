@@ -139,6 +139,9 @@ pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
     {
         return exit::NO_SERVICE;
     }
+    // The channel is the one child this driver publishes. A refused settle
+    // only leaves the device manager to wait out its bound for the node.
+    let _ = tairix_rt::hw_node_settle();
 
     log(
         &LogSink,

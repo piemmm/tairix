@@ -13,6 +13,8 @@
 //! (every ABI decoder does so up front against the structure's `WIRE_LEN`),
 //! so these functions index directly and never allocate.
 
+use crate::Errno;
+
 #[inline]
 pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
@@ -117,12 +119,33 @@ pub(crate) fn put_i64(bytes: &mut [u8], offset: usize, value: i64) {
     bytes[offset + 7] = v[7];
 }
 
+/// Refuse `bytes` unless it is exactly `len` long: short is truncation, and
+/// long a field smuggled past the frame's end.
+pub(crate) const fn exact_len(bytes: &[u8], len: usize) -> Result<(), Errno> {
+    if bytes.len() < len {
+        Err(Errno::BufferTooSmall)
+    } else if bytes.len() > len {
+        Err(Errno::LengthOutOfRange)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        put_i32, put_i64, put_u16, put_u32, put_u64, read_i32, read_i64, read_u16, read_u32,
-        read_u64,
+        exact_len, put_i32, put_i64, put_u16, put_u32, put_u64, read_i32, read_i64, read_u16,
+        read_u32, read_u64,
     };
+    use crate::Errno;
+
+    #[test]
+    fn a_frame_is_exactly_its_length_or_refused() {
+        let frame = [0u8; 6];
+        assert_eq!(exact_len(&frame, 6), Ok(()));
+        assert_eq!(exact_len(&frame[..5], 6), Err(Errno::BufferTooSmall));
+        assert_eq!(exact_len(&frame, 5), Err(Errno::LengthOutOfRange));
+    }
 
     #[test]
     fn i32_round_trips_negative_at_offset() {

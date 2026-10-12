@@ -71,7 +71,9 @@ use tairix_hash::BuildFastHash;
 use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, IconSet};
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
-use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
+use tairix_reclaim::{
+    disposable_ui_budget, disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache,
+};
 use tairix_theme::Palette;
 
 use crate::clock::CLOCK_ROLE;
@@ -164,6 +166,13 @@ pub struct TaskbarRenderer {
 }
 
 impl TaskbarRenderer {
+    /// Hold the glyph cache to what an output of `fb_bytes` allows, the
+    /// output having changed size: the budget [`icon_cache`] builds it
+    /// under.
+    pub fn rescale_cache(&mut self, fb_bytes: usize) {
+        let _ = self.icons.rebudget(disposable_ui_budget(fb_bytes));
+    }
+
     /// A renderer drawing the built-in icon set, caching rasterised glyphs
     /// in `cache`.
     ///

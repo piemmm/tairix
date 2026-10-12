@@ -4563,6 +4563,9 @@ mod tests {
         ) -> Result<(), tairix_abi::Errno> {
             Err(tairix_abi::Errno::Busy)
         }
+        fn settle(&self, _: u32) -> Result<(), tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
     }
 
     /// A tree that cannot be read fails the boot, since translating nothing

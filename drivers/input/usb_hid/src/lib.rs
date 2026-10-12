@@ -3,7 +3,7 @@
 //! `lib/hid`.
 //!
 //! The `lib` target is the driver's identity — [`BIND_KEYS`] and
-//! [`REQUIRED_CAPS`], which the image builder authors its signed manifest
+//! [`REQUIRED_CAPABILITIES`], which the image builder authors its signed manifest
 //! from — and its host-testable bring-up; `src/main.rs` is the `Run` program.
 //! The driver holds no controller register, DMA or interrupt: it reaches its
 //! interface through the URB transport the host-controller driver serves, and
@@ -46,7 +46,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[
 /// The capability set the driver runs under, and the one its manifest
 /// requests: inject seat records, map its interface's shared buffer, call its
 /// interface's URB endpoint, and log.
-pub const REQUIRED_CAPS: &[CapabilityId] = &[
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::INPUT_INJECT,
     CapabilityId::SHM,
     CapabilityId::IPC_ENDPOINT,

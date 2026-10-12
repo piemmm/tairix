@@ -155,6 +155,13 @@ impl PortStatus {
         self.0 & regs::PORTSC_CSC != 0
     }
 
+    /// Whether the device on the port can be unplugged: the port does not
+    /// report it built in ([`regs::PORTSC_DR`]).
+    #[must_use]
+    pub const fn removable(self) -> bool {
+        self.0 & regs::PORTSC_DR == 0
+    }
+
     /// Protocol-defined port speed ID (`1` full, `2` low, `3` high,
     /// `4` super; `0` when no device is connected).
     #[must_use]

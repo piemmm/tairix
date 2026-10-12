@@ -58,8 +58,12 @@ mod program {
     use tairix_abi::time::{Time64, WallTimeState};
     use tairix_abi::touch::TouchFrame;
     use tairix_abi::DriverError;
-    use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
-    use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, SwitchedOff};
+    use tairix_abi::NoticeTopic;
+    use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
+    use tairix_display::{
+        establish_frames, DisplayClient, DisplayTransport, FramesRefused, RemoteDisplay,
+        SwitchedOff,
+    };
     use tairix_geometry::Scale;
     use tairix_greeter::Verdict;
     use tairix_greeter_service::accounts::{load_accounts, DirectoryError, SessionTransport};
@@ -74,6 +78,7 @@ mod program {
     use tairix_greeter_service::screen::LoginScreen;
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
     use tairix_procinfo::{call, IpcTransport};
+    use tairix_rt::shm::SharedRegion;
     use tairix_rt::LogSink;
     use tairix_theme::{Appearance, ThemeRegistry};
     use tairix_window::app;
@@ -83,6 +88,14 @@ mod program {
 
     /// Wait-set token for "the seat has input waiting".
     const SEAT_TOKEN: u64 = 0;
+
+    /// Wait-set token for "the display's output moved" (`plans/DISPLAY.md`
+    /// D12).
+    const DISPLAY_OUTPUT_TOKEN: u64 = 1;
+
+    /// The frame ring the screen presents through: its own frames, owned by
+    /// the ring and unmapped with it.
+    type Ring = RemoteDisplay<SharedRegion, RtDisplayTransport>;
 
     /// The seat's lease was refused, or taken away while the screen ran, so
     /// there is no screen to own.
@@ -247,8 +260,11 @@ mod program {
         );
     }
 
-    /// Hand `present` to the display.
-    fn show<D: Display>(display: &mut D, frame: &[u8], present: Present) {
+    /// Hand `present` to the display, when there is an output to show it on.
+    fn show(display: &mut Option<Ring>, frame: &[u8], present: Present) {
+        let Some(display) = display.as_mut() else {
+            return;
+        };
         match present {
             Present::Nothing => {}
             Present::Region(region) => {
@@ -280,11 +296,11 @@ mod program {
     /// each present is a round trip to the display service, so the whole
     /// burst is applied and then shown as one frame. A drain that changed
     /// nothing shows nothing.
-    fn drain_pointer<D: Display, T: SessionTransport>(
+    fn drain_pointer<T: SessionTransport>(
         screen: &mut LoginScreen<T>,
-        display: &mut D,
-        mode: &DisplayMode,
+        display: &mut Option<Ring>,
     ) -> Drained {
+        let mode = *screen.mode();
         let mut wire = [0u8; PointerInput::WIRE_LEN];
         let mut pending = Present::Nothing;
         let drained = loop {
@@ -301,7 +317,7 @@ mod program {
                 continue;
             };
             let step = screen.on_pointer(&input, tairix_rt::clock_get());
-            pending = pending.merged(step.present, mode);
+            pending = pending.merged(step.present, &mode);
             if let Some(answer) = step.answer {
                 audit(answer.verdict);
             }
@@ -316,11 +332,11 @@ mod program {
     /// Drain the seat's touch channel through the screen's recogniser and
     /// present the union of everything it changed, once; then act on any touch
     /// whose deadline has passed, every queued frame having been read.
-    fn drain_touch<D: Display, T: SessionTransport>(
+    fn drain_touch<T: SessionTransport>(
         screen: &mut LoginScreen<T>,
-        display: &mut D,
-        mode: &DisplayMode,
+        display: &mut Option<Ring>,
     ) -> Drained {
+        let mode = *screen.mode();
         let mut wire = [0u8; TouchFrame::WIRE_LEN];
         let mut gestures = Vec::new();
         let mut pending = Present::Nothing;
@@ -335,7 +351,7 @@ mod program {
             }
             for gesture in gestures.drain(..) {
                 let step = screen.on_gesture(gesture, tairix_rt::clock_get());
-                pending = pending.merged(step.present, mode);
+                pending = pending.merged(step.present, &mode);
                 if let Some(answer) = step.answer {
                     audit(answer.verdict);
                 }
@@ -353,11 +369,11 @@ mod program {
 
     /// Drain the seat's keyboard channel into the screen and present the
     /// union of everything it changed, once.
-    fn drain_keyboard<D: Display, T: SessionTransport>(
+    fn drain_keyboard<T: SessionTransport>(
         screen: &mut LoginScreen<T>,
-        display: &mut D,
-        mode: &DisplayMode,
+        display: &mut Option<Ring>,
     ) -> Drained {
+        let mode = *screen.mode();
         let mut wire = [0u8; KeyInput::WIRE_LEN];
         let mut pending = Present::Nothing;
         let drained = loop {
@@ -375,7 +391,7 @@ mod program {
             };
             let event = tairix_window::key_input_event(input);
             let step = screen.on_input(&event, tairix_rt::clock_get());
-            pending = pending.merged(step.present, mode);
+            pending = pending.merged(step.present, &mode);
             if let Some(answer) = step.answer {
                 audit(answer.verdict);
             }
@@ -387,51 +403,91 @@ mod program {
         drained
     }
 
-    /// Map the frame ring and hand it to the display service.
+    /// Frames for `mode`, established the one way every presenter does.
+    fn frames_for(mode: &DisplayMode) -> Result<Ring, FramesRefused> {
+        establish_frames(
+            DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY),
+            mode,
+            FRAME_COUNT,
+        )
+    }
+
+    /// The output the screen comes up on, and frames for it: the one
+    /// connected now, or the first to arrive, parked for on `set`, which
+    /// already holds the output's announcement so none is missed between a
+    /// read and the park.
     ///
     /// `Err` is the exit code the failure earns, its reason already stated.
-    fn frame_ring(
-        client: &mut DisplayClient<RtDisplayTransport>,
-        mode: &DisplayMode,
-        frame_len: usize,
-    ) -> Result<&'static mut [u8], i32> {
-        let Some(total) = usize::try_from(FRAME_COUNT)
-            .ok()
-            .and_then(|count| frame_len.checked_mul(count))
-        else {
-            return Err(fail(EXIT_NO_FRAMES, "the frame ring's size overflows"));
-        };
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(total, &mut region_id);
-        if base < 0 {
-            return Err(fail(EXIT_NO_FRAMES, "the shared frame region was refused"));
+    fn first_output(set: u64) -> Result<(Ring, DisplayMode), i32> {
+        let mut client = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY);
+        let mut wait = false;
+        loop {
+            if wait {
+                let mut token = 0u64;
+                if tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token) < 0 {
+                    return Err(fail(EXIT_NO_WAITSET, "the display output's wait failed"));
+                }
+            }
+            let Ok(output) = client.query() else {
+                return Err(fail(
+                    EXIT_NO_DISPLAY,
+                    "the display service refused the output query, so there is no screen to draw on",
+                ));
+            };
+            // With no output, and when the output moved before frames reached
+            // it, its announcement is what comes next.
+            wait = true;
+            let Some(mode) = output else {
+                continue;
+            };
+            match frames_for(&mode) {
+                Ok(ring) => return Ok((ring, mode)),
+                Err(FramesRefused::Configure(Errno::Stale)) => {}
+                Err(refused) => return Err(fail(EXIT_NO_FRAMES, refused.reason())),
+            }
         }
-        // A zero handle is the kernel's refusal, not a usable grant.
-        let grant = tairix_rt::shm_grant(region_id, DISPLAY_ENDPOINT);
-        let grant = u64::try_from(grant).ok().filter(|handle| *handle != 0);
-        let Some(grant) = grant else {
-            return Err(fail(EXIT_NO_FRAMES, "the frame region grant was refused"));
+    }
+
+    /// Converge on the display's output once (`plans/DISPLAY.md` D12): with
+    /// none, present nothing; with one, frames established afresh — the
+    /// output may be a new sink, or a restarted service holding none of the
+    /// old ones — and the screen rebuilt in place when the mode is another,
+    /// then shown whole.
+    fn follow_output<T: SessionTransport>(screen: &mut LoginScreen<T>, display: &mut Option<Ring>) {
+        let output = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query();
+        *display = None;
+        // A refused query is a lost seat, which the next drain observes.
+        let Ok(Some(mode)) = output else {
+            return;
         };
-        if client.configure(grant, FRAME_COUNT, mode).is_err() {
-            return Err(fail(
-                EXIT_NO_DISPLAY,
-                "the display service refused the frame configuration",
-            ));
+        let rebuilt = if &mode == screen.mode() {
+            None
+        } else {
+            let Some(scanout) = Scanout::new(mode) else {
+                record(
+                    SCREEN_UNAVAILABLE,
+                    Level::Warn,
+                    "greeter: the display's new mode describes no drawable screen",
+                );
+                return;
+            };
+            Some(scanout)
+        };
+        match frames_for(&mode) {
+            Ok(ring) => *display = Some(ring),
+            // It moved again, and that announcement brings the screen onto
+            // where it went.
+            Err(FramesRefused::Configure(Errno::Stale)) => return,
+            Err(refused) => {
+                record(SCREEN_UNAVAILABLE, Level::Warn, refused.reason());
+                return;
+            }
         }
-        let Ok(base) = usize::try_from(base) else {
-            return Err(fail(
-                EXIT_NO_FRAMES,
-                "the frame region lies outside the address width",
-            ));
+        let all = match rebuilt {
+            Some(scanout) => screen.adopt_scanout(scanout, tairix_rt::clock_get()),
+            None => screen.repaint(),
         };
-        // SAFETY: the kernel mapped exactly `total` zeroed bytes read/write
-        // into this process at `base`, and that mapping stays live for the
-        // rest of the process — nothing unmaps or aliases it, which is what
-        // makes the `'static` borrow honest. The display service maps the
-        // same frames read-only for its blit, and the protocol serialises
-        // access: this task is parked inside its present call while the
-        // service reads, so the two never race.
-        Ok(unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) })
+        show(display, screen.frame(), all);
     }
 
     /// Own the seat and run the screen until a secret is verified.
@@ -439,12 +495,28 @@ mod program {
     /// Split from `main` so every exit after the acquire flows back through
     /// the one owner-checked release.
     fn session() -> i32 {
-        let mut client = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY);
-        let Ok(mode) = client.query() else {
+        // A negative return is the kernel's refusal, and it is exactly what
+        // the conversion rejects, so one check covers both. The output's
+        // announcement joins before the output is read.
+        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
+            return fail(EXIT_NO_WAITSET, "the wait set could not be created");
+        };
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::DisplayOutput.as_u32()),
+            DISPLAY_OUTPUT_TOKEN,
+        ) < 0
+        {
             return fail(
-                EXIT_NO_DISPLAY,
-                "the display service refused the mode query, so there is no screen to draw on",
+                EXIT_NO_WAITSET,
+                "the display's output could not be waited on",
             );
+        }
+        let (ring, mode) = match first_output(set) {
+            Ok(first) => first,
+            Err(code) => return code,
         };
         let Some(scanout) = Scanout::new(mode) else {
             return fail(
@@ -452,13 +524,7 @@ mod program {
                 "the queried mode describes no drawable screen, or no memory holds its frame",
             );
         };
-        let frames = match frame_ring(&mut client, &mode, scanout.frame().len()) {
-            Ok(frames) => frames,
-            Err(code) => return code,
-        };
-        let Ok(mut display) = RemoteDisplay::new(client, mode, frames, FRAME_COUNT) else {
-            return fail(EXIT_NO_FRAMES, "the frame ring rejected the queried mode");
-        };
+        let mut display = Some(ring);
 
         // The ribbon is a night sky, so the column is drawn in the dark theme
         // whichever appearance the desktop defaults to: a dark ink on it
@@ -496,11 +562,6 @@ mod program {
         show(&mut display, screen.frame(), opening);
         record(SCREEN_READY, Level::Info, "greeter: the login screen is up");
 
-        // A negative return is the kernel's refusal, and it is exactly what
-        // the conversion rejects, so one check covers both.
-        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
-            return fail(EXIT_NO_WAITSET, "the wait set could not be created");
-        };
         if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
@@ -511,7 +572,7 @@ mod program {
         {
             return fail(EXIT_NO_WAITSET, "the seat's input could not be waited on");
         }
-        park_loop(&mut screen, &mut display, &mode, set)
+        park_loop(&mut screen, &mut display, set)
     }
 
     /// Serve the screen until it is finished, parking between wakes.
@@ -521,25 +582,28 @@ mod program {
     /// date, puts the display to sleep once the screen has been left alone
     /// long enough, and then parks on `set` until either input arrives or the
     /// nearest of those falls due. A sleeping screen arms no timer at all.
-    fn park_loop<D: Display, T: SessionTransport>(
+    fn park_loop<T: SessionTransport>(
         screen: &mut LoginScreen<T>,
-        display: &mut D,
-        mode: &DisplayMode,
+        display: &mut Option<Ring>,
         set: u64,
     ) -> i32 {
         let mut told_unswitchable = false;
         let mut told_unwakeable = false;
+        let mut token = SEAT_TOKEN;
         loop {
-            let drained = match drain_keyboard(screen, display, mode) {
-                Drained::Empty => match drain_pointer(screen, display, mode) {
-                    Drained::Empty => drain_touch(screen, display, mode),
+            if token == DISPLAY_OUTPUT_TOKEN {
+                follow_output(screen, display);
+            }
+            let drained = match drain_keyboard(screen, display) {
+                Drained::Empty => match drain_pointer(screen, display) {
+                    Drained::Empty => drain_touch(screen, display),
                     ended => ended,
                 },
                 ended => ended,
             };
             match drained {
                 Drained::Verified => {
-                    fade_out(screen, display, mode, set);
+                    fade_out(screen, display, set);
                     return 0;
                 }
                 Drained::Lost => return fail(
@@ -550,7 +614,11 @@ mod program {
             }
             let now = tairix_rt::clock_get();
             let wall = wall_now();
-            match screen.wake(display, now, wall) {
+            let woke = match display.as_mut() {
+                Some(ring) => screen.wake(ring, now, wall),
+                None => Ok(Present::Nothing),
+            };
+            match woke {
                 Ok(Present::Nothing) => {}
                 Ok(opening) => {
                     told_unwakeable = false;
@@ -572,7 +640,10 @@ mod program {
             // audit.
             let refreshed = screen.refresh(now, wall);
             show(display, screen.frame(), refreshed.present);
-            match screen.sleep_if_idle(display, tairix_rt::clock_get()) {
+            let slept = display
+                .as_mut()
+                .and_then(|ring| screen.sleep_if_idle(ring, tairix_rt::clock_get()));
+            match slept {
                 Some(SwitchedOff::Off) => record(
                     DISPLAY_ASLEEP,
                     Level::Info,
@@ -594,7 +665,7 @@ mod program {
                 Some(SwitchedOff::Blanked) | None => {}
             }
             let timeout = screen.park_timeout(tairix_rt::clock_get(), wall);
-            let mut token = 0u64;
+            token = SEAT_TOKEN;
             let woken = tairix_rt::waitset_wait(set, timeout, &mut token);
             // Ready and the armed deadline are the two ways round the loop;
             // any other answer would leave nothing to park on, so exit rather
@@ -617,10 +688,9 @@ mod program {
     /// The seat's channels are still drained, though nothing acts on them:
     /// input left unread reads ready forever, and the park would return at
     /// once instead of pacing the fade.
-    fn fade_out<D: Display, T: SessionTransport>(
+    fn fade_out<T: SessionTransport>(
         screen: &mut LoginScreen<T>,
-        display: &mut D,
-        mode: &DisplayMode,
+        display: &mut Option<Ring>,
         set: u64,
     ) {
         let opening = screen.begin_session_fade(tairix_rt::clock_get());
@@ -629,9 +699,9 @@ mod program {
             let Some(due) = screen.session_fade_due(tairix_rt::clock_get()) else {
                 return;
             };
-            if drain_keyboard(screen, display, mode) == Drained::Lost
-                || drain_pointer(screen, display, mode) == Drained::Lost
-                || drain_touch(screen, display, mode) == Drained::Lost
+            if drain_keyboard(screen, display) == Drained::Lost
+                || drain_pointer(screen, display) == Drained::Lost
+                || drain_touch(screen, display) == Drained::Lost
             {
                 return;
             }

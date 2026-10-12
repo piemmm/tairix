@@ -103,11 +103,11 @@ use tairix_abi::{
     ProcessStart, RandomFlags, ReaddirFrom, RenameFlags, ResourceLimit, SchedPriority, Signal,
     SignalIntakeOp, SpawnAttach, SpawnSession, StreamMode, SyscallNumber, TerminalSize, Time64,
     UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState,
-    BOOT_ID_LEN, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
-    FS_IO_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
-    READDIR_BATCH_MAX, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
-    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    BOOT_ID_LEN, CALL_DEADLINE_NONE, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX,
+    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX,
+    PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
+    RANDOM_REQUEST_MAX_BYTES, READDIR_BATCH_MAX, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN,
+    SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
@@ -121,7 +121,7 @@ use tairix_kernel_irq::{
 use tairix_kernel_mem::sensitive::alloc_sensitive;
 use tairix_kernel_mem::{
     copy_in, copy_out, AllocError, DmaCustodian, FrameAllocator, PageCandidate, PhysMap,
-    RamzipFaultOutcome, Retire, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
+    RamzipFaultOutcome, Retire, SharedMemory, UaccessError, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
 use tairix_kernel_sec::{
@@ -148,7 +148,7 @@ use crate::aspace::{
 };
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
-use crate::console::{ConsoleDevice, NO_CONSOLES};
+use crate::console::{ConsoleDevice, ConsoleSurface, ConsoleWrite, Relocation, NO_CONSOLES};
 use crate::devres::{
     addressable_port, dma_constraint, mappable_subwindow, translate_device_addr, DmaAllocFacility,
     DmaQuarantineFacility, MmioMapFacility, MmioMemoryKind, MsiAllocFacility, PortIoFacility,
@@ -1230,6 +1230,51 @@ where
             }
         }
         Ok(base_va)
+    }
+
+    /// Move `console`, which paints `surface`, onto a block of kernel memory
+    /// a device with DMA windows among `resources` reaches untranslated.
+    ///
+    /// `OutOfRange` with no window starting at the bottom of memory or a
+    /// block outside it, the facility's refusal when no block can be had, and
+    /// `NotFound` for a console that no longer paints a surface.
+    fn move_console(
+        &self,
+        console: &dyn ConsoleWrite,
+        surface: &ConsoleSurface,
+        resources: &[HwResource],
+    ) -> Result<ConsoleSurface, Errno> {
+        let window = crate::devres::bottom_window(resources).ok_or(Errno::OutOfRange)?;
+        let len = surface.len_bytes().ok_or(Errno::OutOfRange)?;
+        let chunks = self.shared_mem_facility.alloc_dma_region(
+            len.div_ceil(PAGE_SIZE as u64),
+            crate::devres::DmaBacking::Contiguous {
+                limit: window.addr_limit,
+            },
+        )?;
+        let release = || {
+            self.shared_mem_facility
+                .free_region(&chunks, SharedMemory::DmaCoherent);
+        };
+        let block = match chunks.as_slice() {
+            [block] if translate_device_addr(&window, block.phys_base).is_ok() => *block,
+            _ => {
+                release();
+                return Err(Errno::OutOfRange);
+            }
+        };
+        match console.relocate(block.phys_base, block.pages * PAGE_SIZE as u64) {
+            // The block is the console's for the kernel's life.
+            Relocation::Moved(moved) => Ok(moved),
+            Relocation::Owned(owned) => {
+                release();
+                Ok(owned)
+            }
+            Relocation::Refused => {
+                release();
+                Err(Errno::NotFound)
+            }
+        }
     }
 
     /// The addressing constraint and custody a DMA carve of `len` bytes under
@@ -3804,8 +3849,15 @@ where
             // read end — the woken owner's read performs the drain,
             // re-resolved against the open table so a descriptor closed or
             // replaced mid-wait simply stops reporting.
-            WaitSourceKind::Stream => u32::try_from(m.id)
-                .is_ok_and(|fd| self.aspaces.read().stream_readable(caller.process(), fd)),
+            // Or keyboard input pending on the console the caller's standard
+            // input reads, while it may take it.
+            // The registry guard is released before the console is asked: the
+            // lock prefers writers, so taking it again would deadlock behind
+            // one.
+            WaitSourceKind::Stream => u32::try_from(m.id).is_ok_and(|fd| {
+                let readable = self.aspaces.read().stream_readable(caller.process(), fd);
+                readable || self.console_input_ready(caller, fd)
+            }),
             // Free room (or a broken stream) on the caller's own write end
             // — the woken owner's write takes the room, re-resolved against
             // the open table so a descriptor closed mid-wait stops
@@ -3958,6 +4010,35 @@ where
     ///
     /// [`Errno::NotFound`] for a descriptor naming no terminal of the caller's,
     /// [`Errno::NotImplemented`] for a console that is not installed.
+    /// The console a wait-set `Stream` member on `fd` watches: one of the
+    /// caller's inherited standard streams opened for reading, on an
+    /// installed console it holds `CONSOLE_READ` for. A descriptor in the
+    /// open table shadows the standard stream, exactly as in `stream_read`.
+    fn read_console(&self, caller: &CallerContext<'_>, fd: u32) -> Option<&'static ConsoleDevice> {
+        if !caller.caps.has(CapabilityId::CONSOLE_READ) {
+            return None;
+        }
+        let aspaces = self.aspaces.read();
+        if aspaces.has_open_file(caller.process(), fd) {
+            return None;
+        }
+        let streams = aspaces.streams(caller.process());
+        drop(aspaces);
+        if streams.mode(fd) != StreamMode::Read {
+            return None;
+        }
+        self.consoles.get(usize::from(streams.console(fd)))
+    }
+
+    /// Whether the console `fd` reads holds input the caller may take now.
+    /// Only a reader `stream_read` would admit sees it, so no other process
+    /// learns when keys are pressed.
+    fn console_input_ready(&self, caller: &CallerContext<'_>, fd: u32) -> bool {
+        self.read_console(caller, fd).is_some_and(|device| {
+            self.check_console_foreground(caller, device).is_ok() && device.read.input_ready()
+        })
+    }
+
     fn with_terminal_ownership<R>(
         &self,
         caller: &CallerContext<'_>,
@@ -8934,8 +9015,9 @@ where
         // released or lost its lease is refused and re-publishes when it
         // re-acquires on foreground wake. What the machine is recording, and
         // that its sound devices moved, are the audio service's to state, by
-        // its reserved rendezvous, and that the interfaces moved is the
-        // network stack's, by its own. Every kernel-owned topic refuses
+        // its reserved rendezvous, that the interfaces moved is the network
+        // stack's, by its own, and that the display's output moved is the
+        // display service's, by its. Every kernel-owned topic refuses
         // outright inside `notice::publish`.
         let refused = match topic {
             NoticeTopic::Desktop => !self.seat_registry.holds_live_lease(seat_owner(caller)),
@@ -8945,6 +9027,14 @@ where
             NoticeTopic::Network => {
                 !crate::notice::binds(tairix_abi::net_ipc::NETSTACK_ENDPOINT, caller.process().0)
             }
+            NoticeTopic::DisplayOutput => !crate::notice::binds(
+                tairix_abi::display_ipc::DISPLAY_ENDPOINT,
+                caller.process().0,
+            ),
+            NoticeTopic::CueAuthority => !crate::notice::binds(
+                tairix_abi::sound_cue::SOUND_CUE_ENDPOINT,
+                caller.process().0,
+            ),
             NoticeTopic::Mounts | NoticeTopic::MemoryPressure | NoticeTopic::DisplayLease => false,
         };
         if refused {
@@ -8955,6 +9045,13 @@ where
         // Decoded here rather than stored raw, so a subscriber can never read
         // a shape the publisher could not have meant.
         let notice = Notice::decode(topic, &bytes[..len])?;
+        // The cue authority names the instance a session grants its files to,
+        // so it may name only the one the kernel attests it is.
+        if let Notice::CueAuthority { instance } = notice {
+            if instance != caller.caps.proc_id() {
+                return Err(Errno::PermissionDenied);
+            }
+        }
         crate::notice::publish(&notice)?;
         Ok(0)
     }
@@ -9016,14 +9113,13 @@ where
         // stable `Errno` for every refusal and otherwise an opaque ticket
         // correlating this caller with its reply. The caller's kernel-held
         // scheduler id rides along so the reply wakes exactly this task.
-        // `ipc_call` carries no deadline, so post with `u64::MAX`: the caller
-        // is released only by the server's reply or the endpoint's teardown,
-        // exactly as before the deadlined async path (`call_post`) existed.
+        // `ipc_call` carries no deadline: the caller is released only by the
+        // server's reply or the endpoint's teardown.
         let ticket = ep.post(
             caller.caps,
             caller.task_id.0,
             payload.as_bytes(),
-            u64::MAX,
+            CALL_DEADLINE_NONE,
             self.audit,
         )?;
 
@@ -9059,16 +9155,14 @@ where
         let claimant = caller.caps.process().0;
         crate::waitq::CALL_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         let outcome = loop {
-            // `now` is dead input here: this call posted with a `u64::MAX`
-            // deadline, so `take_reply` never yields `TimedOut` — the timeout
-            // path is the async `call_reap` handler's, not `ipc_call`'s.
+            // `now` is dead input: a call posted with no deadline never times
+            // out.
             match ep.take_reply(claimant, ticket, 0, self.audit) {
                 ReplyOutcome::Ready(bytes) => break Ok(bytes),
                 // The endpoint was torn down, or the ticket is no longer
                 // ours: abandon the call fail-closed.
                 ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
-                // Unreachable with a `u64::MAX` deadline, but handled
-                // fail-closed rather than silently ignored.
+                // Unreachable with no deadline, but fails closed.
                 ReplyOutcome::TimedOut => break Err(Errno::TimedOut),
                 ReplyOutcome::Pending => {
                     // Park off the run queue until woken, keyed to the CPU
@@ -9135,14 +9229,11 @@ where
         let mut payload = alloc_sensitive(request_len).map_err(AllocError::as_errno)?;
         self.copy_in_user(caller, request, payload.as_bytes_mut())?;
 
-        // Convert the caller's *relative* deadline into the *absolute*
-        // monotonic value the endpoint stores and the reap compares against;
-        // `u64::MAX` stays "no deadline" (a saturating add so a huge relative
-        // value never wraps to a tiny absolute one — fail closed like the
-        // wait-set timeout).
+        // The endpoint stores an absolute deadline; the add saturates so a
+        // huge relative one never wraps to a tiny absolute one.
         let cpu = SchedulerArch::current_cpu(self.arch);
-        let deadline_abs = if deadline_ns == u64::MAX {
-            u64::MAX
+        let deadline_abs = if deadline_ns == CALL_DEADLINE_NONE {
+            CALL_DEADLINE_NONE
         } else {
             self.arch.monotonic_ns(cpu).saturating_add(deadline_ns)
         };
@@ -9290,24 +9381,6 @@ where
         let restricted_sender = !send_set.is_empty();
         let endpoint_id = endpoint;
 
-        // A per-bus-child transfer endpoint is *per-node* authority, not a
-        // machine-wide rendezvous: discovery pairs each child's endpoint id
-        // with a `BusChild` duty resource on its own bus's node, so the
-        // driver the kernel granted that duty is the one entitled to serve
-        // it. Resolved against the caller's own minted grants — never a
-        // claim — so a second privileged driver cannot bind a chip's
-        // endpoint first and feed its driver forged registers. Refused
-        // before the endpoint exists, and audited like any other denied
-        // bind.
-        if tairix_abi::hwtree::BUS_CHILD_ENDPOINTS.contains(endpoint_id)
-            && !self
-                .aspaces
-                .read()
-                .grant_covers(caller.process(), &HwResource::endpoint(endpoint_id))
-        {
-            CallEndpoint::record_create_denied(EndpointId(endpoint_id), self.audit);
-            return Err(Errno::PermissionDenied);
-        }
         // A link supplier's endpoint is served under its node's duty alone:
         // every consumer holds a request naming the same id, and one of them
         // serving it would answer all the others.
@@ -9778,13 +9851,14 @@ where
         }) {
             return Err(Errno::PermissionDenied);
         }
-        // A translation unit, the windows it keeps and the doorbells every
-        // domain maps are the kernel's own discovery: a published one would
-        // hand a driver the unit's registers, or map memory of its choosing
-        // into its child's domain. A driver passes on only its own streams,
-        // which the coverage below holds it to.
+        // A translation unit, the windows it keeps, the doorbells every domain
+        // maps and the facts only discovery states are the kernel's own: a
+        // published one would hand a driver the unit's registers, map memory
+        // of its choosing into its child's domain, or claim the boot console.
+        // A driver passes on only its own streams, which the coverage below
+        // holds it to.
         if decoded.class() == Some(tairix_abi::hwtree::HwDeviceClass::Iommu)
-            || decoded.is_kernel_driven()
+            || decoded.states_discovery_only()
             || decoded.resources().iter().any(|resource| {
                 matches!(
                     resource.kind(),
@@ -10079,23 +10153,101 @@ where
         Ok(0)
     }
 
-    fn hw_self_node(&self, caller: &CallerContext<'_>) -> SyscallResult {
-        // No capability (checked by the dispatcher: the spec carries none): a
-        // driver learning its *own* node id is the unprivileged self-identity
-        // baseline. Security spine (no ambient authority): resolve the
-        // caller's own matched node from kernel-trusted state keyed by
-        // `caller.task_id`, never a caller-supplied id — so a task only ever
-        // learns the identity of the node it was autoloaded for, never
-        // another's, and never the global tree (that stays behind
-        // `hw_tree_read`'s privileged gate). A task with no loaded node is not
-        // an autoloaded driver and fails closed with `NotFound` (no oracle:
-        // the same answer whether the caller could never have a node or simply
-        // does not).
-        let aspaces = self.aspaces.read();
-        let Some(node_id) = aspaces.loaded_node(caller.process()) else {
+    fn hw_node_settle(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher has already checked `CAP_HW_EMIT`: settling ends the
+        // publishing that grant allows. The node is the caller's own, from
+        // kernel-trusted state, so a driver settles only the node it was
+        // loaded for; one with none has nothing to settle.
+        let node_id = self
+            .aspaces
+            .read()
+            .loaded_node(caller.process())
+            .ok_or(Errno::PermissionDenied)?;
+        self.hw_tree.settle(node_id)?;
+        Ok(0)
+    }
+
+    fn console_relocate(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        // The dispatcher enforced `CAP_MEM_DMA`. The node is the caller's own,
+        // from kernel-trusted state, and only one discovery marked may move
+        // the console: no driver can publish the mark.
+        let driver = self
+            .aspaces
+            .read()
+            .loaded_driver(caller.process())
+            .ok_or(Errno::PermissionDenied)?;
+        let node = self
+            .hw_tree
+            .node(driver.node)?
+            .ok_or(Errno::DeviceOffline)?;
+        if node.property(tairix_abi::HwProperty::BootConsole).is_none() {
+            return Err(Errno::PermissionDenied);
+        }
+        if len < HwResource::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // The block is mapped into no translation unit's domain, so only a
+        // device reaching memory untranslated could scan it out.
+        if matches!(driver.dma, crate::iommu::DmaPath::Stranded { .. }) {
+            return Err(Errno::PermissionDenied);
+        }
+        if self.translation_of(&driver).is_some() {
+            return Err(Errno::NotSupported);
+        }
+        let (console, surface) = self
+            .consoles
+            .iter()
+            .find_map(|device| {
+                device
+                    .write
+                    .surface()
+                    .map(|surface| (device.write, surface))
+            })
+            .ok_or(Errno::NotFound)?;
+        let surface = if surface.kernel_owned {
+            surface
+        } else {
+            self.move_console(console, &surface, node.resources())?
+        };
+        let bytes = HwResource::framebuffer(
+            surface.phys,
+            &surface.mode,
+            tairix_abi::hwtree::FramebufferMemory::WriteBack,
+        )?
+        .to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
+    }
+
+    fn hw_self_node(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
+        // No capability: a driver learning its *own* node is the unprivileged
+        // self-identity baseline. The node is resolved from kernel-trusted
+        // state keyed by the caller, never a caller-supplied id, so a task
+        // learns only the node it was autoloaded for and never the global
+        // tree. A task with no loaded node fails closed with `NotFound`, the
+        // same answer whether it could never have a node or simply has none.
+        let Some(node_id) = self.aspaces.read().loaded_node(caller.process()) else {
             return Err(Errno::NotFound);
         };
-        Ok(u64::from(node_id))
+        if len < tairix_abi::HwSelfNode::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let node = self.hw_tree.node(node_id)?.ok_or(Errno::DeviceOffline)?;
+        let ancestors = self.hw_tree.ancestor_status(node_id)?;
+        let bytes =
+            tairix_abi::HwSelfNode::new(node_id, node.match_keys(), ancestors)?.to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &bytes)
+        }) {
+            Some(Ok(())) => Ok(bytes.len() as u64),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        }
     }
 
     fn msi_alloc(&self, caller: &CallerContext<'_>, out: u64, out_len: usize) -> SyscallResult {
@@ -10568,16 +10720,19 @@ where
                         }
                     }
                     WaitSourceKind::Stream => {
-                        // A wait-set may observe a readable stream only
-                        // through the caller's **own** open table: `id` must
-                        // be a descriptor number holding a pipe end opened
-                        // for reading. A write end, a path/resource-backed
-                        // descriptor, an unopened number, an id outside the
-                        // descriptor width, and another task's descriptor
-                        // all collapse to the same `NotFound` the other
-                        // kinds use (no existence oracle).
+                        // A wait-set may observe a readable stream only of the
+                        // caller's **own**: a pipe or pty end its open table
+                        // holds opened for reading, or a standard stream
+                        // reading a console it holds `CONSOLE_READ` for. A
+                        // write end, a path/resource-backed descriptor, an
+                        // unopened number, an id outside the descriptor width,
+                        // and another task's descriptor all collapse to the
+                        // same `NotFound` the other kinds use (no existence
+                        // oracle).
                         let owned = u32::try_from(id).is_ok_and(|fd| {
-                            self.aspaces.read().stream_read_member(caller.process(), fd)
+                            let member =
+                                self.aspaces.read().stream_read_member(caller.process(), fd);
+                            member || self.read_console(caller, fd).is_some()
                         });
                         if !owned {
                             return Err(Errno::NotFound);
@@ -10889,6 +11044,24 @@ where
                 })
                 .collect()
         };
+        // A `Stream` member on a console joins `CONSOLE_WAITQ`, which every
+        // push of console input flags, and `FOREGROUND_WAITQ`, since its input
+        // shows only while the caller may read it. A backing no interrupt
+        // feeds is re-polled at its own interval instead.
+        let mut observes_console = false;
+        let mut console_repoll_ns: Option<u64> = None;
+        for m in members.iter().filter(|m| m.kind == WaitSourceKind::Stream) {
+            let Some(device) = u32::try_from(m.id)
+                .ok()
+                .and_then(|fd| self.read_console(caller, fd))
+            else {
+                continue;
+            };
+            observes_console = true;
+            if let Some(interval) = device.read.poll_interval_ns() {
+                console_repoll_ns = Some(console_repoll_ns.map_or(interval, |n| n.min(interval)));
+            }
+        }
         // `SIGNAL_INTAKE_WAITQ` is likewise joined only by a set that
         // actually holds a `Signal` member, and its wake is targeted at the
         // opted-in task, so signal traffic never disturbs another waiter.
@@ -10920,8 +11093,9 @@ where
         // never disturbs a waiter that did not ask about room.
         let observes_room = members.iter().any(|m| m.kind == WaitSourceKind::PortRoom);
         // `FOREGROUND_WAITQ` is joined only by a set holding a `Foreground`
-        // member, and woken only when some terminal changes hands.
-        let observes_foreground = members.iter().any(|m| m.kind == WaitSourceKind::Foreground);
+        // or console member, and woken only when some terminal changes hands.
+        let observes_foreground =
+            observes_console || members.iter().any(|m| m.kind == WaitSourceKind::Foreground);
         // `HW_TREE_WAITQ` is joined only by a set holding a `HardwareTree`
         // member, and woken by every generation bump of the tree.
         let observes_tree = members
@@ -10937,6 +11111,9 @@ where
         }
         for &key in &stream_keys {
             crate::waitq::STREAM_WAITQ.register_keyed(key, sched_task, crate::waitq::NO_DEADLINE);
+        }
+        if observes_console {
+            crate::waitq::CONSOLE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
@@ -11093,8 +11270,12 @@ where
             if now >= deadline_ns {
                 break Err(Errno::TimedOut);
             }
-            if paced {
-                crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns.min(held_until));
+            let repoll_at = console_repoll_ns.map_or(crate::waitq::NO_DEADLINE, |interval| {
+                now.saturating_add(interval)
+            });
+            if paced || console_repoll_ns.is_some() {
+                crate::waitq::IRQ_WAITQ
+                    .register(sched_task, deadline_ns.min(held_until).min(repoll_at));
             }
 
             // Re-arm every IRQ member's line before parking: a user-space
@@ -11139,6 +11320,9 @@ where
         }
         for &key in &stream_keys {
             crate::waitq::STREAM_WAITQ.deregister_keyed(key, sched_task);
+        }
+        if observes_console {
+            crate::waitq::CONSOLE_WAITQ.deregister(sched_task);
         }
         if observes_signal {
             crate::waitq::SIGNAL_INTAKE_WAITQ.deregister(sched_task);
@@ -13195,6 +13379,18 @@ pub enum LoadPlan {
     },
 }
 
+impl LoadPlan {
+    /// Whether the program may publish hardware-tree children, so has a
+    /// settling of its own to announce. A store bundle's request is read on
+    /// its own task after admission, so it is taken to until it says so.
+    fn may_publish(&self) -> bool {
+        match self {
+            Self::Prebuilt { requested, .. } => requested.contains(CapabilityId::HW_EMIT),
+            Self::Bundle { .. } => true,
+        }
+    }
+}
+
 /// The kernel-resolved inputs [`derive_task_record`] needs, captured at
 /// admit so the placeholder (empty-request) record installed synchronously
 /// and the effective record the loading body installs after verification
@@ -13778,7 +13974,10 @@ where
     /// Record `sec_id` as the driver of the node this context loads one for,
     /// if any, and how that node's DMA reaches memory; one stranded behind a
     /// unit that translates nothing is audited, its driver to master none.
-    fn claim_node(&self, sec_id: ProcessId) -> Result<(), AdmitError> {
+    ///
+    /// The node is then settled at once for a driver that cannot publish
+    /// children, and left for one that can (`publishes`) to settle itself.
+    fn claim_node(&self, sec_id: ProcessId, publishes: bool) -> Result<(), AdmitError> {
         let Some(node) = self.node else {
             return Ok(());
         };
@@ -13797,7 +13996,9 @@ where
                 } else {
                     AdmitError::AspaceConflict
                 }
-            })
+            })?;
+        node.tree.driver_admitted(node.id, publishes);
+        Ok(())
     }
 
     /// Admit a **loading** child and return its PID at once
@@ -13861,7 +14062,7 @@ where
         // services wrap and the dispatcher resolves a caller against — so the
         // child the placeholder record is written for is exactly the child
         // that runs.
-        let seed = self.record_seed();
+        let (seed, publishes) = (self.record_seed(), plan.may_publish());
 
         // Allocate the loading child's kernel stack synchronously, before its
         // address space exists, so its own loading body runs on it. Its guard
@@ -13934,7 +14135,7 @@ where
 
         // A node has at most one live driver. Claimed before any other state
         // of the child exists, so a refusal leaves only the parked task.
-        if let Err(err) = self.claim_node(sec_id) {
+        if let Err(err) = self.claim_node(sec_id, publishes) {
             let _ = self.sched.exit(task_id);
             tairix_kernel_sched_api::release_task_id(task_id);
             return Err(err);
@@ -18546,6 +18747,10 @@ mod tests {
             Ok(0)
         }
 
+        fn input_ready(&self) -> bool {
+            false
+        }
+
         fn purge(&self) {
             self.input_purges
                 .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -18836,6 +19041,10 @@ mod tests {
             let n = core::cmp::min(buf.len(), self.input.len());
             buf[..n].copy_from_slice(&self.input[..n]);
             Ok(n)
+        }
+
+        fn input_ready(&self) -> bool {
+            !self.input.is_empty()
         }
     }
 
@@ -21408,6 +21617,9 @@ mod tests {
                 false
             }
         }
+        impl crate::hwtree::HwDriverTree for Removed {
+            fn driver_admitted(&self, _node_id: u32, _publishes: bool) {}
+        }
         install_trace_filter();
         let sink = make_sink();
         let arch = Arc::new(TestArch::with_cpus(1));
@@ -21481,6 +21693,72 @@ mod tests {
         );
         assert_eq!(h.revoker().revoke(&[0x5B]).holders, 1);
         assert_eq!(aspaces.read().grant(ProcessId(pid), 1), None);
+    }
+
+    /// A driver that cannot publish children has its node settled as it is
+    /// admitted; one that can is left for its own announcement, so a child
+    /// it publishes while coming up is never read as a late arrival.
+    #[test]
+    fn a_driver_s_node_is_settled_at_admission_only_when_it_cannot_publish() {
+        struct Recording(RwLock<Vec<(u32, bool)>>);
+        impl crate::hwtree::HwNodeLiveness for Recording {
+            fn is_live(&self, _node_id: u32) -> bool {
+                true
+            }
+        }
+        impl crate::hwtree::HwDriverTree for Recording {
+            fn driver_admitted(&self, node_id: u32, publishes: bool) {
+                self.0.write().push((node_id, publishes));
+            }
+        }
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let tree = Recording(RwLock::new(Vec::new()));
+        let driver_for = |id| {
+            KernelSpawnCtx::new(
+                sink,
+                &sched,
+                &table,
+                &aspaces,
+                arch.as_ref(),
+                ProcessId::KERNEL,
+                &NULL_PROCESS_WAIT,
+                DescriptorTable::standard(),
+                Vec::new(),
+                &[],
+                Some(crate::spawn::DriverNode { id, tree: &tree }),
+                tairix_abi::ProcId::from_raw([0x16; 16]),
+                ProcName::from_bytes_truncating(b"driverproc"),
+                SPAWN_PATH.to_vec(),
+                SpawnCredential::system(),
+                false,
+            )
+        };
+        let leaf = EmbeddedProgram {
+            path: SPAWN_PATH,
+            rxe: SPAWN_RXE,
+            caps: &[CapabilityId::MMIO_MAP],
+            args: &[],
+        };
+        let bus = EmbeddedProgram {
+            caps: &[CapabilityId::MMIO_MAP, CapabilityId::HW_EMIT],
+            ..leaf
+        };
+        admit_prebuilt_child(&driver_for(0x61), &leaf).expect("admitted");
+        admit_prebuilt_child(&driver_for(0x62), &bus).expect("admitted");
+        assert_eq!(*tree.0.read(), [(0x61, false), (0x62, true)]);
+
+        // A node another driver holds is refused before the tree hears of it,
+        // so the live driver's settling is never undone.
+        assert_eq!(
+            admit_prebuilt_child(&driver_for(0x62), &leaf),
+            Err(AdmitError::NodeBusy)
+        );
+        assert_eq!(tree.0.read().len(), 2);
     }
 
     /// A device grant with no node could never be revoked by a removal, so
@@ -35202,6 +35480,9 @@ mod tests {
         // Every `(node_id, health)` the handler recorded through `set_health`,
         // so a test can assert the resolved own-node and health it passed.
         health_set: RwLock<alloc::vec::Vec<(u32, tairix_abi::blkio::FaultDomainState)>>,
+        // Every node id the handler settled, so a test can assert it settled
+        // the caller's own node and nothing else.
+        settled: RwLock<alloc::vec::Vec<u32>>,
         // The block-service endpoint base ids each node declares, keyed by
         // node id, so an orderly-removal test can give a node the endpoints
         // the busy check reasons about. A node absent from the map declares
@@ -35220,6 +35501,7 @@ mod tests {
                 gone: RwLock::new(alloc::vec::Vec::new()),
                 unremovable: RwLock::new(alloc::vec::Vec::new()),
                 health_set: RwLock::new(alloc::vec::Vec::new()),
+                settled: RwLock::new(alloc::vec::Vec::new()),
                 endpoints: RwLock::new(alloc::vec::Vec::new()),
             }
         }
@@ -35332,6 +35614,10 @@ mod tests {
             // handler passed, so a test can assert the caller could only set
             // its own node's health and that the value was validated.
             self.health_set.write().push((node_id, health));
+            Ok(())
+        }
+        fn settle(&self, node_id: u32) -> Result<(), Errno> {
+            self.settled.write().push(node_id);
             Ok(())
         }
     }
@@ -36780,11 +37066,14 @@ mod tests {
         };
         let granted = child(TEST_VECTOR.resource());
         let wired = child(tairix_abi::HwResource::irq(u64::from(TEST_VECTOR.line), 1));
-        // The granted child at 0x1000, the wired one at 0x1400, and the
-        // allocation record written out at 0x1800.
-        let mut payload = alloc::vec![0u8; 0x800];
-        payload[..tairix_abi::HwNode::WIRE_LEN].copy_from_slice(&granted.to_le_bytes());
-        payload[0x400..0x400 + tairix_abi::HwNode::WIRE_LEN].copy_from_slice(&wired.to_le_bytes());
+        // The granted child at 0x1000, the wired one a node record later, and
+        // the allocation record written out after both, all on one page.
+        let node_len = tairix_abi::HwNode::WIRE_LEN;
+        let wired_at = node_len.next_multiple_of(0x100);
+        let record_at = 2 * wired_at;
+        let mut payload = alloc::vec![0u8; record_at];
+        payload[..node_len].copy_from_slice(&granted.to_le_bytes());
+        payload[wired_at..wired_at + node_len].copy_from_slice(&wired.to_le_bytes());
         let (space, physmap) =
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &payload);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
@@ -36819,19 +37108,17 @@ mod tests {
         .with_hw_tree(tree)
         .with_msi_alloc_facility(msi);
 
+        let user = |offset: usize| 0x1000 + offset as u64;
         assert_eq!(
-            h.msi_alloc(&ctx, 0x1800, tairix_abi::MsiAllocation::WIRE_LEN),
+            h.msi_alloc(&ctx, user(record_at), tairix_abi::MsiAllocation::WIRE_LEN),
             Ok(tairix_abi::MsiAllocation::WIRE_LEN as u64)
         );
         assert_eq!(
-            h.hw_emit_node(&ctx, 0x1400, tairix_abi::HwNode::WIRE_LEN),
+            h.hw_emit_node(&ctx, user(wired_at), node_len),
             Err(Errno::PermissionDenied)
         );
         assert!(tree.published.read().is_empty());
-        assert_eq!(
-            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
-            Ok(100)
-        );
+        assert_eq!(h.hw_emit_node(&ctx, user(0), node_len), Ok(100));
         assert_eq!(tree.published.read().as_slice(), &[(9, granted)]);
     }
 
@@ -37122,10 +37409,458 @@ mod tests {
         );
     }
 
-    /// `hw_self_node` returns the caller's *own* matched node id (resolved
-    /// kernel-side from the task id, never caller-supplied), needs no
-    /// capability, and a task with no loaded node fails closed with
-    /// `NotFound`.
+    /// `hw_node_settle` settles the caller's own matched node, resolved
+    /// kernel-side, and a task with no loaded node settles nothing.
+    #[test]
+    fn hw_node_settle_settles_the_callers_own_node_and_no_other() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        for task in [2, 3] {
+            let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+            aspaces
+                .write()
+                .register(ProcessId(task), space, physmap)
+                .expect("registration succeeds");
+        }
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+
+        let driver_caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let driver = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &driver_caps,
+        };
+        assert_eq!(h.hw_node_settle(&driver), Ok(0));
+        assert_eq!(*source.settled.read(), alloc::vec![9]);
+
+        let stranger_caps = make_caps_record(3, &[CapabilityId::HW_EMIT], sink);
+        let stranger = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &stranger_caps,
+        };
+        assert_eq!(h.hw_node_settle(&stranger), Err(Errno::PermissionDenied));
+        assert_eq!(
+            *source.settled.read(),
+            alloc::vec![9],
+            "a caller with no loaded node settles nothing"
+        );
+    }
+
+    /// A framebuffer console double: it records every block it is offered and
+    /// takes one only while it paints firmware memory, unless told to refuse.
+    struct MovableConsole {
+        surface: RwLock<Option<crate::console::ConsoleSurface>>,
+        refuses: bool,
+        offered: RwLock<alloc::vec::Vec<(u64, u64)>>,
+    }
+
+    impl MovableConsole {
+        fn leaked(surface: Option<crate::console::ConsoleSurface>, refuses: bool) -> &'static Self {
+            Box::leak(Box::new(Self {
+                surface: RwLock::new(surface),
+                refuses,
+                offered: RwLock::new(alloc::vec::Vec::new()),
+            }))
+        }
+
+        fn installed(&'static self) -> &'static [ConsoleDevice] {
+            Box::leak(Box::new([ConsoleDevice::new(
+                self,
+                &crate::console::NULL_CONSOLE_READ,
+            )]))
+        }
+    }
+
+    impl crate::console::ConsoleWrite for MovableConsole {
+        fn write(&self, bytes: &[u8]) -> Result<usize, Errno> {
+            Ok(bytes.len())
+        }
+
+        fn surface(&self) -> Option<crate::console::ConsoleSurface> {
+            *self.surface.read()
+        }
+
+        fn relocate(&self, phys: u64, len: u64) -> Relocation {
+            self.offered.write().push((phys, len));
+            let mut surface = self.surface.write();
+            let held = *surface;
+            match held {
+                Some(current) if current.kernel_owned => Relocation::Owned(current),
+                Some(current)
+                    if !self.refuses && current.len_bytes().is_some_and(|needed| needed <= len) =>
+                {
+                    let moved = crate::console::ConsoleSurface {
+                        phys,
+                        kernel_owned: true,
+                        ..current
+                    };
+                    *surface = Some(moved);
+                    Relocation::Moved(moved)
+                }
+                _ => Relocation::Refused,
+            }
+        }
+    }
+
+    /// Where [`ConsoleBlocks`] places the console's block.
+    const CONSOLE_BLOCK_PHYS: u64 = 0x3000_0000;
+
+    /// A shared-memory facility double for the console's block: one block at
+    /// [`CONSOLE_BLOCK_PHYS`] where the limit admits it, every request and
+    /// release recorded.
+    struct ConsoleBlocks {
+        requested: RwLock<alloc::vec::Vec<(u64, u64)>>,
+        freed: RwLock<alloc::vec::Vec<u64>>,
+    }
+
+    impl ConsoleBlocks {
+        fn leaked() -> &'static Self {
+            Box::leak(Box::new(Self {
+                requested: RwLock::new(alloc::vec::Vec::new()),
+                freed: RwLock::new(alloc::vec::Vec::new()),
+            }))
+        }
+    }
+
+    impl crate::devres::SharedMemFacility for ConsoleBlocks {
+        fn alloc_region(
+            &self,
+            _pages: u64,
+        ) -> Result<alloc::vec::Vec<crate::devres::SharedChunk>, Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn alloc_dma_region(
+            &self,
+            pages: u64,
+            backing: crate::devres::DmaBacking,
+        ) -> Result<alloc::vec::Vec<crate::devres::SharedChunk>, Errno> {
+            let crate::devres::DmaBacking::Contiguous { limit } = backing else {
+                return Err(Errno::NotSupported);
+            };
+            self.requested.write().push((pages, limit));
+            let pages = pages.next_power_of_two();
+            let end = CONSOLE_BLOCK_PHYS + pages * tairix_kernel_mem::PAGE_SIZE as u64;
+            if limit != 0 && end > limit {
+                return Err(Errno::OutOfMemory);
+            }
+            Ok(alloc::vec![crate::devres::SharedChunk {
+                phys_base: CONSOLE_BLOCK_PHYS,
+                order: pages.trailing_zeros(),
+                pages,
+            }])
+        }
+
+        fn map_region(
+            &self,
+            _chunks: &[crate::devres::SharedChunk],
+            _memory: SharedMemory,
+        ) -> Result<u64, Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn unmap_region(&self, _base: u64, _len: usize) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+
+        fn free_region(&self, chunks: &[crate::devres::SharedChunk], _memory: SharedMemory) {
+            self.freed
+                .write()
+                .extend(chunks.iter().map(|chunk| chunk.phys_base));
+        }
+    }
+
+    /// The firmware's 1080p console surface on a Pi 4.
+    fn firmware_console() -> crate::console::ConsoleSurface {
+        crate::console::ConsoleSurface {
+            phys: 0x3E40_2000,
+            mode: tairix_abi::driver::display::DisplayMode {
+                width_px: 1920,
+                height_px: 1080,
+                stride_bytes: 1920 * 4,
+                format: tairix_abi::driver::display::DisplayFormat::Bgra8888,
+            },
+            kernel_owned: false,
+        }
+    }
+
+    /// A Pi 4 display engine's node: memory through `[0, 1 GiB)`, the
+    /// peripherals through `[0xFC00_0000, 0xFF80_0000)`, and the boot console
+    /// where `boot_console`.
+    fn engine_node(id: u32, boot_console: bool, memory: bool) -> tairix_abi::HwNode {
+        let coherence = tairix_abi::DmaCoherence::Unsnooped;
+        let mut node = tairix_abi::HwNode::new(
+            id,
+            tairix_abi::HW_NODE_ROOT_ID,
+            tairix_abi::HwDeviceClass::Display,
+        );
+        node.push_resource(HwResource::dma_translated(
+            0xFF80_0000,
+            0x0380_0000,
+            0x7C00_0000,
+            coherence,
+        ))
+        .expect("room");
+        if memory {
+            node.push_resource(HwResource::dma_translated(
+                0x4000_0000,
+                0x4000_0000,
+                0xC000_0000,
+                coherence,
+            ))
+            .expect("room");
+        }
+        if boot_console {
+            node.push_resource(HwResource::property(tairix_abi::HwProperty::BootConsole, 1))
+                .expect("room");
+        }
+        node
+    }
+
+    /// `console_relocate` moves a console painting firmware memory onto a
+    /// block below the engine's memory window, answers it as a framebuffer
+    /// resource, and answers the same surface again without a second block.
+    #[test]
+    fn console_relocate_moves_the_console_below_the_engine_s_reach_once() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+            0,
+            encode_hw_snapshot(0, &[engine_node(9, true, true)]),
+        )));
+        let console = MovableConsole::leaked(Some(firmware_console()), false);
+        let blocks = ConsoleBlocks::leaked();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_consoles(console.installed())
+        .with_shared_mem_facility(blocks);
+        let caps = make_caps_record(2, &[CapabilityId::MEM_DMA], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let len = HwResource::WIRE_LEN;
+        let pages = (1920u64 * 4 * 1080).div_ceil(tairix_kernel_mem::PAGE_SIZE as u64);
+        let block_len = pages.next_power_of_two() * tairix_kernel_mem::PAGE_SIZE as u64;
+
+        for _ in 0..2 {
+            assert_eq!(h.console_relocate(&ctx, 0x1000, len), Ok(len as u64));
+            let written = h
+                .with_caller_aspace(&ctx, |space, physmap| {
+                    let mut buf = [0u8; HwResource::WIRE_LEN];
+                    copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                    buf
+                })
+                .expect("registered");
+            let surface = HwResource::from_bytes(&written).expect("a resource");
+            assert_eq!(surface.kind(), Some(HwResourceKind::Framebuffer));
+            assert_eq!(surface.base(), CONSOLE_BLOCK_PHYS);
+            assert_eq!(surface.framebuffer_mode(), Ok(firmware_console().mode));
+            assert_eq!(
+                surface.framebuffer_memory(),
+                Ok(tairix_abi::hwtree::FramebufferMemory::WriteBack)
+            );
+        }
+        assert_eq!(
+            *blocks.requested.read(),
+            alloc::vec![(pages, 0x4000_0000)],
+            "one block, below the window that starts at the bottom of memory"
+        );
+        assert_eq!(
+            *console.offered.read(),
+            alloc::vec![(CONSOLE_BLOCK_PHYS, block_len)]
+        );
+        assert!(
+            blocks.freed.read().is_empty(),
+            "the console keeps its block"
+        );
+    }
+
+    /// `console_relocate` answers only the driver of a node discovery marked
+    /// `BootConsole`, and takes no block for a device it cannot place one for.
+    #[test]
+    fn console_relocate_answers_only_the_boot_console_s_engine() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        for task in 2..=6 {
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
+            aspaces
+                .write()
+                .register(ProcessId(task), space, physmap)
+                .expect("registration succeeds");
+        }
+        for (task, node, path) in [
+            (2, 9, crate::iommu::DmaPath::Untranslated),
+            (3, 10, crate::iommu::DmaPath::Untranslated),
+            (5, 11, crate::iommu::DmaPath::Untranslated),
+            (6, 12, crate::iommu::DmaPath::Stranded { unit: None }),
+        ] {
+            aspaces
+                .write()
+                .admit_driver(ProcessId(task), node, path)
+                .expect("the node has no live driver");
+        }
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+            0,
+            encode_hw_snapshot(
+                0,
+                &[
+                    engine_node(9, true, true),
+                    engine_node(10, false, true),
+                    engine_node(11, true, false),
+                    engine_node(12, true, true),
+                ],
+            ),
+        )));
+        let console = MovableConsole::leaked(Some(firmware_console()), false);
+        let blocks = ConsoleBlocks::leaked();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_consoles(console.installed())
+        .with_shared_mem_facility(blocks);
+        let caller = |task| (task, make_caps_record(task, &[CapabilityId::MEM_DMA], sink));
+        let relocate = |task: u64, len: usize| {
+            let (task, caps) = caller(task);
+            let ctx = CallerContext {
+                task_id: SecTaskId(task),
+                caps: &caps,
+            };
+            h.console_relocate(&ctx, 0x1000, len)
+        };
+        let len = HwResource::WIRE_LEN;
+        assert_eq!(
+            relocate(3, len),
+            Err(Errno::PermissionDenied),
+            "a node discovery did not mark"
+        );
+        assert_eq!(
+            relocate(4, len),
+            Err(Errno::PermissionDenied),
+            "no node at all"
+        );
+        assert_eq!(relocate(2, len - 1), Err(Errno::BufferTooSmall));
+        assert_eq!(
+            relocate(6, len),
+            Err(Errno::PermissionDenied),
+            "a device that may master no DMA"
+        );
+        assert_eq!(
+            relocate(5, len),
+            Err(Errno::OutOfRange),
+            "no window starts at the bottom of memory"
+        );
+        assert!(
+            blocks.requested.read().is_empty(),
+            "none of those took a block"
+        );
+        assert_eq!(*console.surface.read(), Some(firmware_console()));
+    }
+
+    /// `console_relocate` gives back a block the console does not take, and
+    /// takes none where there is no console to move.
+    #[test]
+    fn console_relocate_frees_a_block_the_console_does_not_take() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+            0,
+            encode_hw_snapshot(0, &[engine_node(9, true, true)]),
+        )));
+        let refusing = MovableConsole::leaked(Some(firmware_console()), true);
+        let blocks = ConsoleBlocks::leaked();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_consoles(refusing.installed())
+        .with_shared_mem_facility(blocks);
+        let caps = make_caps_record(2, &[CapabilityId::MEM_DMA], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let len = HwResource::WIRE_LEN;
+        assert_eq!(h.console_relocate(&ctx, 0x1000, len), Err(Errno::NotFound));
+        assert_eq!(*blocks.freed.read(), alloc::vec![CONSOLE_BLOCK_PHYS]);
+
+        let h = h.with_consoles(MovableConsole::leaked(None, false).installed());
+        assert_eq!(
+            h.console_relocate(&ctx, 0x1000, len),
+            Err(Errno::NotFound),
+            "a UART-only board has no console to move"
+        );
+        assert_eq!(blocks.requested.read().len(), 1);
+    }
+
+    /// `hw_self_node` writes the caller's *own* matched node record — its id
+    /// and match keys, resolved kernel-side from the task id, never
+    /// caller-supplied — needs no capability, refuses a short buffer, and a
+    /// task with no loaded node fails closed with `NotFound`.
     #[test]
     fn hw_self_node_returns_the_callers_own_matched_node() {
         install_trace_filter();
@@ -37134,7 +37869,8 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
         aspaces
@@ -37154,12 +37890,44 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
+        let mut node = tairix_abi::HwNode::new(
+            9,
+            tairix_abi::HW_NODE_ROOT_ID,
+            tairix_abi::HwDeviceClass::Display,
+        );
+        let keys = [
+            tairix_abi::HwMatchKey::compatible(b"brcm,bcm2711-hdmi0").expect("fits"),
+            tairix_abi::HwMatchKey::compatible(b"brcm,hdmi").expect("fits"),
+        ];
+        for key in keys {
+            node.push_match_key(key).expect("room");
+        }
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+            0,
+            encode_hw_snapshot(0, &[node]),
+        )));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
-        );
+        )
+        .with_hw_tree(source);
 
-        // The caller learns its own node id — never a caller-supplied one.
-        assert_eq!(h.hw_self_node(&ctx), Ok(9));
+        // The caller learns its own node and the keys it is matched by.
+        let len = tairix_abi::HwSelfNode::WIRE_LEN;
+        assert_eq!(
+            h.hw_self_node(&ctx, 0x1000, len - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(h.hw_self_node(&ctx, 0x1000, len), Ok(len as u64));
+        let written = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; tairix_abi::HwSelfNode::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        let record = tairix_abi::HwSelfNode::from_bytes(&written).expect("canonical");
+        assert_eq!(record.node(), 9);
+        assert_eq!(record.match_keys(), keys);
 
         // A task with no loaded node is not an autoloaded driver: fail closed
         // with `NotFound` (no oracle, no fabricated identity).
@@ -37173,7 +37941,87 @@ mod tests {
             .write()
             .register(ProcessId(3), space3, physmap3)
             .expect("registration succeeds");
-        assert_eq!(h.hw_self_node(&other), Err(Errno::NotFound));
+        assert_eq!(
+            h.hw_self_node(&other, 0x1000, tairix_abi::HwSelfNode::WIRE_LEN),
+            Err(Errno::NotFound)
+        );
+    }
+
+    /// A leaf learns the status its resetting ancestor imposes from its own
+    /// node record, folded in the kernel however large the tree: D172's
+    /// leaf read the whole tree into a buffer no real tree fit, so a
+    /// resetting hub was blamed on the disk.
+    #[test]
+    fn hw_self_node_reports_a_resetting_ancestor_however_large_the_tree() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let root = tairix_abi::HwNode::new(
+            tairix_abi::HW_NODE_ROOT_ID,
+            tairix_abi::HW_NODE_ROOT,
+            tairix_abi::HwDeviceClass::Root,
+        );
+        let mut hub = tairix_abi::HwNode::new(
+            5,
+            tairix_abi::HW_NODE_ROOT_ID,
+            tairix_abi::HwDeviceClass::Bus,
+        );
+        hub.set_fault_health(tairix_abi::blkio::FaultDomainState::Recovering);
+        let disk = tairix_abi::HwNode::new(9, 5, tairix_abi::HwDeviceClass::Storage);
+        let mut nodes = alloc::vec![root, hub, disk];
+        // Far more than the eight kibibytes the leaf once copied the tree into.
+        nodes.extend((100..160).map(|id| {
+            tairix_abi::HwNode::new(
+                id,
+                tairix_abi::HW_NODE_ROOT_ID,
+                tairix_abi::HwDeviceClass::Other,
+            )
+        }));
+        assert!(nodes.len() * tairix_abi::HwNode::WIRE_LEN > 8192);
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+            0,
+            encode_hw_snapshot(0, &nodes),
+        )));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        let len = tairix_abi::HwSelfNode::WIRE_LEN;
+        assert_eq!(h.hw_self_node(&ctx, 0x1000, len), Ok(len as u64));
+        let written = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; tairix_abi::HwSelfNode::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        let record = tairix_abi::HwSelfNode::from_bytes(&written).expect("canonical");
+        assert_eq!(
+            record.ancestor_status(),
+            tairix_abi::blkio::BlkStatus::Reset
+        );
     }
 
     /// A display-class node published into the live tree mints an
@@ -38667,7 +39515,7 @@ mod tests {
     }
 
     #[test]
-    fn hw_emit_node_refuses_a_translation_unit_a_kernel_driven_node_a_doorbell_and_a_neighbour_s_stream(
+    fn hw_emit_node_refuses_a_translation_unit_discovery_s_own_facts_a_doorbell_and_a_neighbour_s_stream(
     ) {
         let unit = {
             let mut node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Iommu);
@@ -38685,6 +39533,15 @@ mod tests {
             .expect("resource fits");
             node.push_resource(tairix_abi::HwResource::mmio(0xFE98_0000, 0x4000))
                 .expect("resource fits");
+            node
+        };
+        let console_claim = {
+            let mut node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Display);
+            node.push_resource(tairix_abi::HwResource::property(
+                tairix_abi::HwProperty::BootConsole,
+                1,
+            ))
+            .expect("resource fits");
             node
         };
         let own = tairix_abi::HwResource::iommu_stream(
@@ -38711,6 +39568,7 @@ mod tests {
         for (node, published) in [
             (unit, false),
             (controller, false),
+            (console_claim, false),
             (doorbell, false),
             (child_with(neighbour), false),
             (child_with(own), true),
@@ -39845,7 +40703,9 @@ mod tests {
     }
 
     #[test]
-    fn call_create_admits_a_bus_child_endpoint_only_to_the_driver_holding_its_duty() {
+    fn call_create_admits_an_i2c_controller_endpoint_only_to_the_driver_holding_its_duty() {
+        use tairix_abi::driver::i2c::I2C_CONTROLLER_ENDPOINTS;
+        use tairix_abi::hwlink::{LinkDuty, LinkRequest};
         let _registry = crate::callreg::registry_guard();
         install_trace_filter();
         let sink = make_sink();
@@ -39872,30 +40732,37 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
 
-        let served = tairix_abi::hwtree::BUS_CHILD_ENDPOINTS.endpoint(41);
-        let neighbour = tairix_abi::hwtree::BUS_CHILD_ENDPOINTS.endpoint(42);
+        let served = I2C_CONTROLLER_ENDPOINTS.endpoint(41);
+        let neighbour = I2C_CONTROLLER_ENDPOINTS.endpoint(42);
 
-        // The privileged-bind capability alone is not enough: a driver with
-        // no duty for this child cannot bind its transfer endpoint and feed
-        // the chip's driver forged registers.
+        // The privileged-bind capability alone is not enough, nor is a
+        // target's link to the controller: serving it would answer every
+        // other target on the bus.
+        assert_eq!(
+            h.call_create(&ctx, served, 0x1000, 0x2000, 64, 64, 4),
+            Err(Errno::PermissionDenied)
+        );
+        let link = LinkRequest::new(served, 0, &[0x68], b"").expect("valid");
+        aspaces
+            .write()
+            .mint_grant(ProcessId(driver), tairix_abi::HwResource::request(&link));
         assert_eq!(
             h.call_create(&ctx, served, 0x1000, 0x2000, 64, 64, 4),
             Err(Errno::PermissionDenied)
         );
         assert!(crate::callreg::lookup(EndpointId(served)).is_none());
 
-        // Granted the duty discovery paired with that child, the same
-        // driver binds it…
-        aspaces.write().mint_grant(
-            ProcessId(driver),
-            tairix_abi::HwResource::bus_child(served, 0x68),
-        );
+        // Granted the controller node's duty, the same driver binds it…
+        let duty = LinkDuty::new(served, None).expect("valid");
+        aspaces
+            .write()
+            .mint_grant(ProcessId(driver), tairix_abi::HwResource::duty(&duty));
         assert_eq!(
             h.call_create(&ctx, served, 0x1000, 0x2000, 64, 64, 4),
             Ok(0)
         );
 
-        // …and still cannot bind the child next to it on the same bus.
+        // …and still cannot bind the controller next to it.
         assert_eq!(
             h.call_create(&ctx, neighbour, 0x1000, 0x2000, 64, 64, 4),
             Err(Errno::PermissionDenied)
@@ -43700,6 +44567,83 @@ mod tests {
         crate::callreg::unregister(EndpointId(audio));
     }
 
+    /// The cue authority states which process it is by its reserved
+    /// rendezvous alone, and may name no other: that instance is where a
+    /// session hands its chosen files. Binding it also admits the authority
+    /// to the lease, whose holder's choices are the only ones it applies.
+    #[test]
+    fn the_cue_authority_alone_names_itself_and_follows_the_lease() {
+        let _calls = crate::callreg::registry_guard();
+        let _registry = crate::notice::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let task = crate::test_boot::claim_task();
+        let instance = ProcId::from_raw([0x5d; PROC_ID_LEN]);
+        // The empty capability set the bind reads, then the instance it is,
+        // then one it is not.
+        let mut seed = [0u8; CapabilitySet::WIRE_LEN + 2 * PROC_ID_LEN];
+        seed[CapabilitySet::WIRE_LEN..][..PROC_ID_LEN].copy_from_slice(instance.as_bytes());
+        seed[CapabilitySet::WIRE_LEN + PROC_ID_LEN..].fill(0x77);
+        let (space, physmap) = call_aspace(&seed);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(ProcessId(task), space, physmap)
+            .expect("registration succeeds");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(task, &[CapabilityId::IPC_BIND_PRIVILEGED], sink)
+            .with_proc_id(instance);
+        let ctx = CallerContext {
+            task_id: SecTaskId(task),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let topic = tairix_abi::NoticeTopic::CueAuthority;
+        let own = 0x1000 + CapabilitySet::WIRE_LEN as u64;
+        let other = own + PROC_ID_LEN as u64;
+        assert_eq!(
+            h.notice_publish(&ctx, topic.as_u32(), own, PROC_ID_LEN),
+            Err(Errno::PermissionDenied),
+            "not before it binds the rendezvous"
+        );
+        assert!(!crate::notice::may_observe(
+            tairix_abi::NoticeTopic::DisplayLease,
+            task
+        ));
+        let endpoint = tairix_abi::sound_cue::SOUND_CUE_ENDPOINT;
+        assert_eq!(
+            h.call_create(&ctx, endpoint, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_publish(&ctx, topic.as_u32(), other, PROC_ID_LEN),
+            Err(Errno::PermissionDenied),
+            "an instance the kernel does not attest it is"
+        );
+        assert_eq!(
+            h.notice_publish(&ctx, topic.as_u32(), own, PROC_ID_LEN),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_read(&ctx, topic.as_u32(), 0x2000, PROC_ID_LEN),
+            Ok(PROC_ID_LEN as u64)
+        );
+        assert!(crate::notice::may_observe(topic, task + 1));
+        assert!(crate::notice::may_observe(
+            tairix_abi::NoticeTopic::DisplayLease,
+            task
+        ));
+        crate::callreg::unregister(EndpointId(endpoint));
+    }
+
     /// Only the network stack, by its reserved rendezvous, may state that the
     /// interfaces moved; anybody may read that they did.
     #[test]
@@ -43731,6 +44675,42 @@ mod tests {
         );
         assert_eq!(
             h.notice_read(&bystander, network.as_u32(), 0x2000, len),
+            Ok(len as u64)
+        );
+        crate::callreg::unregister(EndpointId(endpoint));
+    }
+
+    /// Only the display service, by its reserved rendezvous, may state that
+    /// the display's output moved; anybody may read that it did.
+    #[test]
+    fn the_display_service_alone_states_that_the_output_moved() {
+        let _calls = crate::callreg::registry_guard();
+        let _registry = crate::notice::registry_guard();
+        let world = LeaseTopicWorld::new();
+        let h = world.handlers();
+        let (service, bystander) = (world.ctx(LEASE_SERVICE), world.ctx(LEASE_BYSTANDER));
+        let output = tairix_abi::NoticeTopic::DisplayOutput;
+        let len = output.payload_len();
+        assert_eq!(
+            h.notice_publish(&service, output.as_u32(), 0x2000, len),
+            Err(Errno::PermissionDenied),
+            "not before it binds the rendezvous"
+        );
+        let endpoint = tairix_abi::display_ipc::DISPLAY_ENDPOINT;
+        assert_eq!(
+            h.call_create(&service, endpoint, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_publish(&service, output.as_u32(), 0x2000, len),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_publish(&bystander, output.as_u32(), 0x2000, len),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.notice_read(&bystander, output.as_u32(), 0x2000, len),
             Ok(len as u64)
         );
         crate::callreg::unregister(EndpointId(endpoint));
@@ -45274,6 +46254,244 @@ mod tests {
         // Cleanup: this test's own sets and tables only.
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
         assert!(aspaces.write().withdraw(ProcessId(owner)));
+    }
+
+    /// A handler over one console whose input is an interrupt-style
+    /// queue a test can push into, for the console `Stream` member tests.
+    fn console_member_handlers<'a>(
+        harness: &'a ConsoleMemberHarness,
+        aspaces: &'a RwLock<AddressSpaceRegistry>,
+        sink: &'a TestSink,
+    ) -> KernelSyscallHandlers<'a, TestArch> {
+        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            &crate::console::NULL_CONSOLE,
+            harness.queue,
+        )]));
+        KernelSyscallHandlers::new(
+            &harness.sched,
+            &harness.table,
+            &harness.arch,
+            sink,
+            &harness.irq,
+            &harness.ctl,
+            &harness.ipc,
+            aspaces,
+            &harness.rng,
+        )
+        .with_consoles(consoles)
+        .with_process_wait(harness.wait)
+    }
+
+    /// The fixed parts of a console-member test: everything but the
+    /// address spaces each test registers.
+    struct ConsoleMemberHarness {
+        arch: Arc<TestArch>,
+        sched: Scheduler<TestArch>,
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        queue: &'static crate::console::ConsoleInputQueue,
+        wait: &'static crate::procwait::KernelProcessWait<TestArch>,
+    }
+
+    impl ConsoleMemberHarness {
+        fn new() -> Self {
+            let arch = Arc::new(TestArch::with_cpus(1));
+            let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+            Self {
+                sched: make_sched(arch.clone()),
+                arch,
+                table: RwLock::new(CapTable::new()),
+                ipc: RwLock::new(PortRegistry::new()),
+                rng: unseeded_rng(),
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                queue: Box::leak(Box::new(crate::console::ConsoleInputQueue::new())),
+                wait: Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch))),
+            }
+        }
+    }
+
+    /// Register `task` with an address space and the standard streams on
+    /// console 0.
+    fn console_reader(aspaces: &RwLock<AddressSpaceRegistry>, task: u64) {
+        let (space, physmap) = call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(task), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .set_streams(ProcessId(task), DescriptorTable::standard());
+    }
+
+    /// A `Stream` member may watch the console the caller's standard input
+    /// reads only with the capability to read it; every other refusal is
+    /// the same oracle-free `NotFound` the pipe member uses.
+    #[test]
+    fn waitset_console_member_requires_a_readable_console_stream() {
+        install_trace_filter();
+        let sink = make_sink();
+        let harness = ConsoleMemberHarness::new();
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let reader = crate::test_boot::claim_task();
+        let blind = crate::test_boot::claim_peer_task();
+        console_reader(&aspaces, reader);
+        console_reader(&aspaces, blind);
+        let reader_caps = make_caps_record(reader, &[CapabilityId::CONSOLE_READ], sink);
+        let reader_ctx = CallerContext {
+            task_id: SecTaskId(reader),
+            caps: &reader_caps,
+        };
+        let blind_caps = make_caps_record(blind, &[], sink);
+        let blind_ctx = CallerContext {
+            task_id: SecTaskId(blind),
+            caps: &blind_caps,
+        };
+        let h = console_member_handlers(&harness, &aspaces, sink);
+
+        let set = h.waitset_create(&blind_ctx).expect("create");
+        assert_eq!(
+            h.waitset_ctl(
+                &blind_ctx,
+                set,
+                WS_OP_ADD,
+                WS_KIND_STREAM,
+                u64::from(STDIN),
+                1
+            ),
+            Err(Errno::NotFound),
+            "watching a console takes the right to read it"
+        );
+        let set = h.waitset_create(&reader_ctx).expect("create");
+        for fd in [u64::from(STDOUT), 9, u64::from(u32::MAX) + 1] {
+            assert_eq!(
+                h.waitset_ctl(&reader_ctx, set, WS_OP_ADD, WS_KIND_STREAM, fd, 1),
+                Err(Errno::NotFound)
+            );
+        }
+        h.waitset_ctl(
+            &reader_ctx,
+            set,
+            WS_OP_ADD,
+            WS_KIND_STREAM,
+            u64::from(STDIN),
+            1,
+        )
+        .expect("standard input on a readable console");
+
+        assert_eq!(crate::waitset::release_owned_by(reader), 1);
+        assert_eq!(crate::waitset::release_owned_by(blind), 1);
+        assert!(aspaces.write().withdraw(ProcessId(reader)));
+        assert!(aspaces.write().withdraw(ProcessId(blind)));
+    }
+
+    /// A console member reports pushed input as a peek: it stays ready until
+    /// the owner's read drains the bytes, then goes quiet again.
+    #[test]
+    fn waitset_console_member_reports_input_without_consuming_it() {
+        use crate::console::ConsoleInput as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let harness = ConsoleMemberHarness::new();
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let owner = crate::test_boot::claim_task();
+        console_reader(&aspaces, owner);
+        let caps = make_caps_record(owner, &[CapabilityId::CONSOLE_READ], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = console_member_handlers(&harness, &aspaces, sink);
+        let set = h.waitset_create(&ctx).expect("create");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_STREAM, u64::from(STDIN), 0x51)
+            .expect("add the console");
+
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        assert_eq!(harness.queue.push(b"k"), Ok(1));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Ok(0));
+        let token_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(ProcessId(owner))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token_bytes.try_into().expect("8 bytes")),
+            0x51
+        );
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x2000),
+            Ok(0),
+            "the wait only peeked"
+        );
+        assert_eq!(h.stream_read(&ctx, STDIN, 0x1000, 16, 0), Ok(1));
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        assert!(aspaces.write().withdraw(ProcessId(owner)));
+    }
+
+    /// Pending console input shows only to a reader `stream_read` would
+    /// admit: once the console is handed to a child, the shell that gave it
+    /// away no longer learns when a key is pressed.
+    #[test]
+    fn waitset_console_member_shows_input_only_to_its_foreground_owner() {
+        use crate::console::ConsoleInput as _;
+        use crate::procwait::ProcessWait as _;
+        install_trace_filter();
+        let sink = make_sink();
+        let harness = ConsoleMemberHarness::new();
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let shell = crate::test_boot::claim_task();
+        let child = crate::test_boot::claim_peer_task();
+        console_reader(&aspaces, shell);
+        console_reader(&aspaces, child);
+        harness
+            .wait
+            .register_child(
+                ProcessId(shell),
+                ProcessId(child),
+                crate::procwait::ChildListing::Listed,
+            )
+            .expect("registered");
+        let shell_caps = make_caps_record(shell, &[CapabilityId::CONSOLE_READ], sink);
+        let shell_ctx = CallerContext {
+            task_id: SecTaskId(shell),
+            caps: &shell_caps,
+        };
+        let child_caps = make_caps_record(child, &[CapabilityId::CONSOLE_READ], sink);
+        let child_ctx = CallerContext {
+            task_id: SecTaskId(child),
+            caps: &child_caps,
+        };
+        let h = console_member_handlers(&harness, &aspaces, sink);
+        let shell_set = h.waitset_create(&shell_ctx).expect("create");
+        let child_set = h.waitset_create(&child_ctx).expect("create");
+        for (ctx, set) in [(&shell_ctx, shell_set), (&child_ctx, child_set)] {
+            h.waitset_ctl(ctx, set, WS_OP_ADD, WS_KIND_STREAM, u64::from(STDIN), 1)
+                .expect("add the console");
+        }
+
+        assert_eq!(
+            h.console_foreground(&shell_ctx, STDIN, i64::try_from(child).expect("pid")),
+            Ok(0)
+        );
+        assert_eq!(harness.queue.push(b"k"), Ok(1));
+        assert_eq!(
+            h.waitset_wait(&shell_ctx, shell_set, 0, 0x2000),
+            Err(Errno::TimedOut)
+        );
+        assert_eq!(h.waitset_wait(&child_ctx, child_set, 0, 0x2000), Ok(0));
+
+        assert_eq!(crate::waitset::release_owned_by(shell), 1);
+        assert_eq!(crate::waitset::release_owned_by(child), 1);
+        assert!(aspaces.write().withdraw(ProcessId(shell)));
+        assert!(aspaces.write().withdraw(ProcessId(child)));
     }
 
     /// Adding a `StreamRoom` member is owner- and descriptor-checked
@@ -49578,6 +50796,9 @@ mod tests {
             }
             fn read_timeout(&self, _buf: &mut [u8], _timeout_ns: u64) -> Result<usize, Errno> {
                 Err(Errno::TimedOut)
+            }
+            fn input_ready(&self) -> bool {
+                false
             }
         }
         struct DiscardWrite;

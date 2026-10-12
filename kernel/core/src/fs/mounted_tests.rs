@@ -1488,6 +1488,40 @@ fn mount_snapshot_reports_names_and_usage_from_the_registered_driver() {
     assert!(usage.free_blocks <= usage.total_blocks);
 }
 
+/// A volume's driver coming, going, or changing availability moves what the
+/// mount listing reports though no mount point moved, so each is published
+/// as a `Mounts` notice.
+///
+/// Regression: none was, so an unlocked root — whose mounts exist from boot
+/// and gain their driver only at unlock — and a surprise-removed volume
+/// reached no subscriber of the notice.
+#[test]
+fn a_volume_coming_going_or_failing_is_published_as_a_mounts_notice() {
+    use tairix_abi::NoticeTopic;
+    let generation =
+        || crate::notice::generation(NoticeTopic::Mounts, &crate::seat::NULL_SEAT_REGISTRY);
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs(false)).expect("install vfs");
+    let handle = DriverHandle::from_raw(11).expect("handle");
+
+    let before = generation();
+    cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
+        .expect("registered");
+    let registered = generation();
+    assert!(registered > before, "a volume coming online is published");
+
+    cell.set_availability(handle, MountAvailability::UnavailableLost)
+        .expect("marked");
+    let failed = generation();
+    assert!(
+        failed > registered,
+        "a volume becoming unavailable is published"
+    );
+
+    assert!(cell.unregister(handle).is_some());
+    assert!(generation() > failed, "a volume leaving is published");
+}
+
 /// The mount snapshot overlays a live device's reported I/O health onto an
 /// otherwise-`Available` volume, but a genuine surprise-removal state always
 /// wins over the overlay so a vanished volume never masquerades as merely

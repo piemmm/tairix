@@ -1526,8 +1526,11 @@ fn describe<T: UacTransport>(
     let mut rates: Vec<Rate> = Vec::new();
     let mut formats = SampleFormats::EMPTY;
     let mut widest: Option<ChannelMap> = None;
+    let (mut resolved, mut carried) = (0u8, 0u32);
     for format in &info.formats {
         formats = formats.with(format.format);
+        resolved = resolved.max(format.bits);
+        carried = carried.max(format.format.valid_bits());
         if widest.is_none_or(|map| format.channel_map.channels() > map.channels()) {
             widest = Some(format.channel_map);
         }
@@ -1562,6 +1565,7 @@ fn describe<T: UacTransport>(
         direction: info.direction,
         jack: JackState::Unknown,
         formats,
+        resolution: (u32::from(resolved) < carried).then_some(resolved),
         channel_map,
         rates: RateSupport::Discrete(rates),
         min_period_frames: ring_bounds::MIN_FRAMES,

@@ -11,9 +11,8 @@ mod program {
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::{DriverError, Errno, MmioMapper};
     use tairix_audiochan::{exit, fail};
-    use tairix_caps::CapabilitySet;
     use tairix_drv_audio_hda::engine::Hda;
-    use tairix_drv_audio_hda::{Wait, REQUIRED_CAPS};
+    use tairix_drv_audio_hda::{Wait, REQUIRED_CAPABILITIES};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_rt::ClockDelay;
 
@@ -33,16 +32,9 @@ mod program {
         }
     }
 
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        for &cap in REQUIRED_CAPS {
-            caps.insert(cap);
-        }
-        caps
-    }
-
     fn main() -> i32 {
-        let host = match RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) {
+        let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
+        let host = match RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) {
             Ok(host) => host,
             Err(err) => {
                 return fail(
@@ -97,7 +89,7 @@ mod program {
                 )
             }
         };
-        tairix_audiochan::serve(audio, &[tairix_audiochan::Wake::Irq(handle)])
+        tairix_audiochan::serve(audio, &[tairix_abi::driver::DeviceWake::Irq(handle)])
     }
 
     tairix_rt::entry!(main);

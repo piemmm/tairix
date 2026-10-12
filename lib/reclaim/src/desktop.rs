@@ -116,11 +116,19 @@ where
         label,
         seat,
         entry_metadata_bytes,
-        CacheBudget::from_backing(fb_bytes),
+        disposable_ui_budget(fb_bytes),
         pressure,
         sink,
         hasher,
     )
+}
+
+/// The budget [`disposable_ui_cache`] holds its cache to on an output of
+/// `fb_bytes`: what one it built is held to again when the output changes
+/// size ([`ReclaimCache::rebudget`]).
+#[must_use]
+pub fn disposable_ui_budget(fb_bytes: usize) -> CacheBudget {
+    CacheBudget::from_backing(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES)
 }
 
 /// Build a desktop-session cache of *screen-sized* rendered pixels,
@@ -157,11 +165,18 @@ where
         label,
         seat,
         entry_metadata_bytes,
-        CacheBudget::from_ceiling(fb_bytes),
+        screenful_ui_budget(fb_bytes),
         pressure,
         sink,
         hasher,
     )
+}
+
+/// The budget [`screenful_ui_cache`] holds its cache to on an output of
+/// `fb_bytes`.
+#[must_use]
+pub fn screenful_ui_budget(fb_bytes: usize) -> CacheBudget {
+    CacheBudget::from_ceiling(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES)
 }
 
 /// Build a desktop-session cache of pixels the session cannot rebuild
@@ -202,16 +217,25 @@ where
     E: PartialEq + Clone,
     S: BuildHasher,
 {
-    let budget = CacheBudget::from_ceiling(fb_bytes);
     ui_cache(
         label,
         seat,
         entry_metadata_bytes,
-        budget.with_working_set_floor(budget.hard() / WORKING_SET_DIVISOR),
+        working_set_ui_budget(fb_bytes),
         pressure,
         sink,
         hasher,
     )
+}
+
+/// The budget [`working_set_ui_cache`] holds its cache to on an output of
+/// `fb_bytes`.
+#[must_use]
+pub fn working_set_ui_budget(fb_bytes: usize) -> CacheBudget {
+    let budget = CacheBudget::from_ceiling(fb_bytes);
+    budget
+        .with_working_set_floor(budget.hard() / WORKING_SET_DIVISOR)
+        .with_reserved_floor(UI_CACHE_RESERVE_BYTES)
 }
 
 /// Build a desktop-session cache of pixels every surface in a stack of
@@ -250,20 +274,29 @@ where
     E: PartialEq + Clone,
     S: BuildHasher,
 {
-    let ceiling = fb_bytes.max(CacheBudget::from_backing(memory_bytes).hard());
     ui_cache(
         label,
         seat,
         entry_metadata_bytes,
-        CacheBudget::from_ceiling(ceiling).with_working_set_floor(fb_bytes),
+        stacked_ui_budget(fb_bytes, memory_bytes),
         pressure,
         sink,
         hasher,
     )
 }
 
+/// The budget [`stacked_ui_cache`] holds its cache to on an output of
+/// `fb_bytes` in a machine of `memory_bytes`.
+#[must_use]
+pub fn stacked_ui_budget(fb_bytes: usize, memory_bytes: usize) -> CacheBudget {
+    let ceiling = fb_bytes.max(CacheBudget::from_backing(memory_bytes).hard());
+    CacheBudget::from_ceiling(ceiling)
+        .with_working_set_floor(fb_bytes)
+        .with_reserved_floor(UI_CACHE_RESERVE_BYTES)
+}
+
 /// The cache every constructor above builds: the one classification under
-/// `budget`, with the shared reserve no band may take.
+/// `budget`, which carries the shared reserve no band may take.
 fn ui_cache<K, V, E, S>(
     label: &'static str,
     seat: u64,
@@ -282,7 +315,7 @@ where
     ReclaimCache::new(
         label,
         disposable_ui_candidate(seat, entry_metadata_bytes),
-        budget.with_reserved_floor(UI_CACHE_RESERVE_BYTES),
+        budget,
         pressure,
         sink,
         hasher,
@@ -638,6 +671,69 @@ mod tests {
             sink,
             BuildFastHash::new(),
         )
+    }
+
+    /// A desktop cache constructor, at an output's size.
+    type Build = fn(usize, &'static ReportedPressure, &'static DiscardSink) -> GlyphCache;
+
+    /// One constructor, and the budget it names for an output.
+    type Kind = (Build, fn(usize) -> CacheBudget);
+
+    /// A cache held again to the budget its constructor names for another
+    /// output admits exactly what one built for that output does, at every
+    /// band: the budget each constructor holds its cache to is that one
+    /// function, whichever path reached it.
+    #[test]
+    fn a_rebudgeted_cache_admits_what_one_built_for_its_output_does() {
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+        let (small, large) = (640 * 480 * 4, 3840 * 2160 * 4);
+        let kinds: [Kind; 4] = [
+            (
+                |fb, gauge, sink| {
+                    disposable_ui_cache("t", 1, fb, 32, gauge, sink, BuildFastHash::new())
+                },
+                disposable_ui_budget,
+            ),
+            (
+                |fb, gauge, sink| {
+                    screenful_ui_cache("t", 1, fb, 32, gauge, sink, BuildFastHash::new())
+                },
+                screenful_ui_budget,
+            ),
+            (
+                |fb, gauge, sink| {
+                    working_set_ui_cache("t", 1, fb, 32, gauge, sink, BuildFastHash::new())
+                },
+                working_set_ui_budget,
+            ),
+            (
+                |fb, gauge, sink| {
+                    stacked_ui_cache("t", 1, fb, MACHINE, 32, gauge, sink, BuildFastHash::new())
+                },
+                |fb| stacked_ui_budget(fb, MACHINE),
+            ),
+        ];
+        for (build, budget) in kinds {
+            let mut moved = build(small, gauge, sink);
+            let _ = moved.rebudget(budget(large));
+            let built = build(large, gauge, sink);
+            for band in [
+                PressureBand::Normal,
+                PressureBand::Moderate,
+                PressureBand::Critical,
+            ] {
+                gauge.report(band);
+                for bytes in [1 << 12, 1 << 16, 1 << 20, 1 << 24, 1 << 27] {
+                    assert_eq!(
+                        moved.holds(1, bytes),
+                        built.holds(1, bytes),
+                        "{band:?} {bytes}"
+                    );
+                }
+            }
+            gauge.report(PressureBand::Normal);
+        }
     }
 
     /// Two overlapping windows each wider than half the screen want two frosts

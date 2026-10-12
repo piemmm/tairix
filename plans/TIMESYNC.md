@@ -679,63 +679,17 @@ No QEMU vertical is possible — QEMU models no `VideoCore` — so the protocol
 and every fail-closed path are host-proven and the live channel is the on-metal
 acceptance item, exactly as for the rest of `plans/PI.md`'s mailbox work.
 
-**The I²C tier.** §5 fixed the *requirement* — one grant-restricted transfer
-endpoint per child, so a chip driver can never address a neighbour on the bus
-— and I²C has no enumeration protocol to satisfy it with: a driver learns only
-its own grants, `hw_tree_read` is the privileged global inventory, and probing
-every address is forbidden and can be destructive. The shape that landed is
-**the parent carries the duty, the child carries the authority, and both come
-from the device tree**:
+**The I²C tier.** A chip driver can never address a neighbour on the bus:
+the clock chips reach their parts over `i2c-v1` target channels, each held by
+its controller to the one address the chip node's link names (`plans/I2C.md`).
+Discovery reads the targets from the device tree, since I²C has no enumeration
+protocol and probing every address is forbidden. `lib/i2c` holds the
+register-transaction protocol (`Device`: block/single read, block/single
+write, and the `update_one` read-modify-write that writes only a change) plus
+`mock::MockPart`, the one register-file part double every chip driver's host
+tests drive; `drivers/bus/i2c/bcm2835` is the BSC (`plans/I2C.md` I4). The
+chips:
 
-- **`kernel/arch/api::fdtwalk`** (shared by aarch64 and riscv64) recognises a
-  bus child by the Devicetree convention for a non-memory-mapped addressed bus
-  — parent `#address-cells = <1>` with `#size-cells = <0>` — so it stays
-  platform-neutral. `/cpus` spells itself the same way, so a CPU node is
-  excluded by its own spec-defined `device_type`. Each such child's endpoint id
-  is `hwtree::BUS_CHILD_ENDPOINTS` indexed by its hardware-tree node id; the child
-  node gets a plain `Endpoint` resource naming it and the **parent** gets a new
-  `HwResourceKind::BusChild = 9` pairing that id with the child's bus address
-  (`base`/`xlate`, the `Framebuffer` precedent for a paired record).
-- **The parent is emitted before its children, so the duties are read ahead.**
-  A cloned walk iterator replays the *same* emission predicate (`is_emitted`,
-  now the one definition `build_node` also applies) to predict the ids the walk
-  is about to assign. A child past the parent's `HW_NODE_MAX_RESOURCES` gets no
-  duty **and** no endpoint — the two halves can never disagree, and that chip
-  is simply left unbound and logged.
-- **Binding a bus-child endpoint requires the duty grant.** The block is
-  reserved (`ipc::is_reserved_endpoint`), and `call_create` additionally
-  resolves a `BusChild` grant covering the id against the *calling task*, so a
-  second privileged driver cannot claim a chip's endpoint first and feed its
-  driver forged registers. `covers` gives `BusChild ⊃ Endpoint(same id)`, which
-  is also what would let a bus driver forward the endpoint onto a node it
-  publishes.
-- **The wire carries no address.** `lib/abi::driver::i2c`'s `I2cPort` is one
-  *part*, not a bus, and `i2c_ipc`'s frame is two phase lengths plus a payload:
-  the bus driver takes the address from the duty grant paired with the endpoint
-  a request arrived on. A chip driver has no field in which to name a
-  neighbour, whatever it believes about the bus. `I2cAddress::from_bus_address`
-  narrows the grant's 64-bit field rather than truncating it, so a malformed
-  tree leaves a child unserved instead of pointing the controller elsewhere.
-- **`lib/i2c`** holds the register-transaction protocol (`Device`: block/single
-  read, block/single write, and the `update_one` read-modify-write that writes
-  only a change) plus `mock::MockPart`, the one register-file part double every
-  chip driver's host tests drive. `MAX_BLOCK_LEN` is derived from the seam's
-  own per-phase bound, never restated.
-- **`drivers/bus/i2c/bcm2835`** is the BSC: IRQ-driven through the host's
-  `wait_irq` park (which `VirtioHost::notify_wait` now also routes through, one
-  definition), one restricted-sender endpoint per duty, and a per-phase
-  deadline sized from the slowest bus rate the driver tolerates — a liveness
-  backstop for a wedged controller, not a bus-speed bound, since clock
-  stretching is bounded by the controller's own timeout register. Two facts
-  worth not re-deriving: **whether the address was acknowledged comes from
-  `DLEN`**, which reads back the bytes still to move once a transfer has begun
-  (the bytes the driver pushed into the FIFO say nothing — a write phase fills
-  it before the part answers); and **aborting a transfer needs the enable bit
-  dropped**, because the control register has no abort, so recovery disables,
-  clears, and re-enables. It does not touch the clock divider: the bus speed is
-  the board's, and nothing in discovery tells a driver what the part is rated
-  for. The BSC cannot emit a true repeated START — a documented limitation, so
-  a multi-master bus is out of scope.
 - **`drivers/rtc/ds3231`** (`maxim,ds3231`, and `maxim,ds1307` on the same
   `0x00..=0x06` block), **`drivers/rtc/pcf8523`** (`nxp,pcf8523`), and
   **`drivers/rtc/pcf85063a`** (`nxp,pcf85063a`). Each honours its own

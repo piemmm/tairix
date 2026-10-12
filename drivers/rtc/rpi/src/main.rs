@@ -67,16 +67,6 @@ mod program {
     /// is a queue bound, not a hardware capacity.
     const ENDPOINT_CAPACITY: usize = 4;
 
-    /// The capability set the host re-checks before marshalling a property
-    /// exchange, plus the bind privilege needed to create a restricted-sender
-    /// endpoint. The kernel is the authority and re-checks every trap.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MAILBOX);
-        caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
-        caps
-    }
-
     /// The required-sender capability set of the served endpoint.
     ///
     /// `CAP_TIME_SET` rather than a capability of its own: the only principal
@@ -95,7 +85,11 @@ mod program {
     /// On success this never returns: the serve loop runs for the life of the
     /// driver process.
     fn main() -> i32 {
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = tairix_drv_rtc_rpi::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         let mut rtc = RpiRtc::new(host);

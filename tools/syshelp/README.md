@@ -11,22 +11,26 @@ TAIRiX ships on the read-only `/System` volume each command app's
 internationalised `Help/` tree at `<store>/<name>.app/Help/<locale>/<doc>.md`
 (`plans/APPS.md`), each app's bundle resources at
 `<store>/<name>.app/Resources/<file>` (`<store>` being the store the bundle's
-own manifest kind installs it to), and the desktop's graphics assets (icon
-masters, wallpaper masters, cursor sets) under `/System/Graphics`.
+own manifest kind installs it to), and the desktop's own assets — icon
+masters, wallpapers, cursor sets and screensaver previews under
+`/System/Graphics`, the sound themes under `/System/Audio/Sounds`.
 
 `build.rs` walks the command-app source roots (`userland/{apps,gui,shell}`)
-and each graphics family's own directory (`lib/icon/assets/`,
-`lib/wallpaper/assets/`, `lib/cursor/assets/`), and embeds every file it finds
-as a row of `HELP_FILES`, `RESOURCE_FILES` or `GRAPHICS_FILES`. Adding a help
-document, a resource or an asset is dropping a file on disk; nothing keeps a
+and each asset family's own directory (`lib/icon/assets/`,
+`lib/wallpaper/assets/`, `lib/cursor/assets/`, `lib/wallpaper/screensavers/`,
+`lib/soundtheme/assets/`), and embeds every file it finds as a row of
+`HELP_FILES`, `RESOURCE_FILES` or `ASSET_FILES`. Adding a help document, a
+resource or an asset is dropping a file on disk; nothing keeps a
 hand-maintained list, and nothing hardcodes the payload into a binary.
 
 - A resource (e.g. `lspci.app`'s compiled `pci.ids.bin` lookup table) is
   covered by the bundle's signed `AppInfo` content hash, so a tampered
   resource fails the load gate closed.
-- Each graphics asset is validated against its own family's contract as it is
-  discovered, so a name its consumer could never resolve or an over-large file
-  fails the build closed instead of shipping artwork that never draws.
+- Each asset is held to its own family's contract as it is discovered, so a
+  name its consumer could never resolve or an over-large file fails the build
+  instead of shipping. A sound is also decoded in full against the sounds'
+  authoring contract (`sound`, behind the host-only `sound` feature, which
+  `cargo xtask sound-encode` shares), because a bad sound plays as silence.
 
 ## The disk
 

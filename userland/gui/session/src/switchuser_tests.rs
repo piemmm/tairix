@@ -12,7 +12,8 @@ use tairix_abi::{CapabilityId, Errno, Origin, ProcId};
 
 use crate::depart::{serve_park_ns, Departure};
 use crate::switchuser::{
-    ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,
+    ResumeFailure, SeatDeparture, SeatReturn, SessionAuthority, SwitchRefusal, SwitchUser,
+    WakeRefusal,
 };
 use tairix_abi::WAITSET_TIMEOUT_NONE;
 
@@ -30,7 +31,7 @@ enum Step {
     Suspend,
     ReleaseSeat,
     AcquireSeat,
-    QueryMode,
+    QueryOutput,
     Reconfigure(u32, u32),
     PublishDesktop,
     RepaintAll(u32, u32),
@@ -78,7 +79,7 @@ impl SessionAuthority for FakeAuthority {
 struct FakePresentation {
     log: Vec<Step>,
     acquire: Result<(), Errno>,
-    mode: Result<DisplayMode, Errno>,
+    output: Result<Option<DisplayMode>, Errno>,
     reconfigure: Result<(), Errno>,
     repaint: Result<(), Errno>,
 }
@@ -88,20 +89,16 @@ impl FakePresentation {
         Self {
             log: Vec::new(),
             acquire: Ok(()),
-            mode: Ok(mode),
+            output: Ok(Some(mode)),
             reconfigure: Ok(()),
             repaint: Ok(()),
         }
     }
 }
 
-impl SeatPresentation for FakePresentation {
+impl SeatDeparture for FakePresentation {
     fn fade_out(&mut self) {
         self.log.push(Step::FadeOut);
-    }
-
-    fn fade_in(&mut self) {
-        self.log.push(Step::FadeIn);
     }
 
     fn suspend(&mut self) {
@@ -111,15 +108,21 @@ impl SeatPresentation for FakePresentation {
     fn release_seat(&mut self) {
         self.log.push(Step::ReleaseSeat);
     }
+}
+
+impl SeatReturn for FakePresentation {
+    fn fade_in(&mut self) {
+        self.log.push(Step::FadeIn);
+    }
 
     fn acquire_seat(&mut self) -> Result<(), Errno> {
         self.log.push(Step::AcquireSeat);
         self.acquire
     }
 
-    fn query_mode(&mut self) -> Result<DisplayMode, Errno> {
-        self.log.push(Step::QueryMode);
-        self.mode
+    fn query_output(&mut self) -> Result<Option<DisplayMode>, Errno> {
+        self.log.push(Step::QueryOutput);
+        self.output
     }
 
     fn reconfigure(&mut self, mode: DisplayMode) -> Result<(), Errno> {
@@ -338,7 +341,7 @@ fn a_foreground_wake_reacquires_requeries_and_repaints_in_full() {
     );
     // The mode the resume adopted is answered back, so the caller rebuilds
     // what it owns (the pointer's clamp rectangle) against the new screen.
-    assert_eq!(switch.resume(&mut screen), Ok(mode(1280, 720)));
+    assert_eq!(switch.resume(&mut screen), Ok(Some(mode(1280, 720))));
 
     // The seat first, then the mode as it is *now*, then a frame sized to
     // it and every application told of it, then black, then every pixel of
@@ -348,11 +351,60 @@ fn a_foreground_wake_reacquires_requeries_and_repaints_in_full() {
         screen.log,
         vec![
             Step::AcquireSeat,
-            Step::QueryMode,
+            Step::QueryOutput,
             Step::Reconfigure(1280, 720),
             Step::PublishDesktop,
             Step::FadeIn,
             Step::RepaintAll(1280, 720),
+        ]
+    );
+    assert!(!switch.is_background());
+}
+
+/// A session switched back to while no output is connected takes its seat
+/// and tells applications its desktop, but has nothing to draw into: it is
+/// foreground and dormant until an output arrives.
+#[test]
+fn a_resume_with_no_output_comes_back_dormant() {
+    let mut switch = switchable();
+    let mut login = FakeAuthority::accepting();
+    let mut screen = FakePresentation::showing(mode(1920, 1080));
+    assert_eq!(switch.step_aside(&mut login, &mut screen), Ok(()));
+
+    let mut screen = FakePresentation {
+        output: Ok(None),
+        ..FakePresentation::showing(mode(1920, 1080))
+    };
+    assert_eq!(switch.resume(&mut screen), Ok(None));
+    assert_eq!(
+        screen.log,
+        vec![Step::AcquireSeat, Step::QueryOutput, Step::PublishDesktop]
+    );
+    assert!(!switch.is_background());
+}
+
+/// The output moving between the resume reading it and configuring frames
+/// for it is not a failure: the session comes back dormant, and the
+/// announcement of the move brings it onto the new output.
+#[test]
+fn a_resume_that_races_an_output_move_comes_back_dormant() {
+    let mut switch = switchable();
+    let mut login = FakeAuthority::accepting();
+    let mut screen = FakePresentation::showing(mode(1920, 1080));
+    assert_eq!(switch.step_aside(&mut login, &mut screen), Ok(()));
+
+    let mut screen = FakePresentation {
+        reconfigure: Err(Errno::Stale),
+        ..FakePresentation::showing(mode(1920, 1080))
+    };
+    assert_eq!(switch.resume(&mut screen), Ok(None));
+    assert_eq!(
+        screen.log,
+        vec![
+            Step::AcquireSeat,
+            Step::QueryOutput,
+            Step::Reconfigure(1920, 1080),
+            Step::PublishDesktop,
         ]
     );
     assert!(!switch.is_background());
@@ -382,11 +434,11 @@ fn each_failing_resume_step_stops_the_ones_after_it() {
     for (script, expected, after) in [
         (
             FakePresentation {
-                mode: Err(Errno::NotFound),
+                output: Err(Errno::NotFound),
                 ..FakePresentation::showing(mode(800, 600))
             },
             ResumeFailure::ModeUnavailable(Errno::NotFound),
-            vec![Step::AcquireSeat, Step::QueryMode],
+            vec![Step::AcquireSeat, Step::QueryOutput],
         ),
         (
             FakePresentation {
@@ -396,7 +448,7 @@ fn each_failing_resume_step_stops_the_ones_after_it() {
             ResumeFailure::FrameRefused(Errno::OutOfMemory),
             vec![
                 Step::AcquireSeat,
-                Step::QueryMode,
+                Step::QueryOutput,
                 Step::Reconfigure(800, 600),
             ],
         ),
@@ -408,7 +460,7 @@ fn each_failing_resume_step_stops_the_ones_after_it() {
             ResumeFailure::PaintRefused(Errno::DeviceFault),
             vec![
                 Step::AcquireSeat,
-                Step::QueryMode,
+                Step::QueryOutput,
                 Step::Reconfigure(800, 600),
                 Step::PublishDesktop,
                 Step::FadeIn,

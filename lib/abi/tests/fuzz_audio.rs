@@ -34,8 +34,9 @@ use tairix_abi::audio::{
     encode_state_reply, encode_streams_reply, notify_endpoint_for, AudioBaseline,
     AudioDeviceDescriptor, AudioGain, AudioLocation, AudioNotify, AudioRequest, ClockReport,
     ControlAccess, DefaultChoice, OpenParams, StreamDescriptor, StreamGrant, StreamReport,
-    StreamRole, StreamState, AUDIO_CLOCK_REPLY_LEN, AUDIO_ENUMERATE_REPLY_LEN, AUDIO_MAX_REQUEST,
-    AUDIO_NOTIFY_LEN, AUDIO_OPEN_REPLY_LEN, AUDIO_STATE_REPLY_LEN, AUDIO_STREAMS_REPLY_LEN,
+    StreamRole, StreamState, Tenancy, AUDIO_CLOCK_REPLY_LEN, AUDIO_ENUMERATE_REPLY_LEN,
+    AUDIO_MAX_REQUEST, AUDIO_NOTIFY_LEN, AUDIO_OPEN_REPLY_LEN, AUDIO_STATE_REPLY_LEN,
+    AUDIO_STREAMS_REPLY_LEN,
 };
 use tairix_abi::driver::audio::{
     ring_bounds, AudioDeviceFacts, AudioEndpointFacts, AudioName, ChannelMap, Frames, GainRange,
@@ -44,14 +45,15 @@ use tairix_abi::driver::audio::{
 use tairix_abi::driver::audio_channel::{
     decode_configure_reply, decode_endpoint_reply, decode_facts_reply, decode_service_reply,
     encode_configure_reply, encode_endpoint_reply, encode_facts_reply, encode_service_reply,
-    AttachParams, AudioChannelNotify, AudioChannelRequest, AudioServiceReport, ConfigureGrant,
-    ConfigureParams, AUDIO_CHANNEL_CONFIGURE_REPLY_LEN, AUDIO_CHANNEL_ENDPOINT_REPLY_LEN,
-    AUDIO_CHANNEL_FACTS_REPLY_LEN, AUDIO_CHANNEL_MAX_REQUEST, AUDIO_CHANNEL_NOTIFY_LEN,
-    AUDIO_CHANNEL_SERVICE_REPLY_LEN,
+    is_audio_notify_endpoint, AttachParams, AudioChannelNotify, AudioChannelRequest,
+    AudioServiceReport, ConfigureGrant, ConfigureParams, AUDIO_CHANNEL_CONFIGURE_REPLY_LEN,
+    AUDIO_CHANNEL_ENDPOINT_REPLY_LEN, AUDIO_CHANNEL_FACTS_REPLY_LEN, AUDIO_CHANNEL_MAX_REQUEST,
+    AUDIO_CHANNEL_NOTIFY_LEN, AUDIO_CHANNEL_SERVICE_REPLY_LEN,
 };
 use tairix_abi::driver::audio_ring::{
     aligned_region, PcmGeometry, PcmRing, PCM_RING_HEADER_LEN, REGION_ALIGN_PADDING,
 };
+use tairix_abi::origin::{ProcId, PROC_ID_LEN};
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::Errno;
 use tairix_fuzzseed::Prng;
@@ -85,6 +87,7 @@ fn endpoint_facts() -> AudioEndpointFacts {
         formats: SampleFormats::EMPTY
             .with(SampleFormat::S16)
             .with(SampleFormat::F32),
+        resolution: None,
         channel_map: ChannelMap::STEREO,
         rates: rates(),
         min_period_frames: 48,
@@ -151,6 +154,16 @@ fn exercise_channel_request(bytes: &[u8]) {
             "an accepted ring depth must be one the region can be indexed by \
              and inside the pinned-memory bound ({})",
             params.ring_frames
+        );
+    }
+    if let AudioChannelRequest::Attach(AttachParams {
+        notify_endpoint, ..
+    })
+    | AudioChannelRequest::Watch { notify_endpoint } = request
+    {
+        assert!(
+            is_audio_notify_endpoint(notify_endpoint),
+            "an accepted notify port must be a device-channel one ({notify_endpoint:#x})"
         );
     }
     let round =
@@ -348,6 +361,9 @@ fn channel_seeds() -> Vec<Vec<u8>> {
             mute: true,
         }),
         channel_frame(&AudioChannelRequest::Service { endpoint: 1 }),
+        channel_frame(&AudioChannelRequest::Watch {
+            notify_endpoint: 0x4141_0000_0001_0000,
+        }),
     ]
 }
 
@@ -366,6 +382,17 @@ fn client_seeds() -> Vec<Vec<u8>> {
             channel_map: ChannelMap::STEREO,
             role: StreamRole::Media,
             latency_target_frames: 960,
+            tenancy: Tenancy::Caller,
+        })),
+        client_frame(&AudioRequest::Open(OpenParams {
+            device_id: 0,
+            direction: StreamDirection::Playback,
+            format: SampleFormat::S16,
+            rate: Rate::HZ_48000,
+            channel_map: ChannelMap::STEREO,
+            role: StreamRole::Notification,
+            latency_target_frames: 4_800,
+            tenancy: Tenancy::Session(ProcId::from_raw([0x5E; PROC_ID_LEN])),
         })),
         client_frame(&AudioRequest::Attach {
             stream_id: 42,

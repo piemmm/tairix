@@ -42,7 +42,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::audio::{
-    AudioGain, AudioNotify, OpenParams, StreamGrant, StreamReport, StreamRole, StreamState,
+    AudioGain, AudioNotify, OpenParams, StreamGrant, StreamReport, StreamRole, StreamState, Tenancy,
 };
 use tairix_abi::driver::audio::{
     ring_bounds, ChannelMap, Frames, Rate, SampleFormat, StreamDirection, MAX_CHANNELS,
@@ -59,10 +59,10 @@ use tairix_sandbox::audiodecode::{
 };
 use tairix_sandbox::session::{SessionDescriptors, SessionError};
 use tairix_sandbox::supervise::{SessionLauncher, SupervisedSession};
-use tairix_sound::SoundInfo;
+use tairix_sound::{Link, Metadata, SoundInfo};
 
 use crate::loudness;
-use crate::programme::{Advance, EntryId, Extent, Programme};
+use crate::programme::{Advance, EntryId, Programme};
 use crate::Span;
 
 /// Blocks decoded ahead of the ring: one being written while the next is
@@ -345,12 +345,15 @@ impl Skip {
 /// Something the host reports as it happens.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Note {
-    /// An entry is open and about to be played.
+    /// An entry, or a further link of a chained one, is open and about to be
+    /// played.
     Opened {
         /// Which.
         entry: EntryId,
         /// What it is.
         info: SoundInfo,
+        /// Which link of the entry's file, from zero.
+        link: u32,
     },
     /// An entry was left out.
     Skipped {
@@ -390,6 +393,10 @@ pub enum Transport {
 pub struct Status {
     /// The entry being heard, and what it is.
     pub heard: Option<(EntryId, SoundInfo)>,
+    /// The link of its file being heard, from zero: a chained file's links
+    /// each state their own stream, and the position counts from the link's
+    /// start.
+    pub link: u32,
     /// The frame of it being heard.
     pub position: u64,
     /// Where the transport stands.
@@ -414,6 +421,7 @@ impl Status {
     pub const fn new(gain: AudioGain) -> Self {
         Self {
             heard: None,
+            link: 0,
             position: 0,
             transport: Transport::Starting,
             gain,
@@ -474,6 +482,21 @@ impl Point {
     }
 }
 
+/// The part of an entry one link of its file plays: the link, and how far
+/// into the entry the link begins. A file that is no chain is all one part.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Part {
+    link: Link,
+    from: Span,
+}
+
+impl Part {
+    const WHOLE: Self = Self {
+        link: Link::FIRST,
+        from: Span::ZERO,
+    };
+}
+
 /// What the decoder is doing with the file it holds.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Phase {
@@ -483,6 +506,9 @@ enum Phase {
     Seeking,
     /// Decoding, discarding what comes before `from`.
     Decoding { from: u64 },
+    /// Moving to the file's next link: to go on into it once one ended, or,
+    /// `skipping`, to find the link the entry's start lies in.
+    Linking { skipping: bool },
     /// Every frame this pass wants is decoded.
     Done,
 }
@@ -493,10 +519,16 @@ struct Current {
     entry: EntryId,
     /// This play of it, which a repeat of the same entry does not share.
     serial: u64,
-    /// Where decoding it begins: its extent's start, or where a seek went.
+    /// Where decoding it begins in the link: its extent's start, or where a
+    /// seek went.
     enter: Point,
+    /// The part of the entry the decoder holds.
+    part: Part,
+    /// The entry was opened at its extent's start, not by a seek: a start
+    /// past its file's end is then the entry's to be left out for.
+    at_start: bool,
     info: Option<SoundInfo>,
-    /// The frame its pass ends at.
+    /// The frame of the link its pass ends at.
     end: Option<u64>,
     phase: Phase,
     /// Why its bytes could not be read, for the refusal that follows.
@@ -512,7 +544,8 @@ struct Block {
     /// The pass of the programme it was decoded in.
     pass: u32,
     info: SoundInfo,
-    /// The file frame of its first unwritten frame.
+    part: Part,
+    /// The link frame of its first unwritten frame.
     frame: u64,
     bytes: Vec<u8>,
     /// Bytes already written.
@@ -532,6 +565,7 @@ struct Segment {
     entry: EntryId,
     serial: u64,
     pass: u32,
+    part: Part,
     frame: u64,
     info: SoundInfo,
 }
@@ -602,6 +636,8 @@ struct Jump {
     entry: EntryId,
     point: Point,
     pass: u32,
+    /// The part of the entry the point lies in.
+    part: Part,
 }
 
 /// Where the listener is: an entry, the pass it is heard in, how far into it,
@@ -610,8 +646,8 @@ struct Jump {
 struct Heard {
     entry: EntryId,
     pass: u32,
+    part: Part,
     at: Span,
-    info: Option<SoundInfo>,
 }
 
 /// One play of an entry somewhere in the queue, at its first place.
@@ -657,6 +693,9 @@ pub struct Engine<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P:
     status: Status,
     changed: bool,
     notes: Vec<Note>,
+    /// What each further link of a chained entry says about itself, as its
+    /// link opens.
+    linked: Vec<(EntryId, u32, Metadata)>,
     outcome: Option<Outcome>,
 }
 
@@ -708,6 +747,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             status: Status::new(settings.gain),
             changed: true,
             notes: Vec::new(),
+            linked: Vec::new(),
             outcome: None,
         })
     }
@@ -757,6 +797,13 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
     /// Hand over what happened since this was last asked.
     pub fn take_notes(&mut self) -> Vec<Note> {
         core::mem::take(&mut self.notes)
+    }
+
+    /// Hand over what the further links opened since this was last asked
+    /// say about themselves: each entry's tags, its cover, by entry and link.
+    /// A file's first link is what its entry's own probe reads.
+    pub fn take_link_metadata(&mut self) -> Vec<(EntryId, u32, Metadata)> {
+        core::mem::take(&mut self.linked)
     }
 
     /// How the last playback ended, while none is under way.
@@ -987,6 +1034,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             // A jump is waiting for the decoder to be free: what it was doing
             // before is no longer wanted, only finished.
             Answer::Opened
+            | Answer::LastLink
             | Answer::Block { .. }
             | Answer::Ended
             | Answer::Sought { .. }
@@ -998,14 +1046,16 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
                 }
             }
             Answer::Opened => self.opened(),
-            Answer::Ended => self.file_done(),
+            Answer::Ended => self.link_done(),
+            Answer::LastLink => self.last_link(),
+            Answer::Resumed => self.resumed(),
             Answer::Sought { position } => {
                 if let Some(current) = &mut self.current {
                     current.phase = Phase::Decoding { from: position };
                 }
             }
             Answer::Refused(refusal) => self.refused(refusal),
-            Answer::Block { .. } | Answer::Resumed | Answer::Resuming => {}
+            Answer::Block { .. } | Answer::Resuming => {}
         }
     }
 
@@ -1033,33 +1083,44 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
         }
     }
 
+    /// The decoder holds a link of the current entry's file, its first or
+    /// one the decoding moved on to.
     fn opened(&mut self) {
-        let Some(info) = self.decoder.info().copied() else {
+        let (Some(info), Some(link)) = (self.decoder.info().copied(), self.decoder.link()) else {
             return;
         };
-        let Some(entry) = self.current.map(|current| current.entry) else {
-            return;
-        };
-        let end = pass_end(self.programme.extent(entry), &info);
         let gain = self
             .decoder
             .metadata()
             .and_then(loudness::track_millibel)
             .filter(|&millibel| millibel != UNITY_MILLIBEL)
             .map(millibel_to_linear);
+        let Some(current) = self.current else {
+            return;
+        };
+        let hz = info.rate.hz();
+        let start = current.enter.frame_at(hz);
+        if let Some(frames) = info.frames.filter(|&frames| start >= frames) {
+            self.skip_link(Span::of_frames(frames, hz), true);
+            return;
+        }
+        // A pass ending past this link runs it out and goes on into the next.
+        let extent = self.programme.extent(current.entry);
+        let end = extent
+            .duration
+            .map(|duration| {
+                extent
+                    .start
+                    .plus(duration)
+                    .less(current.part.from)
+                    .frames_at(hz)
+            })
+            .filter(|&end| info.frames.is_none_or(|frames| end < frames));
         let Some(current) = &mut self.current else {
             return;
         };
-        let start = current.enter.frame_at(info.rate.hz());
-        if info.frames.is_some_and(|frames| start >= frames) {
-            self.notes.push(Note::Skipped {
-                entry,
-                why: Skip::StartsPastEnd,
-            });
-            self.file_done();
-            return;
-        }
         current.info = Some(info);
+        current.part.link = link;
         current.end = end;
         current.gain = gain;
         current.phase = if start == 0 {
@@ -1069,8 +1130,87 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
         } else {
             Phase::Decoding { from: start }
         };
+        let entry = current.entry;
         self.progress.playable = true;
-        self.notes.push(Note::Opened { entry, info });
+        self.notes.push(Note::Opened {
+            entry,
+            info,
+            link: link.index,
+        });
+        if link != Link::FIRST {
+            if let Some(metadata) = self.decoder.metadata() {
+                if self.linked.try_reserve(1).is_err() {
+                    self.fail(Failure::OutOfMemory);
+                    return;
+                }
+                self.linked.push((entry, link.index, metadata.clone()));
+            }
+        }
+    }
+
+    /// Move the decoder past the link it holds, `length` of the entry long:
+    /// `skipping` to find the link a point beyond it lies in, the point then
+    /// that much earlier in the next.
+    fn skip_link(&mut self, length: Span, skipping: bool) {
+        let Some(current) = &mut self.current else {
+            return;
+        };
+        current.part.from = current.part.from.plus(length);
+        current.enter = if skipping {
+            Point::Time(current.enter.span().less(length))
+        } else {
+            Point::Time(Span::ZERO)
+        };
+        current.phase = Phase::Linking { skipping };
+        if self.decoder.next_link().is_err() {
+            self.fail(Failure::OutOfMemory);
+        }
+    }
+
+    /// The decoder's link ended before this pass of the entry did: go on into
+    /// the file's next link.
+    fn link_done(&mut self) {
+        let Some(current) = self.current else {
+            return;
+        };
+        let Some(info) = current.info else {
+            self.file_done();
+            return;
+        };
+        let length = Span::of_frames(self.decoder.position(), info.rate.hz());
+        let extent = self.programme.extent(current.entry);
+        let reached = extent
+            .duration
+            .is_some_and(|duration| extent.start.plus(duration) <= current.part.from.plus(length));
+        if reached {
+            self.file_done();
+        } else {
+            self.skip_link(length, false);
+        }
+    }
+
+    /// The entry's file holds no further link.
+    fn last_link(&mut self) {
+        if let Some(current) = self.current {
+            if current.at_start && current.phase == (Phase::Linking { skipping: true }) {
+                self.notes.push(Note::Skipped {
+                    entry: current.entry,
+                    why: Skip::StartsPastEnd,
+                });
+            }
+        }
+        self.file_done();
+    }
+
+    /// A replacement worker is back where the stream was; a move to the next
+    /// link the failed one never answered is asked for again.
+    fn resumed(&mut self) {
+        let linking = self
+            .current
+            .is_some_and(|current| matches!(current.phase, Phase::Linking { .. }));
+        if linking && self.decoder.next_link().is_err() {
+            self.fail(Failure::OutOfMemory);
+        }
     }
 
     fn decoded(&mut self, position: u64, mut bytes: Vec<u8>) {
@@ -1113,6 +1253,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
                 serial: current.serial,
                 pass: self.progress.pass,
                 info,
+                part: current.part,
                 frame: first,
                 bytes,
                 offset: 0,
@@ -1271,19 +1412,19 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
 
     /// Open `entry` in the decoder at the start of its extent.
     fn open_track(&mut self, entry: EntryId) {
-        self.open_at(entry, self.start_of(entry));
+        self.open_at(entry, self.start_of(entry), Part::WHOLE);
     }
 
     fn start_of(&self, entry: EntryId) -> Point {
         Point::Time(self.programme.extent(entry).start)
     }
 
-    /// Open `entry` at `enter`, or failing that the first entry after it that
-    /// opens; one walk, however many are left out, rather than one call deep
-    /// for each.
-    fn open_at(&mut self, mut entry: EntryId, mut enter: Point) {
+    /// Open `entry` at `enter` in the part `part` of it, or failing that the
+    /// first entry after it that opens; one walk, however many are left out,
+    /// rather than one call deep for each.
+    fn open_at(&mut self, mut entry: EntryId, mut enter: Point, mut part: Part) {
         loop {
-            let Err(why) = self.try_open(entry, enter) else {
+            let Err(why) = self.try_open(entry, enter, part) else {
                 return;
             };
             self.notes.push(Note::Skipped { entry, why });
@@ -1294,12 +1435,13 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             };
             entry = next;
             enter = self.start_of(next);
+            part = Part::WHOLE;
         }
     }
 
-    /// Open `entry`'s file and hand it to the decoder, or say why it cannot be
-    /// played.
-    fn try_open(&mut self, entry: EntryId, enter: Point) -> Result<(), Skip> {
+    /// Open `entry`'s file at the link `part` names and hand it to the
+    /// decoder, or say why it cannot be played.
+    fn try_open(&mut self, entry: EntryId, enter: Point, part: Part) -> Result<(), Skip> {
         let len = match self.programme.item(entry) {
             Some(item) => self.files.open(item).map_err(Skip::Open)?,
             None => return Err(Skip::Withdrawn),
@@ -1308,10 +1450,13 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             self.fail(Failure::NoDecoder);
             return Ok(());
         };
+        let at_start = part == Part::WHOLE && enter == self.start_of(entry);
         self.current = Some(Current {
             entry,
             serial: self.serials,
             enter,
+            part,
+            at_start,
             info: None,
             end: None,
             phase: Phase::Opening,
@@ -1319,7 +1464,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             gain: None,
         });
         self.serials = self.serials.wrapping_add(1);
-        if self.decoder.open(len, None, seed).is_err() {
+        if self.decoder.open_link(len, None, seed, part.link).is_err() {
             self.fail(Failure::OutOfMemory);
         }
         Ok(())
@@ -1335,21 +1480,24 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
         }
         self.jump = None;
         if let Some(current) = &mut self.current {
-            if let (true, Some(info)) = (current.entry == jump.entry, current.info) {
-                if info.seekable
-                    && self
-                        .decoder
-                        .seek(jump.point.frame_at(info.rate.hz()))
-                        .is_ok()
-                {
-                    current.enter = jump.point;
+            let here = current.entry == jump.entry && current.part == jump.part;
+            if let (true, Some(info)) = (here, current.info) {
+                let hz = info.rate.hz();
+                let frame = jump.point.frame_at(hz);
+                current.enter = jump.point;
+                current.at_start = false;
+                if let Some(frames) = info.frames.filter(|&frames| frame >= frames) {
+                    self.skip_link(Span::of_frames(frames, hz), true);
+                    return true;
+                }
+                if info.seekable && self.decoder.seek(frame).is_ok() {
                     current.phase = Phase::Seeking;
                     return true;
                 }
             }
         }
         self.current = None;
-        self.open_at(jump.entry, jump.point);
+        self.open_at(jump.entry, jump.point, jump.part);
         true
     }
 
@@ -1387,6 +1535,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             moved = true;
             let continues = stream.segments.back().is_some_and(|segment| {
                 segment.serial == head.serial
+                    && segment.part == head.part
                     && segment.frame + (stream.next - segment.ring) == head.frame
             });
             if !continues {
@@ -1395,6 +1544,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
                     entry: head.entry,
                     serial: head.serial,
                     pass: head.pass,
+                    part: head.part,
                     frame: head.frame,
                     info: head.info,
                 });
@@ -1476,6 +1626,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             channel_map: shape.channels,
             role: StreamRole::Media,
             latency_target_frames: latency,
+            tenancy: Tenancy::Caller,
         };
         let grant = match self.speaker.open(&params) {
             Ok(grant) => grant,
@@ -1665,6 +1816,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
         }
         if let Some(segment) = stream.segments.front() {
             self.status.heard = Some((segment.entry, segment.info));
+            self.status.link = segment.part.link.index;
             self.status.pass = segment.pass;
             self.status.position = segment.frame + read.saturating_sub(segment.ring);
             let channels = usize::from(segment.info.channels.channels());
@@ -1732,15 +1884,11 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
     /// heard, else the one being decoded.
     fn heard(&self) -> Option<Heard> {
         if let Some(jump) = self.jump {
-            let info = self
-                .current
-                .filter(|current| current.entry == jump.entry)
-                .and_then(|current| current.info);
             return Some(Heard {
                 entry: jump.entry,
                 pass: jump.pass,
+                part: jump.part,
                 at: jump.point.span(),
-                info,
             });
         }
         let ring = self
@@ -1752,8 +1900,8 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             return Some(Heard {
                 entry: segment.entry,
                 pass: segment.pass,
+                part: segment.part,
                 at: Span::of_frames(frame, segment.info.rate.hz()),
-                info: Some(segment.info),
             });
         }
         let current = self.current?;
@@ -1763,8 +1911,8 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
         Some(Heard {
             entry: current.entry,
             pass: self.progress.pass,
+            part: current.part,
             at,
-            info: current.info,
         })
     }
 
@@ -1786,22 +1934,20 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
         }
     }
 
-    /// Go to `target` in the entry `heard` names, never before its extent's
-    /// start; a target at or past its end is the next entry.
+    /// Go to `target`, a time into the link of the entry `heard` names, never
+    /// before its extent's start; past the link's end is on into the next,
+    /// and past the file's end the next entry.
     fn seek_in(&mut self, heard: Heard, target: Span) {
-        let target = target.max(self.programme.extent(heard.entry).start);
-        let past_end = heard.info.is_some_and(|info| {
-            info.frames
-                .is_some_and(|frames| target.frames_at(info.rate.hz()) >= frames)
-        });
-        if past_end {
-            self.skip_track(true);
-            return;
-        }
+        let start = self
+            .programme
+            .extent(heard.entry)
+            .start
+            .less(heard.part.from);
         self.go_to(Jump {
             entry: heard.entry,
-            point: Point::Time(target),
+            point: Point::Time(target.max(start)),
             pass: heard.pass,
+            part: heard.part,
         });
     }
 
@@ -1809,7 +1955,11 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
         let Some(heard) = self.heard() else {
             return;
         };
-        let played = heard.at.less(self.programme.extent(heard.entry).start);
+        let played = heard
+            .part
+            .from
+            .plus(heard.at)
+            .less(self.programme.extent(heard.entry).start);
         let target = if forward {
             self.programme
                 .next(heard.entry, Advance::Skipped)
@@ -1837,6 +1987,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
             entry,
             point: self.start_of(entry),
             pass,
+            part: Part::WHOLE,
         });
     }
 
@@ -1949,6 +2100,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
                 hz: segment.info.rate.hz(),
             },
             pass: segment.pass,
+            part: segment.part,
         })
     }
 
@@ -1968,12 +2120,14 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
                 entry,
                 point: self.start_of(entry),
                 pass,
+                part: Part::WHOLE,
             }),
             _ => self.place_of(reached).or_else(|| {
                 self.current.map(|current| Jump {
                     entry: current.entry,
                     point: current.enter,
                     pass: self.progress.pass,
+                    part: current.part,
                 })
             }),
         };
@@ -2087,6 +2241,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
                 entry,
                 point: self.start_of(entry),
                 pass,
+                part: Part::WHOLE,
             });
         } else {
             self.current = None;
@@ -2169,6 +2324,7 @@ impl<P: Programme, L: SessionLauncher, S: Sink + Clone, F: Files<P::Item>, O: Sp
 enum Answer {
     Need { offset: u64, len: usize },
     Opened,
+    LastLink,
     Block { position: u64 },
     Ended,
     Sought { position: u64 },
@@ -2189,6 +2345,7 @@ impl Answer {
         match event {
             DecodeEvent::Need { offset, len } => Self::Need { offset, len },
             DecodeEvent::Opened => Self::Opened,
+            DecodeEvent::LastLink => Self::LastLink,
             DecodeEvent::Block { position, .. } => Self::Block { position },
             DecodeEvent::Ended { .. } => Self::Ended,
             DecodeEvent::Sought { position } => Self::Sought { position },
@@ -2199,21 +2356,9 @@ impl Answer {
     }
 }
 
-/// The frame `extent`'s pass of a file `info` describes ends at: its start
-/// plus its duration, and never past its last frame.
-fn pass_end(extent: Extent, info: &SoundInfo) -> Option<u64> {
-    let hz = info.rate.hz();
-    let duration = extent.duration?;
-    let end = extent
-        .start
-        .frames_at(hz)
-        .saturating_add(duration.frames_at(hz));
-    Some(info.frames.map_or(end, |frames| end.min(frames)))
-}
-
 /// Multiply every sample of `bytes` by `gain` through the `f32` pivot,
-/// dithered back onto the format's grid: a gain leaves the material finer than
-/// the grid it is requantised to.
+/// dithered back onto an integer format's grid: a gain leaves the material
+/// finer than the grid it is requantised to.
 fn scale(
     sample: SampleFormat,
     bytes: &mut [u8],
@@ -2225,7 +2370,9 @@ fn scale(
     for value in &mut pivot[..samples] {
         *value *= gain;
     }
-    dither.apply(sample, &mut pivot[..samples]);
+    if !sample.is_float() {
+        dither.apply(sample.valid_bits(), &mut pivot[..samples]);
+    }
     convert::encode(sample, &pivot[..samples], bytes);
 }
 

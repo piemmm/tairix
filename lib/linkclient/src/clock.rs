@@ -48,6 +48,21 @@ impl<C: LinkCall> ClockClient<C> {
         self.ask(&request, decode_run_reply)
     }
 
+    /// Hold the clock at no less than `hz`, answering the rate it runs at:
+    /// for a clock several consumers share, the highest floor any states.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotSupported`] for a clock run at exact rates, or another
+    /// refusal.
+    pub fn floor(&mut self, hz: u64) -> Result<u64, Errno> {
+        let request = ClockRequest::Floor {
+            link: self.link,
+            hz,
+        };
+        self.ask(&request, decode_run_reply)
+    }
+
     /// Give the clock up; the last holder's release stops it.
     ///
     /// # Errors

@@ -142,6 +142,13 @@ pub trait Services {
     /// guarantees each wakeup either consumes or drops every lapsed deadline,
     /// so this loop cannot be woken twice for the same one.
     fn expire_deadlines(&mut self);
+
+    /// Collect the sound authority's answer to a cue PID 1 posted.
+    fn serve_cue(&mut self);
+
+    /// React to the mount table moving: the writable root coming online is
+    /// what the machine's filesystems being mounted means.
+    fn serve_mounts(&mut self);
 }
 
 /// The syscalls the supervisor drives, as a seam so the policy is
@@ -200,6 +207,10 @@ pub enum Woke {
     /// The service-lifecycle-notice endpoint has a notice waiting to be
     /// applied.
     Notice,
+    /// A cue PID 1 posted has been answered, or given up on.
+    Cue,
+    /// The mount table moved.
+    Mounts,
     /// The park lapsed at the deadline the caller passed.
     Deadline,
     /// The park itself failed (`-errno`) — a kernel-state inconsistency PID 1
@@ -376,6 +387,14 @@ pub fn supervise<E: Services, S: Sessions>(
                 services.serve_notice();
                 continue;
             }
+            Woke::Cue => {
+                services.serve_cue();
+                continue;
+            }
+            Woke::Mounts => {
+                services.serve_mounts();
+                continue;
+            }
             Woke::Deadline => {
                 services.expire_deadlines();
                 continue;
@@ -454,6 +473,10 @@ mod tests {
         enrolled: usize,
         /// Deadline wakeups the loop asked the engine to expire.
         expired: usize,
+        /// Cue answers the loop asked the engine to collect.
+        cued: usize,
+        /// Mount-table moves the loop asked the engine to react to.
+        mounted: usize,
         /// The park length the loop asked for, most recent last.
         timeouts: Vec<u64>,
         /// What [`Services::next_timeout_ns`] reports.
@@ -470,6 +493,8 @@ mod tests {
                 noticed: 0,
                 enrolled: 0,
                 expired: 0,
+                cued: 0,
+                mounted: 0,
                 timeouts: Vec::new(),
                 timeout: WAITSET_TIMEOUT_NONE,
             }
@@ -512,6 +537,12 @@ mod tests {
         }
         fn expire_deadlines(&mut self) {
             self.expired += 1;
+        }
+        fn serve_cue(&mut self) {
+            self.cued += 1;
+        }
+        fn serve_mounts(&mut self) {
+            self.mounted += 1;
         }
     }
 
@@ -853,9 +884,10 @@ mod tests {
     #[test]
     fn control_and_deadline_wakeups_never_end_the_loop() {
         // A perpetual service with a stream of control, enrolment,
-        // activation, notice and deadline wakeups: the loop keeps parking, so
-        // no event can be mistaken for the exhaustion or failure that ends
-        // PID 1, and each is routed to its own server rather than another's.
+        // activation, notice, cue, mount-table and deadline wakeups: the loop
+        // keeps parking, so no event can be mistaken for the exhaustion or
+        // failure that ends PID 1, and each is routed to its own server
+        // rather than another's.
         let mut services = MockServices::perpetual();
         let mut sys = ScriptedSessions::new(
             1,
@@ -868,11 +900,15 @@ mod tests {
                 Woke::Enrol,
                 Woke::Activation,
                 Woke::Notice,
+                Woke::Cue,
+                Woke::Mounts,
                 Woke::Deadline,
                 Woke::Control,
                 Woke::Enrol,
                 Woke::Activation,
                 Woke::Notice,
+                Woke::Cue,
+                Woke::Mounts,
                 child(10),
                 Woke::Failed,
             ],
@@ -887,9 +923,11 @@ mod tests {
                 services.enrolled,
                 services.activated,
                 services.noticed,
+                services.cued,
+                services.mounted,
                 services.expired
             ),
-            (2, 2, 2, 2, 2)
+            (2, 2, 2, 2, 2, 2, 2)
         );
         // The child exit was the session's, so it was relaunched rather than
         // routed to the engine.

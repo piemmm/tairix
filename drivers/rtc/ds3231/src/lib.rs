@@ -73,6 +73,15 @@ pub const DS1307_COMPATIBLE: &[u8] = b"maxim,ds1307";
 /// match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the I²C controller its node's link names, the buffer of the channel opened
+/// over it, and the restricted-sender RTC endpoint. It owns no registers.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::SHM,
+];
+
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[
@@ -134,7 +143,7 @@ impl<P: I2cPort> Ds3231<P> {
     }
 
     /// Whether the chip reports its oscillator stopped.
-    fn oscillator_stopped(&self) -> Result<bool, DriverError> {
+    fn oscillator_stopped(&mut self) -> Result<bool, DriverError> {
         Ok(self.device.read_one(REG_STATUS)? & STATUS_OSC_STOPPED != 0)
     }
 

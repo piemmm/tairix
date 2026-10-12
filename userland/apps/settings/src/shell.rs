@@ -37,6 +37,7 @@ use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::accounts::{AccountFacts, Roster};
 use crate::body::{self, Body};
+use crate::effects::{EffectsAsk, EffectsReading};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{
@@ -75,6 +76,8 @@ enum Reading {
     NotifySources,
     /// The sound devices and what is recording.
     Sound,
+    /// The user's sound choices and the themes to choose among.
+    Effects,
 }
 
 impl Reading {
@@ -338,6 +341,9 @@ pub enum ShellOutcome {
         /// Whether the interaction has ended.
         settled: bool,
     },
+    /// The reader changed one of their sound choices, or asked to choose a
+    /// sound's file: the session is to be asked.
+    Effects(EffectsAsk),
 }
 
 impl ShellOutcome {
@@ -366,7 +372,8 @@ impl ShellOutcome {
             | Self::Elevate(_)
             | Self::LockScreen
             | Self::PreviewScreensaver(_)
-            | Self::Sound { .. } => None,
+            | Self::Sound { .. }
+            | Self::Effects(_) => None,
         }
     }
 }
@@ -431,11 +438,13 @@ pub struct Shell {
     notify_sources: Option<Vec<BundleId>>,
     /// What the audio service answered.
     sound: Option<SoundReading>,
-    /// A level being dragged on the Sound pane, so a reading landing meanwhile
+    /// What the desktop session answered of the user's sound choices.
+    effects: Option<EffectsReading>,
+    /// A level being dragged on a sound pane, so a reading landing meanwhile
     /// waits for it to settle rather than rebuilding the slider under it.
-    sound_dragging: bool,
+    dragging: bool,
     /// A reading that landed during the drag.
-    sound_deferred: bool,
+    deferred: bool,
     /// Why the desktop last would not lock the screen, held here so a refusal
     /// landing while another pane is on show is stated once the pane that
     /// asked is shown again.
@@ -519,8 +528,9 @@ impl Shell {
             accounts: AccountFacts::default(),
             notify_sources: None,
             sound: None,
-            sound_dragging: false,
-            sound_deferred: false,
+            effects: None,
+            dragging: false,
+            deferred: false,
             lock_refusal: None,
             preview_refusal: None,
             salt: None,
@@ -809,6 +819,42 @@ impl Shell {
         self.body.composition() == Some(Composition::Sound)
     }
 
+    /// Whether the pane on show is the Sound Effects pane.
+    fn states_effects(&self) -> bool {
+        self.body.composition() == Some(Composition::SoundEffects)
+    }
+
+    /// Whether the caller should read the user's sound choices.
+    #[must_use]
+    pub const fn effects_wanted(&self) -> bool {
+        self.wanted.holds(Reading::Effects)
+    }
+
+    /// An ask about the user's sound choices has been answered: read them
+    /// again if the pane that states them is on show, so it shows what the
+    /// session now holds rather than what the reader asked for.
+    pub fn effects_moved(&mut self) {
+        if self.states_effects() {
+            self.wanted.arm(Reading::Effects);
+        }
+    }
+
+    /// Adopt what the desktop session answered of the user's sound choices.
+    pub fn adopt_effects(&mut self, reading: Option<EffectsReading>) {
+        self.effects = reading;
+        self.wanted.landed(Reading::Effects);
+        if !self.states_effects() {
+            return;
+        }
+        if self.dragging {
+            self.deferred = true;
+            return;
+        }
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_effects(self.effects.as_ref());
+        }
+    }
+
     /// Whether the caller should read the sound devices.
     #[must_use]
     pub const fn sound_wanted(&self) -> bool {
@@ -830,12 +876,25 @@ impl Shell {
         if !self.states_sound() {
             return;
         }
-        if self.sound_dragging {
-            self.sound_deferred = true;
+        if self.dragging {
+            self.deferred = true;
             return;
         }
         if let Some(form) = self.body.form_mut() {
             form.adopt_sound(self.sound.as_ref());
+        }
+    }
+
+    /// Adopt the reading of the pane on show that landed during a drag.
+    fn adopt_deferred(&mut self) {
+        let (sound, effects) = (self.states_sound(), self.states_effects());
+        let Some(form) = self.body.form_mut() else {
+            return;
+        };
+        if sound {
+            form.adopt_sound(self.sound.as_ref());
+        } else if effects {
+            form.adopt_effects(self.effects.as_ref());
         }
     }
 
@@ -1112,6 +1171,7 @@ impl Shell {
         let listed = matches!(self.body, Body::Volumes(_));
         let resolved = self.states_resolvers();
         let sounded = self.states_sound();
+        let effected = self.states_effects();
         // A pane that is not discovered from the capture drops it before
         // it is built: the machine's address book is a privileged reading,
         // and one held while the reader browses elsewhere is one this
@@ -1147,6 +1207,7 @@ impl Shell {
             staged_accounts: &staged_accounts,
             notify_sources: self.notify_sources.as_deref(),
             sound: self.sound.as_ref(),
+            effects: self.effects.as_ref(),
             lock_refusal: self.lock_refusal,
             preview_refusal: self.preview_refusal,
         };
@@ -1172,6 +1233,11 @@ impl Shell {
         // terminal — so it is re-read whenever the pane comes on show.
         if !sounded && self.states_sound() {
             self.wanted.arm(Reading::Sound);
+        }
+        // Another surface may have changed the choices, and the session holds
+        // them, so they are read each time the pane comes on show.
+        if !effected && self.states_effects() {
+            self.wanted.arm(Reading::Effects);
         }
         // The directories move on their own too, so they are re-read when
         // the pane that lists them *comes* on show — not on the rebuild
@@ -1885,17 +1951,19 @@ impl Shell {
     /// The shell outcome a form's answer implies. A sound reading that landed
     /// while a level was dragged is adopted once the drag settles.
     fn concluded(&mut self, acted: FormOutcome) -> ShellOutcome {
-        if let FormOutcome::Sound {
-            control: DeviceControl::Level(_),
-            settled,
-            ..
-        } = acted
-        {
-            self.sound_dragging = !settled;
-            if settled && core::mem::take(&mut self.sound_deferred) {
-                if let Some(form) = self.body.form_mut() {
-                    form.adopt_sound(self.sound.as_ref());
-                }
+        let settled = match &acted {
+            FormOutcome::Sound {
+                control: DeviceControl::Level(_),
+                settled,
+                ..
+            }
+            | FormOutcome::Effects { settled, .. } => Some(*settled),
+            _ => None,
+        };
+        if let Some(settled) = settled {
+            self.dragging = !settled;
+            if settled && core::mem::take(&mut self.deferred) {
+                self.adopt_deferred();
             }
         }
         outcome_of(acted)
@@ -3337,7 +3405,9 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
         // A staged edit changed only a working copy; like any other change
         // that is not durable, all it asks for is a repaint — the pane's
         // action band included, which the caller redraws with it.
-        FormOutcome::Changed | FormOutcome::Staged => ShellOutcome::Changed,
+        FormOutcome::Changed | FormOutcome::Staged | FormOutcome::Effects { ask: None, .. } => {
+            ShellOutcome::Changed
+        }
         FormOutcome::Apply(document) => ShellOutcome::Apply(document),
         FormOutcome::LockScreen => ShellOutcome::LockScreen,
         FormOutcome::PreviewScreensaver(document) => ShellOutcome::PreviewScreensaver(document),
@@ -3350,6 +3420,7 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
             control,
             settled,
         },
+        FormOutcome::Effects { ask: Some(ask), .. } => ShellOutcome::Effects(ask),
     }
 }
 

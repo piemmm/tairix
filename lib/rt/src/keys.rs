@@ -142,7 +142,7 @@ fn read_keys(port: u64, room: u64, hands: u64) {
 /// A wait-set holding one member.
 fn watching(kind: WaitSourceKind, id: u64) -> Result<u64, Errno> {
     let created = crate::waitset_create();
-    let set = u64::try_from(created).map_err(|_| Errno::from_syscall(created))?;
+    let set = Errno::syscall_result(created)?;
     match crate::waitset_ctl(set, WaitSetOp::Add, kind, id, TOKEN) {
         0 => Ok(set),
         refused => Err(Errno::from_syscall(refused)),

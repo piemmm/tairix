@@ -82,7 +82,8 @@ for filesystems, the feature section below.
 | Crypto backend availability + boot self-test (SHA-256) | ▢ soft | ▢ soft | — soft | — soft |
 | Wide vector state for user space (AVX / AVX-512, SVE, V) | ✓ XSAVE | ▢ | ▢ | — |
 | Framebuffer / display | ◐ driver | ✓ | ◐ driver | ✓ |
-| Display switched off when idle (desktop screensaver, login screen) | ▢ virtio-gpu | ✓ Pi firmware | ▢ virtio-gpu | — |
+| Display switched off when idle (desktop screensaver, login screen) | ▢ virtio-gpu | ◐ Pi 4 engine | ▢ virtio-gpu | — |
+| Native display engine (mode setting, several outputs, hotplug, HDMI 2.0 scrambling) | ▢ virtio-gpu | ◐ Pi 4 HVS + HDMI | ▢ virtio-gpu | — |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
 | Graphical login screen (`greeter.app`) | ▢ | ◐ | ▢ | ▢ |
 | Fast user switching (concurrent desktop sessions) | ▢ | ◐ | ▢ | ▢ |
@@ -106,12 +107,14 @@ for filesystems, the feature section below.
 | USB host controller (xHCI: enumeration, hubs, hotplug, isochronous streams) | ✓ qemu-xhci | ✓ qemu-xhci + ◐ VL805 | ✓ qemu-xhci | — |
 | Input devices | ✓ virtio + ◐ ps2 | ✓ virtio + ◐ USB HID | ✓ virtio | ✓ host |
 | Touch input (multitouch frames; tap, scroll and pinch gestures) | ◐ virtio | ◐ virtio + ◐ USB HID | ◐ virtio | ▢ |
-| Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio | ▢ |
-| Sound files played from the command line (`play`: AU, WAV and FLAC, native or in Ogg, decoded in the sandbox, gapless) | ✓ | ✓ | ✓ | ▢ |
+| Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio + Pi jack, I²S, HDMI | ◐ virtio + USB + HD Audio | ▢ |
+| Sound files played from the command line (`play`: AU, WAV, FLAC native or in Ogg, Vorbis, Opus, and MPEG audio, chained Ogg links read in turn, decoded in the sandbox, gapless) | ✓ | ✓ | ✓ | ▢ |
 | Desktop music player (`music.app`: playlist, gapless, album art and tags read in the sandbox, no filesystem capability) | ✓ | ✓ | ✓ | ▢ |
 | Audio follows the seat (held on its frame outside the room, resumed there; recording published as a notice) | ✓ | ✓ | ✓ | ▢ |
 | Sound device controls kept per room tenant (default, level, mute; devices named by location; `audioctl`) | ✓ | ✓ | ✓ | ▢ |
 | Desktop sound: icon-bar volume panel and recording indicator, Settings Sound pane, Switchboard Audio pane; the user's controls remembered and restored per session | ✓ | ✓ | ✓ | ▢ |
+| Desktop event sounds (`soundd`: startup, shutdown, login, logout, device arrival and departure, bell, notifications; a machine sound only from the principal that owns it) | ✓ | ✓ | ✓ | ▢ |
+| A user's own event sounds (Settings' Sound Effects pane: switch, theme, level and a chosen file per event, in force while their session holds the seat; a file handed over as a descriptor, never a path) | ✓ | ✓ | ✓ | ▢ |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
 

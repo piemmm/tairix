@@ -261,6 +261,10 @@ pub enum Errno {
     /// which reports that the *path itself* does not resolve. A value may
     /// legitimately be zero bytes long, so absence is reported as this
     /// errno, never as an empty read.
+    ///
+    /// Also the service manager's answer to an enrolment change before the
+    /// administrator's record has been read: there is no record yet to write
+    /// the change over.
     NoData = 31,
     /// The operation is well-formed on the ABI but the object's backing
     /// cannot support it.
@@ -504,6 +508,16 @@ impl Errno {
     #[must_use]
     pub fn from_syscall(ret: i64) -> Self {
         Self::try_from_syscall(ret).unwrap_or(Self::NotImplemented)
+    }
+
+    /// A syscall's signed result: its value when non-negative, else the
+    /// [`Errno`] it encodes, as [`from_syscall`](Self::from_syscall) reads it.
+    ///
+    /// # Errors
+    ///
+    /// The encoded [`Errno`] of a negative result.
+    pub fn syscall_result(ret: i64) -> Result<u64, Self> {
+        u64::try_from(ret).map_err(|_| Self::from_syscall(ret))
     }
 
     /// Recover an [`Errno`] from its ABI numeric value, or `None` if `value`

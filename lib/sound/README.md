@@ -2,11 +2,13 @@
 
 Stability tier: **experimental**.
 
-First-party TAIRiX sound-file decoding: complete, fail-closed AU, WAV and
-FLAC decoders (FLAC native and in Ogg) that turn an untrusted file into
-interleaved PCM a block at a time, or a typed refusal — never a panic, and
-never more memory than the caller's limits allow. `no_std` + `alloc`,
-`forbid(unsafe_code)`. Behind the off-by-default `encode` feature, the one
+First-party TAIRiX sound-file decoding: complete, fail-closed AU, WAV, FLAC
+(native and in Ogg), Vorbis and Opus (in Ogg) and MPEG audio (Layers I, II
+and III) decoders that turn an untrusted file into interleaved PCM a block at a time,
+or a typed refusal — never a panic, and never more memory than the caller's
+limits allow. The Ogg container is read in full: multiplexed streams, and
+chained links read one after another.
+`no_std` + `alloc`, `forbid(unsafe_code)`. Behind the off-by-default `encode` feature, the one
 encoder: FLAC, for the tests, the fuzz generator and the asset build.
 
 ## Consumers
@@ -20,7 +22,9 @@ is `lib/audio`'s; this crate knows files and nothing of devices.
 
 `PcmSource::open` sniffs the format and reads its header; `next_block`
 writes whole interleaved frames in the stream's `SoundInfo::sample` format;
-`seek` enters a stream that can be entered; `probe` reads the header alone.
+`seek` enters a stream that can be entered; `next_link` moves on to a
+chained file's next link once one has ended, and `open_link` opens a file at
+a link already met; `probe` reads the header alone.
 A file is read through `SoundInput` at offsets of the decoder's choosing, so
 a four-hour recording decodes in the memory of one block. An input whose
 bytes are not at hand answers `InputError::Unavailable`, and the call that

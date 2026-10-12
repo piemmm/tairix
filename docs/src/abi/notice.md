@@ -44,12 +44,14 @@ blocking I/O an interactive surface may not perform.
 | Topic | Payload | Published by | Read by |
 |---|---|---|---|
 | `Desktop` | `DesktopInfo` (54 bytes) | the holder of a seat's live display lease | every windowed application |
-| `Mounts` | none — the generation *is* the news | the kernel, on every mount-table mutation | the file manager's places rail |
+| `Mounts` | none — the generation *is* the news | the kernel, on every mount-table mutation and every change to the volume behind a mount | the file manager's places rail, PID 1, the device manager, and login's text prompt, which re-checks whether a graphical login can start |
 | `MemoryPressure` | the band depth (1 byte) | the kernel, from the pressure gauge | any process holding a reclaimable cache |
-| `DisplayLease` | the boot seat's lease word and its holder's login session (`DisplayLease`, 24 bytes) | the kernel, from its seat registry | the display and audio services alone |
+| `DisplayLease` | the boot seat's lease word and its holder's login session (`DisplayLease`, 24 bytes) | the kernel, from its seat registry | the display and audio services and the cue authority alone |
 | `AudioCapture` | the capture streams moving frames (`u32`, 4 bytes) | the audio service | the session's recording indicator |
 | `AudioDevices` | how many times a device or its controls changed (`u64`, 8 bytes) | the audio service | the session, which remembers its user's controls |
 | `Network` | how many times an interface's presence, link, addresses or address states changed (`u64`, 8 bytes) | the network stack | the Switchboard, which re-reads the interfaces for the bar's network signal |
+| `DisplayOutput` | how many times the display's output arrived, left or ran another mode (`u64`, 8 bytes) | the display service | the desktop session and the login screen, which re-read the output and follow it, and login's text prompt, which gives way to a graphical login once one can start |
+| `CueAuthority` | the cue authority's process instance (`ProcId`, 16 bytes) | the cue authority, naming itself | the desktop session, which hands its user's chosen sound files to that instance |
 
 The set is closed and deliberately small. A topic exists only where a *state*
 must be agreed; an occurrence a subscriber must witness individually — a
@@ -85,21 +87,33 @@ Publishing is authorised per topic, and no topic needed a new capability:
 - **`Network`** admits only the process bound to `NETSTACK_ENDPOINT` — the
   network stack, which owns every interface, so no program can fake or hide a
   change to them.
+- **`DisplayOutput`** admits only the process bound to `DISPLAY_ENDPOINT` — the
+  display service, which owns the output, so no program can fake or hide a
+  move of it. It announces at start, resuming one past the count on the board,
+  and after every move, before it serves another request.
+- **`CueAuthority`** admits only the process bound to `SOUND_CUE_ENDPOINT`, and
+  only a payload naming the instance the kernel attests that process is — so
+  no program can have a session hand its files elsewhere. The authority
+  announces once it has bound, so a new value is also the news that a
+  restarted authority holds no session's choices. The kernel's own sentinel
+  instance is refused on decode, since no publish can name it.
 - **`Mounts`**, **`MemoryPressure`** and **`DisplayLease`** are kernel-owned: a
   userland publish to any of them is refused with `PermissionDenied`.
 
 *Reading* is ungated for every topic but one. `Desktop`, `Mounts`,
-`MemoryPressure`, `AudioCapture`, `AudioDevices` and `Network` are
-machine-wide facts no principal owns — whether a sound device is in use is
-public on every system, and the network edge says only that something moved,
-never what — so gating them would only force applications to guess at facts
-the system knows.
+`MemoryPressure`, `AudioCapture`, `AudioDevices`, `Network`, `DisplayOutput`
+and `CueAuthority` are machine-wide facts no principal owns — whether a sound
+device is in use is public on every system, the network and output edges say
+only that something moved, never what, and a service's instance is a name to
+hand things to, which grants nothing — so gating them would only force
+applications to guess at facts the system knows. What the output runs now
+stays behind the display service's lease-gated `Query`.
 `DisplayLease` is not such a fact: when a console lease is taken and given up
 is what the seat inventory reports only under `CAP_SYSINFO_HW`. It is read,
-subscribed to and woken for only by the two services that own the seat's
-devices, the processes bound to the reserved `DISPLAY_ENDPOINT` and
-`AUDIO_ENDPOINT` — binds only a privileged service can make — and anyone else
-is refused `PermissionDenied`. A member whose owner has since given the
+subscribed to and woken for only by the services that follow the seat, the
+processes bound to the reserved `DISPLAY_ENDPOINT`, `AUDIO_ENDPOINT` and
+`SOUND_CUE_ENDPOINT` — binds only a privileged service can make — and anyone
+else is refused `PermissionDenied`. A member whose owner has since given the
 rendezvous up reports nothing more.
 
 ## Edges and generations
@@ -119,8 +133,11 @@ Each generation comes from its topic's own source of truth:
   differs, so re-publishing the current value wakes nobody. A record that moves
   and moves back wakes its subscribers once with nothing changed — one read,
   no repaint — and never misses a real change.
-- `Mounts`' is a counter bumped by every mount-table mutation. A refused
-  mutation changed nothing and bumps nothing.
+- `Mounts`' is a counter bumped by every mount-table mutation, and by every
+  change to what a mount reports though the table did not move: a volume's
+  driver registering behind its mounts (an unlocked root), leaving, or
+  changing availability. A refused mutation, or an availability set to what it
+  already was, changed nothing and bumps nothing.
 - `DisplayLease`'s is the lease word itself — four times the boot seat's lease
   generation, plus its phase: held, ended in a handover, or ended back to the
   text console — which only grows, so every acquire, every end, and a console
@@ -129,13 +146,16 @@ Each generation comes from its topic's own source of truth:
   the holder. The display service releases a configuration whose lease has
   ended, and lights the display it left dark, without waiting for anyone to
   call it; the audio service holds every stream outside the room the lease
-  describes.
+  describes; the cue authority drops the choices of a session that left the
+  seat.
 - `AudioCapture`'s is a counter bumped only when the published count differs,
   as `Desktop`'s is, and `AudioDevices`' is bumped whenever the audio service's
   change count moves.
 - `Network`'s is bumped whenever the stack's change count moves. The stack
   counts a change only when the interface-state records it would answer
   differ from the ones it last published.
+- `CueAuthority`'s is bumped when the published instance differs, and an
+  instance is never reused, so every start of the authority is one edge.
 
 A counted topic outlives its publisher, and publishing the value in force wakes
 nobody, so a restarted service counting from zero could repeat the count its
@@ -160,9 +180,9 @@ The generated header carries the topic values, each topic's exact payload
 length, the ceiling, and both prototypes:
 
 ```c
-#define TAIRIX_NOTICE_PAYLOAD_MAX 46u
+#define TAIRIX_NOTICE_PAYLOAD_MAX 54u
 #define TAIRIX_NOTICE_TOPIC_DESKTOP 0u
-#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 46u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DESKTOP 54u
 /* ... */
 
 uint64_t tairix_sys_notice_read(uint32_t topic, void *buf, uintptr_t len);

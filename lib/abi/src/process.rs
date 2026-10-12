@@ -599,6 +599,10 @@ pub const PID_MAX: u64 = (1 << 40) - 1;
 /// under, as a spawner, and the one a scheduler never draws.
 pub const NO_PID: u64 = 0;
 
+/// Init's process number. Reserved: a scheduler never draws it, so no other
+/// process can ever hold it.
+pub const INIT_PID: u64 = 1;
+
 /// The `console` argument to [`crate::SyscallNumber::SPAWN`] that attaches
 /// the child to the **caller's own** descriptor table instead of naming an
 /// installed console index.

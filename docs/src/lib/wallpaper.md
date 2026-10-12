@@ -231,8 +231,8 @@ before a pixel is drawn. This crate decodes nothing.
 
 The bounds are fixed validation limits on untrusted input, not growable
 capacities: the format engine's `MAX_DOCUMENT_LEN` / `MAX_VALUE_LEN`,
-`MAX_WALLPAPER_PATH_LEN` (1 KiB path, held inside `MAX_VALUE_LEN` by a
-compile-time assertion), `MAX_WALLPAPER_BYTES` (8 MiB per wallpaper file),
+`MAX_WALLPAPER_PATH_LEN` (the engine's 1 KiB `MAX_SETTING_PATH_LEN`, which
+every path-valued setting shares), `MAX_WALLPAPER_BYTES` (8 MiB per wallpaper file),
 `MAX_WALLPAPER_CATALOG_ENTRIES` (256 offered wallpapers), and
 `MAX_WALLPAPER_CATEGORIES` (64 offered categories).
 
@@ -342,7 +342,8 @@ every source pixel at 1:1 and so needs the native size.
   `DesktopSettings::{load, document, document_of}`, `merge` and
   `merge_within` — the two readings, the canonical render, the per-group one a
   surface posts, and the strict reading confined to one group;
-  `DocumentRefusal` — the strict reading's reasons.
+  `DocumentRefusal` — the strict reading's reasons, the engine's
+  `tairix_appconf::Refusal` over `SettingsKey`.
 - `saver::{ScreensaverOptions, SlideshowOptions, SlideSource, SlideOrder,
   ClockOptions, RibbonOptions, StarfieldOptions, StarDensity, LifeOptions,
   CellSize, RaytraceOptions, CpuUse, SceneDetail, RetroGamesOptions,

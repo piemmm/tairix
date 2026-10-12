@@ -95,6 +95,21 @@ const REGISTER_HANDLE_MARKER: u64 = 0x5653_4E44_0000_0001; // "VSND"
 /// alongside the other concrete-identity drivers.
 const BIND_PRIORITY: u16 = 10;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the register window, the period buffers, the device interrupt, the mixer's
+/// PCM regions, the reserved device-channel endpoint, publishing its
+/// `audiochan` node, and its readiness beacon.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::MMIO_MAP,
+    CapabilityId::MEM_DMA,
+    CapabilityId::IRQ_BIND,
+    CapabilityId::SHM,
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::HW_EMIT,
+    CapabilityId::LOG_EMIT,
+];
+
 /// This driver's hardware bind table: a virtio sound device, matched by its
 /// virtio device id.
 ///
@@ -1027,6 +1042,7 @@ fn decode_chmap(record: &[u8], channels: u8) -> Option<ChannelMap> {
             wire::chmap::RR => ChannelPosition::RearRight,
             wire::chmap::SL => ChannelPosition::SideLeft,
             wire::chmap::SR => ChannelPosition::SideRight,
+            wire::chmap::RC => ChannelPosition::RearCentre,
             _ => return None,
         };
     }
@@ -1094,6 +1110,7 @@ impl<T: Transport> Audio for VirtioSnd<'_, T> {
             direction: stream.direction,
             jack: stream.jack,
             formats: stream.formats,
+            resolution: None,
             channel_map,
             rates: stream.rates,
             // The device states no period bounds of its own, so the driver's

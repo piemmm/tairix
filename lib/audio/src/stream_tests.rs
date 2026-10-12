@@ -16,7 +16,7 @@ use tairix_abi::audio::{
     encode_clock_reply, encode_enumerate_reply, encode_open_reply, encode_state_reply,
     encode_streams_reply, notify_endpoint_for, AudioDeviceDescriptor, AudioGain, AudioLocation,
     AudioNotify, AudioRequest, ClockReport, ControlAccess, DefaultChoice, OpenParams,
-    StreamDescriptor, StreamGrant, StreamReport, StreamRole, StreamState,
+    StreamDescriptor, StreamGrant, StreamReport, StreamRole, StreamState, Tenancy,
 };
 use tairix_abi::driver::audio::{
     AudioName, ChannelMap, Frames, JackState, Rate, RateSupport, SampleFormat, SampleFormats,
@@ -55,6 +55,7 @@ fn params(direction: StreamDirection) -> OpenParams {
         channel_map: ChannelMap::STEREO,
         role: StreamRole::Media,
         latency_target_frames: 480,
+        tenancy: Tenancy::Caller,
     }
 }
 
@@ -173,11 +174,12 @@ impl AudioTransport for MockService {
         Ok(frame.len())
     }
 
-    fn wait_notify(&mut self, out: &mut [u8]) -> Result<usize, Errno> {
-        self.try_notify(out)?.ok_or(Errno::WouldBlock)
+    fn wait_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<usize, Errno> {
+        self.try_notify(mailbox, out)?.ok_or(Errno::WouldBlock)
     }
 
-    fn try_notify(&mut self, out: &mut [u8]) -> Result<Option<usize>, Errno> {
+    fn try_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<Option<usize>, Errno> {
+        assert_eq!(mailbox, grant().notify_endpoint, "the stream's own mailbox");
         let Some(notify) = self.notifications.pop_front() else {
             return Ok(None);
         };
@@ -493,6 +495,86 @@ fn a_state_notification_is_adopted_and_another_streams_is_not() {
     assert_eq!(client.state(), StreamState::SeatInactive);
 }
 
+/// A service keeping each stream's notifications in that stream's own
+/// mailbox, granting each open the next slot.
+struct Mailboxes {
+    opened: u64,
+    held: Vec<(u64, VecDeque<AudioNotify>)>,
+}
+
+impl Mailboxes {
+    fn post(&mut self, mailbox: u64, notify: AudioNotify) {
+        match self.held.iter_mut().find(|(held, _)| *held == mailbox) {
+            Some((_, queue)) => queue.push_back(notify),
+            None => self.held.push((mailbox, VecDeque::from([notify]))),
+        }
+    }
+}
+
+impl AudioTransport for Mailboxes {
+    fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+        assert!(matches!(
+            AudioRequest::decode(request)?,
+            AudioRequest::Open(_)
+        ));
+        let slot = self.opened;
+        self.opened += 1;
+        let frame = encode_open_reply(Ok(StreamGrant {
+            stream_id: STREAM_ID + slot,
+            notify_endpoint: notify_endpoint_for(42, slot),
+            ..grant()
+        }));
+        reply[..frame.len()].copy_from_slice(&frame);
+        Ok(frame.len())
+    }
+
+    fn wait_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<usize, Errno> {
+        self.try_notify(mailbox, out)?.ok_or(Errno::WouldBlock)
+    }
+
+    fn try_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<Option<usize>, Errno> {
+        let Some(notify) = self
+            .held
+            .iter_mut()
+            .find(|(held, _)| *held == mailbox)
+            .and_then(|(_, queue)| queue.pop_front())
+        else {
+            return Ok(None);
+        };
+        let frame = notify.encode();
+        out[..frame.len()].copy_from_slice(&frame);
+        Ok(Some(frame.len()))
+    }
+}
+
+/// Two streams of one process each read their own mailbox: neither takes
+/// the other's notifications, whichever was opened last.
+#[test]
+fn each_stream_of_a_process_reads_its_own_mailbox() {
+    let mut service = Mailboxes {
+        opened: 0,
+        held: Vec::new(),
+    };
+    let params = params(StreamDirection::Playback);
+    let mut first = StreamClient::open(&mut service, &params).expect("opened");
+    let mut second = StreamClient::open(&mut service, &params).expect("opened");
+    assert_ne!(
+        first.grant().notify_endpoint,
+        second.grant().notify_endpoint
+    );
+    let lost = AudioNotify::StateChanged {
+        stream_id: first.grant().stream_id,
+        state: StreamState::DeviceLost,
+        at: Frames::new(480),
+    };
+    service.post(first.grant().notify_endpoint, lost);
+    let mut drain = NotifyDrain::new(8);
+    assert_eq!(second.take_notify(&mut service, &mut drain), Ok(None));
+    assert_eq!(second.state(), StreamState::Idle);
+    assert_eq!(first.take_notify(&mut service, &mut drain), Ok(Some(lost)));
+    assert_eq!(first.state(), StreamState::DeviceLost);
+}
+
 #[test]
 fn a_space_available_notification_changes_no_state() {
     let mut service = MockService::new();
@@ -517,12 +599,12 @@ fn a_malformed_notification_frame_is_refused() {
             reply[..frame.len()].copy_from_slice(&frame);
             Ok(frame.len())
         }
-        fn wait_notify(&mut self, out: &mut [u8]) -> Result<usize, Errno> {
+        fn wait_notify(&mut self, _: u64, out: &mut [u8]) -> Result<usize, Errno> {
             out[..8].fill(0xAA);
             Ok(8)
         }
-        fn try_notify(&mut self, out: &mut [u8]) -> Result<Option<usize>, Errno> {
-            self.wait_notify(out).map(Some)
+        fn try_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<Option<usize>, Errno> {
+            self.wait_notify(mailbox, out).map(Some)
         }
     }
     let mut garbage = Garbage;
@@ -540,10 +622,10 @@ impl AudioTransport for Overlong {
     fn call(&mut self, _: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
         Ok(reply.len() + 1)
     }
-    fn wait_notify(&mut self, out: &mut [u8]) -> Result<usize, Errno> {
+    fn wait_notify(&mut self, _: u64, out: &mut [u8]) -> Result<usize, Errno> {
         Ok(out.len() + 1)
     }
-    fn try_notify(&mut self, out: &mut [u8]) -> Result<Option<usize>, Errno> {
+    fn try_notify(&mut self, _: u64, out: &mut [u8]) -> Result<Option<usize>, Errno> {
         Ok(Some(out.len() + 1))
     }
 }
@@ -605,10 +687,10 @@ fn a_walk_refuses_an_id_that_does_not_ascend_and_ends_on_a_refusal() {
             reply[..frame.len()].copy_from_slice(&frame);
             Ok(frame.len())
         }
-        fn wait_notify(&mut self, _: &mut [u8]) -> Result<usize, Errno> {
+        fn wait_notify(&mut self, _: u64, _: &mut [u8]) -> Result<usize, Errno> {
             Err(Errno::WouldBlock)
         }
-        fn try_notify(&mut self, _: &mut [u8]) -> Result<Option<usize>, Errno> {
+        fn try_notify(&mut self, _: u64, _: &mut [u8]) -> Result<Option<usize>, Errno> {
             Ok(None)
         }
     }

@@ -39,17 +39,15 @@ use crate::MkimageError;
 pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
 
 /// The full `/System` subtree the **read-only** `ARXFSSystem` volume ships
-/// (`build_system_partition`). `Security` additionally carries its fixed
-/// `Keys` and `Policy` subdirectories; the `Users`/`Groups` databases inside
-/// it are installer-authored data, not image content. `Apps` is the system
-/// app store and `Services` the service store: the OS-provided programs'
-/// self-contained bundles — each bundle's signed `AppInfo` + `Run` (composed
-/// by the image pipeline's caller) planted beside its internationalised
-/// `Help/` tree, discovered from the bundle's own on-disk source and planted
-/// from `tairix_syshelp::HELP_FILES`.
-pub const SYSTEM_SUBDIRS: [&str; 13] = [
+/// (`build_system_partition`): the charter's `/System` layout. `Security`
+/// additionally carries its fixed `Keys` and `Policy` subdirectories; the
+/// `Users`/`Groups` databases inside it are installer-authored data, not
+/// image content. `Commands`, `Applications` and `Services` are the program
+/// stores the image pipeline plants each OS-provided bundle into.
+pub const SYSTEM_SUBDIRS: [&str; 15] = [
     "Kernel",
-    "Apps",
+    "Commands",
+    "Applications",
     "Drivers",
     "Libraries",
     "Fonts",
@@ -58,6 +56,7 @@ pub const SYSTEM_SUBDIRS: [&str; 13] = [
     "Network",
     "Security",
     "Printing",
+    "Zoneinfo",
     "Logs",
     "Settings",
     "Services",
@@ -599,6 +598,25 @@ mod tests {
     fn build_keyed(keying: Keying<'_>) -> Vec<u8> {
         build_root_partition(TEST_SECTORS, keying, &mut TestEntropy(7), &TEST_SEED)
             .expect("root partition builds")
+    }
+
+    #[test]
+    fn the_system_skeleton_holds_each_program_store_and_no_other() {
+        use tairix_abi::appinfo::{
+            SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE, SYSTEM_SERVICE_STORE,
+        };
+        for store in [
+            SYSTEM_COMMAND_STORE,
+            SYSTEM_APPLICATION_STORE,
+            SYSTEM_SERVICE_STORE,
+        ] {
+            let leaf = store.strip_prefix("/System/").expect("a /System store");
+            assert!(SYSTEM_SUBDIRS.contains(&leaf), "{store}");
+        }
+        assert!(
+            !SYSTEM_SUBDIRS.contains(&"Apps"),
+            "/Apps is a top-level store, not a /System one"
+        );
     }
 
     #[test]

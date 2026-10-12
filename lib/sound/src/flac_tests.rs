@@ -88,6 +88,33 @@ pub(crate) fn decode_all(
 }
 
 #[test]
+fn a_stream_is_verified_only_once_decoded_whole_against_a_digest_it_carries() {
+    let mut input: &[u8] = &EXAMPLE_1;
+    let opened = PcmSource::open(&mut input, &LIMITS).expect("opens");
+    assert!(!opened.verified(), "nothing is decoded yet");
+    let (source, _, end) = decode_all(&EXAMPLE_1, 16);
+    assert_eq!(end, Ok(()));
+    assert!(source.verified());
+
+    let params = crate::flac_encode::Params {
+        rate: 8_000,
+        channels: 1,
+        bits: 8,
+    };
+    let samples: Vec<i32> = (0..500).map(|n| (n % 97) - 48).collect();
+    let mut writer =
+        crate::flac_encode::encode(params, &samples, crate::flac_encode::Options::default())
+            .expect("encodes");
+    writer.without_digest();
+    let (source, _, end) = decode_all(&writer.finish(), 64);
+    assert_eq!(end, Ok(()));
+    assert!(
+        !source.verified(),
+        "a stream carrying no digest proves nothing"
+    );
+}
+
+#[test]
 fn example_1_decodes_to_the_samples_its_digest_states() {
     let (source, pcm, end) = decode_all(&EXAMPLE_1, 16);
     let info = source.info();

@@ -619,6 +619,21 @@ where
         released
     }
 
+    /// Hold the cache to `budget` from now on — the output its pixels are
+    /// drawn for changed size — releasing at once, oldest first, whatever
+    /// the new budget's target under the live band no longer admits.
+    /// Answers the bytes released.
+    pub fn rebudget(&mut self, budget: CacheBudget) -> usize {
+        self.budget = budget;
+        let Some(policy) = self.policy else {
+            return 0;
+        };
+        let ceiling = shrink_target(self.pressure.sample(), policy.class(), self.budget);
+        let before = self.charged_bytes();
+        self.evict_to(ceiling);
+        before.saturating_sub(self.charged_bytes())
+    }
+
     /// Release everything the cache holds because its owner is going
     /// away — a session ending, a seat revoked, a consumer shutting
     /// down.
@@ -1263,6 +1278,30 @@ mod tests {
         cache.invalidate(&7);
         assert_eq!(cache.charged_bytes(), 0);
         assert_eq!(cache.len(), 0);
+    }
+
+    /// A cache held to a smaller budget gives the excess back at once, oldest
+    /// first; one held to a larger budget keeps everything and admits more.
+    #[test]
+    fn a_rebudget_releases_what_the_new_budget_no_longer_admits() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        for key in 0..3u32 {
+            let _ = cache.get_or_build(&1, key, || Some(Block::of(1024, 0xFF)));
+        }
+        let held = cache.charged_bytes();
+        let smaller = CacheBudget::from_backing(32 * 1024);
+        let released = cache.rebudget(smaller);
+        assert!(cache.charged_bytes() <= smaller.hard());
+        assert_eq!(released, held - cache.charged_bytes());
+        assert!(
+            cache
+                .get_or_build(&1, 2, || panic!("the newest entry stays"))
+                .is_some(),
+            "eviction took the oldest first"
+        );
+
+        assert_eq!(cache.rebudget(CacheBudget::from_backing(256 * 1024)), 0);
+        assert!(cache.holds(1, 8 * 1024), "the larger budget admits more");
     }
 
     #[test]

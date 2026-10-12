@@ -86,6 +86,9 @@ pub struct AltFormat {
     pub alternate: u8,
     /// The sample encoding.
     pub format: SampleFormat,
+    /// The bits of each sample the device resolves (`bBitResolution`),
+    /// left-justified in the encoding.
+    pub bits: u8,
     /// The channel layout, in interleave order.
     pub channel_map: ChannelMap,
     /// Where its rates come from.
@@ -360,6 +363,7 @@ fn alt_format(
         AltFormat {
             alternate,
             format: decoded.format,
+            bits: decoded.bits,
             channel_map,
             rates: decoded.rates,
             data,
@@ -373,6 +377,7 @@ fn alt_format(
 struct Decoded {
     terminal: u8,
     format: SampleFormat,
+    bits: u8,
     channels: u8,
     /// Version 2.0 states its cluster here; 1.0 states only the count.
     cluster: Option<Cluster>,
@@ -402,6 +407,7 @@ fn decode_v1(general: &[u8], format: &[u8]) -> Result<Option<Decoded>, DriverErr
     Ok(Some(Decoded {
         terminal: general[3],
         format: sample,
+        bits,
         channels,
         cluster: None,
         rates: AltRates::Listed(rates),
@@ -433,6 +439,7 @@ fn decode_v2(general: &[u8], format: &[u8]) -> Result<Option<Decoded>, DriverErr
     Ok(Some(Decoded {
         terminal: general[3],
         format: sample,
+        bits,
         channels,
         cluster: Some(Cluster {
             channels,
@@ -529,15 +536,16 @@ fn v1_cluster(topology: &Topology, terminal: u8, channels: u8) -> Cluster {
 }
 
 /// The positions a cluster's spatial bits name, in bit order: front left,
-/// right and centre, low frequency, rear left and right, then side left and
-/// right. Both revisions number these alike.
-const POSITION_BITS: [(u32, ChannelPosition); 8] = [
+/// right and centre, low frequency, rear left and right, rear centre, then
+/// side left and right. Both revisions number these alike.
+const POSITION_BITS: [(u32, ChannelPosition); 9] = [
     (0, ChannelPosition::FrontLeft),
     (1, ChannelPosition::FrontRight),
     (2, ChannelPosition::FrontCentre),
     (3, ChannelPosition::LowFrequency),
     (4, ChannelPosition::RearLeft),
     (5, ChannelPosition::RearRight),
+    (8, ChannelPosition::RearCentre),
     (9, ChannelPosition::SideLeft),
     (10, ChannelPosition::SideRight),
 ];

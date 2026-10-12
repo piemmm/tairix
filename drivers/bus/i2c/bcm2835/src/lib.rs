@@ -1,90 +1,87 @@
 //! Broadcom Serial Controller (BSC) I²C bus driver (`brcm,bcm2835-i2c`).
 //!
-//! The BSC is the I²C master the whole Raspberry Pi family exposes: a
-//! 16-byte FIFO, a slave-address register, a transfer-length register, and a
-//! status register whose bits drive one maskable interrupt. This crate is the
-//! controller logic — the register sequence one transfer runs — with the
-//! process, the endpoints, and the grants left to the `Run` binary.
+//! The BSC is the I²C master every Raspberry Pi generation exposes: a 16-byte
+//! FIFO, an address and a length register, and a status register whose bits
+//! raise one interrupt. [`Bsc`] is the controller as the shared `i2c-v1`
+//! endpoint drives it ([`I2cBus`]); the process, the endpoint and the grants
+//! are the `Run` binary's.
 //!
-//! # Public surface
+//! # A transaction, as the controller issues it
 //!
-//! [`register`] is the driver entry point every driver crate exposes.
-//! [`Bsc`] is the controller, and [`Bsc::port`] narrows it to one child's
-//! [`I2cPort`] — the shape a chip driver's requests are served against, with
-//! the address coming from the bus driver's own duty grant rather than from
-//! the wire.
+//! The BSC has no repeated-START command. It issues one by chaining: a message
+//! started while the one before it is active follows it with a repeated START
+//! instead of a STOP (the behaviour Linux's `i2c-bcm2835` relies on). The
+//! chain must be in place before the message before it can end, and in a
+//! process that may be preempted at any instruction the only guarantee of that
+//! is to withhold the write's last byte until the next message is started: the
+//! controller cannot finish a write it has not been given. So a write may
+//! precede any message, and a read must end the transaction
+//! ([`RepeatedStart::BeforeFinalRead`]).
 //!
-//! # Interrupt-driven, with a liveness backstop
+//! # Paced by the interrupt, bounded by progress
 //!
-//! A transfer arms the controller and then **parks** on its interrupt line
-//! through the injected [`BusWait`] seam: the FIFO-service and completion
-//! interrupts are what advance it, never a spin. The per-phase deadline
-//! exists only to catch a controller that has stopped answering — a slave that legitimately stretches the clock is bounded by
-//! the controller's own stretch-timeout register, which raises its own status
-//! bit long before the deadline could fire.
+//! The FIFO is refilled or drained as its threshold interrupts ask, and the
+//! transfer parks on the interrupt in between. A transaction is abandoned, and
+//! the controller reset, only once the bus has made no progress for a step
+//! budget — a FIFO's worth of bytes at the bus's speed plus the longest stall
+//! a target may hold it for. While the controller waits on this process it
+//! holds the clock, so a late wake finds work, never a timeout.
 //!
-//! # What this controller cannot do
+//! Its divider is set from the parent clock before every transaction, so the
+//! bus runs at no more than its declared speed whatever the firmware has done
+//! to that clock.
 //!
-//! The BSC cannot emit a true repeated START: it drops a STOP between the two
-//! phases of a write-then-read. On a single-master bus — which is what a
-//! board wiring an RTC to the Pi's BSC has — that is indistinguishable, since
-//! nothing else can move a chip's register pointer between the phases; a
-//! multi-master bus is out of scope for this controller.
-//!
-//! The clock divider is left exactly as the firmware programmed it. The bus
-//! speed is a property of the board's wiring and the slowest part on it, and
-//! nothing in discovery tells a driver either, so overriding it could clock a
-//! part past its rating.
-//!
-//! Reference: BCM2835 ARM Peripherals, §3 (BSC).
+//! Reference: BCM2835 ARM Peripherals §3 (BSC); Linux `i2c-bcm2835.c`.
 
 #![no_std]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use tairix_abi::driver::i2c::{I2cAddress, I2cPort, MAX_TRANSFER_LEN};
+use core::num::NonZeroU32;
+use core::ops::Range;
+
+use tairix_abi::driver::i2c::{
+    BusFacts, Direction, I2cFault, I2cMessage, I2cTransaction, RepeatedStart,
+};
 use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterBlock,
 };
+use tairix_i2cbus::{step_budget_ns, I2cBus};
 
 #[cfg(test)]
 mod tests;
 
 /// The capabilities the driver runs with, which its signed manifest requests:
-/// the register window, the interrupt, the per-child endpoints, and the log
-/// its bind records go to.
+/// the register window, the interrupt, the node's endpoint, each channel's
+/// buffer, the parent clock's link, and the log its records go to.
 pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::MMIO_MAP,
     CapabilityId::IRQ_BIND,
     CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::SHM,
     CapabilityId::LOG_EMIT,
 ];
 
-/// Per-driver `DriverHandle` marker returned by [`register`], mirroring the
-/// convention every driver crate uses: the host re-issues its own host-local
-/// handle when binding the driver, and this constant is the on-the-wire
-/// signal that the load-time gate cleared. The bytes spell `"BSC1"`.
+/// Per-driver `DriverHandle` marker returned by [`register`]. The bytes spell
+/// `"BSC1"`.
 const REGISTER_HANDLE_MARKER: u64 = 0x4253_4331_0000_0001;
 
-/// Device-tree `compatible` string of the BSC as the Raspberry Pi bindings
-/// spell it. Every Pi generation's controller is register-compatible with the
-/// BCM2835's, so the later parts carry this string too.
+/// Device-tree `compatible` string of the BSC. Every Pi generation's
+/// controller is register-compatible with the BCM2835's and carries it.
 pub const BSC_COMPATIBLE: &[u8] = b"brcm,bcm2835-i2c";
 
-/// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
-/// match ranks above a generic class-wildcard driver.
+/// The bind priority [`BIND_KEYS`] carries: an exact `compatible` match.
 const BIND_PRIORITY: u16 = 10;
 
-/// The driver's canonical bind table — the single source both the installed
-/// bundle's signed manifest and the autoload match are built from, so the
-/// match data can never drift from the driver.
+/// The driver's canonical bind table, which both the bundle's signed manifest
+/// and the autoload match are built from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     match HwMatchKey::compatible(BSC_COMPATIBLE) {
         Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
+        // A too-long literal is a compile-time const-eval error here, never a
+        // runtime panic.
         Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
     },
 )];
@@ -92,294 +89,369 @@ pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
 /// Bytes of register block the controller occupies (`C` through `CLKT`).
 pub const REGISTER_BLOCK_LEN: usize = 0x20;
 
-/// Control register.
 const C: usize = 0x00;
-/// Status register.
 const S: usize = 0x04;
-/// Data-length register.
 const DLEN: usize = 0x08;
-/// Slave-address register.
 const A: usize = 0x0C;
-/// Data FIFO.
 const FIFO: usize = 0x10;
+const DIV: usize = 0x14;
+const DEL: usize = 0x18;
+const CLKT: usize = 0x1C;
 
-/// `C`: controller enabled.
 const C_I2CEN: u32 = 1 << 15;
-/// `C`: raise an interrupt when the RX FIFO needs reading.
 const C_INTR: u32 = 1 << 10;
-/// `C`: raise an interrupt when the TX FIFO needs writing.
 const C_INTT: u32 = 1 << 9;
-/// `C`: raise an interrupt on transfer completion.
 const C_INTD: u32 = 1 << 8;
-/// `C`: start a transfer with the current `A`, `DLEN`, and direction.
 const C_ST: u32 = 1 << 7;
-/// `C`: clear both FIFOs (a two-bit field; either non-zero value clears).
+/// Clears both FIFOs (a two-bit field; either non-zero value clears).
 const C_CLEAR: u32 = 0b01 << 4;
-/// `C`: the transfer is a read.
 const C_READ: u32 = 1 << 0;
 
-/// `S`: the slave held the clock past the controller's stretch timeout
-/// (write to clear).
 const S_CLKT: u32 = 1 << 9;
-/// `S`: the slave did not acknowledge (write to clear).
 const S_ERR: u32 = 1 << 8;
-/// `S`: the RX FIFO holds at least one byte.
 const S_RXD: u32 = 1 << 5;
-/// `S`: the TX FIFO has room for at least one byte.
 const S_TXD: u32 = 1 << 4;
-/// `S`: the transfer completed (write to clear).
+const S_RXR: u32 = 1 << 3;
+const S_TXW: u32 = 1 << 2;
 const S_DONE: u32 = 1 << 1;
 
-/// Every latched `S` bit a phase clears before and after itself.
+/// Every latched `S` bit, cleared by writing it back.
 const S_LATCHED: u32 = S_CLKT | S_ERR | S_DONE;
 
-/// Bit periods one byte on the wire costs: eight data bits plus the
-/// acknowledge.
-const BITS_PER_BYTE: u64 = 9;
+/// The register reads the divider as even, ignoring its low bit.
+const CDIV_MIN: u32 = 0x0002;
+const CDIV_MAX: u32 = 0xFFFE;
 
-/// Byte periods the START, the address byte, and the STOP add to a phase.
-const FRAMING_BYTES: u64 = 2;
+const FEDL_SHIFT: u32 = 16;
 
-/// The slowest bus rate the transfer deadline is sized for.
-///
-/// The driver does not program the clock divider (see the module docs), so
-/// the deadline must cover the slowest rate a board could plausibly be left
-/// at — an order of magnitude below the 100 kHz standard mode — or a
-/// legitimately slow bus would be abandoned mid-transfer. It bounds a
-/// controller that has stopped answering, not the bus's speed.
-const SLOWEST_BUS_HZ: u64 = 10_000;
-
-/// Nanoseconds a phase of `bytes` bytes may take before the controller is
-/// treated as wedged.
-fn phase_deadline_ns(bytes: usize) -> u64 {
-    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-    let periods = bytes
-        .saturating_add(FRAMING_BYTES)
-        .saturating_mul(BITS_PER_BYTE);
-    periods.saturating_mul(1_000_000_000) / SLOWEST_BUS_HZ
-}
+/// The FIFO's depth in bytes: what one step of progress moves at most.
+const FIFO_DEPTH: u64 = 16;
 
 /// How a transfer waits for the controller to make progress.
 ///
-/// On metal this is the bound interrupt line and the kernel monotonic clock;
-/// in a host test it is a simulated controller that steps as the driver
-/// parks, which is exactly what the real one does.
+/// On metal this is the bound interrupt line and the kernel's monotonic
+/// clock; in a host test, a simulated controller that steps as the driver
+/// parks.
 pub trait BusWait {
     /// Monotonic nanoseconds.
     fn now_ns(&self) -> u64;
 
-    /// Park until the controller signals, or `timeout_ns` elapses.
+    /// Park until the controller interrupts, or `timeout_ns` elapses.
     ///
-    /// A refused park must return rather than spin: the caller re-reads the
-    /// clock and fails closed once the deadline is spent.
+    /// A refused park returns rather than spins: the caller re-reads the clock
+    /// and fails closed once its budget is spent.
     fn wait(&self, timeout_ns: u64);
 }
 
-/// Direction of one phase of a transfer.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Phase {
-    Write,
-    Read,
-}
-
-/// The Broadcom Serial Controller.
-pub struct Bsc<'a> {
-    regs: &'a dyn RegisterBlock,
-    wait: &'a dyn BusWait,
-}
-
-impl<'a> Bsc<'a> {
-    /// Bind the driver to the controller behind `regs`, enabling it and
-    /// clearing any state a previous owner left behind.
+/// The clock the controller divides its bus clock from.
+pub trait ParentClock {
+    /// The rate it runs at now.
     ///
     /// # Errors
     ///
-    /// [`DriverError::LengthOutOfRange`] if the granted window is shorter
-    /// than the register block, or [`DriverError::DeviceFault`] if a register
-    /// access is refused.
-    pub fn new(regs: &'a dyn RegisterBlock, wait: &'a dyn BusWait) -> Result<Self, DriverError> {
+    /// A clock whose rate cannot be read.
+    fn rate(&mut self) -> Result<u64, DriverError>;
+}
+
+/// The divider that runs the bus at no more than `speed_hz` from a parent at
+/// `parent_hz`: rounded up, then up to even, which is how the register reads
+/// it.
+fn divider(parent_hz: u64, speed_hz: NonZeroU32) -> Result<u32, DriverError> {
+    let divider = parent_hz.div_ceil(u64::from(speed_hz.get()));
+    let even = divider.saturating_add(divider & 1);
+    u32::try_from(even)
+        .ok()
+        .filter(|divider| (CDIV_MIN..=CDIV_MAX).contains(divider))
+        .ok_or(DriverError::OutOfRange)
+}
+
+/// The edge delays for `divider`: data driven a sixteenth of a bit after the
+/// falling edge and sampled a quarter after the rising, as Linux sets them.
+fn edge_delays(divider: u32) -> u32 {
+    let falling = (divider / 16).max(1);
+    let rising = (divider / 4).max(1);
+    falling << FEDL_SHIFT | rising
+}
+
+/// The control word that starts `message`, interrupting on every condition
+/// it can raise, completion among them so a refusal ends the wait.
+const fn start_word(message: I2cMessage) -> u32 {
+    let base = C_I2CEN | C_ST | C_INTD;
+    match message.direction {
+        Direction::Read => base | C_READ | C_INTR,
+        Direction::Write if message.len != 0 => base | C_INTT,
+        Direction::Write => base,
+    }
+}
+
+/// One transaction in flight.
+struct Run<'t> {
+    messages: &'t [I2cMessage],
+    /// The last message started.
+    started: usize,
+    /// The message whose bytes move next.
+    cursor: usize,
+    /// Where they are in the buffer.
+    span: Range<usize>,
+    /// The earliest message the controller has not been seen to finish: the
+    /// one a refusal is reported against.
+    active: usize,
+}
+
+impl<'t> Run<'t> {
+    fn new(messages: &'t [I2cMessage]) -> Option<Self> {
+        Some(Self {
+            span: messages.first()?.span(),
+            messages,
+            started: 0,
+            cursor: 0,
+            active: 0,
+        })
+    }
+
+    fn last(&self) -> usize {
+        self.messages.len() - 1
+    }
+}
+
+/// A message's index as a fault names it; a transaction holds at most eight.
+fn index(message: usize) -> u8 {
+    u8::try_from(message).unwrap_or(u8::MAX)
+}
+
+/// The Broadcom Serial Controller.
+pub struct Bsc<'a, P: ParentClock> {
+    regs: &'a dyn RegisterBlock,
+    wait: &'a dyn BusWait,
+    parent: P,
+    speed_hz: NonZeroU32,
+}
+
+impl<'a, P: ParentClock> Bsc<'a, P> {
+    /// The controller behind `regs`, run at no more than `speed_hz` divided
+    /// from `parent`, and left idle with any state a previous owner left
+    /// cleared.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::LengthOutOfRange`] for a window shorter than the
+    /// registers, or the refusal of a register access.
+    pub fn new(
+        regs: &'a dyn RegisterBlock,
+        wait: &'a dyn BusWait,
+        parent: P,
+        speed_hz: NonZeroU32,
+    ) -> Result<Self, DriverError> {
         if regs.block_len() < REGISTER_BLOCK_LEN {
             return Err(DriverError::LengthOutOfRange);
         }
-        let bsc = Self { regs, wait };
+        let bsc = Self {
+            regs,
+            wait,
+            parent,
+            speed_hz,
+        };
         bsc.quiesce()?;
         Ok(bsc)
     }
 
-    /// Narrow the controller to the child at `address` — the [`I2cPort`] one
-    /// transfer endpoint's requests are served against.
-    #[must_use]
-    pub const fn port(&self, address: I2cAddress) -> Port<'_> {
-        Port { bsc: self, address }
-    }
-
     /// Stop any transfer, clear both FIFOs and every latched status bit, and
-    /// leave the controller enabled and idle.
+    /// leave the controller enabled, idle and interrupting on nothing.
     ///
-    /// Dropping the enable bit is the only way to abort a transfer already in
-    /// flight — the control register has no abort — so the sequence disables,
-    /// clears, and re-enables rather than leaving a wedged transfer running
-    /// under the next caller.
+    /// The control register has no abort: dropping the enable bit is the only
+    /// way to stop a transfer in flight, so the controller is disabled,
+    /// cleared and re-enabled rather than left wedged under the next caller.
     fn quiesce(&self) -> Result<(), DriverError> {
-        self.write_reg(C, C_CLEAR)?;
-        self.write_reg(S, S_LATCHED)?;
-        self.write_reg(C, C_I2CEN | C_CLEAR)
+        self.regs.write32(C, C_CLEAR)?;
+        self.regs.write32(S, S_LATCHED)?;
+        self.regs.write32(C, C_I2CEN | C_CLEAR)
     }
 
-    /// Run one write-then-read transfer against `address`.
-    fn transfer(
+    /// Set the divider for the parent's rate now, answering the bus clock it
+    /// makes. A target the controller times out on its own would be reset
+    /// without telling which message stalled, so its stretch timeout stays
+    /// off and the step budget bounds every stall.
+    fn clock(&mut self) -> Result<u64, DriverError> {
+        let parent_hz = self.parent.rate()?;
+        let divider = divider(parent_hz, self.speed_hz)?;
+        self.regs.write32(DIV, divider)?;
+        self.regs.write32(DEL, edge_delays(divider))?;
+        self.regs.write32(CLKT, 0)?;
+        Ok(parent_hz / u64::from(divider))
+    }
+
+    fn start(&self, message: I2cMessage) -> Result<(), DriverError> {
+        self.regs.write32(A, u32::from(message.address.get()))?;
+        self.regs.write32(DLEN, u32::from(message.len))?;
+        self.regs.write32(C, start_word(message))
+    }
+
+    /// Hand the FIFO the cursor's write bytes it has room for, starting the
+    /// next message before the last byte so the controller cannot end the
+    /// write first. Answers whether anything moved.
+    fn fill(&self, run: &mut Run<'_>, buffer: &[u8]) -> Result<bool, DriverError> {
+        let mut moved = false;
+        while !run.span.is_empty() && self.regs.read32(S)? & S_TXD != 0 {
+            if run.span.len() == 1 && run.cursor < run.last() && run.started == run.cursor {
+                run.started += 1;
+                self.start(run.messages[run.started])?;
+            }
+            let byte = buffer
+                .get(run.span.start)
+                .ok_or(DriverError::LengthOutOfRange)?;
+            self.regs.write32(FIFO, u32::from(*byte))?;
+            run.span.start += 1;
+            moved = true;
+        }
+        if run.span.is_empty() && run.cursor < run.last() {
+            run.cursor += 1;
+            run.span = run.messages[run.cursor].span();
+        }
+        Ok(moved)
+    }
+
+    /// Take the bytes the controller has received into the cursor's read
+    /// span. Answers whether anything moved, or `None` for a byte the
+    /// message has no room for.
+    fn drain(&self, run: &mut Run<'_>, buffer: &mut [u8]) -> Result<Option<bool>, DriverError> {
+        let mut moved = false;
+        while self.regs.read32(S)? & S_RXD != 0 {
+            if run.span.is_empty() {
+                return Ok(None);
+            }
+            let slot = buffer
+                .get_mut(run.span.start)
+                .ok_or(DriverError::LengthOutOfRange)?;
+            // The FIFO is byte-wide; its register's upper bits read as zero.
+            *slot = self.regs.read32(FIFO)?.to_le_bytes()[0];
+            run.span.start += 1;
+            moved = true;
+        }
+        Ok(Some(moved))
+    }
+
+    /// End the transaction with `outcome`, the controller left idle.
+    fn end(&self, outcome: Result<(), I2cFault>) -> Result<Result<(), I2cFault>, DriverError> {
+        self.quiesce()?;
+        Ok(outcome)
+    }
+
+    /// Judge a transaction the controller reports done: complete only if
+    /// every message was started and every byte moved.
+    fn finish(
         &self,
-        address: I2cAddress,
-        write: &[u8],
-        read: &mut [u8],
-    ) -> Result<(), DriverError> {
-        if write.len() > MAX_TRANSFER_LEN || read.len() > MAX_TRANSFER_LEN {
+        run: &mut Run<'_>,
+        buffer: &mut [u8],
+    ) -> Result<Result<(), I2cFault>, DriverError> {
+        let reading = run.messages[run.cursor].direction == Direction::Read;
+        let drained = if reading {
+            self.drain(run, buffer)?
+        } else {
+            Some(false)
+        };
+        let complete = drained.is_some()
+            && run.started == run.last()
+            && run.cursor == run.last()
+            && run.span.is_empty();
+        if complete {
+            self.end(Ok(()))
+        } else {
+            self.end(Err(I2cFault::BusFault {
+                message: index(run.active),
+            }))
+        }
+    }
+
+    fn run(
+        &mut self,
+        messages: &[I2cMessage],
+        buffer: &mut [u8],
+    ) -> Result<Result<(), I2cFault>, DriverError> {
+        if messages
+            .iter()
+            .any(|message| message.span().end > buffer.len())
+        {
             return Err(DriverError::LengthOutOfRange);
         }
-        self.write_reg(A, u32::from(address.get()))?;
-        // Both phases empty is the address-only probe: a zero-length write
-        // addresses the part and stops, and its acknowledge is the answer.
-        if !write.is_empty() || read.is_empty() {
-            self.run_phase(Phase::Write, &mut [], write)?;
-        }
-        if read.is_empty() {
-            return Ok(());
-        }
-        // A part that acknowledged the write phase is demonstrably there, so
-        // a refusal of the read phase's address is a fault of this transfer
-        // rather than an absent part.
-        self.run_phase(Phase::Read, read, &[]).map_err(|err| {
-            if err == DriverError::NotFound && !write.is_empty() {
-                DriverError::DeviceFault
-            } else {
-                err
-            }
-        })
-    }
-
-    /// Arm one phase and service its FIFO until the controller reports the
-    /// phase complete, parking on the interrupt between rounds.
-    ///
-    /// Exactly one of `read`/`write` is non-empty for a phase that moves
-    /// data; a write phase with both empty is the address-only probe.
-    fn run_phase(&self, phase: Phase, read: &mut [u8], write: &[u8]) -> Result<(), DriverError> {
-        let len = if phase == Phase::Read {
-            read.len()
-        } else {
-            write.len()
+        let Some(mut run) = Run::new(messages) else {
+            return Err(DriverError::LengthOutOfRange);
         };
-        let remaining_reg = u32::try_from(len).map_err(|_| DriverError::OutOfRange)?;
-        self.write_reg(S, S_LATCHED)?;
-        self.write_reg(DLEN, remaining_reg)?;
-        let mut control = C_I2CEN | C_CLEAR | C_ST | C_INTD;
-        control |= match phase {
-            Phase::Read => C_READ | C_INTR,
-            Phase::Write => C_INTT,
-        };
-        self.write_reg(C, control)?;
-
-        let deadline = self.wait.now_ns().saturating_add(phase_deadline_ns(len));
-        let mut moved = 0usize;
+        let budget = step_budget_ns(FIFO_DEPTH, self.clock()?);
+        self.regs.write32(S, S_LATCHED)?;
+        self.regs.write32(C, C_I2CEN | C_CLEAR)?;
+        self.start(messages[0])?;
+        let mut deadline = self.wait.now_ns().saturating_add(budget);
         loop {
-            let status = self.read_reg(S)?;
+            let status = self.regs.read32(S)?;
+            let message = index(run.active);
             if status & S_ERR != 0 {
-                // `DLEN` reads back the bytes still to move once a transfer
-                // has begun, so an untouched count means the part never
-                // answered its address at all; a count that has moved means
-                // it is there and stopped acknowledging, which is a fault of
-                // the transfer rather than an absent part. Read before the
-                // abort, which resets it.
-                let untouched = self.read_reg(DLEN)? == remaining_reg;
-                self.quiesce()?;
-                return Err(if untouched {
-                    DriverError::NotFound
-                } else {
-                    DriverError::DeviceFault
-                });
+                return self.end(Err(I2cFault::NoAck { message }));
             }
             if status & S_CLKT != 0 {
-                self.quiesce()?;
-                return Err(DriverError::DeviceFault);
+                return self.end(Err(I2cFault::BusFault { message }));
             }
-            moved += self.service(phase, read, write, moved)?;
-            // Re-read rather than trusting the pre-service snapshot: the
-            // phase usually completes while the FIFO is being drained, and
-            // the stale bit would cost a needless park.
-            if self.read_reg(S)? & S_DONE != 0 {
-                break;
+            if status & S_DONE != 0 {
+                return self.finish(&mut run, buffer);
             }
+            let current = &messages[run.cursor];
+            // Wanting bytes the message does not hold, or delivering them, is
+            // the controller miscounting the message.
+            let overrun = Err(I2cFault::BusFault {
+                message: index(run.cursor),
+            });
+            let progressed = match current.direction {
+                Direction::Write if status & S_TXW != 0 && current.len != 0 => {
+                    if run.span.is_empty() {
+                        return self.end(overrun);
+                    }
+                    run.active = run.cursor;
+                    self.fill(&mut run, buffer)?
+                }
+                Direction::Read if status & (S_RXR | S_RXD) != 0 => {
+                    run.active = run.cursor;
+                    match self.drain(&mut run, buffer)? {
+                        Some(moved) => moved,
+                        None => return self.end(overrun),
+                    }
+                }
+                _ => false,
+            };
             let now = self.wait.now_ns();
+            if progressed {
+                deadline = now.saturating_add(budget);
+                continue;
+            }
             if now >= deadline {
-                self.quiesce()?;
-                return Err(DriverError::DeviceFault);
+                return self.end(Err(I2cFault::TimedOut {
+                    message: index(run.active),
+                }));
             }
             self.wait.wait(deadline - now);
         }
-        // The controller stopped: drain whatever the last completion left in
-        // the FIFO before judging the phase.
-        moved += self.service(phase, read, write, moved)?;
-        self.write_reg(S, S_DONE)?;
-        if moved == len {
-            Ok(())
-        } else {
-            // A short transfer is a failure, never a partially-filled
-            // buffer the caller could mistake for a reading.
-            self.quiesce()?;
-            Err(DriverError::DeviceFault)
-        }
-    }
-
-    /// Move as many bytes as the FIFO currently allows, returning how many.
-    fn service(
-        &self,
-        phase: Phase,
-        read: &mut [u8],
-        write: &[u8],
-        moved: usize,
-    ) -> Result<usize, DriverError> {
-        let mut done = 0usize;
-        match phase {
-            Phase::Read => {
-                while moved + done < read.len() && self.read_reg(S)? & S_RXD != 0 {
-                    // The FIFO is byte-wide; the register's upper bits read
-                    // as zero, so the narrowing is total.
-                    let byte = self.read_reg(FIFO)?.to_le_bytes()[0];
-                    read[moved + done] = byte;
-                    done += 1;
-                }
-            }
-            Phase::Write => {
-                while moved + done < write.len() && self.read_reg(S)? & S_TXD != 0 {
-                    self.write_reg(FIFO, u32::from(write[moved + done]))?;
-                    done += 1;
-                }
-            }
-        }
-        Ok(done)
-    }
-
-    fn read_reg(&self, offset: usize) -> Result<u32, DriverError> {
-        self.regs.read32(offset)
-    }
-
-    fn write_reg(&self, offset: usize, value: u32) -> Result<(), DriverError> {
-        self.regs.write32(offset, value)
     }
 }
 
-/// One child of the bus, bound to the address its duty grant named.
-///
-/// This is the whole of what a chip driver's transfer endpoint resolves to:
-/// the address is held here, on the bus driver's side, so no request can
-/// reach a part other than the one its endpoint belongs to.
-pub struct Port<'a> {
-    bsc: &'a Bsc<'a>,
-    address: I2cAddress,
-}
+impl<P: ParentClock> I2cBus for Bsc<'_, P> {
+    fn facts(&self) -> BusFacts {
+        BusFacts {
+            speed_hz: self.speed_hz.get(),
+            repeated_start: RepeatedStart::BeforeFinalRead,
+        }
+    }
 
-impl I2cPort for Port<'_> {
-    fn transfer(&self, write: &[u8], read: &mut [u8]) -> Result<(), DriverError> {
-        self.bsc.transfer(self.address, write, read)
+    fn transfer(
+        &mut self,
+        transaction: &I2cTransaction,
+        buffer: &mut [u8],
+    ) -> Result<Result<(), I2cFault>, DriverError> {
+        let outcome = self.run(transaction.messages(), buffer);
+        if outcome.is_err() {
+            // Whatever refused, the controller is left idle for the next
+            // transaction; a register that refuses this too has nothing left
+            // to say.
+            let _ = self.quiesce();
+        }
+        outcome
     }
 }
 
@@ -389,12 +461,6 @@ impl I2cPort for Port<'_> {
 ///
 /// [`DriverError::PermissionDenied`] if the host did not grant
 /// [`CapabilityId::DRV_LOAD`].
-///
-/// # Capabilities
-///
-/// Requires [`CapabilityId::DRV_LOAD`]. Driving the bus additionally needs
-/// the mapped register window and the bound interrupt line the matched node
-/// requested, and the privilege to bind each child's transfer endpoint.
 pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     if !host.has_capability(CapabilityId::DRV_LOAD) {
         return Err(DriverError::PermissionDenied);

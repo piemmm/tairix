@@ -5,14 +5,14 @@
 //! Every request is a blocking URB call the host controller answers, and the
 //! serve loop parks on the stream ports between periods, so nothing spins.
 
+use tairix_abi::driver::DeviceWake;
 use tairix_abi::usb_urb::{
     iso_notify_endpoint_for, IsoGrant, IsoStartParams, UsbSpeed, ISO_MAX_SLOTS, ISO_NOTIFY_LEN,
 };
 use tairix_abi::{DriverError, Errno, HwProperty, Origin, ProcId};
-use tairix_audiochan::{exit, fail, Wake};
-use tairix_caps::CapabilitySet;
+use tairix_audiochan::{exit, fail};
 use tairix_drv_audio_usb_uac::engine::{UacTransport, UsbAudio};
-use tairix_drv_audio_usb_uac::REQUIRED_CAPS;
+use tairix_drv_audio_usb_uac::REQUIRED_CAPABILITIES;
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_usb::device::CTRL_DATA_LEN;
 use tairix_usb::transport::{read_configuration, UrbCall, UrbClient, UrbLink};
@@ -62,7 +62,7 @@ impl Live {
     fn map(grant: &IsoGrant, len: usize) -> Result<Region, Errno> {
         let mut mapped_len = 0u64;
         let mapped = tairix_rt::shm_map_from(grant.region_grant, grant.grantor, &mut mapped_len);
-        let base = u64::try_from(mapped).map_err(|_| Errno::from_syscall(mapped))?;
+        let base = Errno::syscall_result(mapped)?;
         let (Ok(address), Ok(mapped_len)) = (usize::try_from(base), usize::try_from(mapped_len))
         else {
             return Err(Errno::DeviceFault);
@@ -180,21 +180,14 @@ impl UacTransport for Live {
     }
 }
 
-fn driver_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    for &cap in REQUIRED_CAPS {
-        caps.insert(cap);
-    }
-    caps
-}
-
 /// The transport, its interface and speed, and the URB endpoint its host
 /// controller serves.
 type Transport = (UrbLink<'static, IpcUrbCall>, u8, UsbSpeed, u64);
 
 /// Map the interface's transport from the grants its node carries.
 fn map_transport() -> Result<Transport, i32> {
-    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+    let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
+    let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
         return Err(fail(
             exit::NO_HOST,
             "usb-audio: the driver host could not be built",
@@ -260,7 +253,7 @@ fn main() -> i32 {
     for endpoint in audio.stream_endpoints() {
         wanted[slot_of(endpoint)] = true;
     }
-    let mut wakes = [Wake::Port(0); STREAM_ENDPOINTS];
+    let mut wakes = [DeviceWake::Port(0); STREAM_ENDPOINTS];
     let mut count = 0usize;
     let capacity = usize::from(ISO_MAX_SLOTS) + 1;
     for (slot, _) in wanted.iter().enumerate().filter(|(_, wanted)| **wanted) {
@@ -289,7 +282,7 @@ fn main() -> i32 {
             );
         }
         audio.transport_mut().ports[slot] = Some(port);
-        wakes[count] = Wake::Port(port);
+        wakes[count] = DeviceWake::Port(port);
         count += 1;
     }
     tairix_audiochan::serve(audio, &wakes[..count])

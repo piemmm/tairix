@@ -325,8 +325,8 @@ mod tests {
     }
 
     impl Display for AcceptingDisplay {
-        fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-            Ok(self.mode)
+        fn output(&self) -> Option<DisplayMode> {
+            Some(self.mode)
         }
 
         fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {

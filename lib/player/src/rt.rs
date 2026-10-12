@@ -10,9 +10,8 @@ use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{Errno, OpenFlags};
 use tairix_audio::live::{LiveStream, RtAudio};
 use tairix_audio::stream::{OpenFailure, Written};
-use tairix_hash::HashSeed;
 use tairix_rt::File;
-use tairix_sandbox::rt::{RtSessionLauncher, SessionMembers};
+use tairix_sandbox::rt::{draw_seed, RtSessionLauncher, SessionMembers};
 
 use crate::engine::{Engine, Failure, FileRefusal, Files, Settings, Speaker};
 use crate::programme::Programme;
@@ -140,8 +139,8 @@ pub struct RtSpeaker {
 impl RtSpeaker {
     /// The mailbox the open stream's notifications arrive in.
     #[must_use]
-    pub const fn notify_port(&self) -> Option<u64> {
-        self.transport.notify_port()
+    pub fn notify_port(&self) -> Option<u64> {
+        self.stream.as_ref().map(LiveStream::notify_port)
     }
 
     fn stream(&mut self) -> Result<(&mut LiveStream, &mut RtAudio), Errno> {
@@ -206,14 +205,6 @@ impl Speaker for RtSpeaker {
         let (stream, transport) = self.stream()?;
         stream.client_mut().report(transport)
     }
-}
-
-/// A fresh draw for a decoder's page cache.
-#[must_use]
-pub fn draw_seed() -> Option<HashSeed> {
-    let mut key = [0u8; HashSeed::LEN];
-    tairix_rt::random_fill(&mut key).ok()?;
-    Some(HashSeed::from_bytes(key))
 }
 
 /// The tokens a host's wait-set reports the engine's sources under.

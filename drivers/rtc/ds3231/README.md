@@ -14,7 +14,8 @@ and never reaches for an address of its own.
 | Capability | Why |
 |---|---|
 | `CAP_DRV_LOAD` | the load-time gate every driver clears |
-| `CAP_IPC_ENDPOINT` | calling the transfer endpoint its matched node's grant names |
+| `CAP_IPC_ENDPOINT` | calling the I²C controller its node's link names |
+| `CAP_SHM` | mapping the buffer of the channel opened over that link |
 | `CAP_IPC_BIND_PRIVILEGED` | binding the RTC service endpoint it serves |
 
 It requests **no** `CAP_MMIO_MAP`: it owns no registers of its own, only a
@@ -24,17 +25,17 @@ reads this driver's RTC service endpoint and tags the reading `Firmware`
 itself. A compromised RTC driver can lie about the *chip*, but it can neither
 assert a provenance it did not earn nor overwrite a network sync.
 
-## One endpoint, one part
+## One link, one part
 
-Discovery splits each bus child in two: the bus driver receives the **duty**
-(the endpoint id paired with this part's bus address) and this driver receives
-the **authority** (the endpoint alone). The transfer wire carries no address,
-so this driver has no field in which it could name a neighbour on the bus. A
-driver delivered no endpoint grant stands down rather than guessing an id.
+Discovery gives this part's node an I²C link naming its controller and its
+address. The driver opens a target channel over it, and the controller holds
+every message to that one address, so this driver cannot name a neighbour on
+the bus. A node linking no one target is left alone: the driver stands down
+rather than guessing.
 
-A chip driver whose bus driver has not yet bound its endpoint simply gets a
-refusal from the first call; `timed`'s existing bounded RTC ladder covers the
-start-up ordering, so nothing here retries or spins.
+A chip driver whose controller is not yet serving gets a refusal from the
+open; `timed`'s existing bounded RTC ladder covers the start-up ordering, so
+nothing here retries or spins.
 
 ## What it can and cannot vouch for
 

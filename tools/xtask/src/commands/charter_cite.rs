@@ -204,6 +204,10 @@ const SOURCES: &[&str] = &[
     "GICv",
     "HID",
     "VL805",
+    // Display-link standards: the EDID, InfoFrame and audio formats a display
+    // and its source exchange.
+    "CTA-861",
+    "HDMI",
     // Architectures and vendors whose manuals are cited by section.
     "Arm",
     "ARM",
@@ -776,6 +780,24 @@ mod tests {
                 "not refused: {body}"
             );
         }
+    }
+
+    /// The display-link standards are cited by section in the EDID and HDMI
+    /// crates, and a section number they share with the charter is theirs.
+    #[test]
+    fn a_display_standards_section_is_accepted() {
+        for body in [
+            "//! The `InfoFrames` a source sends a sink (CTA-861-H §6; HDMI 1.4b §8.2.3),",
+            "/// the speaker allocation (CTA-861-G §7.5.3)",
+            "/// per HDMI 2.0 §10.4",
+        ] {
+            assert!(reasons(body).is_empty(), "refused: {body}");
+        }
+        assert_eq!(
+            reasons("/// one more pane (§6)"),
+            vec!["section number with no source named beside it"],
+            "a bare section is still the charter's"
+        );
     }
 
     #[test]

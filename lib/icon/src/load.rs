@@ -23,7 +23,7 @@ use crate::vector::VectorIcon;
 ///
 /// A fixed table so a loader iterates the closed [`IconKind`] vocabulary
 /// without inventing a second list of kinds.
-pub const ICON_KINDS: [IconKind; 110] = [
+pub const ICON_KINDS: [IconKind; 112] = [
     IconKind::Network,
     IconKind::Volume,
     IconKind::Battery,
@@ -134,6 +134,8 @@ pub const ICON_KINDS: [IconKind; 110] = [
     IconKind::Microphone,
     IconKind::VolumeMuted,
     IconKind::NetworkOffline,
+    IconKind::SoundDevices,
+    IconKind::SoundEffects,
 ];
 
 /// A source of on-disk SVG icon assets, one per [`IconKind`].

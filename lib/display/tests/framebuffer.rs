@@ -132,7 +132,7 @@ fn open_reports_configured_mode() {
     let host = MockHost::full(8);
     let fb = Framebuffer::open(&host, config(4, 2, 16)).expect("open");
     assert_eq!(
-        fb.mode_info().expect("mode"),
+        fb.output().expect("an output"),
         DisplayMode {
             width_px: 4,
             height_px: 2,

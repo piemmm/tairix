@@ -738,31 +738,27 @@ own `BlkHealth` degrading independently. The primitives:
   `Offline → Offline`); `FaultDomain::child_status` now resolves its grace
   window and delegates to it, so an owned (clocked) domain and a published
   (already-resolved) ancestor state impose identically (§2.2).
-- `hwtree::ancestor_imposed_status` (slice) and
-  `hwtree::ancestor_imposed_status_from_snapshot` (the wire snapshot a driver
-  reads with `hw_tree_read`, alloc-free) fold the chain's published health;
-  both share one traversal (`resolve_owner`/`fold_ancestor_status` over a
-  generic per-id `lookup`), so the byte- and slice-backed folds cannot diverge,
-  and a malformed/truncated snapshot degrades safe to `Ok`. Proven host-side:
-  the mapping, owned/published agreement, the snapshot↔slice agreement across
-  every health arrangement, deep-not-masked-by-shallow, and fail-closed cases.
-- A driver learns *its own* place in the tree through the new `hw_self_node`
-  syscall (number 103, `lib/abi` + `kernel/core` + `lib/rt`/`lib/abi-sys` +
-  generated C header): the kernel resolves the caller's own matched node from
-  its task id (never caller-supplied — no ambient authority, no global-tree
-  window), needs no capability (self-identity baseline, like reading one's own
-  pid), and fails closed `NotFound` for a task with no matched node. Proven
-  host-side (own-node resolution + fail-closed).
-- `usb_msd` is the first live consumer: `recover::serve_lun_with_domain` now
-  folds an ancestor status supplied by a **lazy closure** invoked *only on the
+- `hwtree::ancestor_imposed_status` (over a slice) and
+  `hwtree::ancestor_imposed_status_by` (over a lookup by id) fold the chain's
+  published health through one traversal (`resolve_owner`/`fold_ancestor_status`),
+  so the two cannot diverge. Proven host-side: the mapping, owned/published
+  agreement, lookup↔slice agreement across every health arrangement,
+  deep-not-masked-by-shallow, and the fail-closed cases.
+- A driver learns its own place in the tree from `hw_self_node`: its node, the
+  keys it is matched by, and the status its fault-domain ancestors impose,
+  which the kernel folds where it holds the tree (`HwTreeSource::ancestor_status`)
+  so the driver copies none of it. The kernel resolves the caller's node from
+  its task (never caller-supplied), needs no capability, and fails closed
+  `NotFound` for a task with no matched node.
+- `usb_msd` is the first live consumer: `recover::serve_lun_with_domain` folds
+  an ancestor status supplied by a **lazy closure** invoked *only on the
   recovery path* (a stall the device did not answer definitively —
-  `transport_alive` gates it out), so a healthy hot-path transfer never reads
-  the tree (§2.16); a data-valid or medium answer proves the path above is up
-  and always wins, so no valid read is ever masked. The serve loop fetches
-  `hw_self_node` once and its closure reads the current snapshot into a bounded
-  degrade-safe buffer and calls `ancestor_imposed_status_from_snapshot`. Proven
-  host-side (recovering ancestor → reissuable, offline ancestor → closed,
-  medium/data wins, offline ancestor dominates a recovering transport).
+  `transport_alive` gates it out), so a healthy transfer never asks; a
+  data-valid or medium answer proves the path above is up and always wins. The
+  closure reads the status from `hw_self_node`. Proven host-side (recovering
+  ancestor → reissuable, offline ancestor → closed, medium/data wins, offline
+  ancestor dominates a recovering transport) and in the kernel, a resetting hub
+  attributed in a tree of any size.
 
 Remaining:
 - A QEMU vertical of a modelled hub/controller with several children resetting,

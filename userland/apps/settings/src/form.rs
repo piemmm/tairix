@@ -66,6 +66,7 @@ use tairix_wallpaper::{
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
+use crate::effects::{self, EffectsAsk, EffectsReading, EffectsRow};
 use crate::machine::MachineSetting;
 use crate::network::{self, Addressing, Choice, IfaceSetting};
 use crate::notices;
@@ -1177,6 +1178,8 @@ pub(crate) enum Owner {
     Pictures(Chooser),
     /// One control of one sound device, which the audio service owns.
     Sound(SoundRow),
+    /// One of the user's sound choices, which their desktop session owns.
+    Effects(EffectsRow),
 }
 
 /// A settable a composition **declares** in a static table, as opposed to
@@ -1612,6 +1615,9 @@ pub enum Composition {
     /// The Sound pane: one plate per sink and source, and what is recording,
     /// discovered from the audio service.
     Sound,
+    /// The Sound Effects pane: the desktop's switch and theme, then one plate
+    /// per event a user's choices reach, read from the desktop session.
+    SoundEffects,
 }
 
 impl Composition {
@@ -1632,7 +1638,7 @@ impl Composition {
             Self::Keyboard => &KEYBOARD_GROUPS,
             Self::Screensaver => &SCREENSAVER_GROUPS,
             Self::LockScreen => &LOCK_GROUPS,
-            Self::Ethernet | Self::Dns | Self::Users | Self::Sound => &[],
+            Self::Ethernet | Self::Dns | Self::Users | Self::Sound | Self::SoundEffects => &[],
         }
     }
 
@@ -1650,7 +1656,8 @@ impl Composition {
             | Self::Keyboard
             | Self::Screensaver
             | Self::LockScreen
-            | Self::Sound => Posture::Immediate,
+            | Self::Sound
+            | Self::SoundEffects => Posture::Immediate,
             // Writing either of the machine's stores is a re-authenticated
             // run of the tool that owns them, which is not something to ask
             // for per pointer sample.
@@ -1754,7 +1761,8 @@ impl Composition {
             | Self::Ethernet
             | Self::Dns
             | Self::Users
-            | Self::Sound => &[],
+            | Self::Sound
+            | Self::SoundEffects => &[],
         }
     }
 
@@ -1772,6 +1780,7 @@ impl Composition {
             Self::Dns => network::RESOLVER_FACTS.to_vec(),
             Self::Users => accounts::ACCOUNT_FACTS.to_vec(),
             Self::Sound => sound::SOUND_FACTS.to_vec(),
+            Self::SoundEffects => effects::EFFECTS_FACTS.to_vec(),
             Self::Notifications => self
                 .declared_labels()
                 .chain(notices::SOURCE_FACTS.iter().copied())
@@ -1825,6 +1834,15 @@ impl Composition {
                     groups,
                     rows.into_iter()
                         .map(|rows| rows.into_iter().map(Owner::Sound).collect())
+                        .collect(),
+                ))
+            }
+            Self::SoundEffects => {
+                let (groups, rows) = effects::groups(documents.effects);
+                Built::plain((
+                    groups,
+                    rows.into_iter()
+                        .map(|rows| rows.into_iter().map(Owner::Effects).collect())
                         .collect(),
                 ))
             }
@@ -2004,6 +2022,9 @@ pub(crate) struct Documents<'a> {
     /// The sound devices and captures the audio service answered with, or
     /// `None` while the reading has not landed.
     pub(crate) sound: Option<&'a SoundReading>,
+    /// The user's sound choices the desktop session answered with, or `None`
+    /// while the reading has not landed.
+    pub(crate) effects: Option<&'a EffectsReading>,
     /// The account readings: the caller's own record, the two ungated
     /// directories, and whatever an authenticated listing answered.
     pub(crate) accounts: &'a AccountFacts,
@@ -2032,7 +2053,8 @@ const fn secret_owner(owner: Owner) -> bool {
         | Owner::Source(_)
         | Owner::Action(_)
         | Owner::Pictures(_)
-        | Owner::Sound(_) => false,
+        | Owner::Sound(_)
+        | Owner::Effects(_) => false,
     }
 }
 
@@ -2100,6 +2122,15 @@ pub enum FormOutcome {
         /// Whether the interaction has ended.
         settled: bool,
     },
+    /// The reader changed one of their sound choices or asked to choose a
+    /// sound's file, or moves a sound's level and asks nothing until it
+    /// `settled`.
+    Effects {
+        /// What to ask the desktop session, if anything yet.
+        ask: Option<EffectsAsk>,
+        /// Whether the interaction has ended.
+        settled: bool,
+    },
 }
 
 /// A composed pane: the groups it draws, and the setting behind each row.
@@ -2140,6 +2171,7 @@ pub struct Form {
     /// restates it rather than dropping back to unmeasured.
     resolvers: Option<Vec<NetServerAddr>>,
     sound: Option<SoundReading>,
+    effects: Option<EffectsReading>,
     /// The account readings the plates are discovered from and a staged
     /// change is measured against.
     accounts: AccountFacts,
@@ -2201,6 +2233,7 @@ impl Form {
             staged: documents.staged.to_vec(),
             resolvers: documents.resolvers.map(<[_]>::to_vec),
             sound: documents.sound.cloned(),
+            effects: documents.effects.cloned(),
             accounts: documents.accounts.clone(),
             staged_accounts: documents.staged_accounts.to_vec(),
             cursor_sets: documents.cursor_sets.to_vec(),
@@ -2266,6 +2299,12 @@ impl Form {
     /// Adopt what the audio service answered.
     pub(crate) fn adopt_sound(&mut self, reading: Option<&SoundReading>) {
         self.sound = reading.cloned();
+        self.rebuild();
+    }
+
+    /// Adopt what the desktop session answered of the user's sound choices.
+    pub(crate) fn adopt_effects(&mut self, reading: Option<&EffectsReading>) {
+        self.effects = reading.cloned();
         self.rebuild();
     }
 
@@ -2454,7 +2493,8 @@ impl Form {
             | Owner::Source(_)
             | Owner::Action(_)
             | Owner::Pictures(_)
-            | Owner::Sound(_) => None,
+            | Owner::Sound(_)
+            | Owner::Effects(_) => None,
             Owner::Machine(setting) => {
                 let (working, effect) = (self.config.as_ref()?, self.config_in_effect.as_ref()?);
                 let value = setting.value(working);
@@ -2668,6 +2708,7 @@ impl Form {
             staged: &self.staged,
             resolvers: self.resolvers.as_deref(),
             sound: self.sound.as_ref(),
+            effects: self.effects.as_ref(),
             accounts: &self.accounts,
             staged_accounts: &self.staged_accounts,
             notify_sources: self.notify_sources.as_deref(),
@@ -3109,6 +3150,17 @@ impl Form {
         if let Owner::Sound(row) = owner {
             return sound_outcome(row, action.action);
         }
+        if let Owner::Effects(row) = owner {
+            let settled = !matches!(action.action, FieldAction::SetValue { .. });
+            let ask = self
+                .effects
+                .as_ref()
+                .and_then(|reading| effects::effects_ask(row, &action.action, reading));
+            if ask.is_none() && settled {
+                return FormOutcome::Changed;
+            }
+            return FormOutcome::Effects { ask, settled };
+        }
         match action.action {
             FieldAction::Selected { index } => self.chose(owner, index),
             // A slider settles once, where its drag or its key step ended,
@@ -3252,8 +3304,9 @@ impl Form {
                 );
                 FormOutcome::Staged
             }
-            // A command row offers no choice list to choose from.
-            Owner::Action(_) | Owner::Sound(_) => FormOutcome::Changed,
+            // A command row offers no choice list to choose from, and the
+            // sound rows answer their own actions before any choice is read.
+            Owner::Action(_) | Owner::Sound(_) | Owner::Effects(_) => FormOutcome::Changed,
             Owner::Account(setting) => {
                 // The lock state is the pane's one closed account field;
                 // an index outside the list this surface built stages

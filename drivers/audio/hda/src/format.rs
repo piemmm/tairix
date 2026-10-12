@@ -71,6 +71,21 @@ impl PcmSupport {
         formats
     }
 
+    /// The bits of a 32-bit sample the converter keeps, where fewer than all
+    /// of them: its widest size, when that is 20 or 24 bits.
+    #[must_use]
+    pub const fn resolution(self) -> Option<u8> {
+        if self.streams & PCM_STREAMS == 0 || self.pcm & SIZE_32 != 0 {
+            None
+        } else if self.pcm & SIZE_24 != 0 {
+            Some(24)
+        } else if self.pcm & SIZE_20 != 0 {
+            Some(20)
+        } else {
+            None
+        }
+    }
+
     /// The rates the converter runs at, ascending.
     ///
     /// # Errors
@@ -205,6 +220,22 @@ mod tests {
             Err(DriverError::Unsupported)
         );
         assert_eq!(frame_bytes(SampleFormat::S32, 6), 24);
+    }
+
+    #[test]
+    fn a_container_wider_than_the_converter_states_its_resolution() {
+        let to_24 = PcmSupport::new((1 << 17) | (1 << 19) | 0x40, 1);
+        assert_eq!(to_24.resolution(), Some(24));
+        let to_20 = PcmSupport::new((1 << 18) | 0x40, 1);
+        assert_eq!(to_20.resolution(), Some(20));
+        let to_32 = PcmSupport::new((1 << 19) | (1 << 20) | 0x40, 1);
+        assert_eq!(to_32.resolution(), None);
+        assert_eq!(QEMU.resolution(), None, "sixteen bits are their own");
+        assert_eq!(
+            PcmSupport::new(1 << 19, 0).resolution(),
+            None,
+            "no PCM at all"
+        );
     }
 
     #[test]

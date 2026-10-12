@@ -12,7 +12,8 @@ GPU acceleration live above this trait, not inside it.
 
 | Method           | Purpose                                  | Capability gate          |
 |------------------|------------------------------------------|--------------------------|
-| `mode_info`      | report `DisplayMode { width_px, height_px, stride_bytes, format }` | `DriverHandle` ownership |
+| `output`         | report the `DisplayMode { width_px, height_px, stride_bytes, format }` the output runs, or `None` with no sink | `DriverHandle` ownership |
+| `service_events` | collect what woke the display's event sources and move `output` to match | `DriverHandle` ownership |
 | `device_report`  | report the device's own memory and compositor, for the monitor | `DriverHandle` ownership |
 | `present`        | copy a fully-rendered frame to the surface | `DriverHandle` ownership |
 | `present_rects`  | present a full frame of which only a list of `DamageRect`s changed | `DriverHandle` ownership |
@@ -72,7 +73,8 @@ definition. The trait's default refuses `Unsupported`, which is the truth for
 a surface with no power control of its own — a firmware linear framebuffer, a
 VBE mode — and the presenter then keeps its screen black and still instead,
 so it spends nothing on the screen either way. A driver that can reach the
-panel overrides it: the Raspberry Pi service blanks through the firmware.
+panel overrides it: the Pi 4's display engine brings its outputs down, so a
+sink sees no signal and sleeps.
 
 A power-down never outlives the configuration that asked for it.
 `DisplayServer` tracks the display as unverified, on, or off: its release of a
@@ -113,8 +115,8 @@ partial (§2.9).
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
 | framebuffer  | `tairix-drv-display-framebuffer` (Run process over `tairix_display::Framebuffer`) | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
 | vesa         | `tairix-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
-| rpi_hvs      | `tairix-drv-display-rpi-hvs`         | Raspberry Pi VideoCore HVS plane compositor (`AcceleratedDisplay`) | host-side tests |
-| rpi_fb       | `tairix-drv-display-rpi-fb` (Run process over `tairix_display::Framebuffer`) | the Pi firmware's linear framebuffer, switched off through the firmware | host-side tests against the mock firmware |
+| bcm2711_hvs  | `tairix-drv-display-bcm2711-hvs`     | the Pi 4's HVS and HDMI pixel valves, driven natively, its encoders over `encoder-v1` | host-side tests against a register-level model |
+| bcm2711_hdmi | `tairix-drv-display-bcm2711-hdmi`    | not a surface: each Pi 4 HDMI block, an `encoder-v1` encoder of the display engine and an `audiochan-v1` audio device | host-side tests against a register-level model |
 
 The two display drivers are deliberate siblings (`AGENTS.md` §2.2
 carve-out), not duplicates: `vesa` owns the VBE-specific decode, while
@@ -187,10 +189,31 @@ call* — which is also where the window they partition opens, so a refused
 present adds nothing to either and no request an unauthorised caller can send
 moves the epoch —
 the memory and compositor capabilities the driver reports through
-`Display::device_report`, and the mode being scanned out. The default
+`Display::device_report`, and the mode being scanned out, or none while
+there is no output. The default
 `device_report` is honest for a firmware framebuffer — no memory of its
 own, no hardware compositor — and an `AcceleratedDisplay` driver overrides
 it with its real `AccelCaps`.
+
+#### The display follows its output
+
+The output is the driver's: `Display::output` is the mode it runs for the
+sink it has, or `None` with none (`plans/DISPLAY.md` D12). A driver whose
+output can move hands `serve` its event sources (`DeviceWake`: an interrupt
+line, a port, a posted call's reply); the loop parks on them beside the
+endpoint, calls `Display::service_events` when one fires, and announces a
+move on the counted `NoticeTopic::DisplayOutput` before it serves another
+request — and once when it starts, so a client of an earlier instance
+converges onto this one. `Query` answers the output: a mode, or none. A
+`Configure` whose geometry is not the output's mode, and a `Present` of frames
+shaped for another, are refused `Stale`; the configuration is not dropped, so
+the frames serve again the moment the output runs their mode, and it still
+ends only with its lease. A linear framebuffer's output never moves, so it
+names no source.
+
+Clients establish frames one way, `tairix_display::establish_frames` (feature
+`rt`): the shared region, its grant to the service, the configure, and the
+ring that owns the region and unmaps it when dropped.
 
 Lifecycle: the signed-bundle load gate clears `CAP_DRV_LOAD`;
 `Framebuffer::open` maps the surface; dropping the `Framebuffer`
@@ -347,103 +370,120 @@ The `fw_cfg` DMA protocol lives once in the shared `lib/fwcfg` crate
 transport, the deliberate sibling of the riscv64 MMIO transport
 (`AGENTS.md` §2.2).
 
-### `tairix-drv-display-rpi-hvs`
+### `tairix-drv-display-bcm2711-hvs`
 
-The Raspberry Pi driver is the first to implement `AcceleratedDisplay`.
-It exposes the VideoCore Hardware Video Scaler (HVS) — a fixed-function
-plane compositor — so the window manager hands it the visible windows
-as layers instead of a pre-composited frame.
+The Raspberry Pi 4's display engine, driven natively as Linux's full-KMS
+`vc4` drives it: the fifth-generation HVS composites the seat's surface into
+the pixel valves feeding HDMI0 and HDMI1, and each HDMI block is an encoder
+driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
 
-The HVS composites by walking a *display list* (DLIST) of plane entries
-held in a dedicated RAM. On each accelerated present the driver uploads
-each layer's premultiplied pixels into a per-plane, GPU-visible source
-buffer, builds one unity-scaled DLIST entry per layer (control word,
-packed position, size, source **bus** pointer, pitch, alpha — modelled
-on the VC4 HVS plane format, six 32-bit words plus an end marker),
-writes the list into the HVS DLIST RAM, and arms the display channel
-through its control register. Plane pointers are bus addresses: a
-physical address is translated through the configured VideoCore bus
-alias (default `0xC000_0000`) and bounds-checked against the 30-bit
-aperture, failing closed rather than driving the engine off a bad
-address.
+- **Its node.** The aarch64 port states the engine's fixed wiring on the HVS
+  node, which the image's display overlay enables: the HVS window `hvs`, the
+  pixel valves' windows `valve2` and `valve4` with `Encoder` links `hdmi0`
+  and `hdmi1` to the blocks they feed (`tairix_vcmailbox::ENGINE_OUTPUTS`),
+  the core clock's link, its bus's DMA windows, and, where the boot lit a
+  framebuffer console, the discovery-only `BootConsole` fact in place of a
+  boot display node, so no generic framebuffer service binds the firmware's
+  surface ([aarch64 platform](../platform/aarch64.md)).
+- **Takeover.** The kernel first moves the boot console off the firmware's
+  memory onto a block it owns below the HVS's DMA reach (`console_relocate`),
+  so nothing writes or scans out memory the firmware may take back; a console
+  that will not move ends the driver with the firmware told nothing. The
+  engine then tells the firmware the display is the ARM's
+  (`NOTIFY_DISPLAY_DONE`, tag `0x0003_0066`, which the mailbox service admits
+  only for the HVS node's driver) and records the answer: a refusal or an
+  unprocessed tag is logged with the firmware's codes, and the display is
+  taken over regardless, as Linux's `vc4` does. It brings down whatever pipe
+  the firmware left running — the valve's video stopped and its pixels
+  drained, the encoder disabled, the valve reset, the HVS channel the
+  output's mux names stopped, the encoder powered down — before it sets the
+  HVS up and every mode itself.
+- **The mode set.** Up: the channel's lists written and the output muxed to
+  it, the channel started, the encoder configured, the valve configured and
+  enabled, the encoder prepared, the valve's video started, the encoder
+  enabled. Down is the reverse. The encoder server holds the engine to that
+  order, and the engine's tests run against it. An output whose sink lost
+  what its link set it up with — the encoder's connector counting a lost
+  link — is brought down and up again, the surface and its frames kept.
+- **The surface.** The display takes the mode of the first output, in valve
+  order, with a sink it can drive. Another connected output shows the same
+  surface scaled to its mode with its aspect kept — the polyphase filter
+  enlarging or shrinking by up to a third, the trapezoidal one shrinking
+  further, through the Mitchell–Netravali kernel in display-list memory.
+- **Presents.** Every display list is written before its channel can read it.
+  A present copies into a frame no running channel composites or latches next,
+  and each channel latches it at its next frame start, so a present never
+  tears and never waits; with two frames per channel in flight and one being
+  written, three frames serve one output and four serve two. A frame is
+  brought up to date with only the damage presented since it was last written.
+- **Where the screen goes.** While the seat shows text the outputs show the
+  boot console's surface scaled to fit; while another presenter takes over
+  they show black. A departed presenter's frames are forgotten, so the next
+  presenter's first present rewrites a frame whole before any channel shows
+  it.
+- **The core clock.** Each encoder is told what its pipe carries at the core
+  clock's ceiling (`clock-v1`'s highest rate): a deep-FIFO valve composites a
+  line's active pixels with an 8 MHz margin and no less than nine tenths of
+  the pixel clock, a shallow one keeps pace with the clock. The core clock is
+  raised to at least 500 MHz for a mode set and settles at what the running
+  outputs need.
 
-Every region (scan-out, DLIST RAM, control register, per-plane buffers)
-is discovered by the boot capability as an `HvsConfig` and mapped
-through the host's `MmioMapper` under `CAP_MMIO_MAP` (`AGENTS.md` §4 —
-no ambient authority). The driver also implements the plain `Display`
-trait, so the software full-frame path remains the mandatory fallback.
-Like the other display drivers it runs in user space and is exercised
-by host-side tests against a multi-region mock `MmioMapper` that reads
-back both the uploaded plane pixels and the encoded DLIST words.
+QEMU models no HVS; the register-level model carries the host tests and the
+metal run is `plans/SOUND.md` SND19q.
 
-#### Firmware framebuffer discovery (`tairix-vcmailbox`)
+### `tairix-drv-display-bcm2711-hdmi`
 
-The scan-out surface itself comes from the Pi's GPU firmware, spoken to
-over the BCM2711 **mailbox property channel**. That protocol lives once
-in the shared `lib/vcmailbox` crate (`AGENTS.md` §2.2 — the aarch64
-port's framebuffer boot console speaks it too): `FramebufferRequest::encode`
-builds the tag message (set physical/virtual size, depth 32, pixel
-order from the `DisplayFormat`, allocate at page alignment, get pitch);
-`decode_framebuffer_response` validates the firmware's in-place answer
-fail-closed — header code, per-tag response bits and lengths, exact
-geometry echoes, pitch/size consistency — and `bus_to_arm_physical`
-strips the 2-bit VideoCore bus alias, rejecting a zero, unaligned, or
-out-of-aperture buffer. The crate also carries the display-size query
-(`query_display_size`, the boot console's "is a display attached, and
-at what resolution" probe). The validated answer feeds `RpiHvs::open`
-as the `ScanoutConfig` (`ScanoutConfig::from_firmware`, which also
-supplies the bus alias the DLIST pointers use).
+Each of the Pi 4's HDMI blocks as an [`encoder-v1`](../lib/encoder.md)
+encoder and an [`audiochan-v1`](../lib/audiochan.md) audio device, driven as
+Linux's `vc4_hdmi` drives it, its sink found and its mode chosen by the driver
+while the display engine takes it through the mode set and the mixer plays
+through it. One thread serves both (`tairix_encoder::serve_with_audio`).
 
-The doorbell sits behind the crate's `MailboxTransport` seam:
-`MmioMailbox` drives the real register block (`0xFE00_B880` on the
-BCM2711, reached as a discovered `hwtree` resource through
-`CAP_MMIO_MAP`, never a compiled-in constant) with a budget-bounded
-poll that fails closed with `Timeout` instead of spinning forever. QEMU
-models neither the VideoCore firmware nor an in-aperture RAM window
-(the `virt` board's RAM begins at `0x4000_0000`, outside the 30-bit
-VideoCore aperture), so the emulation artefact is the host-side full
-chain — the crate's protocol-faithful `mock::MockFirmware` answers the
-exchange and the decoded `ScanoutConfig` drives `RpiHvs::open` and
-`present` (the `wiring_tests` full-chain test) — while the real
-scan-out (HVS hardware, HDMI) is the `plans/PI.md` P7 metal acceptance
-item.
+- **The connector.** Each hotplug line wakes it to read the connector and the
+  sink's EDID over E-DDC on its DDC bus, a block at a time, retrying a sink
+  still powering up. A sink whose EDID cannot be read is given 1024x768 at
+  60 Hz as DVI.
+- **The mode.** The sink's preferred timing when the transmitter, the link
+  and the engine's pipe all carry it, else the largest they do. A DVI sink is
+  held to a single link's 165 MHz, an HDMI sink to the rate its EDID states,
+  and rates past 340 MHz need SCDC. A timing with an odd part of a line is
+  passed over: the pixel valve clocks two pixels at a time. Where the board
+  shares the 2.4 GHz band (the node's `wifi-2.4ghz-coexistence`), a link
+  inside its first channel is pulled down to 238.56 MHz.
+- **The mode set.** Configure floors the state machine clock at one percent
+  over the pixel clock and the pixel path's clock for the rate, brings the
+  PHY's PLL up and sets the timing; prepare sets the colour conversion —
+  limited range for a consumer timing to an HDMI sink — and the FIFO; enable
+  starts the video, switches the scheduler to HDMI, sends the AVI `InfoFrame`
+  (the vendor frame too for one of the four 4K timings named by its HDMI
+  code), and recentres the FIFO. A configure or an enable the hardware
+  refuses is undone.
+- **Scrambling.** Above 340 MHz the sink is told over SCDC to expect a
+  quarter-rate clock and a scrambled link, then asked on a one-shot deadline,
+  a second later, whether it sees it, and told again until it does. A sink
+  replugged under a scrambled link has forgotten it, so the connector counts
+  a lost link and the engine sets the output up again.
+- **The state machine clock.** A register reached without it stalls the bus,
+  so it is held while an output is up, while a stream is configured, and for
+  each read of the connector, and let go otherwise; an output the firmware
+  left running keeps the rate the firmware gave it until it is brought down.
+- **Audio.** The jack is present while a connected HDMI sink declares audio.
+  The endpoint offers the widest layout the sink's speakers place without a
+  gap — stereo, 5.1 or 7.1 — at the rates its descriptors name for that many
+  channels, as Linux's ELD constraints read them, and refuses a layout whose
+  speakers the sink lacks, and states the widest sample the sink takes as its
+  resolution, which the mixer dithers to. A stream is fed to the MAI by a
+  DMA4 channel as IEC 60958 subframes carrying the rate and the sink's word
+  length, the bits below it sent as zero, and the MAI is clocked from the
+  DVP's audio clock, so a stream outlives an output brought down. While the link sends, N is the HDMI specification's
+  recommended value and CTS the nearest whole count of the TMDS clock, and the
+  audio `InfoFrame` names the channels' speaker allocation. A sink leaving
+  keeps what the endpoint offers; a new sink's offer is a jack change, which
+  the mixer re-reads.
+- **Sound is the video's companion, never its precondition.** A node that
+  links no audio clock or audio DMA line, or whose audio line opens no channel,
+  is stated (`hdmi: the transmitter carries no sound`, with its cause) and its
+  encoder served alone: the display comes up, and only HDMI audio is absent.
 
-#### Driver-host wiring (`wiring`)
-
-The `wiring` module is the bring-up seam between the hardware tree and
-the driver. The aarch64 `FdtDiscovery` emits the Pi's mailbox node
-(`brcm,bcm2835-mbox`) with two resources: the discovered doorbell
-window as a capability-gated MMIO resource and a `Dma` resource
-requesting a one-page property-buffer carve bounded by the 30-bit
-VideoCore aperture (`AGENTS.md` §18.1). The host satisfies the carve
-and calls `wiring::open_discovered`, which checks `CAP_MMIO_MAP`, maps
-the doorbell and the carve, translates the carve to a bus address
-(`arm_physical_to_bus`, the exact fail-closed inverse of
-`bus_to_arm_physical`), exchanges the framebuffer request over
-`MmioMailbox`, and assembles the full `HvsConfig` — the firmware's
-scan-out plus the host's `HvsRegions` (DLIST RAM, display-channel
-control, plane carves) — for `RpiHvs::open`. `open_with_transport` is
-the host-provable half below the doorbell; the wiring's fail-closed
-paths (missing capability, missing mapper, out-of-aperture carve, a
-silent firmware timing out after the doorbell was rung) are unit-tested
-on the host.
-
-### `tairix-drv-display-rpi-fb`
-
-The Raspberry Pi service for the linear framebuffer the VideoCore firmware
-allocates at boot. Its pixels take the generic path —
-`tairix_display::Framebuffer` under `tairix_display::service` — and what it
-adds is `set_power`: `FirmwareDisplay` wraps the surface and answers
-`SetPower` with the firmware's blank request (tag `0x0004_0002`,
-`lib/vcmailbox`'s `encode_blank_screen` and its fail-closed
-`decode_blank_screen_response`), exchanged over the mailbox service through
-the driver host's `MailboxChannel` (`CAP_MAILBOX`).
-
-It binds by discovery: the aarch64 port publishes the boot display node with
-the firmware framebuffer's own binding, `brcm,bcm2708-fb`, ahead of
-`simple-framebuffer`, and this driver's bind key on it carries priority 20
-over the generic service's 10, so the more capable service wins and the
-generic one still binds any surface without it. Whether a blanked HDMI output
-also drops its signal is the firmware's `hdmi_blanking` setting. QEMU models
-no VideoCore, so the power switch is host-tested against
-`mock::MockFirmware`; its metal run is a `plans/PI.md` acceptance item.
+QEMU models no HDMI block; the register-level model carries the host tests
+and the metal run is `plans/SOUND.md` SND19q.

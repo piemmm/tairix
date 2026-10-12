@@ -39,56 +39,6 @@ fn exchanged(
     message
 }
 
-// --- Display blanking -------------------------------------------------
-
-#[test]
-fn a_blank_request_switches_the_output_and_reads_back_its_state() {
-    let mut firmware = MockFirmware::healthy();
-    for blank in [true, false] {
-        let words = exchanged(&mut firmware, encode_blank_screen(blank));
-        assert_eq!(decode_blank_screen_response(&words, blank), Ok(()));
-        assert_eq!(firmware.blanked, blank);
-    }
-}
-
-#[test]
-fn a_blank_request_lays_out_one_state_word() {
-    let words = encode_blank_screen(true);
-    assert_eq!(words[1], CODE_REQUEST);
-    assert_eq!(words[2], TAG_BLANK_SCREEN);
-    assert_eq!(words[3], 4, "one value word");
-    assert_eq!(words[5], BLANK_STATE_BIT);
-    assert_eq!(words[6], 0, "end tag");
-    assert_eq!(words[0], 28, "header, one tag, end tag");
-    assert_eq!(encode_blank_screen(false)[5], 0);
-}
-
-/// A firmware that answers with the state it did not switch to has not made
-/// the switch, and saying otherwise would leave the session believing the
-/// display is off, or on.
-#[test]
-fn a_blank_answer_naming_the_other_state_is_refused() {
-    let mut firmware = MockFirmware::healthy();
-    let words = exchanged(&mut firmware, encode_blank_screen(true));
-    assert_eq!(
-        decode_blank_screen_response(&words, false),
-        Err(MailboxError::FirmwareError)
-    );
-    let mut unhonoured = encode_blank_screen(true);
-    unhonoured[1] = CODE_RESPONSE_OK;
-    assert_eq!(
-        decode_blank_screen_response(&unhonoured, true),
-        Err(MailboxError::MalformedResponse),
-        "no response bit: the tag was not processed"
-    );
-    let mut refused = words;
-    refused[1] = CODE_RESPONSE_ERROR;
-    assert_eq!(
-        decode_blank_screen_response(&refused, true),
-        Err(MailboxError::FirmwareError)
-    );
-}
-
 // --- Framing -----------------------------------------------------------
 
 #[test]
@@ -1342,6 +1292,64 @@ fn xhci_reset_decode_rejects_an_unhonoured_tag() {
     );
 }
 
+// --- Display takeover ----------------------------------------------------
+
+#[test]
+fn display_done_lays_out_a_tag_with_no_values() {
+    let words = encode_display_done();
+    // 6 used words: 2 header + a 3-word tag + 1 end marker.
+    assert_eq!(words[0], 6 * 4, "message byte length");
+    assert_eq!(words[1], CODE_REQUEST);
+    assert_eq!(words[2..5], [TAG_NOTIFY_DISPLAY_DONE, 0, 0]);
+    assert_eq!(words[5], 0, "end tag");
+}
+
+#[test]
+fn display_done_confirms_only_a_processed_tag_and_reports_any_other_answer() {
+    let mut firmware = MockFirmware::healthy();
+    let reply = exchanged(&mut firmware, encode_display_done());
+    assert_eq!(decode_display_done_response(&reply), Ok(()));
+    assert!(firmware.display_done);
+
+    let mut unanswered = encode_display_done();
+    unanswered[1] = CODE_RESPONSE_OK;
+    assert_eq!(
+        decode_display_done_response(&unanswered),
+        Err(Unconfirmed {
+            header: CODE_RESPONSE_OK,
+            tag: Some(CODE_REQUEST),
+        }),
+        "a tag left a request's was not processed"
+    );
+    let mut refused = reply;
+    refused[1] = CODE_RESPONSE_ERROR;
+    assert_eq!(
+        decode_display_done_response(&refused),
+        Err(Unconfirmed {
+            header: CODE_RESPONSE_ERROR,
+            tag: Some(TAG_RESPONSE_BIT),
+        })
+    );
+    let mut unframed = reply;
+    unframed[3] = u32::MAX;
+    assert_eq!(
+        decode_display_done_response(&unframed),
+        Err(Unconfirmed {
+            header: CODE_RESPONSE_OK,
+            tag: None,
+        }),
+        "a tag overrunning the message is no answer"
+    );
+}
+
+#[test]
+fn display_done_reads_no_response_length_from_a_tag_with_no_values() {
+    let mut firmware = MockFirmware::healthy();
+    let mut reply = exchanged(&mut firmware, encode_display_done());
+    reply[4] = TAG_RESPONSE_BIT | 4;
+    assert_eq!(decode_display_done_response(&reply), Ok(()));
+}
+
 // --- Mailbox liveness probe ----------------------------------------------
 
 #[test]
@@ -1738,8 +1746,8 @@ fn a_set_without_the_turbo_word_cannot_lower_the_clock() {
     // floor stayed at the ceiling. Nothing failed and nothing was logged,
     // because the applied rate the firmware answers with *is* that ceiling.
     let mut firmware = MockFirmware::healthy();
-    let floor = firmware.arm_clock_min_hz;
-    let ceiling = firmware.arm_clock_max_hz;
+    let floor = firmware.arm.min_hz;
+    let ceiling = firmware.arm.max_hz;
     assert_ne!(floor, ceiling, "the modelled board must have a range");
 
     let mut short = [0u32; PROPERTY_WORDS];
@@ -1767,9 +1775,9 @@ fn a_set_without_the_turbo_word_cannot_lower_the_clock() {
 fn clock_rates_round_trip_through_a_healthy_firmware() {
     let mut firmware = MockFirmware::healthy();
     for (query, expected) in [
-        (ClockRateQuery::Current, firmware.arm_clock_hz),
-        (ClockRateQuery::Min, firmware.arm_clock_min_hz),
-        (ClockRateQuery::Max, firmware.arm_clock_max_hz),
+        (ClockRateQuery::Current, firmware.arm.hz),
+        (ClockRateQuery::Min, firmware.arm.min_hz),
+        (ClockRateQuery::Max, firmware.arm.max_hz),
     ] {
         assert_eq!(
             query_clock_rate(&mut firmware, FirmwareClock::Arm, query),
@@ -1798,12 +1806,12 @@ fn clock_rate_write_reports_what_the_firmware_actually_applied() {
     let mut firmware = MockFirmware::healthy();
     assert_eq!(
         set_clock_rate(&mut firmware, FirmwareClock::Arm, u32::MAX),
-        Ok(firmware.arm_clock_max_hz),
+        Ok(firmware.arm.max_hz),
         "above the range clamps to max"
     );
     assert_eq!(
         set_clock_rate(&mut firmware, FirmwareClock::Arm, 1),
-        Ok(firmware.arm_clock_min_hz),
+        Ok(firmware.arm.min_hz),
         "below the range clamps to min"
     );
     // 1_000_111_000 is not a multiple of the modelled 2 MHz grain.
@@ -1884,7 +1892,7 @@ fn an_unmodelled_clock_reads_as_zero_rather_than_another_clocks_rate() {
 #[test]
 fn the_emmc2_clock_is_read_through_its_own_selector() {
     let mut firmware = MockFirmware::healthy();
-    firmware.emmc2_clock_hz = 150_000_000;
+    firmware.emmc2.hz = 150_000_000;
     let words = encode_clock_rate_query(FirmwareClock::Emmc2, ClockRateQuery::Current);
     assert_eq!(words[5], 12, "the firmware's own EMMC2 clock id");
     assert_eq!(
@@ -1893,7 +1901,7 @@ fn the_emmc2_clock_is_read_through_its_own_selector() {
     );
     assert_eq!(
         query_clock_rate(&mut firmware, FirmwareClock::Arm, ClockRateQuery::Current),
-        Ok(firmware.arm_clock_hz),
+        Ok(firmware.arm.hz),
         "the ARM clock is a different selector"
     );
 }
@@ -2005,4 +2013,53 @@ fn a_firmware_that_ignores_the_gpio_tag_is_refused() {
         Err(MailboxError::FirmwareError)
     );
     assert!(!firmware.gpio_high(4));
+}
+
+/// The mailbox service reached over its channel, as a driver process reaches
+/// it.
+struct ServiceChannel(core::cell::RefCell<MockFirmware>);
+
+impl MailboxChannel for ServiceChannel {
+    fn exchange(&self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), DriverError> {
+        self.0
+            .borrow_mut()
+            .exchange(message)
+            .map_err(MailboxError::as_driver_error)
+    }
+}
+
+struct RefusingChannel;
+
+impl MailboxChannel for RefusingChannel {
+    fn exchange(&self, _message: &mut [u32; PROPERTY_WORDS]) -> Result<(), DriverError> {
+        Err(DriverError::PermissionDenied)
+    }
+}
+
+#[test]
+fn a_channel_to_the_service_carries_the_one_clock_exchange_and_its_refusal() {
+    let service = ServiceChannel(core::cell::RefCell::new(MockFirmware::healthy()));
+    assert_eq!(
+        query_clock_rate(&mut &service, FirmwareClock::Core, ClockRateQuery::Current),
+        Ok(500_000_000)
+    );
+    assert_eq!(
+        set_clock_rate(&mut &service, FirmwareClock::M2mc, 150_000_000),
+        Ok(150_000_000)
+    );
+    assert_eq!(service.0.borrow().m2mc.hz, 150_000_000);
+    let refused = query_clock_rate(
+        &mut &RefusingChannel,
+        FirmwareClock::Arm,
+        ClockRateQuery::Max,
+    );
+    assert_eq!(
+        refused,
+        Err(MailboxError::Channel(DriverError::PermissionDenied))
+    );
+    assert_eq!(
+        refused.map_err(MailboxError::as_driver_error),
+        Err(DriverError::PermissionDenied),
+        "a channel's own refusal reaches the driver unchanged"
+    );
 }

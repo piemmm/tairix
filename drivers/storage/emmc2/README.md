@@ -111,8 +111,7 @@ next time.
 
 ## Trace
 
-The engine reports what it does through `SdhciHost::trace`, which the metal
-host forwards to `CompletionWait::trace` (`trace::Trace`):
+The engine reports what it does through `SdhciHost::trace` (`trace::Trace`):
 
 - each bring-up step as it starts, and each rung it attempts;
 - the controller's version, capability and maximum-current registers;
@@ -123,8 +122,8 @@ host forwards to `CompletionWait::trace` (`trace::Trace`):
 - every wait that ended without what it wanted, with the register value it
   last saw and how many completion parks it took.
 
-A host that records nothing keeps the default no-op. The kernel's debug image
-prints the trace (the `storage-trace` feature).
+A host that records nothing keeps the default no-op, as the metal host does;
+the bring-up tests record it to check each step.
 
 ## Layered seam
 

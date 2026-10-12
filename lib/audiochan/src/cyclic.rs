@@ -14,9 +14,10 @@
 //! the device's own, through its [`FrameCodec`]; everything else here is the
 //! same for every such device.
 //!
-//! A buffer frame is as many bytes as a ring frame of two channels in the
-//! codec's [`format`](FrameCodec::format), so a period is read from the ring
-//! straight into its place in the buffer and encoded where it lies.
+//! A buffer frame is as many bytes as a ring frame of the codec's
+//! [`channels`](FrameCodec::channels) in its [`format`](FrameCodec::format),
+//! so a period is read from the ring straight into its place in the buffer
+//! and encoded where it lies.
 
 use tairix_abi::driver::audio::{AudioInterrupt, AudioServiced, Frames, Rate, SampleFormat};
 use tairix_abi::driver::audio_ring::PcmRing;
@@ -27,9 +28,6 @@ use tairix_abi::DriverError;
 /// Periods the buffer holds.
 pub const PERIODS: u32 = 4;
 
-/// Channels a frame carries.
-pub const CHANNELS: u8 = 2;
-
 /// Most frames a period may hold: the buffer then spans at most 512 KiB.
 pub const MAX_PERIOD_FRAMES: u32 = 16_384;
 
@@ -37,15 +35,17 @@ pub const MAX_PERIOD_FRAMES: u32 = 16_384;
 /// worth at the largest period.
 pub const MAX_RING_FRAMES: u32 = MAX_PERIOD_FRAMES * PERIODS;
 
-/// Bytes a frame of `format` occupies, which must be whole FIFO words.
+/// Bytes a frame of `channels` samples of `format` occupies, which must be
+/// whole FIFO words.
 ///
 /// # Errors
 ///
-/// [`DriverError::Unsupported`] for a frame that is not.
-pub fn frame_bytes(format: SampleFormat) -> Result<u32, DriverError> {
+/// [`DriverError::Unsupported`] for a frame that is not, or one of no
+/// channels.
+pub fn frame_bytes(format: SampleFormat, channels: u8) -> Result<u32, DriverError> {
     let sample = u32::try_from(format.bytes_per_sample()).map_err(|_| DriverError::Unsupported)?;
-    let bytes = sample * u32::from(CHANNELS);
-    if !bytes.is_multiple_of(4) {
+    let bytes = sample * u32::from(channels);
+    if bytes == 0 || !bytes.is_multiple_of(4) {
         return Err(DriverError::Unsupported);
     }
     Ok(bytes)
@@ -132,11 +132,14 @@ pub trait DmaPort {
 
 /// How a device's frames sit in its buffer.
 pub trait FrameCodec {
-    /// The ring's sample format, two channels of which make a frame.
+    /// The ring's sample format.
     fn format(&self) -> SampleFormat;
 
-    /// Turn `frame`, a ring frame, left then right, into the buffer's form
-    /// where it lies.
+    /// The channels a frame carries.
+    fn channels(&self) -> u8;
+
+    /// Turn `frame`, a ring frame in its channels' interleave, into the
+    /// buffer's form where it lies.
     fn encode(&mut self, frame: &mut [u8]);
 
     /// Write a frame of silence where the mixer supplied none, mid-stream.
@@ -259,6 +262,25 @@ impl<D: DmaPort, C: FrameCodec> CyclicPlayback<D, C> {
         &mut self.dma
     }
 
+    /// The codec the stream's frames are laid out by.
+    pub const fn codec(&self) -> &C {
+        &self.codec
+    }
+
+    /// The codec, to be set up between streams, once the channel has
+    /// stopped: the frames in flight are the codec's shape.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Busy`] while the channel clocks, a stream or its
+    /// parking.
+    pub fn codec_mut(&mut self) -> Result<&mut C, DriverError> {
+        if self.clocking {
+            return Err(DriverError::Busy);
+        }
+        Ok(&mut self.codec)
+    }
+
     /// Whether a stream is configured and clocking.
     #[must_use]
     pub fn is_running(&self) -> bool {
@@ -297,7 +319,7 @@ impl<D: DmaPort, C: FrameCodec> CyclicPlayback<D, C> {
         frames: u32,
         mut frame_at: impl FnMut(u32, &mut [u8]),
     ) -> Result<(), DriverError> {
-        let frame_bytes = frame_bytes(self.codec.format())?;
+        let frame_bytes = frame_bytes(self.codec.format(), self.codec.channels())?;
         let period_bytes = period_bytes(frames, frame_bytes)?;
         self.halt()?;
         self.stream = None;
@@ -345,7 +367,7 @@ impl<D: DmaPort, C: FrameCodec> CyclicPlayback<D, C> {
     }
 
     fn fill_parked(&mut self) {
-        let Ok(frame_bytes) = frame_bytes(self.codec.format()) else {
+        let Ok(frame_bytes) = frame_bytes(self.codec.format(), self.codec.channels()) else {
             return;
         };
         let Self { dma, codec, .. } = self;
@@ -473,7 +495,7 @@ impl<D: DmaPort, C: FrameCodec> CyclicPlayback<D, C> {
     /// frame is not whole FIFO words, [`DriverError::Busy`] while a stream
     /// clocks, or the DMA channel's refusal.
     pub fn configure(&mut self, rate: Rate, period_frames: u32) -> Result<(), DriverError> {
-        let frame_bytes = frame_bytes(self.codec.format())?;
+        let frame_bytes = frame_bytes(self.codec.format(), self.codec.channels())?;
         let period_bytes = period_bytes(period_frames, frame_bytes)?;
         if self.is_running() {
             return Err(DriverError::Busy);
@@ -565,13 +587,14 @@ impl<D: DmaPort, C: FrameCodec> CyclicPlayback<D, C> {
     ///
     /// # Errors
     ///
-    /// [`DriverError::BadMagic`] for a ring of another shape than two
-    /// channels in the codec's format or counters that fail validation,
+    /// [`DriverError::BadMagic`] for a ring of another shape than the codec's
+    /// channels in its format or counters that fail validation,
     /// [`DriverError::DeviceFault`] when nothing is configured, or the DMA
     /// channel's refusal.
     pub fn service(&mut self, ring: &mut PcmRing<'_>) -> Result<AudioServiced, DriverError> {
         let geometry = ring.geometry();
-        if geometry.format() != self.codec.format() || geometry.channels() != CHANNELS {
+        if geometry.format() != self.codec.format() || geometry.channels() != self.codec.channels()
+        {
             return Err(DriverError::BadMagic);
         }
         let transferred = if self.stream()?.running {

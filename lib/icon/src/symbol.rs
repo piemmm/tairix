@@ -256,6 +256,8 @@ pub(crate) fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::WiFi => WIFI,
         IconKind::Dns => SIGNPOST,
         IconKind::TcpIp => EXCHANGE,
+        IconKind::SoundDevices => FADERS,
+        IconKind::SoundEffects => NOTES,
         IconKind::Theme => PALETTE,
         _ => return None,
     })
@@ -647,6 +649,30 @@ const EXCHANGE: &[Mark] = &[stroke(
     ],
     2.1,
 )];
+
+/// Three faders on their tracks, each at its own level.
+const FADERS: &[Mark] = &[
+    stroke(
+        &[
+            Outline::Path("M6 4V20"),
+            Outline::Path("M12 4V20"),
+            Outline::Path("M18 4V20"),
+        ],
+        1.6,
+    ),
+    fill(&[
+        Outline::Path("M3.6 13.2H8.4V16.4H3.6Z"),
+        Outline::Path("M9.6 6.8H14.4V10H9.6Z"),
+        Outline::Path("M15.6 10.6H20.4V13.8H15.6Z"),
+    ]),
+];
+
+/// Two notes joined by their beam.
+const NOTES: &[Mark] = &[fill(&[
+    circle(6.0, 17.6, 2.4),
+    circle(15.8, 15.6, 2.4),
+    Outline::Path("M7.6 17.6V6L19.4 3.4V15.6H17.8V6.4L9.2 8.3V17.6Z"),
+])];
 
 /// A painter's palette, its thumb notch and four wells of paint.
 const PALETTE: &[Mark] = &[cut(&[

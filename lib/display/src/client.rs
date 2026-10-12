@@ -9,8 +9,9 @@
 //! # Zero-copy shape
 //!
 //! The session owns the shared frame region (its own `shm_create`
-//! mapping) and hands `RemoteDisplay` that mapping as a plain mutable
-//! slice. A present copies only the changed pixels into the back frame
+//! mapping) and hands it to `RemoteDisplay`, which owns it from then on, so
+//! the frames live exactly as long as the ring presenting them. A present
+//! copies only the changed pixels into the back frame
 //! and sends the frame *index* plus the damage rectangles — never pixel
 //! bytes. With more than one frame the copy also refreshes the target
 //! frame's **stale region** (the damage accumulated while other frames
@@ -69,7 +70,8 @@ impl<T: DisplayTransport> DisplayClient<T> {
         self.seat_id
     }
 
-    /// Query the active display mode.
+    /// Query the display's output: the mode it runs, or [`None`] while
+    /// nothing is connected.
     ///
     /// # Errors
     ///
@@ -77,7 +79,7 @@ impl<T: DisplayTransport> DisplayClient<T> {
     /// [`Errno::SeatRevoked`] / [`Errno::NotFound`]), a transport
     /// failure, or a malformed reply (fail closed, never a guessed
     /// mode).
-    pub fn query(&mut self) -> Result<DisplayMode, Errno> {
+    pub fn query(&mut self) -> Result<Option<DisplayMode>, Errno> {
         let request = DisplayRequest::Query {
             seat_id: self.seat_id,
         }
@@ -92,7 +94,8 @@ impl<T: DisplayTransport> DisplayClient<T> {
     ///
     /// # Errors
     ///
-    /// The service's typed refusal, a transport failure, or a corrupt
+    /// [`Errno::Stale`] when `mode` is not the one the output runs now, the
+    /// service's other typed refusals, a transport failure, or a corrupt
     /// status frame.
     pub fn configure(
         &mut self,
@@ -119,7 +122,8 @@ impl<T: DisplayTransport> DisplayClient<T> {
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] if `damage` is empty or holds more than
-    /// [`MAX_DAMAGE_RECTS`] rectangles, the service's typed refusal, a
+    /// [`MAX_DAMAGE_RECTS`] rectangles, [`Errno::Stale`] when the output no
+    /// longer runs the configured mode, the service's other typed refusals, a
     /// transport failure, or a corrupt status frame.
     pub fn present(&mut self, frame_index: u32, damage: &[DamageRect]) -> Result<(), Errno> {
         let request = DisplayRequest::Present {
@@ -160,16 +164,16 @@ impl<T: DisplayTransport> DisplayClient<T> {
 ///
 /// Build one with [`RemoteDisplay::new`] after the bring-up handshake
 /// (query → create/grant the region → configure) has succeeded; the
-/// mapping handed in is the client's own view of the region it granted
-/// to the service.
-pub struct RemoteDisplay<'f, T: DisplayTransport> {
+/// frames handed in are the client's own view of the region it granted
+/// to the service, and are dropped — a mapping unmapped — with the ring.
+pub struct RemoteDisplay<F: AsMut<[u8]>, T: DisplayTransport> {
     client: DisplayClient<T>,
     mode: DisplayMode,
     /// The whole surface, as the rectangle every stale set is clipped to.
     /// Clipping is what makes a stale rectangle's copy total: every edge is
     /// inside the frame, so no span can be negative or overrun a row.
     surface: Rect,
-    frames: &'f mut [u8],
+    frames: F,
     frame_len: usize,
     frame_count: u32,
     /// The frame the *next* present renders into.
@@ -183,7 +187,7 @@ pub struct RemoteDisplay<'f, T: DisplayTransport> {
     stale: [Region; DISPLAY_MAX_FRAMES as usize],
 }
 
-impl<'f, T: DisplayTransport> RemoteDisplay<'f, T> {
+impl<F: AsMut<[u8]>, T: DisplayTransport> RemoteDisplay<F, T> {
     /// Wrap a configured session: `frames` is the client's mapping of
     /// the granted region, holding `frame_count` frames shaped as
     /// `mode`.
@@ -200,7 +204,7 @@ impl<'f, T: DisplayTransport> RemoteDisplay<'f, T> {
     pub fn new(
         client: DisplayClient<T>,
         mode: DisplayMode,
-        frames: &'f mut [u8],
+        mut frames: F,
         frame_count: u32,
     ) -> Result<Self, Errno> {
         if frame_count == 0 || frame_count > DISPLAY_MAX_FRAMES {
@@ -213,7 +217,7 @@ impl<'f, T: DisplayTransport> RemoteDisplay<'f, T> {
         let total = frame_len
             .checked_mul(frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
-        if frame_len == 0 || frames.len() < total {
+        if frame_len == 0 || frames.as_mut().len() < total {
             return Err(Errno::LengthOutOfRange);
         }
         // Every stale rectangle is a screen rectangle, so a mode whose
@@ -238,6 +242,17 @@ impl<'f, T: DisplayTransport> RemoteDisplay<'f, T> {
             back: 0,
             stale,
         })
+    }
+
+    /// Hand the service the region these frames are, granted to it as
+    /// `grant`, laid out as this ring presents them.
+    ///
+    /// # Errors
+    ///
+    /// The service's refusal ([`Errno::Stale`] when the output no longer
+    /// runs the ring's mode), a transport failure, or a corrupt status frame.
+    pub fn configure(&mut self, grant: u64) -> Result<(), Errno> {
+        self.client.configure(grant, self.frame_count, &self.mode)
     }
 
     /// Copy `damage` (with whatever the back frame had still to catch up
@@ -299,7 +314,8 @@ impl<'f, T: DisplayTransport> RemoteDisplay<'f, T> {
         let base = index * self.frame_len;
         for row in 0..rect.height as usize {
             let line = (top + row) * stride + x0;
-            self.frames[base + line..base + line + span].copy_from_slice(&frame[line..line + span]);
+            self.frames.as_mut()[base + line..base + line + span]
+                .copy_from_slice(&frame[line..line + span]);
         }
     }
 }
@@ -336,9 +352,12 @@ fn mark(region: &mut Region, damage: &[DamageRect], surface: Rect) {
     }
 }
 
-impl<T: DisplayTransport> Display for RemoteDisplay<'_, T> {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(self.mode)
+impl<F: AsMut<[u8]>, T: DisplayTransport> Display for RemoteDisplay<F, T> {
+    /// The mode the frames are shaped for: the output the service last
+    /// accepted them for. A move since is what a present refused
+    /// [`DriverError::Stale`] reports.
+    fn output(&self) -> Option<DisplayMode> {
+        Some(self.mode)
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {

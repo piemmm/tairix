@@ -2493,7 +2493,12 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   (`tairix_reclaim::desktop::stacked_ui_cache`), because a window beneath
   translucent glass still shows through it, so overlapping windows want a frost
   each over the same pixels; mild and moderate pressure keep one screenful of
-  them, a single layer of glass.
+  them, a single layer of glass. Each constructor's budget is a function of
+  the output (`disposable_ui_budget`, `screenful_ui_budget`,
+  `working_set_ui_budget`, `stacked_ui_budget`), and an output that changes
+  size re-holds every one of these caches to it through
+  `ReclaimCache::rebudget`, which gives back at once, oldest first, what the
+  new budget no longer admits (`plans/DISPLAY.md` D12).
 - **Every one of them keeps an irreducible reserve.** A desktop holding none
   of its rasterised pixels does not draw a cheaper frame — it draws the same
   frame, re-deriving every element through a rasterisation, a blur, a

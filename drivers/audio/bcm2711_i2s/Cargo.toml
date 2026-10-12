@@ -33,8 +33,6 @@ tairix-linkclient = { path = "../../../lib/linkclient", version = "=0.0.0" }
 tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0", features = ["mock-dma"] }
 
 [target.'cfg(target_os = "none")'.dependencies]
-# The capability-set type the rt-backed host is built over.
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The node's grants and its register window.
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # `_start`.

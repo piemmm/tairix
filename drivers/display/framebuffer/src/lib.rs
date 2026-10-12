@@ -1,7 +1,8 @@
 //! Canonical bind table of the framebuffer display service.
 //!
 //! The `Run` binary (`src/main.rs`) is the service itself; this
-//! host-buildable lib target carries the crate's canonical [`BIND_KEYS`] —
+//! host-buildable lib target carries its [`REQUIRED_CAPABILITIES`] and the
+//! crate's canonical [`BIND_KEYS`] —
 //! the single source of truth the signed-manifest bind table is authored
 //! from (`tools/xtask` `image_drivers`, the autoload fixtures) and `devmgr`
 //! (or the in-kernel bootstrap-floor autoload) resolves a discovered display
@@ -21,11 +22,21 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use tairix_abi::{DriverBindKey, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
+use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey, SIMPLE_FRAMEBUFFER_COMPATIBLE};
 
 /// The bind priority [`BIND_KEYS`] carries: the concrete-identity tier of an
 /// exact `compatible` match. A surface-specific driver outranks it.
 pub const BIND_PRIORITY: u16 = 10;
+
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the scan-out surface, each session's frame region, the reserved display
+/// rendezvous, and its first-present record.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::MMIO_MAP,
+    CapabilityId::SHM,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
 
 /// This driver's hardware bind table: a platform-published linear
 /// scan-out surface, matched by the canonical model name.

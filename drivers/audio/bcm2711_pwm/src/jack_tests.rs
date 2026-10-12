@@ -57,6 +57,25 @@ fn one_stereo_playback_endpoint_is_offered_at_the_jacks_rate_alone() {
     assert!(matches!(jack.endpoint_facts(1), Err(DriverError::NotFound)));
 }
 
+/// Two channels are not a stereo pair unless they are left and right: any
+/// other layout is refused rather than played as one.
+#[test]
+fn a_two_channel_layout_other_than_stereo_is_refused() {
+    use tairix_abi::driver::audio::ChannelPosition::{FrontCentre, FrontLeft};
+    let mut jack = jack();
+    let refused = jack.configure(
+        0,
+        &ConfigureParams {
+            endpoint: 0,
+            rate: rate(),
+            format: SampleFormat::S32,
+            channel_map: ChannelMap::new(&[FrontLeft, FrontCentre]).expect("a layout"),
+            period_frames: PERIOD,
+        },
+    );
+    assert!(matches!(refused, Err(DriverError::Unsupported)));
+}
+
 #[test]
 fn bring_up_ramps_from_low_to_silence_and_leaves_the_channel_stopped() {
     let mut jack = jack();

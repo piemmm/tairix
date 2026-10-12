@@ -2450,6 +2450,12 @@ control are the shell's responsibility, exactly as on a real tty — and a
 failing seam call surfaces the boundary `Errno` while leaving the screen
 unchanged (`AGENTS.md` §5.4).
 
+The bell (`^G`) is a sound, never a flash: the parser records that it rang
+(`Terminal::take_bell`), and once a batch of the shell's output is applied the
+app cues `Bell` through [`soundd`](../userland/soundd.md), so a burst of bells
+is one sound. The cue is posted and its answer collected from the window
+loop's own wait-set; the loop never waits on it.
+
 Because "echo, line editing, and job control are the shell's responsibility"
 presumes a real tty *between* the emulator and the shell, the correct shell
 channel is a **pseudo-terminal** whose slave carries the kernel's tty line

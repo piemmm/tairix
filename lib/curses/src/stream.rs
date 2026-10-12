@@ -34,9 +34,12 @@ const INPUT_CHUNK: usize = 64;
 /// * [`Tty::read_timeout`] parks the task until input arrives or the bound
 ///   elapses; an elapsed bound is `Ok` with no bytes (the caller's tick), a
 ///   closed stream is an I/O error — the two are never conflated.
-/// * [`Tty::read`] honestly reports "nothing available right now": the
-///   standard-input backing owns blocking and offers no peek/poll, so a
-///   non-blocking read cannot know what is pending and never lies about it.
+/// * [`Tty::read`] honestly reports "nothing available right now": a read
+///   of standard input either returns bytes or parks, so a non-blocking read
+///   cannot know what is pending and never lies about it. A program that
+///   must wait on standard input beside other events parks on a wait-set
+///   `Stream` member instead, asking
+///   [`Screen::has_pending_input`](crate::Screen::has_pending_input) first.
 /// * [`Tty::size`] asks the kernel's `TerminalSize` for standard input —
 ///   the seam [`Screen`](crate::Screen) polls for a resize in place of the
 ///   `SIGWINCH` TAIRiX does not have. A console that cannot attest a size

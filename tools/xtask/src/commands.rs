@@ -44,6 +44,7 @@ mod qemu_tests;
 mod rngsoak;
 mod sbom;
 mod seed;
+mod sound_encode;
 mod spec_review;
 mod supply_chain;
 mod target_clippy;
@@ -62,6 +63,7 @@ pub enum Command {
     AbiCheck,
     CHeader,
     FontAtlas,
+    SoundEncode,
     Artsheet,
     Devids,
     DepsCheck,
@@ -99,6 +101,7 @@ impl Command {
         Command::AbiCheck,
         Command::CHeader,
         Command::FontAtlas,
+        Command::SoundEncode,
         Command::Artsheet,
         Command::Devids,
         Command::DepsCheck,
@@ -135,6 +138,7 @@ impl Command {
             "abi-check" => Command::AbiCheck,
             "c-header" => Command::CHeader,
             "font-atlas" => Command::FontAtlas,
+            "sound-encode" => Command::SoundEncode,
             "artsheet" => Command::Artsheet,
             "devids" => Command::Devids,
             "deps-check" => Command::DepsCheck,
@@ -173,6 +177,7 @@ impl Command {
             Command::AbiCheck => "abi-check",
             Command::CHeader => "c-header",
             Command::FontAtlas => "font-atlas",
+            Command::SoundEncode => "sound-encode",
             Command::Artsheet => "artsheet",
             Command::Devids => "devids",
             Command::DepsCheck => "deps-check",
@@ -218,6 +223,7 @@ impl Command {
             Command::FontAtlas => {
                 "Generate/verify the system glyph atlas (`--write` to regenerate)."
             }
+            Command::SoundEncode => "Encode authored WAV masters into a sound theme's FLAC assets.",
             Command::Artsheet => {
                 "Measure WinterSun's figure art against its bounds (`--write` to regenerate \
                  the ledger, `--sheets` to render the contact sheets)."
@@ -285,6 +291,7 @@ impl Command {
             Command::AbiCheck => run_abi_check(ctx, args),
             Command::CHeader => run_c_header(ctx, args),
             Command::FontAtlas => run_font_atlas(ctx, args),
+            Command::SoundEncode => sound_encode::run(ctx, args),
             Command::Artsheet => run_artsheet(ctx, args),
             Command::Devids => devids::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
@@ -1685,9 +1692,8 @@ fn kernel_build_profile(
 }
 
 /// The kernel features that make up the debug image's diagnostics: the
-/// lockup-watchdog aids (`watchdog-diagnostics`, `plans/WATCHDOG.md`) and the
-/// SD-card bring-up trace (`storage-trace`, `plans/PI.md` P8).
-pub(crate) const KERNEL_DIAGNOSTICS_FEATURES: &str = "watchdog-diagnostics,storage-trace";
+/// lockup-watchdog aids (`watchdog-diagnostics`, `plans/WATCHDOG.md`).
+pub(crate) const KERNEL_DIAGNOSTICS_FEATURES: &str = "watchdog-diagnostics";
 
 /// The package the kernel image is built from, where its diagnostics are
 /// switched on.
@@ -1750,17 +1756,22 @@ type DriverBundleBuilder =
 /// other bundle stays unbound. The Pi RTC hangs off no bus at all — the
 /// firmware owns it — so its driver binds the discovered `raspberrypi,rpi-rtc` node and reaches the chip
 /// through the mailbox service; on a Pi 3 or Pi 4 there is no such node and
-/// the bundle simply stays unbound. The frequency driver hangs off no bus
-/// either: it binds the discovered `raspberrypi,firmware-clocks` node, takes
-/// the kernel's frequency mechanism role, and applies the governor's targets
-/// over the same mailbox service. The firmware-framebuffer display service
-/// rides beside the generic one: the Pi's boot display carries the firmware's
-/// own binding, so it binds there and can switch the display off, while an
-/// emulated boot's `ramfb` surface binds the generic service. The legacy DMA
-/// engine driver binds the discovered `brcm,bcm2835-dma` node and serves its
+/// the bundle simply stays unbound. The firmware-clocks driver hangs off no
+/// bus either: it binds the discovered `raspberrypi,firmware-clocks` node,
+/// takes the kernel's frequency mechanism role for the ARM clock, and serves
+/// the display's clocks, all over the same mailbox service. The native
+/// display engine binds the HVS node, which carries the boot console's
+/// surface, and drives each HDMI block through the transmitter driver bound
+/// to it, over `encoder-v1`; an emulated boot's `ramfb` surface binds the
+/// generic framebuffer service. The Broadcom DMA
+/// driver binds the discovered `brcm,bcm2835-dma` and `brcm,bcm2711-dma` nodes
+/// and serves their
 /// channels to the peripheral drivers whose nodes name request lines on it,
-/// as the clock manager driver serves the audio blocks' clocks to theirs; the
-/// headphone jack's and the I²S interface's drivers are those consumers, and
+/// as the clock manager driver serves the audio blocks' clocks to theirs and
+/// the DVP driver the HDMI blocks' audio-clock gates, and the DDC controllers'
+/// driver serves the bus each HDMI port reads its sink's EDID over; the
+/// headphone jack's and
+/// the I²S interface's drivers are the audio blocks' consumers, and
 /// a USB audio device behind the bus chain gets the USB Audio Class driver.
 /// Both codec drivers ship, so an I²S HAT carrying either part works with no
 /// rebuild.
@@ -1802,28 +1813,44 @@ const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
         image_drivers::build_framebuffer_bundle,
     ),
     (
-        image_drivers::RPI_FB_STORE_PATH,
-        image_drivers::build_rpi_fb_bundle,
+        image_drivers::BCM2711_HVS_STORE_PATH,
+        image_drivers::build_bcm2711_hvs_bundle,
+    ),
+    (
+        image_drivers::BCM2711_HDMI_STORE_PATH,
+        image_drivers::build_bcm2711_hdmi_bundle,
     ),
     (
         image_drivers::RPI_RTC_STORE_PATH,
         image_drivers::build_rpi_rtc_bundle,
     ),
     (
-        image_drivers::RPI_CPUFREQ_STORE_PATH,
-        image_drivers::build_rpi_cpufreq_bundle,
+        image_drivers::RPI_FIRMWARE_CLOCKS_STORE_PATH,
+        image_drivers::build_rpi_firmware_clocks_bundle,
     ),
     (
         image_drivers::I2C_BCM2835_STORE_PATH,
         image_drivers::build_i2c_bcm2835_bundle,
     ),
     (
+        image_drivers::I2C_BRCMSTB_STORE_PATH,
+        image_drivers::build_i2c_brcmstb_bundle,
+    ),
+    (
         image_drivers::DMA_BCM2835_STORE_PATH,
         image_drivers::build_dma_bcm2835_bundle,
     ),
     (
+        image_drivers::IRQ_BRCMSTB_L2_STORE_PATH,
+        image_drivers::build_irq_brcmstb_l2_bundle,
+    ),
+    (
         image_drivers::CPRMAN_BCM2711_STORE_PATH,
         image_drivers::build_cprman_bcm2711_bundle,
+    ),
+    (
+        image_drivers::DVP_BCM2711_STORE_PATH,
+        image_drivers::build_dvp_bcm2711_bundle,
     ),
     (
         image_drivers::PWM_AUDIO_STORE_PATH,
@@ -2499,15 +2526,15 @@ mod tests {
     }
 
     /// The kernel diagnostics are gated to the non-shippable `debug` image:
-    /// its kernel build gets the lockup-watchdog aids and the storage
-    /// bring-up trace, and the shippable `installer` build gets nothing, so
-    /// the address-bearing developer aids, their hot-path recording, and the
-    /// flushed trace lines are compiled entirely out of any shippable kernel.
+    /// its kernel build gets the lockup-watchdog aids, and the shippable
+    /// `installer` build gets nothing, so the address-bearing developer aids
+    /// and their hot-path recording are compiled entirely out of any
+    /// shippable kernel.
     #[test]
     fn kernel_diagnostics_are_gated_to_the_debug_image() {
         assert_eq!(
             kernel_diag_feature_args(tairix_mkimage::ImageProfile::Debug),
-            &["--features", "watchdog-diagnostics,storage-trace"],
+            &["--features", "watchdog-diagnostics"],
             "the debug image must compile in the kernel diagnostics"
         );
         assert!(

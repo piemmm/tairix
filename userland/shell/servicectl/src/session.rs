@@ -187,6 +187,8 @@ fn enrol_refused_message(op: ServiceEnrolOp, service: &str, err: Errno) -> alloc
         Errno::NotFound => "no such service is installed",
         Errno::Busy => "a service it depends on is not enabled",
         Errno::LimitExceeded => "the enrolment record cannot hold another change",
+        Errno::NoData => "the enrolment record has not been read yet",
+        Errno::NotSupported => "it is part of the boot floor, which no enrolment changes",
         Errno::PermissionDenied | Errno::BufferTooSmall | Errno::NoSpace => {
             "the manager could not write the enrolment record"
         }

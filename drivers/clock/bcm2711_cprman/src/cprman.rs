@@ -87,7 +87,48 @@ impl Source {
 /// PLLC follows the core clock, and PLLA feeds the display.
 const RUN_SOURCES: [Source; 2] = [Source::Oscillator, Source::PlldPer];
 
+/// What the VPU generator's source field selects: the VPU's own mux, whose
+/// PLL inputs are their core channels.
+#[derive(Copy, Clone, Debug)]
+enum VpuSource {
+    Ground,
+    Oscillator,
+    Pll(&'static Pll, usize),
+}
+
+impl VpuSource {
+    /// [`None`] for the two test inputs, PLLH, which this part lacks, and the
+    /// reserved values.
+    const fn from_field(field: u32) -> Option<Self> {
+        match field {
+            0 => Some(Self::Ground),
+            1 => Some(Self::Oscillator),
+            4 => Some(Self::Pll(&PLLA, PLLA_CORE)),
+            5 => Some(Self::Pll(&PLLC, PLLC_CORE0)),
+            6 => Some(Self::Pll(&PLLD, PLLD_CORE)),
+            8 => Some(Self::Pll(&PLLC, PLLC_CORE1)),
+            9 => Some(Self::Pll(&PLLC, PLLC_CORE2)),
+            _ => None,
+        }
+    }
+}
+
+/// The VPU generator, whose clock the firmware sets and the core clock is.
+const VPU_CONTROL: usize = 0x08;
+const VPU_DIVISOR: usize = 0x0C;
+
+/// The VPU divisor's fraction is 8 bits wide, the top of the 12.12 field's.
+const VPU_FRACTION_BITS: u32 = 8;
+
+/// The PLL core channels the VPU's mux selects.
+const PLLA_CORE: usize = 0x1400;
+const PLLC_CORE0: usize = 0x1620;
+const PLLC_CORE1: usize = 0x1420;
+const PLLC_CORE2: usize = 0x1320;
+const PLLD_CORE: usize = 0x1440;
+
 /// One PLL's registers.
+#[derive(Debug)]
 struct Pll {
     control: usize,
     fraction: usize,
@@ -116,8 +157,9 @@ const PLLD: Pll = Pll {
     channel: 0x1540,
 };
 
-/// Bytes of window the registers the driver reaches lie within.
-pub const WINDOW_LEN: usize = 0x1544;
+/// Bytes of window the registers the driver reaches lie within: up to
+/// PLLC's first core channel.
+pub const WINDOW_LEN: usize = PLLC_CORE0 + 4;
 
 const PLL_NDIV: u32 = 0x3FF;
 const PLL_PDIV_SHIFT: u32 = 12;
@@ -290,21 +332,21 @@ impl<'r, R: RegisterBlock + ?Sized> Cprman<'r, R> {
         match source {
             Source::Ground => Ok(0),
             Source::Oscillator => Ok(self.oscillator),
-            Source::PllaPer => self.channel_rate(&PLLA),
-            Source::PllcPer => self.channel_rate(&PLLC),
-            Source::PlldPer => self.channel_rate(&PLLD),
+            Source::PllaPer => self.channel_rate(&PLLA, PLLA.channel),
+            Source::PllcPer => self.channel_rate(&PLLC, PLLC.channel),
+            Source::PlldPer => self.channel_rate(&PLLD, PLLD.channel),
         }
     }
 
-    /// The rate `pll`'s peripheral channel runs at: the oscillator multiplied
-    /// by the PLL's fractional feedback over its pre-divider, then divided by
-    /// the channel's own divider.
-    fn channel_rate(&self, pll: &Pll) -> Result<u64, DriverError> {
+    /// The rate `pll`'s channel at `channel` runs at: the oscillator
+    /// multiplied by the PLL's fractional feedback over its pre-divider, then
+    /// divided by the channel's own divider.
+    fn channel_rate(&self, pll: &Pll, channel: usize) -> Result<u64, DriverError> {
         let control = self.regs.read32(pll.control)?;
         if control & PLL_OUT_OF_RESET == 0 || control & PLL_POWER_DOWN != 0 {
             return Ok(0);
         }
-        let channel = self.regs.read32(pll.channel)?;
+        let channel = self.regs.read32(channel)?;
         let pdiv = (control >> PLL_PDIV_SHIFT) & PLL_PDIV;
         if channel & CHANNEL_DISABLED != 0 || pdiv == 0 {
             return Ok(0);
@@ -356,6 +398,46 @@ impl<'r, R: RegisterBlock + ?Sized> Cprman<'r, R> {
         // candidate always exists.
         let best = best.ok_or(DriverError::DeviceFault)?;
         Ok((best.setting, divided(best.parent, best.setting.divisor)))
+    }
+
+    /// The fastest rate a generator can be run at from the run sources: the
+    /// fastest source over the smallest divisor.
+    ///
+    /// # Errors
+    ///
+    /// A register read's failure.
+    pub fn max_rate(&self) -> Result<u64, DriverError> {
+        let mut most = 0;
+        for source in RUN_SOURCES {
+            most = most.max(divided(self.source_rate(source)?, MIN_DIVISOR));
+        }
+        Ok(most)
+    }
+
+    /// The rate the VPU clock runs at now, the firmware's to set; zero while
+    /// it is stopped.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Unsupported`] for a source this part cannot state the
+    /// rate of or a zero divisor, or a register read's failure.
+    pub fn vpu_rate(&self) -> Result<u64, DriverError> {
+        let control = self.regs.read32(VPU_CONTROL)?;
+        if control & CTL_ENABLE == 0 {
+            return Ok(0);
+        }
+        let source_rate = match VpuSource::from_field(control & CTL_SOURCE) {
+            Some(VpuSource::Ground) => 0,
+            Some(VpuSource::Oscillator) => self.oscillator,
+            Some(VpuSource::Pll(pll, channel)) => self.channel_rate(pll, channel)?,
+            None => return Err(DriverError::Unsupported),
+        };
+        let unused = FRACTION_BITS - VPU_FRACTION_BITS;
+        let divisor = (self.regs.read32(VPU_DIVISOR)? & DIVISOR) >> unused << unused;
+        if divisor == 0 {
+            return Err(DriverError::Unsupported);
+        }
+        Ok(divided(source_rate, divisor))
     }
 
     /// The rate `generator` runs at now; zero while it is stopped.

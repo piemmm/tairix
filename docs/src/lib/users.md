@@ -202,12 +202,15 @@ The compiled-in **system identity** (`plans/USERS.md`) is defined here
 too: `system_accounts()` — the no-login `system` record (uid 0, group
 `system` gid 0, empty ceiling; the *name* the kernel's bootstrap identity
 resolves to) plus one no-login account per system service (`devmgr` 10,
-`sysinfod` 11, `seatmgr` 12, `login` 13, `netstack` 14, `fontd` 15, primary
-group `services` gid 101), each carrying exactly its own service's grant
-ceiling (`DEVMGR_CEILING`, `SYSINFOD_CEILING`, `SEATMGR_CEILING`,
-`LOGIN_CEILING`, `NETSTACK_CEILING`, `FONTD_CEILING`) so the §5.2
-ceiling∩manifest intersection does real
-work — and `system_groups()` (`system:0`, `services:101`). The kernel is
+`sysinfod` 11, `seatmgr` 12, `login` 13, `netstack` 14, `fontd` 15,
+`greeter` 16, `confd` 17, `timed` 18, `audiod` 19, `discoveryd` 20,
+`soundd` 21, primary group `services` gid 101), each carrying exactly its own
+service's grant ceiling (`DEVMGR_CEILING` … `SOUNDD_CEILING`) so the
+ceiling∩manifest intersection does real work. The uids a protocol
+authenticates its peer by — the network stack's, the discovery service's,
+the cue authority's, and the login service's and device manager's the cue
+authority admits lifecycle sounds by — are defined in that protocol's
+`lib/abi` module and read from there — and `system_groups()` (`system:0`, `services:101`). The kernel is
 the sole consumer: the set is compiled into its identity table, never
 authored to a volume. PID 1 resolves a startup-config account name onto
 its uid through the pure, allocation-free `system_account_uid()` at

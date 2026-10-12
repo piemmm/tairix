@@ -19,6 +19,7 @@ use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::accounts::{AccountFacts, AccountSetting};
+use crate::effects::EffectsReading;
 use crate::facts::{Facts, MachineFacts};
 use crate::form::{Documents, Form, FormPlace, TextChoices};
 use crate::network::{IfaceSetting, NetworkFacts};
@@ -66,6 +67,8 @@ pub(crate) struct Answered<'a> {
     pub(crate) notify_sources: Option<&'a [BundleId]>,
     /// The sound devices and captures, or `None` while not read.
     pub(crate) sound: Option<&'a SoundReading>,
+    /// The user's sound choices, or `None` while not read.
+    pub(crate) effects: Option<&'a EffectsReading>,
     /// Why the desktop last would not lock the screen, if it would not.
     pub(crate) lock_refusal: Option<Errno>,
     /// Why the desktop last would not show the screensaver, if it would not.
@@ -86,6 +89,7 @@ impl<'a> Answered<'a> {
             staged: self.staged,
             resolvers: self.network.resolvers_slice(),
             sound: self.sound,
+            effects: self.effects,
             accounts: self.accounts,
             staged_accounts: self.staged_accounts,
             notify_sources: self.notify_sources,

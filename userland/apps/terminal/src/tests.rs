@@ -147,6 +147,20 @@ fn grid_resize_preserves_top_left_and_clamps_cursor() {
 }
 
 #[test]
+fn a_bell_is_heard_once_however_often_it_rang_and_never_drawn() {
+    let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
+    assert!(!term.take_bell());
+    term.feed(b"a\x07b\x07\x07");
+    assert_eq!(row_text(term.grid(), 0), "ab", "the bell leaves no mark");
+    assert!(term.take_bell());
+    assert!(!term.take_bell(), "asked once, it is spent");
+    term.feed(b"\x1b]0;title\x07");
+    assert!(!term.take_bell(), "an OSC terminator is not a bell");
+    term.feed(b"\x07");
+    assert!(term.take_bell());
+}
+
+#[test]
 fn terminal_resize_reshapes_the_grid() {
     let mut term = Terminal::new(20, 3, QueueShell::default()).expect("valid size");
     term.feed(b"hi");

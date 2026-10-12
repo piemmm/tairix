@@ -174,6 +174,68 @@ fn floats_read_finite_doubles_narrow_and_laws_expand() {
     }
 }
 
+/// A mask places a count that has no conventional layout: five channels
+/// with no low frequency, and 6.1 with its back centre.
+#[test]
+fn a_mask_places_a_count_with_no_conventional_layout() {
+    use ChannelPosition::{
+        FrontCentre, FrontLeft, FrontRight, LowFrequency, RearCentre, RearLeft, RearRight,
+        SideLeft, SideRight,
+    };
+    for (channels, mask, positions) in [
+        (
+            5u16,
+            0x37,
+            &[FrontLeft, FrontRight, FrontCentre, RearLeft, RearRight][..],
+        ),
+        (
+            7,
+            0x70F,
+            &[
+                FrontLeft,
+                FrontRight,
+                FrontCentre,
+                LowFrequency,
+                RearCentre,
+                SideLeft,
+                SideRight,
+            ][..],
+        ),
+    ] {
+        let data = xorshift(usize::from(channels) * 2 * 10, u64::from(channels));
+        let file = wave(
+            b"RIFF",
+            &[
+                fmt(
+                    0xFFFE,
+                    channels,
+                    48_000,
+                    2 * channels,
+                    16,
+                    Some(&extensible(16, mask, 1)),
+                ),
+                chunk(b"data", &data),
+            ],
+        );
+        let (source, pcm) = decode(&file, 4);
+        assert_eq!(
+            source.info().channels,
+            ChannelMap::new(positions).expect("a map"),
+            "{channels} channels"
+        );
+        assert_eq!(pcm, data);
+    }
+    let unmasked = wave(
+        b"RIFF",
+        &[fmt(1, 5, 48_000, 10, 16, None), chunk(b"data", &[0; 20])],
+    );
+    assert_eq!(
+        open(&unmasked).err(),
+        Some(DecodeError::ChannelLayoutUnsupported),
+        "no mask, no layout"
+    );
+}
+
 #[test]
 fn an_extensible_format_reads_its_subformat_and_channel_mask() {
     use ChannelPosition::{FrontCentre, FrontLeft, FrontRight, LowFrequency, RearLeft, RearRight};

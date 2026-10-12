@@ -94,6 +94,8 @@ mod program {
     use tairix_terminal::menu::{self, Command};
     // `Settings` here is the sheet UI; the app-data handle is `SettingsStore`.
     use tairix_appdata::{Publication, PublishJob, Published, RtHost, Settings as SettingsStore};
+    use tairix_soundtheme::cue::RtCuePost;
+    use tairix_soundtheme::{Answer, PostedCues, SoundEvent, CUE_ANSWER_DEADLINE_NS};
     use tairix_terminal::profile::{Invalidation, Profile};
     use tairix_terminal::render::Screen;
     use tairix_terminal::scheme::Painted;
@@ -115,6 +117,42 @@ mod program {
     /// when a publish has answered, so the profile the store now holds is
     /// adopted through the park the loop is already in rather than by polling.
     const PUBLISH_TOKEN: u64 = app::FIRST_APP_TOKEN;
+
+    /// The wait-set token of the sound authority's answer to a bell.
+    const BELL_TOKEN: u64 = PUBLISH_TOKEN + 1;
+
+    /// The shell's bell, heard through the cue authority without ever waiting
+    /// on it.
+    struct Bell {
+        cues: PostedCues,
+        post: RtCuePost,
+    }
+
+    impl Bell {
+        fn new(set: u64) -> Self {
+            Self {
+                cues: PostedCues::new(),
+                post: RtCuePost::new(set, BELL_TOKEN),
+            }
+        }
+
+        /// Sound the bell if `open`'s shell rang it: refused or silent, the
+        /// answer is the authority's to record.
+        fn ring_if_rung(&mut self, open: &mut TerminalWindow) {
+            if open.terminal.take_bell() {
+                let _ = self.cues.post(
+                    &mut self.post,
+                    SoundEvent::Bell,
+                    Answer::Started,
+                    CUE_ANSWER_DEADLINE_NS,
+                );
+            }
+        }
+
+        fn collect(&mut self) {
+            self.cues.collect(&mut self.post, |_, _| {});
+        }
+    }
 
     /// Where the per-window token pairs begin, clear of the fixed tokens
     /// above.
@@ -1097,6 +1135,7 @@ mod program {
         // readiness is a level peek, so work left undrained re-reports on the
         // next wait. The park carries a frame deadline only while some window
         // has an animated effect in force.
+        let mut bell = Bell::new(set);
         let code = 'serve: loop {
             let animated = publication
                 .live()
@@ -1255,6 +1294,7 @@ mod program {
                     }
                 }
                 Wake::PressureUnchanged => {}
+                Wake::App(BELL_TOKEN) => bell.collect(),
                 Wake::App(token) => {
                     // A per-window member — its shell wrote, or its shell
                     // exited — or the exit of a shell whose window has gone.
@@ -1277,6 +1317,7 @@ mod program {
                     } else {
                         drain_and_reap(&mut windows[index], &mut client)
                     };
+                    bell.ring_if_rung(&mut windows[index]);
                     // The shell this window hosted is gone, or going, so the
                     // window is: hosting it was the window's whole purpose.
                     // Its siblings keep running.

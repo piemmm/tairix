@@ -55,7 +55,7 @@ pub use agent::{AgentStep, MemberAgent, REOFFER_BASE_NS, REOFFER_CEILING_NS};
 pub use offer::Transport;
 
 use tairix_abi::raid_ipc::{RAID_CANDIDATE_COMPATIBLE, RAID_MEMBER_COMPATIBLE};
-use tairix_abi::{DriverBindKey, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
 
 /// Bind priority of the member-agent keys.
 ///
@@ -78,6 +78,15 @@ const fn bind_key(compatible: &'static [u8]) -> DriverBindKey {
         },
     )
 }
+
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the block endpoint and data window it delegates to the array composer, and
+/// its diagnostics.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::SHM,
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::LOG_EMIT,
+];
 
 /// The bind table the signed bundle publishes: a device the volume manager
 /// recognised as an array member, and a whole device it found empty enough to

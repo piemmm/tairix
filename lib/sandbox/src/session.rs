@@ -389,8 +389,9 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
 
     /// Take one transport read into the inbound accumulator.
     ///
-    /// Called when the owner's read readiness fired. A spurious call the
-    /// session does not want is a no-op rather than a read that could park.
+    /// Called only when the owner's read readiness fired: a pipe read with
+    /// nothing in it parks the caller. A call the session does not want is a
+    /// no-op.
     ///
     /// # Errors
     ///

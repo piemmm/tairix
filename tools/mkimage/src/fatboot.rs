@@ -14,7 +14,10 @@ use tairix_drv_fs_fat32::Fat32;
 
 use crate::device::MemBlock;
 use crate::firmware::FirmwareFile;
-use crate::overlay::{pwm_audio_overlay, JACK_PINS, PWM_AUDIO_OVERLAY, PWM_AUDIO_OVERLAY_PATH};
+use crate::overlay::{
+    display_overlay, pwm_audio_overlay, DISPLAY_OVERLAY, DISPLAY_OVERLAY_PATH, JACK_PINS,
+    PWM_AUDIO_OVERLAY, PWM_AUDIO_OVERLAY_PATH,
+};
 use crate::MkimageError;
 
 /// Name of the kernel image the firmware loads (`config.txt` `kernel=`).
@@ -60,7 +63,8 @@ pub use tairix_drv_fs_arxfs::ROOT_UNLOCK_NAME;
 /// in an unusable black border.
 ///
 /// The headphone jack's pins go to PWM1, and the first-party overlay names
-/// that block for its driver ([`crate::overlay`]).
+/// that block for its driver; the display overlay enables the nodes the
+/// native display engine binds ([`crate::overlay`]).
 #[must_use]
 pub fn config_txt(with_armstub: bool, console_baud: u32) -> String {
     let mut text = format!(
@@ -74,7 +78,8 @@ pub fn config_txt(with_armstub: bool, console_baud: u32) -> String {
          init_uart_clock=48000000\n\
          init_uart_baud={console_baud}\n\
          {JACK_PINS}\n\
-         dtoverlay={PWM_AUDIO_OVERLAY}\n",
+         dtoverlay={PWM_AUDIO_OVERLAY}\n\
+         dtoverlay={DISPLAY_OVERLAY}\n",
     );
     if with_armstub {
         text.push_str("armstub=armstub8.bin\n");
@@ -115,6 +120,7 @@ pub fn build_boot_partition(
         plant(&mut fs, &file.name, &file.bytes)?;
     }
     plant(&mut fs, PWM_AUDIO_OVERLAY_PATH, &pwm_audio_overlay()?)?;
+    plant(&mut fs, DISPLAY_OVERLAY_PATH, &display_overlay()?)?;
     plant(&mut fs, CONFIG_TXT_NAME, config.as_bytes())?;
     plant(&mut fs, KERNEL_IMG_NAME, kernel8)?;
     if let Some(descriptor) = unlock_descriptor {
@@ -237,11 +243,16 @@ mod tests {
         assert!(config.contains("dtoverlay=disable-bt"));
         assert!(config.contains("disable_overscan=1"));
         assert!(config.contains("gpio=40,41=a0\ndtoverlay=tairix-pwm-audio\n"));
+        assert!(config.contains("dtoverlay=tairix-display\n"));
         assert!(!config.contains("armstub="));
         assert_eq!(
             read_back(&mut fs, PWM_AUDIO_OVERLAY_PATH),
             pwm_audio_overlay().expect("the overlay"),
             "the overlay config.txt applies is planted where the firmware looks"
+        );
+        assert_eq!(
+            read_back(&mut fs, DISPLAY_OVERLAY_PATH),
+            display_overlay().expect("the overlay")
         );
     }
 

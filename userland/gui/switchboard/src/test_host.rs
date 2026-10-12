@@ -353,6 +353,12 @@ pub(crate) struct RecordingHost {
     pub(crate) priorities: Vec<(i64, SchedPriority)>,
     /// Every power transition attempted, in order.
     pub(crate) powered: Vec<PowerAction>,
+    /// How many times the machine's end sound was asked for.
+    pub(crate) end_cues: usize,
+    /// The refusal [`ServiceHost::cue_end`] answers.
+    pub(crate) cue_refusal: Option<Errno>,
+    /// Whether the end sound's answer has come.
+    pub(crate) end_over: bool,
     /// Every refusal stated, in order.
     pub(crate) refusals: Vec<(String, Errno)>,
     /// Every degradation noted, in order.
@@ -407,6 +413,9 @@ impl RecordingHost {
             signals: Vec::new(),
             priorities: Vec::new(),
             powered: Vec::new(),
+            end_cues: 0,
+            cue_refusal: None,
+            end_over: false,
             refusals: Vec::new(),
             degradations: Vec::new(),
             open_refusal: None,
@@ -530,6 +539,15 @@ impl ServiceHost for RecordingHost {
     fn power(&mut self, action: PowerAction) -> Result<(), Errno> {
         self.powered.push(action);
         self.power_refusal.map_or(Ok(()), Err)
+    }
+
+    fn cue_end(&mut self) -> Result<(), Errno> {
+        self.end_cues += 1;
+        self.cue_refusal.map_or(Ok(()), Err)
+    }
+
+    fn end_sound_over(&mut self) -> bool {
+        self.end_over
     }
 
     fn report_refusal(&mut self, action: &str, refusal: Errno) {

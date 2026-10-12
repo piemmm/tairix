@@ -105,6 +105,15 @@ impl IdleClock {
         self.lock_retry_at = None;
     }
 
+    /// The screensaver came down with no input, its screen having moved
+    /// under it: it is due again at once, drawn over the screen now drawn,
+    /// and the display behind it is switched off again when its wait has
+    /// passed — a display a new configuration lit does not stay lit.
+    pub fn saver_withdrawn(&mut self) {
+        self.saving = false;
+        self.asleep = false;
+    }
+
     /// The lock [`due`](Self::due) asked for could not engage at `now_ns`:
     /// ask again on the retry pace, never at once, so a screen that must lock
     /// keeps trying without spinning.
@@ -247,6 +256,21 @@ mod tests {
         );
         assert_eq!(clock.due(12 * MIN), Some(IdleAction::StartScreensaver));
         assert_eq!(clock.due(17 * MIN), Some(IdleAction::Lock));
+    }
+
+    #[test]
+    fn a_withdrawn_screensaver_is_due_again_and_so_is_the_display_off() {
+        let mut clock = IdleClock::new(0);
+        clock.set_policy(IdlePolicy {
+            display_off: Some(minutes(1)),
+            ..policy(Some(5), None)
+        });
+        assert_eq!(clock.due(6 * MIN), Some(IdleAction::StartScreensaver));
+        assert_eq!(clock.due(6 * MIN), Some(IdleAction::SwitchDisplayOff));
+        clock.saver_withdrawn();
+        assert_eq!(clock.due(7 * MIN), Some(IdleAction::StartScreensaver));
+        assert_eq!(clock.due(7 * MIN), Some(IdleAction::SwitchDisplayOff));
+        assert_eq!(clock.due(7 * MIN), None);
     }
 
     #[test]

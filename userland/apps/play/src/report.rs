@@ -32,12 +32,24 @@ pub fn describe(info: &SoundInfo) -> String {
     text
 }
 
-/// The `schema` record for `file`, about to be played as `info` describes.
+/// `file` as a line names it: a chained file's later links by their place,
+/// counted from one as people count.
 #[must_use]
-pub fn opened(file: &str, info: &SoundInfo) -> Vec<u8> {
-    let human = format!("Playing {}: {}.", file, describe(info));
+pub fn naming(file: &str, link: u32) -> String {
+    if link == 0 {
+        String::from(file)
+    } else {
+        format!("{file} (link {})", u64::from(link) + 1)
+    }
+}
+
+/// The `schema` record for link `link` of `file`, about to be played as
+/// `info` describes.
+#[must_use]
+pub fn opened(file: &str, link: u32, info: &SoundInfo) -> Vec<u8> {
+    let human = format!("Playing {}: {}.", naming(file, link), describe(info));
     let mut ai = format!(
-        "{{\"subject\":\"playback\",\"file\":{},\"format\":\"{}\",\"encoding\":\"{}\",",
+        "{{\"subject\":\"playback\",\"file\":{},\"link\":{link},\"format\":\"{}\",\"encoding\":\"{}\",",
         JsonStr(file),
         info.format.token(),
         info.encoding.token()

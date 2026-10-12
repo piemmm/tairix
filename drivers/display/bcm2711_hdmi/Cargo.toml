@@ -1,0 +1,47 @@
+[package]
+name = "tairix-drv-display-bcm2711-hdmi"
+description = "TAIRiX Raspberry Pi 4 HDMI transmitters: each HDMI block an encoder-v1 encoder, its sink found from its hotplug lines and the EDID its DDC bus reads, its PHY, clocks, timing, InfoFrames and SCDC scrambling set for the mode the sink, the transmitter and the display engine's pipe all carry."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `Encoder` class trait, the I²C frames, the register seam and the
+# capability ids.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The sink's EDID, the video codes naming its timings, the InfoFrames.
+tairix-edid = { path = "../../../lib/edid", version = "=0.0.0" }
+# The clocks', the DDC bus's and the interrupt lines' clients.
+tairix-linkclient = { path = "../../../lib/linkclient", version = "=0.0.0" }
+# The recorder the transmitter's decisions go to; in the driver, the node's
+# grants, its duty and its windows.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The cyclic DMA stream its audio plays from, and the frame codec seam.
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
+# The encoders' bindings, defined once with the display engine's wiring.
+tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
+
+[dev-dependencies]
+# The recorder the tests read the transmitter's decisions back from.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0", features = ["test-support"] }
+# The synthetic sink descriptions the model's sinks are built from.
+tairix-edid = { path = "../../../lib/edid", version = "=0.0.0", features = ["test-support"] }
+# The modelled DMA channel the audio path's tests play through.
+tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0", features = ["mock-dma"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# Which transmitter the node is, by the bind key it matched.
+tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
+# The `encoder-v1` server and its serve loop.
+tairix-encoder = { path = "../../../lib/encoder", version = "=0.0.0" }
+# The bring-up's failure, recorded with a stable event id.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# `_start`, the node record, the clock the mode sets wait on, the link calls
+# and the DDC channel's mapping.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

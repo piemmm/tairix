@@ -210,7 +210,8 @@ impl SampleFormats {
 
 /// Where one channel of a stream is meant to be heard.
 ///
-/// The 7.1 vocabulary, which covers every layout consumer hardware presents.
+/// The 7.1 vocabulary and 6.1's rear centre, which between them cover every
+/// layout consumer hardware and the consumer formats present.
 /// A map's positions are what the channel matrix is derived from, so a
 /// position the vocabulary does not name is refused rather than mapped to
 /// something arbitrary.
@@ -235,6 +236,9 @@ pub enum ChannelPosition {
     SideLeft = 8,
     /// Side right.
     SideRight = 9,
+    /// Rear (surround) centre: 6.1's back channel, or the one surround of a
+    /// layout with no pair.
+    RearCentre = 10,
 }
 
 impl ChannelPosition {
@@ -260,6 +264,7 @@ impl ChannelPosition {
             7 => Ok(Self::RearRight),
             8 => Ok(Self::SideLeft),
             9 => Ok(Self::SideRight),
+            10 => Ok(Self::RearCentre),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -1044,7 +1049,8 @@ mod endpoint {
     pub const DIRECTION: usize = 2;
     pub const JACK: usize = 3;
     pub const FORMATS: usize = 4;
-    pub const RESERVED0: usize = 6;
+    pub const RESOLUTION: usize = 6;
+    pub const RESERVED0: usize = 7;
     pub const CHANNEL_MAP: usize = 8;
     pub const RESERVED1: usize = CHANNEL_MAP + CHANNEL_MAP_WIRE_LEN;
     pub const RATES: usize = RESERVED1 + 3;
@@ -1077,6 +1083,11 @@ pub struct AudioEndpointFacts {
     pub jack: JackState,
     /// Sample encodings the hardware accepts without conversion.
     pub formats: SampleFormats,
+    /// The most significant bits of a sample the endpoint resolves, where
+    /// that is fewer than a format carries: the bits below are neither heard
+    /// nor captured, so a sink's samples are quantised, dithered, to this
+    /// many. `None` when every format's bits are its own.
+    pub resolution: Option<u8>,
     /// The endpoint's channel layout.
     pub channel_map: ChannelMap,
     /// Rates the endpoint can be clocked at.
@@ -1094,16 +1105,31 @@ pub struct AudioEndpointFacts {
 }
 
 impl AudioEndpointFacts {
+    /// The bits of a `format` sample the endpoint resolves: the format's own,
+    /// or [`Self::resolution`] where that is fewer.
+    #[must_use]
+    pub fn resolved_bits(&self, format: SampleFormat) -> u32 {
+        let own = format.valid_bits();
+        self.resolution.map_or(own, |bits| own.min(u32::from(bits)))
+    }
+
     /// Check the facts are internally consistent.
     ///
     /// # Errors
     ///
     /// * [`Errno::OutOfRange`] — an endpoint index past
-    ///   [`MAX_DEVICE_ENDPOINTS`], an empty format set, period bounds that
-    ///   are inverted, or a ring bound outside the ring bounds or too small
-    ///   to hold one period.
+    ///   [`MAX_DEVICE_ENDPOINTS`], an empty format set, a resolution of no
+    ///   bits or of more than any encoding carries, period bounds that are
+    ///   inverted, or a ring bound outside the ring bounds or too small to
+    ///   hold one period.
     pub fn validate(&self) -> Result<(), Errno> {
         if self.index >= MAX_DEVICE_ENDPOINTS || self.formats.is_empty() {
+            return Err(Errno::OutOfRange);
+        }
+        if self
+            .resolution
+            .is_some_and(|bits| bits == 0 || u32::from(bits) > SampleFormat::S32.valid_bits())
+        {
             return Err(Errno::OutOfRange);
         }
         if self.min_period_frames == 0 || self.min_period_frames > self.max_period_frames {
@@ -1128,6 +1154,7 @@ impl AudioEndpointFacts {
         out[endpoint::DIRECTION] = self.direction.as_u8();
         out[endpoint::JACK] = self.jack.as_u8();
         put_u16(&mut out, endpoint::FORMATS, self.formats.bits());
+        out[endpoint::RESOLUTION] = self.resolution.unwrap_or(0);
         out[endpoint::CHANNEL_MAP..endpoint::CHANNEL_MAP + CHANNEL_MAP_WIRE_LEN]
             .copy_from_slice(&self.channel_map.to_wire());
         out[endpoint::RATES..endpoint::RATES + RATE_SUPPORT_WIRE_LEN]
@@ -1155,7 +1182,7 @@ impl AudioEndpointFacts {
         if bytes.len() < AUDIO_ENDPOINT_FACTS_WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        if read_u16(bytes, endpoint::RESERVED0) != 0
+        if bytes[endpoint::RESERVED0] != 0
             || bytes[endpoint::RESERVED1..endpoint::RATES]
                 .iter()
                 .any(|b| *b != 0)
@@ -1169,6 +1196,10 @@ impl AudioEndpointFacts {
             direction: StreamDirection::from_u8(bytes[endpoint::DIRECTION])?,
             jack: JackState::from_u8(bytes[endpoint::JACK])?,
             formats: SampleFormats::from_bits(read_u16(bytes, endpoint::FORMATS))?,
+            resolution: match bytes[endpoint::RESOLUTION] {
+                0 => None,
+                bits => Some(bits),
+            },
             channel_map: ChannelMap::from_wire(&bytes[endpoint::CHANNEL_MAP..])?,
             rates: RateSupport::from_wire(&bytes[endpoint::RATES..])?,
             min_period_frames: read_u32(bytes, endpoint::MIN_PERIOD),

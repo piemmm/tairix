@@ -29,30 +29,20 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::CapabilityId;
-    use tairix_caps::CapabilitySet;
     use tairix_display::service::{open_surface, serve, EXIT_NO_HOST};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 
-    /// The capabilities the driver host re-checks before issuing a trap, so a
-    /// missing grant fails fast: the scan-out window (`CAP_MMIO_MAP`) and the
-    /// client frame regions the engine maps (`CAP_SHM`). The kernel re-checks
-    /// every trap regardless.
-    fn service_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::SHM);
-        caps
-    }
-
     /// Program entry point; on success it never returns.
     fn main() -> i32 {
-        let Ok(host) = RtDriverHost::from_grants_query(service_caps(), RtGrantSyscalls, None)
-        else {
+        let caps = tairix_drv_display_framebuffer::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         match open_surface(&host) {
-            Ok(mut surface) => serve(&mut surface),
+            Ok(mut surface) => serve(&mut surface, &[]),
             Err(code) => code,
         }
     }

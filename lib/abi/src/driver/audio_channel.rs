@@ -110,6 +110,9 @@ pub const fn is_audio_channel_endpoint(id: u64) -> bool {
 /// [`notify_endpoint_for`]).
 const AUDIO_NOTIFY_ENDPOINT_TAG: u64 = 0x4141_0000_0000_0000;
 
+/// The bits of a notify-port id the tag occupies.
+const AUDIO_NOTIFY_TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+
 /// The notify-mailbox endpoint id the mixer binds for one attached device
 /// channel and passes to the driver in [`AttachParams::notify_endpoint`].
 ///
@@ -131,6 +134,13 @@ pub const fn notify_endpoint_for(pid: u64, index: u64) -> u64 {
     AUDIO_NOTIFY_ENDPOINT_TAG | ((pid & crate::PID_MAX) << 8) | (index & 0xFF)
 }
 
+/// Whether `id` is a device-channel notify-port id, as [`notify_endpoint_for`]
+/// makes them: the only ports a driver is told to send to.
+#[must_use]
+pub const fn is_audio_notify_endpoint(id: u64) -> bool {
+    id & AUDIO_NOTIFY_TAG_MASK == AUDIO_NOTIFY_ENDPOINT_TAG
+}
+
 /// Operation discriminants (the request's seventh byte).
 mod op {
     pub const FACTS: u8 = 1;
@@ -143,6 +153,7 @@ mod op {
     pub const SERVICE: u8 = 8;
     pub const GAIN: u8 = 9;
     pub const DETACH: u8 = 10;
+    pub const WATCH: u8 = 11;
 }
 
 /// Fixed request header: magic (4) + version (2) + op (1) + reserved (1).
@@ -187,6 +198,12 @@ mod transport {
     pub const LEN: usize = 16;
 }
 
+/// Byte offsets within the [`AudioChannelRequest::Watch`] body.
+mod watch {
+    pub const NOTIFY: usize = 0;
+    pub const LEN: usize = 8;
+}
+
 /// Byte offsets within the [`AudioChannelRequest::Gain`] body.
 mod gain {
     pub const INDEX: usize = 0;
@@ -216,6 +233,9 @@ const fn largest_body() -> usize {
     }
     if gain::LEN > largest {
         largest = gain::LEN;
+    }
+    if watch::LEN > largest {
+        largest = watch::LEN;
     }
     largest
 }
@@ -277,6 +297,12 @@ pub enum AudioChannelRequest {
     Detach {
         /// The endpoint to detach.
         endpoint: u16,
+    },
+    /// Name the port the driver tells of a change to any endpoint's
+    /// connector, attached or not; a later watch replaces it.
+    Watch {
+        /// The mixer's port, a [`notify_endpoint_for`] id.
+        notify_endpoint: u64,
     },
 }
 
@@ -409,6 +435,7 @@ impl AudioChannelRequest {
             Self::Service { .. } => op::SERVICE,
             Self::Gain { .. } => op::GAIN,
             Self::Detach { .. } => op::DETACH,
+            Self::Watch { .. } => op::WATCH,
         }
     }
 
@@ -425,6 +452,7 @@ impl AudioChannelRequest {
                 Self::Attach(_) => attach::LEN,
                 Self::Start { .. } | Self::Stop { .. } => transport::LEN,
                 Self::Gain { .. } => gain::LEN,
+                Self::Watch { .. } => watch::LEN,
             }
     }
 
@@ -464,6 +492,7 @@ impl AudioChannelRequest {
                 body[gain::MUTE] = u8::from(*mute);
                 put_i32(body, gain::MILLIBEL, *millibel);
             }
+            Self::Watch { notify_endpoint } => put_u64(body, watch::NOTIFY, *notify_endpoint),
         }
         Ok(len)
     }
@@ -520,6 +549,9 @@ impl AudioChannelRequest {
                 }
             }
             op::GAIN => decode_gain(body),
+            op::WATCH => Ok(Self::Watch {
+                notify_endpoint: checked_notify(read_u64(body, watch::NOTIFY))?,
+            }),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -533,6 +565,7 @@ const fn body_len(op: u8) -> Result<usize, Errno> {
         op::ATTACH => Ok(attach::LEN),
         op::START | op::STOP => Ok(transport::LEN),
         op::GAIN => Ok(gain::LEN),
+        op::WATCH => Ok(watch::LEN),
         _ => Err(Errno::OutOfRange),
     }
 }
@@ -550,6 +583,16 @@ fn checked_endpoint(index: u16) -> Result<u16, Errno> {
         return Err(Errno::OutOfRange);
     }
     Ok(index)
+}
+
+/// A notify port, refused unless it is a device-channel notify id: any other
+/// would turn the driver into a proxy for wakes at someone else's mailbox, a
+/// reserved rendezvous above all.
+fn checked_notify(port: u64) -> Result<u64, Errno> {
+    if !is_audio_notify_endpoint(port) || crate::ipc::is_reserved_endpoint(port) {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(port)
 }
 
 fn decode_endpoint_body(body: &[u8]) -> Result<u16, Errno> {
@@ -602,18 +645,11 @@ fn decode_attach(body: &[u8]) -> Result<AttachParams, Errno> {
     {
         return Err(Errno::OutOfRange);
     }
-    let notify_endpoint = read_u64(body, attach::NOTIFY);
-    // A notify port naming a reserved rendezvous would turn the driver into a
-    // proxy for wakes at a system service. The mixer's own
-    // `notify_endpoint_for` never produces one, so refusing costs nothing.
-    if crate::ipc::is_reserved_endpoint(notify_endpoint) {
-        return Err(Errno::OutOfRange);
-    }
     Ok(AttachParams {
         endpoint: checked_endpoint(read_u16(body, attach::INDEX))?,
         ring_frames,
         region_grant: read_u64(body, attach::GRANT),
-        notify_endpoint,
+        notify_endpoint: checked_notify(read_u64(body, attach::NOTIFY))?,
     })
 }
 
@@ -972,7 +1008,8 @@ pub enum AudioChannelNotify {
         /// The device's frame position at the end of playout.
         position: Frames,
     },
-    /// A connector was occupied or vacated.
+    /// A connector was occupied or vacated, and the endpoint's other facts
+    /// may have changed with it: the mixer reads them again.
     JackChanged {
         /// The endpoint whose connector changed.
         endpoint: u16,

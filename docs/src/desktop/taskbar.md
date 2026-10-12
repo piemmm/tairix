@@ -518,7 +518,10 @@ system stays fully usable rather than showing blank slots (`AGENTS.md` §10,
 ## Notification icons
 
 The notification area holds an ordered list of status icons, each with a
-stable `IconId` and a theme **asset id**. When the bar renders, every
+stable `IconId` and a theme **asset id**. Raising one answers what it did
+(`Raised`): shown where nothing was, replaced the content under its key, or
+left byte-identical content as it was. Only `Shown` is an arrival, and
+`arrival_sound` names the sound its severity makes. When the bar renders, every
 notification slot resolves its asset id to a `tairix-icon` `IconKind`
 (`IconKind::for_asset`, falling back to a generic glyph for an unknown id,
 `AGENTS.md` §2.9), builds the matching scalable `VectorIcon` in the **muted**

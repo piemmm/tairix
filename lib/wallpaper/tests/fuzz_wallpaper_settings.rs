@@ -26,6 +26,7 @@
 //! the same seeded stream keeps being drawn until the budget elapses.
 
 use tairix_appconf::{Document, Registry, MAX_DOCUMENT_LEN};
+use tairix_fuzzseed::registry::{registry_document, RegistryRow};
 use tairix_fuzzseed::Prng;
 use tairix_wallpaper::{merge, DesktopSettings};
 
@@ -36,7 +37,7 @@ const SMOKE_ITERATIONS: u64 = 5_000;
 /// so no `set_field`/`field_value` arm is left unfuzzed. The names are
 /// asserted against `SettingsKey::ALL` below, so a key added without a row here
 /// fails rather than silently going uncovered.
-const KEYS: &[(&str, &[&str], &[&str])] = &[
+const KEYS: &[RegistryRow] = &[
     (
         "wallpaper",
         &[
@@ -282,46 +283,8 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
 ];
 const BAD_TOKENS: &[&str] = &["", " ", "has space", "bogus", "relative/path.png"];
 
-/// One document in this many carries a value drawn to be refused.
-const POISONED_ONE_IN: usize = 4;
-
-/// A value `key` accepts or, to `refuse`, one it should refuse: its own, or a
-/// token few keys take.
-fn value_for(rng: &mut Prng, key: &str, refuse: bool) -> &'static str {
-    let Some(&(_, accepted, refused)) = KEYS.iter().find(|(name, _, _)| *name == key) else {
-        unreachable!("every generated key comes from the table");
-    };
-    if !refuse {
-        return rng.pick(accepted);
-    }
-    if refused.is_empty() || rng.below(2) == 0 {
-        return rng.pick(BAD_TOKENS);
-    }
-    rng.pick(refused)
-}
-
-/// A document of distinct keys, one line of which is poisoned in one document
-/// of every [`POISONED_ONE_IN`]. Poisoning a document rather than each line
-/// keeps the share accepted whole, and with it the round trip's coverage,
-/// from falling as the registry grows.
 fn document(rng: &mut Prng) -> String {
-    use std::fmt::Write as _;
-
-    let mut out = String::new();
-    let mut keys: Vec<&str> = KEYS.iter().map(|(name, _, _)| *name).collect();
-    let n = rng.below(keys.len() + 1);
-    let poisoned = (n > 0 && rng.below(POISONED_ONE_IN) == 0).then(|| rng.below(n));
-    for line in 0..n {
-        let index = rng.below(keys.len());
-        let key = keys.swap_remove(index);
-
-        if rng.below(10) == 0 {
-            out.push_str("# comment\n");
-        }
-        let value = value_for(rng, key, poisoned == Some(line));
-        let _ = writeln!(out, "{key} = {value}");
-    }
-    out
+    registry_document(rng, KEYS, BAD_TOKENS)
 }
 
 /// Read `doc` both ways and hold every invariant the two readings owe each

@@ -47,7 +47,10 @@ added the first in-tree consumer (`userland/apps/top`).
   `read_events` (batched); `set_input_mode` selects `Blocking`, `NonBlocking`
   (`nodelay`), or `Timeout(..)` waiting. A blocking `getch` re-reads past a
   chunk that decodes to no event (an unmodelled sequence), so `None` from it
-  means exactly one thing: the channel has closed.
+  means exactly one thing: the channel has closed. `has_pending_input` says
+  whether `getch` would answer without reading — a key buffered by an earlier
+  read, or a latched resize — so a program waiting on its standard input in a
+  wait-set beside other events asks it before parking.
 - **`StreamTty`** (feature `program`, freestanding targets only) is the one
   production `Tty` over a program's inherited standard streams (fd 0/1)
   through `tairix-rt`. Blocking and timed reads park the task in the kernel; a

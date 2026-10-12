@@ -36,7 +36,7 @@ fn grant() -> ConfigureGrant {
     }
 }
 
-fn every_request() -> [AudioChannelRequest; 10] {
+fn every_request() -> [AudioChannelRequest; 11] {
     [
         AudioChannelRequest::Facts,
         AudioChannelRequest::EndpointFacts { endpoint: 2 },
@@ -58,6 +58,9 @@ fn every_request() -> [AudioChannelRequest; 10] {
             mute: true,
         },
         AudioChannelRequest::Detach { endpoint: 1 },
+        AudioChannelRequest::Watch {
+            notify_endpoint: notify_endpoint_for(4_096, 0),
+        },
     ]
 }
 
@@ -186,7 +189,10 @@ fn a_request_header_fails_closed() {
 fn an_endpoint_index_past_the_device_bound_is_refused_on_every_operation() {
     for request in every_request() {
         let (mut frame, len) = encoded(request);
-        if matches!(request, AudioChannelRequest::Facts) {
+        if matches!(
+            request,
+            AudioChannelRequest::Facts | AudioChannelRequest::Watch { .. }
+        ) {
             continue;
         }
         put_u16(&mut frame, HEADER_LEN, MAX_DEVICE_ENDPOINTS);
@@ -322,6 +328,40 @@ fn attach_refuses_a_notify_port_that_names_a_system_rendezvous() {
     )));
 }
 
+/// A driver is told to send only to a mixer's device-channel notify port: a
+/// client stream's notify port, or any other mailbox, is refused at the wire
+/// by an attach and a watch alike.
+#[test]
+fn attach_and_watch_refuse_a_port_outside_the_device_notify_space() {
+    let (attach, attach_len) = encoded(AudioChannelRequest::Attach(attach_params()));
+    let (watch, watch_len) = encoded(AudioChannelRequest::Watch {
+        notify_endpoint: notify_endpoint_for(4_096, 0),
+    });
+    for stray in [
+        crate::audio::notify_endpoint_for(4_096, 3),
+        0x0A55_0001,
+        notify_endpoint_for(4_096, 3) ^ (1 << 63),
+    ] {
+        assert!(!is_audio_notify_endpoint(stray));
+        let mut corrupt = attach;
+        put_u64(&mut corrupt, HEADER_LEN + attach::NOTIFY, stray);
+        assert_eq!(
+            AudioChannelRequest::decode(&corrupt[..attach_len]),
+            Err(Errno::OutOfRange)
+        );
+        let mut corrupt = watch;
+        put_u64(&mut corrupt, HEADER_LEN + watch::NOTIFY, stray);
+        assert_eq!(
+            AudioChannelRequest::decode(&corrupt[..watch_len]),
+            Err(Errno::OutOfRange)
+        );
+    }
+    assert!(is_audio_notify_endpoint(notify_endpoint_for(
+        crate::PID_MAX,
+        0xFF
+    )));
+}
+
 #[test]
 fn transport_and_gain_refuse_their_dirty_reserved_fields() {
     let (frame, len) = encoded(AudioChannelRequest::Start {
@@ -383,6 +423,7 @@ fn the_facts_replies_round_trip_and_carry_a_refusal_verbatim() {
         direction: StreamDirection::Capture,
         jack: JackState::Absent,
         formats: SampleFormats::EMPTY.with(SampleFormat::S16),
+        resolution: None,
         channel_map: ChannelMap::MONO,
         rates: RateSupport::Discrete(RateSet::new(&[Rate::HZ_48000]).expect("one rate")),
         min_period_frames: 48,

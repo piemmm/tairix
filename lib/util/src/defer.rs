@@ -259,9 +259,11 @@ impl<Req, Ans> JobQueue<Req, Ans> {
         self.answered.pop_front()
     }
 
-    /// How many answers have landed and wait to be collected.
-    #[must_use]
-    pub fn landed(&self) -> usize {
+    /// How many answers have landed, for a pass that collects that many: an
+    /// answer landing from here on owes the loop a wake, since that pass will
+    /// not take it.
+    pub fn landed_for_collection(&mut self) -> usize {
+        self.nudged = false;
         self.answered.len()
     }
 

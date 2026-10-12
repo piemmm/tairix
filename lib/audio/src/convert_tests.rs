@@ -13,7 +13,9 @@ use alloc::vec::Vec;
 
 use tairix_cpuops::{CpuFeatureSet, DecisionReason};
 
-use super::{convert, decode, encode, kernel, narrows, resolve, silence, DitherSource, PORTABLE};
+use super::{
+    convert, decode, encode, kernel, requantise, resolve, silence, DitherSource, PORTABLE,
+};
 use tairix_abi::driver::audio::SampleFormat;
 use tairix_abi::Errno;
 
@@ -288,21 +290,10 @@ fn the_dispatch_family_self_verifies_and_resolves_to_the_portable_kernel() {
 }
 
 #[test]
-fn dither_belongs_only_where_the_destination_is_narrower() {
-    assert!(narrows(24, SampleFormat::S16));
-    assert!(narrows(32, SampleFormat::S24));
-    assert!(!narrows(16, SampleFormat::S16));
-    assert!(!narrows(8, SampleFormat::S24));
-    // A float destination has no step, so nothing is thrown away and nothing
-    // is dithered.
-    assert!(!narrows(32, SampleFormat::F32));
-}
-
-#[test]
 fn triangular_dither_is_bounded_by_one_destination_step_and_centred() {
     let mut noise = DitherSource::new(0x5EED);
     let mut block = vec![0.0f32; 4_096];
-    noise.apply(SampleFormat::S16, &mut block);
+    noise.apply(16, &mut block);
     let step = 1.0f32 / 32_768.0;
     let mut sum = 0.0f64;
     for sample in &block {
@@ -324,18 +315,47 @@ fn dither_is_deterministic_for_a_seed_and_different_across_seeds() {
     let mut first = vec![0.0f32; 32];
     let mut again = vec![0.0f32; 32];
     let mut other = vec![0.0f32; 32];
-    DitherSource::new(7).apply(SampleFormat::S16, &mut first);
-    DitherSource::new(7).apply(SampleFormat::S16, &mut again);
-    DitherSource::new(8).apply(SampleFormat::S16, &mut other);
+    DitherSource::new(7).apply(16, &mut first);
+    DitherSource::new(7).apply(16, &mut again);
+    DitherSource::new(8).apply(16, &mut other);
     assert_eq!(first, again);
     assert_ne!(first, other);
 }
 
 #[test]
-fn a_float_destination_is_never_dithered() {
-    let mut block = vec![0.25f32; 16];
-    DitherSource::new(1).apply(SampleFormat::F32, &mut block);
-    assert_eq!(block, vec![0.25f32; 16]);
+fn requantising_lands_every_sample_on_the_narrower_grid() {
+    let mut block = vec![0.3f32, -0.3, 1.0, -1.0, 2.0, f32::NAN, 1.0 / 65_536.0];
+    requantise(16, &mut block);
+    let mut bytes = vec![0u8; block.len() * 4];
+    encode(SampleFormat::S24In32, &block, &mut bytes);
+    let words: Vec<i32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| i32::from_le_bytes(*word))
+        .collect();
+    assert!(
+        words.iter().all(|word| word.trailing_zeros() >= 8),
+        "{words:x?}"
+    );
+    assert_eq!(words[0], 9_830 << 8, "0.3 of 32768, rounded");
+    assert_eq!(words[1], -9_830 << 8);
+    assert_eq!(words[2], 32_767 << 8, "full scale saturates on the grid");
+    assert_eq!(words[3], -32_768 << 8);
+    assert_eq!(words[4], 32_767 << 8);
+    assert_eq!(words[5], 0, "a non-finite sample is silence");
+    assert_eq!(words[6], 1 << 8, "half a step rounds away from zero");
+}
+
+#[test]
+fn a_grid_finer_than_the_pivot_keeps_full_scale_on_it() {
+    let mut block = vec![1.0f32, -1.0, 0.5];
+    requantise(28, &mut block);
+    let mut bytes = vec![0u8; block.len() * 4];
+    encode(SampleFormat::S32, &block, &mut bytes);
+    for word in bytes.as_chunks::<4>().0 {
+        assert_eq!(i32::from_le_bytes(*word) & 0xF, 0, "{word:x?}");
+    }
 }
 
 #[test]

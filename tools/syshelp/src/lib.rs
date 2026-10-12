@@ -24,7 +24,7 @@
 //! wallpaper masters, `lib/wallpaper/screensavers/` for the screensaver
 //! previews — through one shared table and loop, embedding each
 //! discovered file as a row in [`HELP_FILES`] / [`RESOURCE_FILES`] /
-//! [`GRAPHICS_FILES`]. The planters iterate that discovered data — **never** a
+//! [`ASSET_FILES`]. The planters iterate that discovered data — **never** a
 //! hand-maintained list that a new file would force an edit to (the
 //! duplication the charter forbids). Adding a bundle's payload is dropping
 //! files under `<root>/<name>/Help/<locale>/` or `<root>/<name>/Resources/`,
@@ -61,6 +61,8 @@ extern crate std;
 
 #[cfg(any(feature = "walk", test))]
 pub mod bundles;
+#[cfg(any(feature = "sound", test))]
+pub mod sound;
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -145,17 +147,13 @@ pub struct ResourceFile {
 pub const RESOURCE_FILES: &[ResourceFile] =
     &include!(concat!(env!("OUT_DIR"), "/resource_files.rs"));
 
-/// Which family of desktop graphics assets a [`GraphicsFile`] belongs to.
+/// Which family of desktop assets an [`AssetFile`] belongs to.
 ///
-/// Closed by design, and deliberately not carried as a free-form string: a
-/// consumer tells the shipped families apart by matching on this enum,
-/// never by comparing a directory name. Adding a family means adding a
-/// variant here, which then forces every `match` over this type — in this
-/// crate and in every crate that reads [`GRAPHICS_FILES`] — to say
-/// explicitly what the new family means to it, rather than silently falling
+/// Closed, so every `match` over it — here and in every reader of
+/// [`ASSET_FILES`] — says what a new family means rather than falling
 /// through a default arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GraphicsFamilyKind {
+pub enum AssetFamilyKind {
     /// The icon class masters: one `<asset-id>.png` raster *or*
     /// `<asset-id>.svg` vector per icon kind, resolved by the window manager
     /// and file manager by asset id.
@@ -177,35 +175,39 @@ pub enum GraphicsFamilyKind {
     /// `tairix_wallpaper::preview_file` and resolved by
     /// `tairix_wallpaper::preview_kind`.
     ScreensaverPreview,
+    /// The sound themes: one `<asset>.flac` per sound asset, filed one
+    /// directory level deep in a theme (`TAIRiX`, …), resolved by
+    /// `tairix_soundtheme::SoundAsset::from_file_name` and decoded in full
+    /// against the sounds' authoring contract ([`sound`]) at build time.
+    Sound,
 }
 
-impl GraphicsFamilyKind {
-    /// The subdirectory of `/System/Graphics` this family's files are
-    /// planted under: the one spelling the image build uses, which the tests
-    /// hold to the directory the family's runtime consumer reads.
+impl AssetFamilyKind {
+    /// Where under `/System` this family's files are planted: the one
+    /// spelling the image build uses, which the tests hold to the directory
+    /// the family's runtime consumer reads.
     #[must_use]
-    pub const fn target_dir(self) -> &'static str {
+    pub const fn target_dir(self) -> [&'static str; 2] {
         match self {
-            Self::Icon => "Icons",
-            Self::Wallpaper => "Wallpapers",
-            Self::Cursor => "Cursors",
-            Self::ScreensaverPreview => "Screensavers",
+            Self::Icon => ["Graphics", "Icons"],
+            Self::Wallpaper => ["Graphics", "Wallpapers"],
+            Self::Cursor => ["Graphics", "Cursors"],
+            Self::ScreensaverPreview => ["Graphics", "Screensavers"],
+            Self::Sound => ["Audio", "Sounds"],
         }
     }
 }
 
-/// One shipped desktop graphics asset, ready to plant at
-/// `/System/Graphics/<family.target_dir()>[/<category>]/<file>` on the
-/// read-only `/System` volume.
+/// One shipped desktop asset, ready to plant at
+/// `/System/<family.target_dir()>[/<category>]/<file>` on the read-only
+/// `/System` volume.
 ///
-/// Unlike a [`HelpFile`] or a [`ResourceFile`] a graphics asset is not
-/// per-bundle: it is desktop-wide artwork, tagged with the
-/// [`GraphicsFamilyKind`] it belongs to so a future family plants through
-/// this same table and loop rather than a second one.
+/// Unlike a [`HelpFile`] or a [`ResourceFile`] it is not per-bundle: it is
+/// desktop-wide, tagged with the [`AssetFamilyKind`] it belongs to.
 #[derive(Clone, Copy, Debug)]
-pub struct GraphicsFile {
+pub struct AssetFile {
     /// Which family this asset belongs to.
-    pub family: GraphicsFamilyKind,
+    pub family: AssetFamilyKind,
     /// The category directory this asset is filed under inside its family's
     /// own directory, or `None` for a family whose assets sit directly in
     /// it. Discovery decides this per family, so a flat family can never
@@ -219,22 +221,18 @@ pub struct GraphicsFile {
     pub bytes: &'static [u8],
 }
 
-/// Every desktop graphics asset, discovered from each graphics family's own
-/// source tree at build time (`lib/icon/assets/` for icons,
-/// `lib/wallpaper/assets/` for wallpapers, `lib/cursor/assets/` for cursor
-/// sets, `lib/wallpaper/screensavers/` for screensaver previews) and
-/// validated against that
-/// family's own contract as it is discovered (a name its consumer could not
-/// resolve, an over-large file, or a duplicate identifier fails the build).
+/// Every desktop asset, discovered from each family's own source tree at
+/// build time (`lib/icon/assets/`, `lib/wallpaper/assets/`,
+/// `lib/cursor/assets/`, `lib/wallpaper/screensavers/`,
+/// `lib/soundtheme/assets/`) and held to that family's contract as it is
+/// discovered.
 ///
-/// Rows are ordered deterministically (by family, then category, then file
-/// name), so the planted store and any reproducible image are stable across
-/// builds and hosts.
-pub const GRAPHICS_FILES: &[GraphicsFile] =
-    &include!(concat!(env!("OUT_DIR"), "/graphics_files.rs"));
+/// Rows are ordered by family, then category, then file name, so the planted
+/// store and any reproducible image are stable across builds and hosts.
+pub const ASSET_FILES: &[AssetFile] = &include!(concat!(env!("OUT_DIR"), "/asset_files.rs"));
 
 /// Visit every discovered payload file — each [`HelpFile`], [`ResourceFile`]
-/// and [`GraphicsFile`] — with its `/System`-volume-relative path components
+/// and [`AssetFile`] — with its `/System`-volume-relative path components
 /// and its bytes, stopping at the first error `visit` returns.
 fn for_each_payload_file<E>(
     mut visit: impl FnMut(&[&[u8]], &[u8]) -> Result<(), E>,
@@ -262,15 +260,12 @@ fn for_each_payload_file<E>(
             res.bytes,
         )?;
     }
-    for asset in GRAPHICS_FILES {
-        let family = asset.family.target_dir().as_bytes();
+    for asset in ASSET_FILES {
+        let [area, family] = asset.family.target_dir().map(str::as_bytes);
         let file = asset.file.as_bytes();
         match asset.category {
-            Some(category) => visit(
-                &[b"Graphics", family, category.as_bytes(), file],
-                asset.bytes,
-            ),
-            None => visit(&[b"Graphics", family, file], asset.bytes),
+            Some(category) => visit(&[area, family, category.as_bytes(), file], asset.bytes),
+            None => visit(&[area, family, file], asset.bytes),
         }?;
     }
     Ok(())
@@ -604,47 +599,77 @@ mod tests {
         assert!(violations.is_empty(), "{}", violations.join("\n"));
     }
 
-    /// The discovered desktop graphics assets are non-empty, and every one
-    /// satisfies its own family's contract.
-    ///
-    /// Partitioning on [`super::GraphicsFamilyKind`] rather than a
-    /// directory string is what makes that true of *every* family: a family
-    /// added without an arm here fails to compile rather than silently
-    /// skipping its own contract. Each partition is then held to the
-    /// fail-closed checks `build.rs` applies — the emitted table and each
-    /// family's own runtime consumer share one definition, so neither can
-    /// drift.
+    /// The discovered desktop assets are non-empty, and every one satisfies
+    /// its own family's contract: a family added without an arm here fails to
+    /// compile rather than skipping its contract.
     #[test]
-    fn every_discovered_graphics_asset_satisfies_its_family_contract() {
-        use super::{GraphicsFamilyKind, GraphicsFile, GRAPHICS_FILES};
+    fn every_discovered_asset_satisfies_its_family_contract() {
+        use super::{AssetFamilyKind, AssetFile, ASSET_FILES};
 
         assert!(
-            !GRAPHICS_FILES.is_empty(),
-            "at least one desktop graphics asset must be discovered"
+            !ASSET_FILES.is_empty(),
+            "at least one desktop asset must be discovered"
         );
-        let mut icons: Vec<&GraphicsFile> = Vec::new();
-        let mut wallpapers: Vec<&GraphicsFile> = Vec::new();
-        let mut cursors: Vec<&GraphicsFile> = Vec::new();
-        let mut previews: Vec<&GraphicsFile> = Vec::new();
-        for asset in GRAPHICS_FILES {
+        let mut icons: Vec<&AssetFile> = Vec::new();
+        let mut wallpapers: Vec<&AssetFile> = Vec::new();
+        let mut cursors: Vec<&AssetFile> = Vec::new();
+        let mut previews: Vec<&AssetFile> = Vec::new();
+        let mut sounds: Vec<&AssetFile> = Vec::new();
+        for asset in ASSET_FILES {
             match asset.family {
-                GraphicsFamilyKind::Icon => icons.push(asset),
-                GraphicsFamilyKind::Wallpaper => wallpapers.push(asset),
-                GraphicsFamilyKind::Cursor => cursors.push(asset),
-                GraphicsFamilyKind::ScreensaverPreview => previews.push(asset),
+                AssetFamilyKind::Icon => icons.push(asset),
+                AssetFamilyKind::Wallpaper => wallpapers.push(asset),
+                AssetFamilyKind::Cursor => cursors.push(asset),
+                AssetFamilyKind::ScreensaverPreview => previews.push(asset),
+                AssetFamilyKind::Sound => sounds.push(asset),
             }
         }
         check_icon_family(&icons);
         check_wallpaper_family(&wallpapers);
         check_cursor_family(&cursors);
         check_screensaver_preview_family(&previews);
+        check_sound_family(&sounds);
+    }
+
+    /// The sound family's contract: each asset filed in a legal theme, named
+    /// for one sound, within the bound and true to the authoring contract;
+    /// and the shipped default theme complete, because an event its own theme
+    /// lacks falls back to the default's and then to silence.
+    fn check_sound_family(assets: &[&super::AssetFile]) {
+        use tairix_soundtheme::{is_theme_name, SoundAsset, DEFAULT_THEME, MAX_SOUND_BYTES};
+
+        let mut shipped: BTreeSet<&str> = BTreeSet::new();
+        for asset in assets {
+            let theme = asset
+                .category
+                .unwrap_or_else(|| panic!("`{}` is filed in a theme", asset.file));
+            assert!(is_theme_name(theme), "`{theme}` is a legal theme");
+            let sound = SoundAsset::from_file_name(asset.file)
+                .unwrap_or_else(|| panic!("`{}` is a sound asset", asset.file));
+            assert!(asset.bytes.len() <= MAX_SOUND_BYTES, "`{}`", asset.file);
+            if let Err(why) =
+                super::sound::shipped_samples(asset.bytes, tairix_sound::SoundFormat::Flac)
+            {
+                panic!("`{theme}/{}` {why}", asset.file);
+            }
+            if theme == DEFAULT_THEME {
+                assert!(shipped.insert(sound.name()), "`{}` twice", asset.file);
+            }
+        }
+        for sound in SoundAsset::ALL {
+            assert!(
+                shipped.contains(sound.name()),
+                "the default theme ships no `{}`",
+                sound.name()
+            );
+        }
     }
 
     /// The screensaver previews' contract: flat, each named for the kind it
     /// shows and within the preview byte bound, one per kind, and every kind
     /// covered — a chooser offering a screensaver with no preview would show
     /// its glyph where every other shows a picture.
-    fn check_screensaver_preview_family(assets: &[&super::GraphicsFile]) {
+    fn check_screensaver_preview_family(assets: &[&super::AssetFile]) {
         let mut kinds: BTreeSet<tairix_wallpaper::ScreensaverKind> = BTreeSet::new();
         for asset in assets {
             assert!(
@@ -673,26 +698,26 @@ mod tests {
     /// reads it from, so the image and the desktop cannot disagree on where
     /// a family lives.
     #[test]
-    fn every_graphics_family_is_planted_where_its_consumer_reads_it() {
-        use super::GraphicsFamilyKind;
+    fn every_asset_family_is_planted_where_its_consumer_reads_it() {
+        use super::AssetFamilyKind;
 
         for family in [
-            GraphicsFamilyKind::Icon,
-            GraphicsFamilyKind::Wallpaper,
-            GraphicsFamilyKind::Cursor,
-            GraphicsFamilyKind::ScreensaverPreview,
+            AssetFamilyKind::Icon,
+            AssetFamilyKind::Wallpaper,
+            AssetFamilyKind::Cursor,
+            AssetFamilyKind::ScreensaverPreview,
+            AssetFamilyKind::Sound,
         ] {
             let read_from = match family {
-                GraphicsFamilyKind::Icon => tairix_icon::ICONS_DIR,
-                GraphicsFamilyKind::Wallpaper => tairix_wallpaper::WALLPAPER_STORE,
-                GraphicsFamilyKind::Cursor => tairix_cursor::CURSOR_STORE,
-                GraphicsFamilyKind::ScreensaverPreview => {
-                    tairix_wallpaper::SCREENSAVER_PREVIEW_STORE
-                }
+                AssetFamilyKind::Icon => tairix_icon::ICONS_DIR,
+                AssetFamilyKind::Wallpaper => tairix_wallpaper::WALLPAPER_STORE,
+                AssetFamilyKind::Cursor => tairix_cursor::CURSOR_STORE,
+                AssetFamilyKind::ScreensaverPreview => tairix_wallpaper::SCREENSAVER_PREVIEW_STORE,
+                AssetFamilyKind::Sound => tairix_soundtheme::SOUND_STORE,
             };
             assert_eq!(
                 read_from,
-                alloc::format!("/System/Graphics/{}", family.target_dir()),
+                alloc::format!("/System/{}", family.target_dir().join("/")),
                 "{family:?}"
             );
         }
@@ -702,7 +727,7 @@ mod tests {
     /// `<asset-id>.svg` name within the artwork byte bound, with a unique
     /// asset id — so one kind never ships a master in both formats, of
     /// which the resolution order could only ever select the raster one.
-    fn check_icon_family(assets: &[&super::GraphicsFile]) {
+    fn check_icon_family(assets: &[&super::AssetFile]) {
         assert!(!assets.is_empty(), "at least one icon must be discovered");
         let mut ids: BTreeSet<&str> = BTreeSet::new();
         for asset in assets {
@@ -730,7 +755,7 @@ mod tests {
     /// the wallpaper byte bound, filed under a legal category directory and
     /// unique within it, and the default wallpaper's own category present —
     /// without it the desktop's default choice ships nowhere.
-    fn check_wallpaper_family(assets: &[&super::GraphicsFile]) {
+    fn check_wallpaper_family(assets: &[&super::AssetFile]) {
         assert!(
             !assets.is_empty(),
             "at least one wallpaper must be discovered"
@@ -774,7 +799,7 @@ mod tests {
     /// and unique within it — and every shipped set covering every kind,
     /// since a missing one shows that kind's built-in cursor beside the
     /// shipped artwork and the pointer changes look as it changes shape.
-    fn check_cursor_family(assets: &[&super::GraphicsFile]) {
+    fn check_cursor_family(assets: &[&super::AssetFile]) {
         assert!(
             !assets.is_empty(),
             "at least one cursor asset must be discovered"
@@ -881,7 +906,7 @@ mod tests {
     fn payload_bytes() -> u64 {
         let docs = HELP_FILES.iter().map(|doc| doc.bytes.len());
         let resources = super::RESOURCE_FILES.iter().map(|res| res.bytes.len());
-        let graphics = super::GRAPHICS_FILES.iter().map(|asset| asset.bytes.len());
+        let graphics = super::ASSET_FILES.iter().map(|asset| asset.bytes.len());
         docs.chain(resources)
             .chain(graphics)
             .map(|len| u64::try_from(len).expect("a file length fits u64"))
@@ -953,7 +978,7 @@ mod tests {
         let planted = outcome.expect("the volume is authored");
         assert_eq!(
             planted.len(),
-            HELP_FILES.len() + super::RESOURCE_FILES.len() + super::GRAPHICS_FILES.len() + 1
+            HELP_FILES.len() + super::RESOURCE_FILES.len() + super::ASSET_FILES.len() + 1
         );
         let planted_bytes: u64 = planted.iter().map(|(_, len)| len).sum();
         assert_eq!(planted_bytes, payload_bytes() + 15);
@@ -1040,14 +1065,12 @@ mod tests {
     }
 
     /// The payload walk yields every discovered file exactly once, at its
-    /// `/System`-volume-relative path: a help document under
-    /// `Apps/<bundle>/Help/<locale>/`, a resource under
-    /// `Apps/<bundle>/Resources/`, an icon under `Graphics/Icons/` by its
-    /// discovered file name whatever its format, and a wallpaper under
-    /// `Graphics/Wallpapers/<category>/`.
+    /// `/System`-volume-relative path: a bundle's help and resources inside
+    /// the bundle in its own store, and each desktop asset under its family's
+    /// directory.
     #[test]
     fn the_payload_walk_visits_every_file_at_its_planted_path() {
-        use super::{for_each_payload_file, GRAPHICS_FILES, HELP_FILES, RESOURCE_FILES};
+        use super::{for_each_payload_file, ASSET_FILES, HELP_FILES, RESOURCE_FILES};
 
         let mut visited: Vec<Vec<Vec<u8>>> = Vec::new();
         let outcome: Result<(), core::convert::Infallible> =
@@ -1062,7 +1085,7 @@ mod tests {
 
         assert_eq!(
             visited.len(),
-            HELP_FILES.len() + RESOURCE_FILES.len() + GRAPHICS_FILES.len(),
+            HELP_FILES.len() + RESOURCE_FILES.len() + ASSET_FILES.len(),
             "every discovered file is visited exactly once"
         );
         // The folder class icon is the shipped vector master, and the
@@ -1104,6 +1127,21 @@ mod tests {
                         file.as_bytes().to_vec()
                     ]),
                 "the {kind:?} preview is planted at Graphics/Screensavers/{file}"
+            );
+        }
+        // And each shipped sound inside the default theme.
+        let theme = tairix_soundtheme::DEFAULT_THEME;
+        for sound in tairix_soundtheme::SoundAsset::ALL {
+            let file = alloc::format!("{}.flac", sound.name());
+            assert!(
+                visited.iter().any(|c| c
+                    == &[
+                        b"Audio".to_vec(),
+                        b"Sounds".to_vec(),
+                        theme.as_bytes().to_vec(),
+                        file.as_bytes().to_vec()
+                    ]),
+                "the {file} sound is planted at Audio/Sounds/{theme}/{file}"
             );
         }
     }

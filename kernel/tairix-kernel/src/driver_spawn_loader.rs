@@ -360,6 +360,10 @@ mod tests {
         }
     }
 
+    impl tairix_kernel_core::hwtree::HwDriverTree for OnlyNode {
+        fn driver_admitted(&self, _node_id: u32, _publishes: bool) {}
+    }
+
     use core::cell::RefCell;
 
     use tairix_abi::{CapabilityId, DriverHost, DriverKind, DriverManifest};

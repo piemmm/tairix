@@ -802,7 +802,7 @@ fn error_display_is_nonempty() {
 fn a_refusal_names_what_was_wrong() {
     assert_eq!(
         alloc::format!("{}", read("bogus = value\n").unwrap_err()),
-        "unknown pinboard settings key `bogus`"
+        "unknown settings key `bogus`"
     );
     assert!(
         alloc::format!("{}", read("fit = tile\nnonsense\n").unwrap_err()).starts_with("line 2:")

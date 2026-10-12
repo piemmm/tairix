@@ -184,6 +184,22 @@ impl IntoIterator for &CapabilitySet {
     }
 }
 
+impl Extend<CapabilityId> for CapabilitySet {
+    fn extend<I: IntoIterator<Item = CapabilityId>>(&mut self, caps: I) {
+        for cap in caps {
+            self.insert(cap);
+        }
+    }
+}
+
+impl FromIterator<CapabilityId> for CapabilitySet {
+    fn from_iter<I: IntoIterator<Item = CapabilityId>>(caps: I) -> Self {
+        let mut set = Self::empty();
+        set.extend(caps);
+        set
+    }
+}
+
 /// Expose a [`CapabilitySet`] to ABI-level host seams that gate on a
 /// granted capability through `&dyn tairix_abi::CapabilityQuery` without
 /// naming this crate (the `lib/abi -> lib/caps`
@@ -233,6 +249,34 @@ mod tests {
         assert_eq!(
             query.holds(CapabilityId::MEM_DMA),
             s.contains(CapabilityId::MEM_DMA)
+        );
+    }
+
+    #[test]
+    fn a_collected_set_holds_exactly_its_list_and_extending_adds_to_it() {
+        let listed = [
+            CapabilityId::MMIO_MAP,
+            CapabilityId::LOG_EMIT,
+            CapabilityId::MMIO_MAP,
+        ];
+        let mut set: CapabilitySet = listed.iter().copied().collect();
+        assert_eq!(set.len(), 2);
+        assert!(listed.iter().all(|&cap| set.contains(cap)));
+        assert!(!set.contains(CapabilityId::NET_RAW));
+
+        set.extend([CapabilityId::NET_RAW]);
+        let mut expected = CapabilitySet::empty();
+        for cap in [
+            CapabilityId::MMIO_MAP,
+            CapabilityId::LOG_EMIT,
+            CapabilityId::NET_RAW,
+        ] {
+            expected.insert(cap);
+        }
+        assert_eq!(set, expected);
+        assert_eq!(
+            core::iter::empty().collect::<CapabilitySet>(),
+            CapabilitySet::empty()
         );
     }
 

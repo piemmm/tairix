@@ -108,6 +108,8 @@ struct Attached {
 pub struct AudioChannelServer<A: Audio> {
     audio: A,
     endpoints: [Option<Configured>; ENDPOINT_SLOTS],
+    /// The port told of every connector's changes.
+    watch: Option<u64>,
 }
 
 impl<A: Audio> AudioChannelServer<A> {
@@ -117,6 +119,7 @@ impl<A: Audio> AudioChannelServer<A> {
         Self {
             audio,
             endpoints: [None; ENDPOINT_SLOTS],
+            watch: None,
         }
     }
 
@@ -145,6 +148,20 @@ impl<A: Audio> AudioChannelServer<A> {
             .attached
             .as_ref()
             .map(|a| a.notify_endpoint)
+    }
+
+    /// The port told of a change to any endpoint's connector, once the mixer
+    /// has named it.
+    #[must_use]
+    pub const fn watch_endpoint(&self) -> Option<u64> {
+        self.watch
+    }
+
+    /// Tell `notify_endpoint` of every connector's changes from now on.
+    #[must_use]
+    pub fn watch(&mut self, notify_endpoint: u64) -> [u8; STATUS_REPLY_LEN] {
+        self.watch = Some(notify_endpoint);
+        encode_status_reply(Ok(()))
     }
 
     /// The agreed ring geometry for `endpoint`, or [`None`] while it is not

@@ -31,7 +31,9 @@ use tairix_arch_aarch64::fdt::PsciMethod;
 use tairix_arch_aarch64::gicv3::RedistributorRegion;
 use tairix_arch_aarch64::{halt_current_cpu, psci, serial, Aarch64Arch};
 use tairix_arch_api::{CpuId, PlatformEntropy, SchedulerArch, SecondaryBringup};
-use tairix_kernel_core::{ConsoleRead, ConsoleWrite, IrqRouting, KernelArch, SeatRegistry};
+use tairix_kernel_core::{
+    ConsoleRead, ConsoleSurface, ConsoleWrite, IrqRouting, KernelArch, Relocation, SeatRegistry,
+};
 use tairix_kernel_irq::IrqTable;
 
 /// Local [`KernelArch`] wrapper around the arch port's
@@ -390,10 +392,9 @@ impl KernelArch for Aarch64BinArch {
     }
 
     fn direct_phys_map(&self) -> Option<&'static (dyn tairix_kernel_mem::PhysMap + Sync)> {
-        // The configured-identity direct map (`virtual == physical` over the
-        // discovered RAM/Device gigapages) the shared-memory facility scrubs
-        // region frames through. On a host build there is no real RAM to map,
-        // so none is offered and `shm_*` stays fail-closed.
+        // The direct map the shared-memory facility scrubs region frames
+        // through. On a host build there is no real RAM to map, so none is
+        // offered and `shm_*` stays fail-closed.
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         {
             Some(&crate::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP)
@@ -449,10 +450,7 @@ impl KernelArch for Aarch64BinArch {
     fn console_framebuffer(&self) -> Option<(tairix_kernel_mem::PhysAddr, u64)> {
         // The active framebuffer console's scan-out surface, so the pre-boot
         // Supervisor's `memtest` takeover can keep it out of the destructive
-        // whole-RAM sweep (the Pi's mailbox framebuffer sits in usable DRAM
-        // the sweep would otherwise overwrite, killing the progress display).
-        // The boot path identity-maps the surface, so the reported base is
-        // already physical. `None` on a UART-only boot or a host build.
+        // whole-RAM sweep. `None` on a UART-only boot or a host build.
         let (base, len) = tairix_arch_aarch64::video::active_framebuffer_extent()?;
         Some((tairix_kernel_mem::PhysAddr::new(base), len))
     }
@@ -637,6 +635,10 @@ impl ConsoleRead for UartConsole {
         // spurious end-of-input.
         Ok(serial::read_console_bytes(buf))
     }
+
+    fn input_ready(&self) -> bool {
+        serial::console_rx_pending()
+    }
 }
 
 /// The single `'static` [`UartConsole`] the boot path lists as the UART
@@ -704,6 +706,12 @@ impl ConsoleRead for UartConsoleRead {
         #[cfg(all(freestanding, kernel_isa = "aarch64"))]
         crate::aarch64::gic_irq::rearm_uart_rx_if_masked();
         Ok(read)
+    }
+
+    fn input_ready(&self) -> bool {
+        // The queue the interrupt fills, or a byte still in the FIFO this
+        // reader's own drain would take.
+        UART_INPUT.input_ready() || serial::console_rx_pending()
     }
 }
 
@@ -773,11 +781,38 @@ impl ConsoleWrite for VideoConsole {
         tairix_arch_aarch64::video::reclaim_surface();
     }
 
+    fn surface(&self) -> Option<ConsoleSurface> {
+        tairix_arch_aarch64::video::placement().map(console_surface)
+    }
+
+    fn relocate(&self, phys: u64, len: u64) -> Relocation {
+        use tairix_arch_aarch64::video::Relocated;
+        match tairix_arch_aarch64::video::relocate(phys, len) {
+            Relocated::Moved(placement) => Relocation::Moved(console_surface(placement)),
+            Relocated::Owned(placement) => Relocation::Owned(console_surface(placement)),
+            Relocated::Refused => Relocation::Refused,
+        }
+    }
+
     fn purge(&self) {
         // A retained console owns its screen, so the discard is real: both
         // cell grids and every pixel, not the escape sequence the trait
         // default sends a terminal the kernel cannot reach.
         tairix_arch_aarch64::video::purge();
+    }
+}
+
+/// The port's account of the console's scan-out, as the kernel states it.
+fn console_surface(placement: tairix_arch_aarch64::video::Placement) -> ConsoleSurface {
+    ConsoleSurface {
+        phys: placement.phys_base,
+        mode: tairix_abi::driver::display::DisplayMode {
+            width_px: placement.width_px,
+            height_px: placement.height_px,
+            stride_bytes: placement.stride_bytes,
+            format: placement.format,
+        },
+        kernel_owned: placement.kernel_owned,
     }
 }
 

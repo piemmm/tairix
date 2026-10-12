@@ -212,7 +212,7 @@ fn an_answer_landing_while_others_are_collected_still_wakes_the_loop() {
     }
     assert!(queue.deliver(10));
     assert!(!queue.deliver(20));
-    let landed = queue.landed();
+    let landed = queue.landed_for_collection();
     assert_eq!(queue.collect(), Some(10));
     assert!(queue.deliver(30), "landed after the loop looked");
     assert_eq!(queue.collect(), Some(20));
@@ -345,11 +345,30 @@ fn landed_counts_answers_until_they_are_collected() {
     let mut queue = JobQueue::<u32, u32>::with_capacity(2).expect("room for two");
     queue.submit(1).expect("room");
     queue.submit(2).expect("room");
-    assert_eq!(queue.landed(), 0, "waiting is not landed");
+    assert_eq!(queue.landed_for_collection(), 0, "waiting is not landed");
     assert_eq!(queue.next_job(), Some(1));
-    assert_eq!(queue.landed(), 0, "in flight is not landed");
+    assert_eq!(queue.landed_for_collection(), 0, "in flight is not landed");
     assert!(queue.deliver(10));
-    assert_eq!(queue.landed(), 1);
+    assert_eq!(queue.landed_for_collection(), 1);
     assert_eq!(queue.collect(), Some(10));
-    assert_eq!(queue.landed(), 0);
+    assert_eq!(queue.landed_for_collection(), 0);
+}
+
+/// An answer landing after a pass counted what it collects, and before it
+/// collected any, still owes the loop a wake: that pass will not take it.
+#[test]
+fn an_answer_landing_once_a_pass_has_counted_still_wakes_the_loop() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(4).expect("room for four");
+    for job in 1..=2 {
+        queue.submit(job).expect("room");
+        assert_eq!(queue.next_job(), Some(job));
+    }
+    assert!(queue.deliver(10));
+    assert_eq!(queue.landed_for_collection(), 1);
+    assert!(
+        queue.deliver(20),
+        "the pass that counted one will not take it"
+    );
+    assert_eq!(queue.collect(), Some(10));
+    assert_eq!(queue.collect(), Some(20));
 }

@@ -1,13 +1,12 @@
 # `tairix-i2c`
 
 `lib/i2c` is the I²C **register-transaction protocol**: the write-then-read
-composition every register-addressed part needs, over the `abi-v1` transfer
-seam. It names no device, board, or chip, so it lives in `lib/*` as shared
-common code (`AGENTS.md` §6 / §2.2) — *not* under the §2.20 / §2.22
-single-device carve-out. Each chip driver (`drivers/rtc/ds3231`,
-`drivers/rtc/pcf8523`, `drivers/rtc/pcf85063a`) composes it without a
-`drivers/*` → `drivers/*` dependency (§17.4), exactly as the bus-agnostic xHCI
-protocol lives in [`tairix-usb`](./usb.md) rather than the xHCI driver.
+composition every register-addressed part needs, over the `I2cPort` seam. It
+names no device, board, or chip, so it lives in `lib/*` as shared code. Each
+chip driver (`drivers/rtc/ds3231`, `drivers/rtc/pcf8523`,
+`drivers/rtc/pcf85063a`, `drivers/audio/pcm5122`) composes it, exactly as the
+bus-agnostic xHCI protocol lives in [`tairix-usb`](./usb.md) rather than the
+xHCI driver.
 
 ## What it provides
 
@@ -16,38 +15,34 @@ protocol lives in [`tairix-usb`](./usb.md) rather than the xHCI driver.
   read-modify-write every status-flag clear needs, which writes only when the
   value actually changed so a control register the chip owns bits in is never
   clobbered from a driver's stale idea of it).
-- **`MAX_BLOCK_LEN`** — the longest register block one transaction can carry,
-  *derived* from the seam's own per-phase bound minus the pointer byte, so the
-  two cannot drift.
+- **`MAX_BLOCK_LEN`** — the longest register block one write carries, 32
+  bytes, an `SMBus` block: it bounds the frame the write builds with its
+  pointer byte. A read is bounded by the port.
 - **`mock::MockPart`** (behind the `mock-bus` feature) — the shared
   register-file part double: a seedable register file, the chip's pointer
-  auto-increment, a programmable fault, and a transfer counter. Every chip
-  driver's host tests drive this one definition, so no driver carries a
-  private copy of the scaffold (§2.2).
+  auto-increment, a programmable fault, a transfer counter, and the bounds a
+  real target channel holds a transfer to. Every chip driver's host tests
+  drive this one definition.
 
-It re-exports `I2cPort` and `MAX_TRANSFER_LEN` from `lib/abi`, so a chip
-driver names the whole vocabulary through one crate.
+It re-exports `I2cPort` from `lib/abi`, so a chip driver names the whole
+vocabulary through one crate.
 
-## One request, not two
+## One transaction, not two
 
 A register read is a *write-then-read*: the pointer write and the read-back
-are one request, so no other transfer can be interleaved between them and
-return some other register's contents — a wrong clock rather than an error.
-`Device` never splits them, and a host test asserts the transaction's shape
-rather than merely its result.
+are one transaction joined by a repeated START, so no other transfer can be
+interleaved between them and return some other register's contents — a wrong
+clock rather than an error. `Device` never splits them, and a host test
+asserts the transaction's shape rather than merely its result.
 
 ## What a chip driver holds
 
 A `Device` is one `I2cPort`, and **a port carries no address**. On a real bus
-it is the per-child transfer endpoint the bus driver serves it on, and the
-address lives only in that driver's duty grant, so a chip driver has no field
-in which it could name a neighbour however it is compromised.
-
-Discovery splits each bus child in two — the bus node carries the duty
-(`HwResourceKind::BusChild`, an endpoint id paired with the child's bus
-address) and the child node carries the authority (a plain endpoint grant) —
-which is described in full in [the RTC driver
-page](../drivers/rtc.md#the-i²c-tier) and staged in `plans/TIMESYNC.md` TS-4.
+it is an `I2cTarget` ([`tairix-linkclient`](./linkclient.md)), a channel
+opened over the target link discovery gave the chip's node; the controller
+holds every message of it to the one address that link names, so a chip
+driver cannot reach a neighbour however it is compromised. The protocol is
+[`i2c-v1`](./i2cbus.md), and `plans/I2C.md` carries its design.
 
 ## Stability
 

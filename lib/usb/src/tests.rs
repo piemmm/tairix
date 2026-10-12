@@ -1057,6 +1057,9 @@ struct MockXhci {
     /// to the hub fixtures (class `0x09`), mirroring the Pi 4B's onboard
     /// `2109:3431` VIA Labs hub.
     hub_ports: u8,
+    /// The USB 2.0 hub's `DeviceRemovable` byte: the downstream ports whose
+    /// device is built in.
+    hub_fixed_ports: u8,
     /// The slot the root-attached hub currently occupies, recorded at its
     /// Address Device (route string `0`). A re-attached hub takes a fresh
     /// slot, and its downstream devices' transaction-translator
@@ -1607,6 +1610,7 @@ impl MockXhci {
             hcsparams2: 0,
             pagesize: 0,
             hub_ports: 0,
+            hub_fixed_ports: 0,
             hub_downstream_port: 0,
             hub_downstream_status: 0,
             hub_powered: 0,
@@ -3079,13 +3083,25 @@ impl MockXhci {
             Some(i) => self.nested_hubs[i].ports,
             None => self.hub_ports,
         };
-        let hub_desc = if self.superspeed_hub {
-            // The fixed 12-byte SS hub descriptor (USB 3.2 §10.15.2.1).
-            [12u8, desc_type, ports, 0x00, 0x00, 0x32, 0x00, 0xFF]
+        // An SS hub's reply ends before its DeviceRemovable word; a USB 2.0
+        // hub's names its built-in ports, then its port-power mask.
+        let ss_hub_desc = [12u8, desc_type, ports, 0x00, 0x00, 0x32, 0x00, 0xFF];
+        let hub_desc = [
+            9u8,
+            desc_type,
+            ports,
+            0x00,
+            0x00,
+            0x32,
+            0x00,
+            self.hub_fixed_ports,
+            0xFF,
+        ];
+        if self.superspeed_hub {
+            self.deliver_in_data(data, &ss_hub_desc, w_length, status_addr)
         } else {
-            [9u8, desc_type, ports, 0x00, 0x00, 0x32, 0x00, 0xFF]
-        };
-        self.deliver_in_data(data, &hub_desc, w_length, status_addr)
+            self.deliver_in_data(data, &hub_desc, w_length, status_addr)
+        }
     }
 
     /// Leave the IN control TD `setup` names unanswered when a knob says so
@@ -4815,7 +4831,8 @@ fn a_hub_descriptor_yields_its_port_count_and_the_think_time_of_a_usb2_tt() {
         HubDescriptor::decode(&hub, false),
         Some(HubDescriptor {
             ports: 7,
-            tt_think_time: 3
+            tt_think_time: 3,
+            fixed_ports: 0,
         })
     );
     for (characteristics, think_time) in [(0x0020, 1), (0x0040, 2), (0x0080, 0), (0x0100, 0)] {
@@ -4838,9 +4855,84 @@ fn a_superspeed_hub_descriptor_has_no_think_time_whatever_its_reserved_bits_say(
         HubDescriptor::decode(&hub, true),
         Some(HubDescriptor {
             ports: 4,
-            tt_think_time: 0
+            tt_think_time: 0,
+            fixed_ports: 0,
         })
     );
+}
+
+#[test]
+fn a_hub_descriptor_names_its_built_in_ports_and_nothing_past_its_last() {
+    // Ports 2 and 5 of a 9-port USB 2.0 hub are built in: DeviceRemovable
+    // takes two bytes, bit n for port n, and the port-power mask follows.
+    let hub = [11, 0x29, 9, 0x00, 0x00, 0x32, 0x00, 0x24, 0x00, 0xFF, 0x03];
+    assert_eq!(
+        HubDescriptor::decode(&hub, false).map(|hub| hub.fixed_ports),
+        Some((1 << 2) | (1 << 5))
+    );
+    // The reserved bit 0 and bits past a 4-port hub's last port name nothing.
+    let hub = [9, 0x29, 4, 0x00, 0x00, 0x32, 0x00, 0xFF, 0xFF];
+    assert_eq!(
+        HubDescriptor::decode(&hub, false).map(|hub| hub.fixed_ports),
+        Some(0b1_1110)
+    );
+    // A SuperSpeed hub's word sits at bytes 10:11; a reply short of it
+    // reports nothing built in.
+    let hub = [12, 0x2A, 4, 0x00, 0x00, 0x32, 0x00, 0xFF, 0, 0, 0x08, 0];
+    assert_eq!(
+        HubDescriptor::decode(&hub, true).map(|hub| hub.fixed_ports),
+        Some(1 << 3)
+    );
+    assert_eq!(
+        HubDescriptor::decode(&hub[..10], true).map(|hub| hub.fixed_ports),
+        Some(0)
+    );
+}
+
+#[test]
+fn a_root_device_is_removable_unless_its_port_reports_it_built_in() {
+    for (built_in, removable) in [(false, true), (true, false)] {
+        let mem = shared_mem();
+        let mut mock = MockXhci::with_device(&mem);
+        if built_in {
+            mock.portsc[0] |= regs::PORTSC_DR;
+        }
+        let mut device = started_device(mock, &mem);
+        let index = attach_root_device(&mut device, 1).expect("enumeration succeeds");
+        assert_eq!(
+            device
+                .device_identity(index)
+                .map(|identity| identity.removable),
+            Some(removable)
+        );
+        assert_eq!(
+            device
+                .describe_device(index, 7, 9)
+                .map(|node| node.is_removable()),
+            Ok(removable),
+            "the node carries what its port reports"
+        );
+    }
+}
+
+#[test]
+fn a_device_behind_a_hub_is_removable_unless_the_hub_reports_its_port_built_in() {
+    for (fixed, removable) in [(0, true), (1 << 4, false), (1 << 3, true)] {
+        let mem = shared_mem();
+        let mut mock = MockXhci::with_hub(&mem, 4, 4);
+        mock.hub_fixed_ports = fixed;
+        let mut device = started_device(mock, &mem);
+        let (hub, status) = install_hub_and_ready_port(&mut device, 4);
+        let keyboard = attach_and_watch(&mut device, hub, 4, hub_port_speed(status))
+            .expect("the keyboard behind the hub is addressed");
+        assert_eq!(
+            device
+                .device_identity(keyboard)
+                .map(|identity| identity.removable),
+            Some(removable),
+            "DeviceRemovable {fixed:#04x}"
+        );
+    }
 }
 
 #[test]
@@ -11125,6 +11217,7 @@ fn a_device_is_recognised_by_every_fact_and_storage_by_its_serial_too() {
         interface_number: 0,
         interface_class: 0x03_01_01,
         serial_number: None,
+        removable: true,
     };
     assert!(
         keyboard.recognises(&keyboard),

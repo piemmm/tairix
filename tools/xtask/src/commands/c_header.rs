@@ -66,7 +66,7 @@ use tairix_abi::{
     UnlinkFlags, Uptime, UserDirectoryRecord, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1,
     APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
     BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX,
-    BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX,
+    BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE, CAPABILITY_ID_MAX,
     COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DRIVER_MANIFEST_MAGIC,
     DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
     DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
@@ -90,7 +90,7 @@ use tairix_abi::{
     SYSCALL_TABLE_HASH_LEN, SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX,
     SYSINFO_QUERY_RECORD_LEN, SYSINFO_REPLY_PAYLOAD_MAX, SYSINFO_REPLY_STATUS_LEN,
     SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
-    THREAD_STACK_DEFAULT,
+    THREAD_STACK_DEFAULT, WAITSET_CHILD_ANY, WAITSET_TIMEOUT_NONE,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -195,6 +195,7 @@ const DRIVER_ERROR_NAMES: &[(&str, DriverError)] = &[
     ("DIRECTORY_CYCLE", DriverError::DirectoryCycle),
     ("OUT_OF_MEMORY", DriverError::OutOfMemory),
     ("NO_BANDWIDTH", DriverError::NoBandwidth),
+    ("STALE", DriverError::Stale),
 ];
 
 /// One generated C header: its file name (relative to the include directory)
@@ -776,7 +777,6 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::Shared => "SHARED",
         HwResourceKind::Framebuffer => "FRAMEBUFFER",
         HwResourceKind::LinkAddress => "LINK_ADDRESS",
-        HwResourceKind::BusChild => "BUS_CHILD",
         HwResourceKind::LinkDuty => "LINK_DUTY",
         HwResourceKind::LinkRequest => "LINK_REQUEST",
         HwResourceKind::IommuStream => "IOMMU_STREAM",
@@ -797,6 +797,9 @@ fn property_name(key: HwProperty) -> &'static str {
         HwProperty::KernelDriven => "KERNEL_DRIVEN",
         HwProperty::UsbSpeed => "USB_SPEED",
         HwProperty::FixedClockRate => "FIXED_CLOCK_RATE",
+        HwProperty::BusSpeed => "BUS_SPEED",
+        HwProperty::RadioCoexistence => "RADIO_COEXISTENCE",
+        HwProperty::BootConsole => "BOOT_CONSOLE",
     }
 }
 
@@ -2771,6 +2774,7 @@ fn generate_syscall() -> String {
     emit_readdir_contract(&mut out);
     emit_dir_watch_contract(&mut out);
     emit_grant_contract(&mut out);
+    emit_call_contract(&mut out);
     emit_filelock_contract(&mut out);
     emit_signal_contract(&mut out);
     emit_power_contract(&mut out);
@@ -3113,6 +3117,13 @@ fn emit_waitset_contract(out: &mut String) {
             kind.as_u32()
         );
     }
+    let _ = writeln!(
+        out,
+        "/* waitset_wait() timeout_ns that parks until a member is ready, and the\n\
+         * child-member id that observes any child. */\n\
+         #define TAIRIX_WAITSET_TIMEOUT_NONE ((uint64_t){WAITSET_TIMEOUT_NONE:#x}ull)\n\
+         #define TAIRIX_WAITSET_CHILD_ANY ((uint64_t){WAITSET_CHILD_ANY:#x}ull)"
+    );
     out.push('\n');
 }
 
@@ -3197,6 +3208,8 @@ const fn notice_topic_macro_suffix(topic: NoticeTopic) -> &'static str {
         NoticeTopic::AudioCapture => "AUDIO_CAPTURE",
         NoticeTopic::AudioDevices => "AUDIO_DEVICES",
         NoticeTopic::Network => "NETWORK",
+        NoticeTopic::DisplayOutput => "DISPLAY_OUTPUT",
+        NoticeTopic::CueAuthority => "CUE_AUTHORITY",
     }
 }
 
@@ -3403,6 +3416,21 @@ fn emit_grant_contract(out: &mut String) {
     let _ = writeln!(
         out,
         "#define TAIRIX_GRANT_EXTENT_INHERIT ((uint64_t){GRANT_EXTENT_INHERIT:#x}ull)"
+    );
+    out.push('\n');
+}
+
+/// Emit the `call_post()` contract item into `tairix_syscall.h`: the deadline
+/// that never passes, read from `lib/abi`.
+fn emit_call_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* call_post() deadline_ns that never passes: the request is answered only\n\
+         * by its server or by the endpoint's end. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_CALL_DEADLINE_NONE ((uint64_t){CALL_DEADLINE_NONE:#x}ull)"
     );
     out.push('\n');
 }

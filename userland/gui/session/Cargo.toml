@@ -173,6 +173,10 @@ tairix-appstore = { path = "../../../lib/appstore", version = "=0.0.0" }
 # against an on-disk manifest by the same digest the load gate attests it
 # from, so the two can never key the same developer differently.
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
+# The sound settings and the user's layer over them: the session keeps the
+# user's own choices and hands the cue authority the document the one engine
+# reads, and the reading of them the Settings pane is told.
+tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0" }
 
 [dev-dependencies]
 # The secret marker's cadence, which the credential prompt's frame schedule is
@@ -235,6 +239,9 @@ path = "src/run.rs"
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 # The audio service's live transport the sound worker's round trips use.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
+# The cue client a newly shown notification is heard through, posted from the
+# one wait-set so the sound authority never holds up a frame.
+tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0", features = ["rt"] }
 # The browser engine's production symbolic-link reader (`RtLinkReader`): the
 # `fs_readlink` + resolving `fs_stat` pair a listed link needs, written once in
 # `lib/browse` so no surface carries its own copy of those two calls.

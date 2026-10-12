@@ -146,7 +146,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 100 | `call_reap`    | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (reply), `len` | `u64` (bytes) | — | no |
 | 101 | `call_cancel`  | `IpcEndpoint`, `Handle` (ticket)        | `errno` | — | no |
 | 102 | `hw_node_health` | `u64 state` (`FaultDomainState`)      | `errno`       | `CAP_HW_EMIT` | yes   |
-| 103 | `hw_self_node` | —                                       | `u64` (node id) | —           | no    |
+| 103 | `hw_self_node` | `user_ptr` (out: `HwSelfNode`), `len`   | `u64` (bytes) | —             | no    |
 | 104 | `sched_set_priority` | `i64 pid`, `u32 priority`         | `errno`       | — (target rule + raise gate in-handler) | yes |
 | 105 | `system_power` | `u32 action` | `errno` | `CAP_SYSTEM_POWER` | yes |
 | 106 | `call_grant`   | `IpcEndpoint` (delegated), `IpcEndpoint` (recipient) | `u64` (handle) | `CAP_IPC_ENDPOINT` | yes |
@@ -183,6 +183,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 137 | `fs_watch_read` | `u32 fd`, `user_ptr` (buf), `len`      | `u64` (bytes) | `CAP_FS_ACCESS`  | no    |
 | 138 | `port_admit`   | `IpcEndpoint` (own port), `IpcEndpoint` (server) | `errno` | —                       | yes     |
 | 139 | `foreground_held` | `u32 fd`                             | `u64` (`1` held, `0` not) | `CAP_CONSOLE_READ` | no |
+| 140 | `hw_node_settle` | —                                     | `errno`       | `CAP_HW_EMIT`    | no    |
+| 141 | `console_relocate` | `user_ptr` (out: framebuffer `HwResource`), `len` | `u64` (bytes) | `CAP_MEM_DMA` | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -513,7 +515,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SHM`          | `shm_create`, `shm_map`, `shm_map_from`, `shm_grant`, `shm_grant_peer`, and `shm_create_dma` (checked in-handler, in addition to the dispatcher's `CAP_MEM_DMA`) |
 | `CAP_IPC_ENDPOINT` | `call_grant` (the dispatch gate); also the per-endpoint gate a grant-restricted endpoint's *senders* must hold, enforced in `ipc_call`/`call_post` alongside the per-endpoint grant |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
-| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`, `dma_quiesced`, `shm_create_dma` |
+| `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`, `dma_quiesced`, `shm_create_dma`, `console_relocate` |
 | `CAP_SYSINFO_HW`   | `hw_tree_read`, `hw_tree_wait` |
 | `CAP_SYSINFO_INTROSPECT` | `sysinfo_introspect` |
 | `CAP_LOG_EMIT`     | `log_emit`                 |
@@ -720,6 +722,37 @@ load is the audited security decision (§5.4.4 / §18.3). The first-party Rust
 wrapper is `tairix_rt::resource_grants` (the user-space driver host
 `tairix_drvrt::RtDriverHost::from_grants_query` builds its grant table from
 it); the C stub is `tairix_sys_resource_grants`.
+
+`hw_self_node` (no. 103) writes the calling driver's own `HwSelfNode`: the
+hardware-tree node it was autoloaded for, the keys that node is matched by, and
+the status its fault-domain ancestors' published health imposes on it — folded
+in the kernel, which holds the tree — resolved from the caller and never from a
+caller-supplied id. It needs no capability and reveals nothing beyond the
+caller's own node and the health of the chain above it. A leaf asks on its
+recovery path, to blame a resetting hub or controller rather than its own
+device, and a driver serving several bindings of one family passes the keys to
+`tairix_devmatch::matched_bind_key` with its own bind table to learn which it
+drives — the rule the device manager matched it by. A caller with no matched
+node fails `NotFound`, one whose node has left the tree `DeviceOffline`, and a
+buffer shorter than the record `BufferTooSmall`. The Rust wrapper is
+`tairix_rt::hw_self_node`; the C stub is `tairix_sys_hw_self_node`.
+
+`console_relocate` (no. 141) moves the kernel's framebuffer console off the
+firmware's memory, so a display engine can take the screen over from the
+firmware that lit it: once told, the firmware may take its own framebuffer
+back. Only the driver of a node discovery marked `BootConsole` is answered —
+no driver can publish that mark — and it holds `CAP_MEM_DMA`, since its
+device reads the memory; a driver confined by a translation unit is refused
+`NotSupported`, as the block is mapped into no domain. The kernel takes a
+zeroed, contiguous block below the node's DMA window that starts at the
+bottom of memory, has the console repaint there from its retained screen in
+the disposition it holds, and writes the surface into `(buf, len)` as one
+framebuffer `HwResource`. The block is the console's for the kernel's life,
+so a second call — a restarted engine's — answers the same surface. A
+console that cannot move stays where it was: `NotFound` with none to move,
+`OutOfRange` with no such window, `OutOfMemory` with no block below it. The
+Rust wrapper is `tairix_rt::console_relocate`; the C stub is
+`tairix_sys_console_relocate`.
 
 `hw_tree_read` (no. 29) and `hw_tree_wait` (no. 30) expose the discovered
 hardware tree the kernel built at boot (`AGENTS.md` §16.6 / §18.1 / §18.4) —
@@ -1356,20 +1389,35 @@ with `peer_watch(Take)`. The wake is targeted at the watching thread, and only
 sets holding a `PeerExit` member join its queue.
 
 It also accepts a `Stream` member (`plans/APPWIN.md` AW4): `id` names a
-descriptor of the **caller's own open table** holding a pipe end opened
-for reading (a write end, a path- or resource-backed descriptor, an
-unopened number, or another task's descriptor all refuse with the same
-oracle-free `NotFound` at add). The member is ready when a read would not
-park — buffered bytes are waiting, or every write end is closed, so the
-woken owner's read observes end-of-stream rather than waiting forever on
-a dead writer. Readiness is a non-consuming peek re-resolved against the
-caller's table on every scan (a descriptor closed mid-wait simply stops
-reporting), and the wake rides the pipe layer's existing write/close
-wakes; only sets that contain a `Stream` member join the pipe wake queue,
-so unrelated pipeline traffic never touches other waiters. This is the
-windowed terminal's "the shell wrote output" wake: it parks on one set
-holding its window-event port, its shell-output pipe, and its shell
-child, and dispatches on the woken member's token.
+descriptor of the **caller's own open table** holding a pipe end, a pty
+master or a pty slave opened for reading, or — when the open table holds
+nothing at that number — one of its inherited standard streams reading a
+console it holds `CAP_CONSOLE_READ` for (a write end, a path- or
+resource-backed descriptor, an unopened number, or another task's
+descriptor all refuse with the same oracle-free `NotFound` at add). The
+member is ready when a read would not park — buffered bytes are waiting, or
+every write end is closed, so the woken owner's read observes end-of-stream
+rather than waiting forever on a dead writer. Readiness is a non-consuming
+peek re-resolved against the caller's table on every scan (a descriptor
+closed mid-wait simply stops reporting), and the wake rides the pipe
+layer's existing write/close wakes; only sets that contain a `Stream`
+member join the pipe wake queue, so unrelated pipeline traffic never
+touches other waiters. This is the windowed terminal's "the shell wrote
+output" wake: it parks on one set holding its window-event port, its
+shell-output pipe, and its shell child, and dispatches on the woken
+member's token.
+
+A console member asks each console backing whether a read would return at
+once (`ConsoleRead::input_ready`, a peek that takes nothing: an interrupt-fed
+queue's occupancy, a receive FIFO's status register, or — for the riscv64 SBI
+console, which can only hand a byte over — a zeroed one-byte hold). It shows
+input only to a caller `stream_read` would admit, the console's foreground
+owner or anyone while it has none, so typing cadence reaches no other
+process. Its set joins the console wake queue, which every push of input
+flags, and the foreground queue, since an ownership change can make pending
+input readable; a backing no interrupt feeds is re-polled at its own
+interval. This is login's text prompt: it parks on its console together with
+the notices its choice of login rests on.
 
 It accepts a `PortRoom` member (`plans/APPWIN.md` AW4), the **send**-side
 twin of the `Port` member: `id` names a message port the caller may post

@@ -2,9 +2,9 @@ use core::num::NonZeroU32;
 
 use super::*;
 use crate::hwlink::{LinkDuty, LinkRequest};
-use crate::hwtree::{HwResource, BUS_CHILD_ENDPOINTS};
+use crate::hwtree::{HwResource, NodeEndpointBlock};
 use crate::le::{put_i32, put_u16, put_u32};
-use crate::origin::PROC_ID_LEN;
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -43,8 +43,8 @@ fn every_request() -> [DmaEngineRequest; 7] {
     ]
 }
 
-fn buffer() -> DmaBufferGrant {
-    DmaBufferGrant {
+fn buffer() -> RegionGrant {
+    RegionGrant {
         grant: 0x77,
         grantor: ProcId::from_raw([0xA5; PROC_ID_LEN]),
     }
@@ -230,7 +230,12 @@ fn an_open_quotes_only_a_canonical_request_line() {
 #[test]
 fn a_request_line_refuses_what_its_record_could_not_carry() {
     assert_eq!(
-        LinkRequest::new(BUS_CHILD_ENDPOINTS.endpoint(12), 0, &[2], b"tx"),
+        LinkRequest::new(
+            NodeEndpointBlock::tagged(*b"ZZ").endpoint(12),
+            0,
+            &[2],
+            b"tx"
+        ),
         Err(Errno::OutOfRange)
     );
     assert_eq!(
@@ -246,7 +251,7 @@ fn a_request_line_refuses_what_its_record_could_not_carry() {
         Err(Errno::LengthOutOfRange)
     );
     assert_eq!(
-        LinkDuty::new(BUS_CHILD_ENDPOINTS.endpoint(12), None),
+        LinkDuty::new(NodeEndpointBlock::tagged(*b"ZZ").endpoint(12), None),
         Err(Errno::OutOfRange)
     );
     let unnamed = LinkRequest::new(endpoint(), 4, &[], &[]).expect("valid");
@@ -360,11 +365,11 @@ fn a_malformed_reply_is_refused_rather_than_half_read() {
     );
     assert_eq!(decode_open_reply(&out[..3]), Err(Errno::BufferTooSmall));
 
-    let no_grant = DmaBufferGrant {
+    let no_grant = RegionGrant {
         grant: 0,
         ..buffer()
     };
-    let no_grantor = DmaBufferGrant {
+    let no_grantor = RegionGrant {
         grantor: ProcId::KERNEL,
         ..buffer()
     };

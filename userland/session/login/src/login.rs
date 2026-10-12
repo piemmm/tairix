@@ -42,6 +42,10 @@ pub struct LoginConfig<'a> {
     /// There is no per-login prompt: a shell user starts the desktop on
     /// demand with the `desktop` command.
     pub session_default: SessionKind,
+    /// Whether an untouched username prompt may give way to a graphical login
+    /// that becomes available while it waits: set for a text round chosen
+    /// up front, clear for one a failed graphical round fell back to.
+    pub may_give_way: bool,
     /// Seam that presents the login screen and reads the user's input.
     pub view: &'a dyn LoginView,
     /// Seam that verifies credentials against `kernel/sec`.
@@ -76,8 +80,10 @@ impl<'a> Login<'a> {
     /// [`LoginError::Console`] if the terminal could not be read, or
     /// [`LoginError::SessionLaunch`] if an authenticated user's session could
     /// not be started. Each is a fail-closed outcome that launched no session.
+    /// [`LoginError::Superseded`] ends a round nobody had begun typing in,
+    /// for the login that became available; the view is left first.
     pub fn run(&self) -> Result<SessionOutcome, LoginError> {
-        self.cfg.view.round_begin();
+        self.cfg.view.round_begin(self.cfg.may_give_way);
         let mut remaining = self.cfg.max_attempts;
         while remaining > 0 {
             remaining -= 1;
@@ -95,6 +101,10 @@ impl<'a> Login<'a> {
             match attempt {
                 Ok(Some(outcome)) => return Ok(outcome),
                 Ok(None) => self.cfg.view.note_failure(),
+                Err(LoginError::Superseded) => {
+                    self.cfg.view.round_abandoned();
+                    return Err(LoginError::Superseded);
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -138,6 +148,10 @@ impl<'a> Login<'a> {
             Err(err) => Err(err),
         };
         outcome.map_err(|err| {
+            // A read that gave way is no console failure.
+            if err == Errno::Interrupted {
+                return LoginError::Superseded;
+            }
             self.audit_console_error(stage, err);
             LoginError::Console(err)
         })
@@ -417,6 +431,9 @@ mod tests {
         failures: Cell<u32>,
         handoffs: Cell<u32>,
         purges: Cell<u32>,
+        abandoned: Cell<u32>,
+        /// What the last round told the view about giving way.
+        gave_way_allowed: Cell<bool>,
         /// Terminal events in the order the machine produced them, shared
         /// with [`MockLauncher`] so a test can assert the purge lands after
         /// the session rather than before it.
@@ -453,6 +470,8 @@ mod tests {
                 failures: Cell::new(0),
                 handoffs: Cell::new(0),
                 purges: Cell::new(0),
+                abandoned: Cell::new(0),
+                gave_way_allowed: Cell::new(false),
                 trace,
             }
         }
@@ -472,8 +491,9 @@ mod tests {
         }
     }
     impl LoginView for MockView {
-        fn round_begin(&self) {
+        fn round_begin(&self, may_give_way: bool) {
             self.rounds.set(self.rounds.get() + 1);
+            self.gave_way_allowed.set(may_give_way);
         }
         fn read_username(&self, buf: &mut [u8]) -> Result<usize, Errno> {
             Self::fill(&self.lines, buf)
@@ -491,6 +511,9 @@ mod tests {
         fn session_ended(&self) {
             self.purges.set(self.purges.get() + 1);
             self.trace.borrow_mut().push("purge");
+        }
+        fn round_abandoned(&self) {
+            self.abandoned.set(self.abandoned.get() + 1);
         }
     }
 
@@ -646,6 +669,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -677,6 +701,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: true,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -700,6 +725,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: true,
             session_default: SessionKind::Graphical,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -723,6 +749,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Graphical,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -745,6 +772,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -769,6 +797,7 @@ mod tests {
             max_attempts: 2,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -799,6 +828,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -824,6 +854,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -849,6 +880,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -857,6 +889,38 @@ mod tests {
 
         assert_eq!(login.run(), Err(LoginError::Console(Errno::TimedOut)));
         assert_eq!(sink.count(events::CONSOLE_ERROR), 1);
+        assert!(launcher.launched.borrow().is_empty());
+    }
+
+    /// A username read that gave way ends the round for the login that became
+    /// available: the view is left, nothing is audited as a console failure,
+    /// and no attempt is spent or session launched.
+    #[test]
+    fn a_username_read_that_gives_way_ends_the_round_quietly() {
+        let view = MockView::with_results(alloc::vec![Err(Errno::Interrupted)], Vec::new());
+        let auth = auth();
+        let launcher = MockLauncher::ok(SessionKind::Text);
+        let sink = RecordingSink::new();
+        let login = Login::new(LoginConfig {
+            max_attempts: 3,
+            graphical_available: false,
+            session_default: SessionKind::Graphical,
+            may_give_way: true,
+            view: &view,
+            authenticator: &auth,
+            launcher: &launcher,
+            sink: &sink,
+        });
+
+        assert_eq!(login.run(), Err(LoginError::Superseded));
+        assert!(
+            view.gave_way_allowed.get(),
+            "the round's policy reaches the view"
+        );
+        assert_eq!(view.abandoned.get(), 1);
+        assert_eq!(view.failures.get(), 0);
+        assert_eq!(view.handoffs.get(), 0);
+        assert_eq!(sink.count(events::CONSOLE_ERROR), 0);
         assert!(launcher.launched.borrow().is_empty());
     }
 
@@ -870,6 +934,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -897,6 +962,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -921,6 +987,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -944,6 +1011,7 @@ mod tests {
             max_attempts: 2,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -971,6 +1039,7 @@ mod tests {
             max_attempts: 3,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,
@@ -995,6 +1064,7 @@ mod tests {
             max_attempts: 0,
             graphical_available: false,
             session_default: SessionKind::Text,
+            may_give_way: false,
             view: &view,
             authenticator: &auth,
             launcher: &launcher,

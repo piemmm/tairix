@@ -3,11 +3,9 @@
 //! space** by `devmgr` when a `maxim,ds3231` node is discovered
 //! (`plans/TIMESYNC.md` TS-4).
 //!
-//! The process reaches its chip over one thing only: the transfer endpoint
-//! its matched node's grant names. Discovery split the bus child in two — the
-//! bus driver got the duty (that endpoint paired with this part's bus
-//! address) and this driver got the authority (the endpoint alone) — so the
-//! wire carries no address and this driver cannot reach a neighbour on the
+//! The process reaches its chip over one thing only: the I²C target channel
+//! its node's link names. The controller holds every message to the one
+//! address that link reaches, so this driver cannot reach a neighbour on the
 //! bus however it is compromised.
 //!
 //! It holds **no** clock authority either: the machine clock is set by the
@@ -31,20 +29,26 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use tairix_abi::hwlink::{sole_link, LinkRole};
     use tairix_abi::rtc_ipc::{self, RTC_ENDPOINT};
     use tairix_abi::CapabilityId;
     use tairix_caps::CapabilitySet;
     use tairix_drv_rtc_ds3231::Ds3231;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
+    use tairix_linkclient::{I2cTarget, RtLinkCall};
+    use tairix_rt::shm::MappedGrant;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants. A reserved, fail-closed value.
     const EXIT_NO_HOST: i32 = 80;
 
-    /// Exit code when the delivered grants name no transfer endpoint — an
-    /// unbound or mis-provisioned node, or a bus whose duty list could not
-    /// hold this child. A reserved, fail-closed value.
+    /// Exit code when the node links no one I²C target — an unbound or
+    /// mis-provisioned node. A reserved, fail-closed value.
     const EXIT_NO_RESOURCES: i32 = 81;
+
+    /// Exit code when the chip's channel could not be opened. A reserved
+    /// value.
+    const EXIT_BRINGUP_FAILED: i32 = 82;
 
     /// Exit code when the call endpoint could not be created — the id is
     /// already bound (another RTC driver serves it; the first RTC in
@@ -62,17 +66,6 @@ mod program {
     /// client asks a handful of times a day, so a small capacity suffices; it
     /// is a queue bound, not a hardware capacity.
     const ENDPOINT_CAPACITY: usize = 4;
-
-    /// The capability set the host re-checks before issuing a trap: the
-    /// per-endpoint call gate that reaches the bus driver, plus the bind
-    /// privilege the served RTC endpoint needs. No mapping authority — this
-    /// driver owns no registers. The kernel re-checks every trap.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::IPC_ENDPOINT);
-        caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
-        caps
-    }
 
     /// The required-sender capability set of the served endpoint.
     ///
@@ -92,15 +85,21 @@ mod program {
     /// On success this never returns: the serve loop runs for the life of the
     /// driver process.
     fn main() -> i32 {
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = tairix_drv_rtc_ds3231::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
-        // The endpoint grant *is* this driver's chip. Without one there is no
-        // part to talk to, so it stands down rather than guessing an id.
-        if host.endpoint_grant().is_none() {
+        let Some(link) = sole_link(host.resources(), LinkRole::I2c) else {
             return EXIT_NO_RESOURCES;
-        }
-        let mut rtc = Ds3231::new(&host);
+        };
+        let Ok(port) = I2cTarget::open(RtLinkCall::new(link.endpoint()), link, MappedGrant::map)
+        else {
+            return EXIT_BRINGUP_FAILED;
+        };
+        let mut rtc = Ds3231::new(port);
 
         let send_caps = endpoint_send_caps();
         let recv_caps = CapabilitySet::empty();
@@ -128,7 +127,7 @@ mod program {
     /// yield-retrying a dead channel forever. A reply that fails to encode is
     /// dropped to a zero-length reply, which the client decodes as a
     /// fail-closed truncation.
-    fn serve(rtc: &mut Ds3231<&RtDriverHost<RtGrantSyscalls>>) -> i32 {
+    fn serve(rtc: &mut Ds3231<I2cTarget<RtLinkCall, MappedGrant>>) -> i32 {
         let mut request = [0u8; rtc_ipc::REQUEST_LEN];
         let mut reply = [0u8; rtc_ipc::REPLY_LEN];
         loop {
@@ -146,11 +145,5 @@ mod program {
     tairix_rt::entry!(main);
 }
 
-// --- Host stub ----------------------------------------------------------
-//
-// On the host (`cargo build --workspace`, clippy, fmt) the program's real
-// entry — the freestanding `tairix-rt` `_start` path — is not compiled, so
-// this inert `main` keeps the crate building under the host tooling. It
-// performs no I/O.
 #[cfg(not(freestanding))]
 fn main() {}

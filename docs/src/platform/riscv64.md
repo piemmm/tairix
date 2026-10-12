@@ -130,6 +130,12 @@ three things on the `BootInfo` hand-off:
   *does* interrupt leaves the default `None`, so a lost wake there stays a
   visible hang rather than becoming a silent latency bug.
 
+  The service can only hand a byte over, never show one, so the readiness
+  peek a wait-set watching the console asks (`ConsoleRead::input_ready`)
+  takes the byte into a one-byte hold the next read returns first. The hold
+  is a secret ring, zeroed as the byte leaves: it may be part of a
+  passphrase.
+
   Console 0's read half is wrapped in the shared `GatedConsoleRead`, as on
   the sibling ports: `login` is withheld until the unlock kthread has
   resolved the root — reading an encrypted root's passphrase off the same

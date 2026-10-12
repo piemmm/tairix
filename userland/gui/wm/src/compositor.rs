@@ -35,7 +35,10 @@ use tairix_inline::ArrayVec;
 use tairix_input::{InputEvent, Key};
 use tairix_parallel::JobRunner;
 use tairix_raster::{resample_reach, BlurScratch, Frosting, ResampleScratch};
-use tairix_reclaim::{CacheAccounting, PressureBand, PressureGauge, ReclaimCache, Served};
+use tairix_reclaim::{
+    screenful_ui_budget, stacked_ui_budget, CacheAccounting, PressureBand, PressureGauge,
+    ReclaimCache, Served,
+};
 use tairix_theme::{CursorKind, Theme};
 use tairix_util::fallible;
 
@@ -640,6 +643,24 @@ impl Compositor {
         let screen = self.screen_rect();
         self.mark(screen);
         true
+    }
+
+    /// Hold the window furniture and the frosted backdrops to what an output
+    /// of `fb_bytes` in a machine of `memory_bytes` allows, the output having
+    /// changed size: the budgets [`crate::chrome_cache`] and
+    /// [`crate::frost_cache`] build them under.
+    pub fn rescale_caches(&mut self, fb_bytes: usize, memory_bytes: usize) {
+        let _ = self.chrome.rebudget(screenful_ui_budget(fb_bytes));
+        let _ = self
+            .frost
+            .rebudget(stacked_ui_budget(fb_bytes, memory_bytes));
+    }
+
+    /// Owe the display the whole output again, recomposing nothing: a sink
+    /// that arrived since the last frame has seen none of what was presented
+    /// before it (`plans/DISPLAY.md` D12). The next present sends all of it.
+    pub fn owe_output(&mut self) {
+        self.undelivered.add(self.output_rect());
     }
 
     /// The whole-screen rectangle: the desktop as windows, the pointer and

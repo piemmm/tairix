@@ -11,8 +11,10 @@ play — jouer des fichiers sonores
 Joue chaque fichier à son tour sur une sortie. Chaque fichier est décodé dans
 un processus isolé qui ne détient aucune autorité : un fichier hostile ne peut
 au pire que mettre fin à son propre décodage. Il est alors écarté avec la
-raison indiquée, et le reste de la liste est joué. Les fichiers AU, WAV et FLAC
-sont lus, FLAC natif ou dans Ogg.
+raison indiquée, et le reste de la liste est joué. Les fichiers AU, WAV, FLAC,
+Vorbis, Opus et audio MPEG (MP1, MP2 et MP3) sont lus, FLAC natif ou dans Ogg,
+Vorbis et Opus dans Ogg ; les flux chaînés d'un fichier Ogg sont joués l'un
+après l'autre.
 
 Les fichiers consécutifs de même fréquence, même format d'échantillon et même
 disposition des canaux s'enchaînent sans blanc, dans un seul flux. Un fichier

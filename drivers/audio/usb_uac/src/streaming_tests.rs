@@ -246,6 +246,15 @@ fn channel_maps_follow_the_stated_positions_or_the_conventional_reading() {
             ChannelPosition::RearRight
         ]
     );
+    let back_centre = |config| {
+        map(7, config).map(|map| {
+            map.positions()
+                .iter()
+                .position(|&p| p == ChannelPosition::RearCentre)
+        })
+    };
+    assert_eq!(back_centre(0x13F), Some(Some(6)), "6.1 with the rear pair");
+    assert_eq!(back_centre(0x70F), Some(Some(4)), "6.1 with the side pair");
     // Left of centre has no word; positions for the wrong count describe
     // nothing; five channels with none stated have no conventional reading.
     assert_eq!(map(2, 0x40 | 0x1), None);

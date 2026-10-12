@@ -63,6 +63,9 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The device controls the Sound pane asks for, the volume taper its sliders
 # read through, and the walk that lists the devices.
 tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+# The sound settings registry the Sound Effects pane reads the session's
+# answer with and renders its changes in, and which sounds a user decides.
+tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0" }
 # The shared wrapping tile-grid geometry the Wallpaper pane's gallery lays
 # its pictures out with — the same one the file manager's icon view and the
 # desktop's own icon column use, so no second grid exists.

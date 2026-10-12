@@ -155,8 +155,8 @@ impl MockDisplay {
 }
 
 impl Display for MockDisplay {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(self.mode)
+    fn output(&self) -> Option<DisplayMode> {
+        Some(self.mode)
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -2971,8 +2971,8 @@ impl MockAccel {
 }
 
 impl Display for MockAccel {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(self.mode)
+    fn output(&self) -> Option<DisplayMode> {
+        Some(self.mode)
     }
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
         self.software_frame = frame.to_vec();
@@ -6463,6 +6463,28 @@ fn a_refused_frame_is_sent_again_by_the_next_present() {
     assert!(!c.has_damage(), "nothing is owed once the display took it");
 }
 
+/// An output that came back may show nothing of what was presented before
+/// it went, so the whole output is owed again, though nothing changed.
+#[test]
+fn an_owed_output_is_sent_whole_by_the_next_present() {
+    let m = mode(8, 8);
+    let mut c = new_compositor(m, BLUE).expect("compositor");
+    let mut display = MockDisplay::new(m);
+    c.present(&mut display).expect("the first frame");
+    assert!(!c.has_damage());
+
+    c.owe_output();
+    assert!(c.has_damage(), "the whole output is owed");
+    let mut fresh = MockDisplay::new(m);
+    c.present(&mut fresh).expect("the owed frame");
+    assert_eq!(fresh.last, c.frame(), "every pixel was sent");
+    assert!(
+        fresh.full_presents == 1 || fresh.regions == [DamageRect::full(&m)],
+        "the present covers the output"
+    );
+    assert!(!c.has_damage(), "nothing is owed once the display took it");
+}
+
 /// A layer stack carries the whole scene, so a frame the display refused
 /// earlier is owed no longer once the engine takes one.
 #[test]
@@ -7277,6 +7299,37 @@ fn retained_furniture_never_exceeds_the_one_screenful_ceiling() {
         "a bounded cache cannot have retained every window's furniture"
     );
     assert!(c.chrome_cache_stats().evictions() > 0);
+}
+
+/// The furniture a screenful bounds is held to the screen the compositor now
+/// draws: an output that shrank to a quarter of the furniture gives the rest
+/// back at once, oldest first.
+#[test]
+fn rescaled_furniture_is_held_to_the_new_screenful() {
+    let ceiling = 320 * 240 * 4;
+    let mut c = Compositor::new(
+        mode(320, 240),
+        Theme::dark(),
+        chrome_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
+        test_frost_cache(),
+        &NORMAL_PRESSURE,
+    )
+    .expect("compositor");
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    for index in 0..4 {
+        titled_window(&mut c, index * 8, index * 8, 60, "window");
+    }
+    c.composite();
+    let held = c.chrome_cache_bytes();
+    assert!(held > 0);
+
+    let smaller = held / 4;
+    c.rescale_caches(smaller, 0);
+    assert!(
+        c.chrome_cache_bytes() <= tairix_reclaim::screenful_ui_budget(smaller).hard(),
+        "the furniture fits the new screenful"
+    );
+    assert!(c.chrome_cache_bytes() < held);
 }
 
 #[test]
@@ -9384,8 +9437,8 @@ struct TakingDisplay {
 }
 
 impl Display for TakingDisplay {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(self.mode)
+    fn output(&self) -> Option<DisplayMode> {
+        Some(self.mode)
     }
 
     fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {

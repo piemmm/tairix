@@ -1,8 +1,8 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use super::{overwrite, Keys, Live, Registry, MOST_KEYS};
-use crate::{as_u32, Document};
+use super::{merge_admitting, overwrite, Keys, Live, Refusal, Registry, MOST_KEYS};
+use crate::{as_u32, ConfError, Document};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Key {
@@ -99,6 +99,44 @@ impl Live for Fixture {
             Key::Note => overwrite(&mut self.note, other.note),
         }
     }
+}
+
+#[test]
+fn a_strict_merge_takes_what_it_names_and_keeps_the_rest() {
+    let base = Fixture {
+        note: Some(5),
+        ..Fixture::default()
+    };
+    let merged = merge_admitting(&base, "size = 20\n", |_| true).expect("a valid document");
+    assert_eq!(merged.size, 20);
+    assert_eq!(
+        merged.note,
+        Some(5),
+        "a key it does not name keeps its value"
+    );
+    let capped = merge_admitting(&base, "size = 300\n", |_| true).expect("a valid document");
+    assert_eq!(capped.size, 99, "the record is brought within its bounds");
+}
+
+#[test]
+fn a_strict_merge_refuses_the_whole_document_on_its_first_fault() {
+    let base = Fixture::default();
+    let merge = |text: &str| merge_admitting(&base, text, |key| key != Key::Note);
+    assert_eq!(
+        merge("bogus = 1\n"),
+        Err(Refusal::UnknownKey(String::from("bogus")))
+    );
+    assert_eq!(
+        merge("size = 20\nmode = wrong\n"),
+        Err(Refusal::InvalidValue(Key::Mode))
+    );
+    assert_eq!(merge("size = 20\nnonsense\n"), Err(Refusal::Unparsed(2)));
+    assert_eq!(merge("note = 3\n"), Err(Refusal::OutsideGroup(Key::Note)));
+    let huge = "x".repeat(crate::MAX_DOCUMENT_LEN + 1);
+    assert_eq!(
+        merge(&huge),
+        Err(Refusal::Malformed(ConfError::DocumentTooLarge))
+    );
 }
 
 fn parsed(text: &str) -> Document {

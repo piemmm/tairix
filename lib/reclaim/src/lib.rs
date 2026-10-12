@@ -67,7 +67,8 @@ pub mod pressure;
 pub use audit::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
 pub use cache::{CachedBytes, ReclaimCache, Served};
 pub use desktop::{
-    disposable_ui_cache, disposable_ui_candidate, screenful_ui_cache, stacked_ui_cache,
+    disposable_ui_budget, disposable_ui_cache, disposable_ui_candidate, screenful_ui_budget,
+    screenful_ui_cache, stacked_ui_budget, stacked_ui_cache, working_set_ui_budget,
     working_set_ui_cache,
 };
 pub use ledger::CacheLedger;

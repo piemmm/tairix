@@ -1057,6 +1057,10 @@ mod root_unlock {
             self.cursor.store(i + 1, Ordering::Relaxed);
             Ok(1)
         }
+
+        fn input_ready(&self) -> bool {
+            self.cursor.load(Ordering::Relaxed) <= disk_image::PASSPHRASE.len()
+        }
     }
 
     /// The unlock device tail: open the virtio-blk whole-disk device over

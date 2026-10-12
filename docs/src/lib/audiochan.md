@@ -39,24 +39,32 @@ hardware-tree node the device manager hands to the mixer, and parks on a wait
 set over `{call endpoint, device interrupt}`, handing each wake to the
 dispatcher.
 
+`Channel` is that claimed and published channel without the loop, for a
+driver whose device also serves another protocol from the same thread — an
+HDMI transmitter's encoder link beside its audio endpoint
+(`tairix_encoder::serve_with_audio`). The other protocol's loop parks on the
+channel's endpoint too, and calls `on_call` when it wakes and `on_event` after
+anything that may have changed what the device reports.
+
 ## The cyclic engine
 
 A device a DMA controller feeds from a looping buffer — the Raspberry Pi's
-headphone jack and its I²S interface — streams the same way whatever its FIFO
-wants, so `cyclic::CyclicPlayback` is that stream once, over two seams:
+headphone jack, its I²S interface and its HDMI transmitters' MAI — streams the
+same way whatever its FIFO wants, so `cyclic::CyclicPlayback` is that stream
+once, over two seams:
 `DmaPort`, the channel (`cyclic::LinkDma` in a driver process, the device's
 link to its [DMA controller](../drivers/dma.md) through
 [`tairix-linkclient`](linkclient.md)), and `FrameCodec`, how a frame sits in
-the buffer.
+the buffer and how many channels it carries.
 
 - **Four periods, one written ahead.** A boundary is the answer to a posted
-  wait, which the serve loop wakes on (`Wake::CallReply`). Each frees the
+  wait, which the serve loop wakes on (`DeviceWake::CallReply`). Each frees the
   period just played and the next period of the ring goes into it. The period
   after the one playing is always written: as silence counted lost when the
   mixer has not supplied it, since a period left alone replays a lap-old
   sound.
 - **A frame is copied where it lies.** A buffer frame is as many bytes as a
-  ring frame of two channels in the codec's format, and must be whole 32-bit
+  ring frame of the codec's channels in its format, and must be whole 32-bit
   FIFO words, so a period is read from the ring straight into the buffer and
   encoded in place.
 - **The position is the channel's**: its boundary count, stamped with the
@@ -91,6 +99,12 @@ so one channel carries several endpoints' state rather than one channel's.
 - `Detach` releases the endpoint's device-side stream. A release the hardware
   refused still forgets the channel state, because the process is about to
   unmap the region either way.
+
+A jack change is reported on the device-wide notify port the mixer names with
+`Watch` when it binds the device, whether or not a stream is attached: a
+connector that changes what an endpoint offers matters most when nothing
+plays on it. A notify port naming no device notification id is refused, for
+`Watch` as for `Attach`.
 
 A grant whose period rounds up past its own ring ceiling admits no
 power-of-two ring at all, so `ConfigureGrant::validate` refuses it as a device

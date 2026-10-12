@@ -640,20 +640,57 @@ const SBI_CONSOLE_POLL_INTERVAL_NS: u64 = 1_000_000;
 /// a one-shot timer for that long rather than forever. Without a read half
 /// at all the port could write a prompt but never read the answer, which
 /// left the interactive root unlock unreachable on this port alone.
-#[derive(Debug, Default, Copy, Clone)]
-pub struct RiscvUartConsoleRead;
+pub struct RiscvUartConsoleRead {
+    /// A byte [`ConsoleRead::input_ready`] took to learn it was there — the
+    /// service has no way to look without taking — held for the next read.
+    /// A secret ring, so the byte is zeroed once it leaves: it may be part
+    /// of a passphrase.
+    held: tairix_sync::SpinLock<tairix_inline::SecretRing<u8, 1>>,
+}
+
+impl RiscvUartConsoleRead {
+    /// A reader holding nothing. `const`, so it can back the console list's
+    /// `'static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            held: tairix_sync::SpinLock::new(tairix_inline::SecretRing::new(0)),
+        }
+    }
+}
+
+impl Default for RiscvUartConsoleRead {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ConsoleRead for RiscvUartConsoleRead {
     fn read(&self, buf: &mut [u8]) -> Result<usize, tairix_abi::Errno> {
+        let mut held = self.held.lock();
         let mut read = 0;
-        while read < buf.len() {
-            let Some(byte) = tairix_arch_riscv64::sbi::console_getchar() else {
+        for slot in buf.iter_mut() {
+            let Some(byte) = held
+                .pop_front()
+                .or_else(tairix_arch_riscv64::sbi::console_getchar)
+            else {
                 break;
             };
-            buf[read] = byte;
+            *slot = byte;
             read += 1;
         }
         Ok(read)
+    }
+
+    fn input_ready(&self) -> bool {
+        let mut held = self.held.lock();
+        if held.is_empty() {
+            if let Some(byte) = tairix_arch_riscv64::sbi::console_getchar() {
+                // The hold was empty, so the push cannot be refused.
+                let _ = held.try_push_back(byte);
+            }
+        }
+        !held.is_empty()
     }
 
     fn poll_interval_ns(&self) -> Option<u64> {
@@ -662,7 +699,7 @@ impl ConsoleRead for RiscvUartConsoleRead {
 }
 
 /// The single `'static` [`RiscvUartConsoleRead`] the console list carries.
-pub static RISCV_UART_CONSOLE_READ: RiscvUartConsoleRead = RiscvUartConsoleRead;
+pub static RISCV_UART_CONSOLE_READ: RiscvUartConsoleRead = RiscvUartConsoleRead::new();
 
 /// Console-0's read half, gated on the in-kernel root-unlock service's
 /// ownership latch: a `stream_read` from `login` is withheld until the

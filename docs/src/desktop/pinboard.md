@@ -114,6 +114,25 @@ wrong:
 Reading is not brokered at all: a surface reads the user's own published
 document directly, because a reader needs no coordination.
 
+### The sound requests
+
+The same rendezvous carries the Sound Effects pane's requests about the user's
+sound choices (`plans/SOUND.md` SND23), attested exactly as an apply is:
+
+| Request | Answer |
+|---|---|
+| `SoundRead` | the settings in effect, the user's over the machine's, and each event's file by its name alone (`encode_sound_reading`) |
+| `SoundThemes { from }` | up to `SOUND_THEMES_PAGE` themes from the `from`th, in name order; a short page is the last (`encode_sound_themes`) |
+| `SoundApply { document }` | the status, once the choices are stored; a document naming a file, or any setting of a sound no user's choices reach, is refused whole |
+| `SoundPick { event }` | the status, once the session's own picker has closed, chosen or not |
+| `SoundUseTheme { event }` | the status, once stored |
+
+No request names a path: the session's picker is the only way a file is
+chosen, so no caller can have the session play one the user did not pick.
+Unlike the pinboard document, the choices are private, so a read *is*
+brokered. Every frame is exactly as long as its operation's, and the
+rendezvous answers at most `PINBOARD_MAX_REPLY` bytes.
+
 ## Drawing the wallpaper
 
 A wallpaper is untrusted input — a shipped master no less than a file the

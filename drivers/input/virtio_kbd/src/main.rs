@@ -93,8 +93,7 @@ mod program {
     use tairix_abi::driver::virtio::VirtioHost;
     use tairix_abi::driver::virtio_pci::virtio_pci_windows;
     use tairix_abi::input::PointerInput;
-    use tairix_abi::{CapabilityId, DriverError, MmioMapper};
-    use tairix_caps::CapabilitySet;
+    use tairix_abi::{DriverError, MmioMapper};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_virtio::{MmioTransport, PciTransport, Transport};
     use tairix_virtio_input::{Report, VirtioInput, VirtioKeyboardConsole};
@@ -137,24 +136,6 @@ mod program {
         value: 0,
     });
 
-    /// The capability set the driver host re-checks up front before issuing a
-    /// `mmio_map` / `dma_alloc` / `irq_bind` trap, so a missing grant fails
-    /// fast without a round trip. It mirrors the resources the matched node
-    /// requested — the register window (`CAP_MMIO_MAP`), the DMA region
-    /// (`CAP_MEM_DMA`), and the device interrupt line the report pump parks on
-    /// (`CAP_IRQ_BIND`). The kernel is the authority and re-checks every trap
-    /// regardless: claiming a capability the process was not
-    /// granted only fails the trap kernel-side, never widens authority. It
-    /// must list every capability the host gates on locally, or the host
-    /// short-circuits a real, granted operation before it ever traps.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::MEM_DMA);
-        caps.insert(CapabilityId::IRQ_BIND);
-        caps
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -164,7 +145,11 @@ mod program {
         // Build the host from the grants the kernel minted for this driver.
         // Coherent DMA is carved kernel-side, so no architecture-specific
         // cache-maintenance shim is supplied.
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = tairix_drv_input_virtio_kbd::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
 

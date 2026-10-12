@@ -85,6 +85,12 @@ impl SharedRegion {
     }
 }
 
+impl AsMut<[u8]> for SharedRegion {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.bytes_mut()
+    }
+}
+
 impl Drop for SharedRegion {
     fn drop(&mut self) {
         let _ = crate::shm_unmap(self.base as u64, self.len);

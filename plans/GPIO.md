@@ -9,7 +9,7 @@ fires. Lines reach their consumers as `InterruptLine` links
 
 | Id | Item | Status |
 |---|---|---|
-| G1 | The line-interrupt service (`lib/abi/src/driver/gpio.rs`, `gpioirq-v1`): a consumer's link endpoint answers `Wait` when its line fires, with the trigger and polarity its selector states; the line stays masked from the moment it fires until the consumer waits again, so a level interrupt is serviced before it re-arms | planned |
+| G1 | The line-interrupt service (`lib/abi/src/driver/irqline.rs`, `irqline-v1`): a consumer's link endpoint answers `Wait` when its line fires, with the trigger and polarity its selector states; the line stays masked from the moment it fires until the consumer waits again, so a level interrupt is serviced before it re-arms; first served by the BCM L2 controller (`plans/SOUND.md` SND19e) | done |
 | G2 | The BCM2835-family GPIO controller driver (`drivers/gpio/bcm2835`: `brcm,bcm2711-gpio`, `brcm,bcm2835-gpio`): its bank interrupts, per-line edge and level detection, and the service | planned |
 | G3 | The Intel PCH GPIO controller driver (`drivers/gpio/intel_pch`, Sunrise Point and later): communities, pad groups, ACPI pin numbering, GPI interrupts through the controller's shared interrupt; published by the ACPI bus driver (`plans/ACPI.md` A4) | planned |
 
@@ -19,12 +19,16 @@ fires. Lines reach their consumers as `InterruptLine` links
   did; the line is masked in the controller as it fires, and unmasked by the
   next `Wait`. An edge that arrives while masked is latched and answers the
   next `Wait` at once, so no edge is lost and a level line cannot storm.
-- The selector names the line, the trigger (rising, falling, both, high, low)
-  and nothing else. A line another consumer holds, one the controller does not
-  have, or a trigger it cannot detect is refused at the first `Wait`, logged.
-- The consumer's driver waits on its link through the driver runtime's one
-  interrupt seam, beside a direct `Irq`, so a driver serves a device whichever
-  way its interrupt is wired.
+- The selector is the controller's own specifier: the line, and for a
+  controller whose binding names one the trigger (rising, falling, both, high,
+  low), and nothing else. A line another live consumer holds, one the
+  controller does not have, or a trigger it cannot detect is refused at the
+  first `Wait`, logged; a line an ended consumer held is taken by its link's
+  next holder.
+- The consumer's driver waits on its link through `tairix_linkclient`'s
+  `IrqLineClient` — a blocking wait, or a posted one its serve loop wakes on —
+  beside a direct `Irq`, so a driver serves a device whichever way its
+  interrupt is wired.
 - A consumer that ends has its line masked and released; a controller that
   ends answers every outstanding `Wait` with `NotFound`, which the consumer
   reads as its device gone.

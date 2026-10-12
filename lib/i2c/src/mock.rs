@@ -12,7 +12,7 @@
 
 use core::cell::RefCell;
 
-use tairix_abi::driver::i2c::{I2cPort, MAX_TRANSFER_LEN};
+use tairix_abi::driver::i2c::{I2cAddress, I2cPort, I2cTransaction};
 use tairix_abi::DriverError;
 
 /// Registers the modelled part exposes. Covers every register file this
@@ -75,11 +75,13 @@ impl MockPart {
     }
 }
 
-impl I2cPort for MockPart {
+impl MockPart {
     fn transfer(&self, write: &[u8], read: &mut [u8]) -> Result<(), DriverError> {
-        if write.len() > MAX_TRANSFER_LEN || read.len() > MAX_TRANSFER_LEN {
-            return Err(DriverError::LengthOutOfRange);
-        }
+        // Held to the bounds a real target channel holds it to; the address
+        // is the channel's, which the part has no say in.
+        let any = I2cAddress::new(0x50).map_err(DriverError::from_errno)?;
+        I2cTransaction::write_then_read(any, write.len(), read.len())
+            .map_err(DriverError::from_errno)?;
         let mut state = self.state.borrow_mut();
         state.transfers += 1;
         if let Some(fault) = state.fault {
@@ -92,11 +94,25 @@ impl I2cPort for MockPart {
         for (step, byte) in write.iter().skip(1).enumerate() {
             state.registers[(first + step) % REGISTER_COUNT] = *byte;
         }
-        // A read phase resumes at the pointer the write phase named, which
-        // is what a register read's repeated start does.
+        // A read resumes at the pointer the write named, which is what a
+        // register read's repeated START does.
         for (step, byte) in read.iter_mut().enumerate() {
             *byte = state.registers[(first + step) % REGISTER_COUNT];
         }
         Ok(())
+    }
+}
+
+impl I2cPort for MockPart {
+    fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), DriverError> {
+        Self::transfer(self, write, read)
+    }
+}
+
+/// A shared part is a port too, so a test can keep the part to seed and
+/// inspect while a driver drives it.
+impl I2cPort for &MockPart {
+    fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), DriverError> {
+        MockPart::transfer(self, write, read)
     }
 }

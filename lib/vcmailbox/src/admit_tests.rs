@@ -7,11 +7,11 @@ use tairix_abi::{Errno, HwDeviceClass, HwMatchKey, HwNode};
 
 use super::{admit_request, Refusal};
 use crate::{
-    encode_blank_screen, encode_clock_rate_query, encode_clock_rate_write,
+    encode_clock_rate_query, encode_clock_rate_write, encode_display_done,
     encode_firmware_revision_query, encode_gpio_state_write, encode_rtc_register_query,
     encode_rtc_register_write, encode_xhci_reset, request, ClockRateQuery, FirmwareClock,
-    FramebufferRequest, RtcRegister, FIRMWARE_CLOCKS_KEY, FIRMWARE_FRAMEBUFFER_KEY, PROPERTY_WORDS,
-    RPI_RTC_KEY, TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG, VL805_KEY,
+    FramebufferRequest, RtcRegister, DISPLAY_ENGINE_KEY, FIRMWARE_CLOCKS_KEY, PROPERTY_WORDS,
+    RPI_RTC_KEY, SKIP_SETTING_TURBO, TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG, VL805_KEY,
 };
 
 const EXECUTE_CODE: u32 = 0x0003_0010;
@@ -28,46 +28,83 @@ fn node(class: HwDeviceClass, keys: &[HwMatchKey]) -> HwNode {
 
 /// The four drivers the service answers, each loaded for its device's node.
 fn clients() -> [HwNode; 4] {
-    let simple_framebuffer = HwMatchKey::compatible(b"simple-framebuffer").expect("fits");
     [
-        node(
-            HwDeviceClass::Display,
-            &[FIRMWARE_FRAMEBUFFER_KEY, simple_framebuffer],
-        ),
         node(HwDeviceClass::Bus, &[VL805_KEY]),
         node(HwDeviceClass::Rtc, &[RPI_RTC_KEY]),
         node(HwDeviceClass::Other, &[FIRMWARE_CLOCKS_KEY]),
+        node(HwDeviceClass::Display, &[DISPLAY_ENGINE_KEY]),
     ]
 }
 
 /// Each driver's working set: the index of its driver in [`clients`], and one
 /// request of it.
-fn working_sets() -> [(usize, [u32; PROPERTY_WORDS]); 10] {
+fn working_sets() -> [(usize, [u32; PROPERTY_WORDS]); 21] {
     [
-        (0, encode_blank_screen(true)),
-        (0, encode_blank_screen(false)),
-        (1, encode_xhci_reset()),
-        (2, encode_rtc_register_query(RtcRegister::Time)),
-        (2, encode_rtc_register_query(RtcRegister::BackupVolts)),
+        (3, encode_display_done()),
+        (0, encode_xhci_reset()),
+        (1, encode_rtc_register_query(RtcRegister::Time)),
+        (1, encode_rtc_register_query(RtcRegister::BackupVolts)),
         (
-            2,
+            1,
             encode_rtc_register_write(RtcRegister::Time, 1_700_000_000),
         ),
         (
-            3,
+            2,
             encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Current),
         ),
         (
-            3,
+            2,
             encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Max),
         ),
         (
-            3,
+            2,
             encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Min),
         ),
         (
-            3,
+            2,
             encode_clock_rate_write(FirmwareClock::Arm, 1_500_000_000),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::Core, ClockRateQuery::Current),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::Core, ClockRateQuery::Max),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::Core, ClockRateQuery::Min),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::M2mc, ClockRateQuery::Current),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::M2mc, ClockRateQuery::Max),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::M2mc, ClockRateQuery::Min),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::PixelBvb, ClockRateQuery::Current),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::PixelBvb, ClockRateQuery::Max),
+        ),
+        (
+            2,
+            encode_clock_rate_query(FirmwareClock::PixelBvb, ClockRateQuery::Min),
+        ),
+        (2, encode_clock_rate_write(FirmwareClock::Core, 500_000_000)),
+        (2, encode_clock_rate_write(FirmwareClock::M2mc, 150_000_000)),
+        (
+            2,
+            encode_clock_rate_write(FirmwareClock::PixelBvb, 150_000_000),
         ),
     ]
 }
@@ -133,12 +170,7 @@ fn every_tag_outside_the_working_sets_is_refused_to_every_caller() {
     const SET_CUSTOMER_OTP: u32 = 0x0003_8021;
     let everything = node(
         HwDeviceClass::Other,
-        &[
-            FIRMWARE_FRAMEBUFFER_KEY,
-            VL805_KEY,
-            RPI_RTC_KEY,
-            FIRMWARE_CLOCKS_KEY,
-        ],
+        &[VL805_KEY, RPI_RTC_KEY, FIRMWARE_CLOCKS_KEY],
     );
     let refused_tags = [
         request(&[(EXECUTE_CODE, &[0x1000, 0, 0, 0, 0, 0, 0])]),
@@ -171,7 +203,7 @@ fn every_tag_outside_the_working_sets_is_refused_to_every_caller() {
 
 #[test]
 fn a_tag_in_a_shape_its_driver_never_sends_is_refused() {
-    let [_, vl805, rtc, clocks] = clients();
+    let [vl805, rtc, clocks, _] = clients();
     let arm = FirmwareClock::Arm.as_u32();
     // The clock write with its turbo word missing answered a lowering with the
     // ceiling; with the word clear it performs the turbo transition.
@@ -179,6 +211,8 @@ fn a_tag_in_a_shape_its_driver_never_sends_is_refused() {
     let turbo = request(&[(TAG_SET_CLOCK_RATE, &[arm, 600_000_000, 0])]);
     let peripheral_clock = encode_clock_rate_write(FirmwareClock::Emmc2, 200_000_000);
     let peripheral_query = encode_clock_rate_query(FirmwareClock::Emmc2, ClockRateQuery::Current);
+    // The 3D engine's clock feeds a device another driver owns.
+    let v3d = request(&[(TAG_SET_CLOCK_RATE, &[5, 500_000_000, SKIP_SETTING_TURBO])]);
     let mut stray_slot = encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Max);
     stray_slot[6] = 1;
     for message in [
@@ -186,6 +220,7 @@ fn a_tag_in_a_shape_its_driver_never_sends_is_refused() {
         turbo,
         peripheral_clock,
         peripheral_query,
+        v3d,
         stray_slot,
     ] {
         assert_eq!(
@@ -216,19 +251,8 @@ fn a_tag_in_a_shape_its_driver_never_sends_is_refused() {
 }
 
 #[test]
-fn a_blank_state_outside_the_two_its_encoder_spells_is_refused() {
-    let [framebuffer, ..] = clients();
-    let mut message = encode_blank_screen(false);
-    message[5] = 2;
-    assert_eq!(
-        admit_request(&message, Some(&framebuffer)),
-        refused(&message, Errno::PermissionDenied)
-    );
-}
-
-#[test]
 fn a_request_carries_exactly_one_tag() {
-    let [.., rtc, _] = clients();
+    let [_, rtc, ..] = clients();
     let time = encode_rtc_register_query(RtcRegister::Time);
     let twice = request(&[(time[2], &[0, 0]), (time[2], &[0, 0])]);
     assert_eq!(
@@ -255,7 +279,7 @@ fn a_request_carries_exactly_one_tag() {
 
 #[test]
 fn a_malformed_buffer_is_refused_before_any_tag_is_trusted() {
-    let [.., rtc, _] = clients();
+    let [_, rtc, ..] = clients();
     let good = encode_rtc_register_query(RtcRegister::Time);
     let with = |edit: &dyn Fn(&mut [u32; PROPERTY_WORDS])| {
         let mut message = good;

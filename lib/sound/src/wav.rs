@@ -12,8 +12,8 @@ use crate::g711::{ALAW, ULAW};
 use crate::input::{self, SoundInput};
 use crate::meta::{Collector, Cue, Loop, LoopKind, TagKey, TagKind};
 use crate::{
-    conventional_channels, ima, msadpcm, pcm, speaker_map, DataLength, DecodeError, DecodeLimits,
-    Encoding, SoundFormat, SoundInfo,
+    channel_count, conventional_channels, ima, msadpcm, pcm, speaker_map, DataLength, DecodeError,
+    DecodeLimits, Encoding, SoundFormat, SoundInfo,
 };
 
 const WAVE: &[u8; 4] = b"WAVE";
@@ -166,16 +166,16 @@ struct Format {
 }
 
 /// The channel map of `count` channels and an extensible format's `mask`, no
-/// mask naming none.
+/// mask naming none: a mask places any count it names, conventional or not.
 fn channel_map(
     count: u16,
     mask: Option<u32>,
     limits: &DecodeLimits,
 ) -> Result<ChannelMap, DecodeError> {
-    let conventional = conventional_channels(u32::from(count), limits)?;
     match mask.filter(|&mask| mask != 0) {
-        None => Ok(conventional),
-        Some(mask) => speaker_map(conventional.channels(), mask).ok_or(DecodeError::WavChannelMask),
+        None => conventional_channels(u32::from(count), limits),
+        Some(mask) => speaker_map(channel_count(u32::from(count), limits)?, mask)
+            .ok_or(DecodeError::WavChannelMask),
     }
 }
 

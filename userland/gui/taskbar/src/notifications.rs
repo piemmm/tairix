@@ -23,6 +23,38 @@ use tairix_abi::{BundleId, Errno, ProcId};
 use tairix_icon::IconKind;
 
 pub use tairix_abi::notify_ipc::NotifySeverity;
+use tairix_abi::sound_cue::SoundEvent;
+
+/// What raising a notification did.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Raised {
+    /// A notification not showing before is shown.
+    Shown,
+    /// One showing under the same key took the new content.
+    Replaced,
+    /// Byte-identical content was raised again: nothing moved.
+    Unchanged,
+}
+
+impl Raised {
+    /// Whether the shown set changed.
+    #[must_use]
+    pub const fn changed(self) -> bool {
+        !matches!(self, Self::Unchanged)
+    }
+}
+
+/// The sound a newly shown notification makes: the soft chime for one that
+/// informs, escalated for one that warns or reports a failure. An update in
+/// place makes none, so a producer reporting progress is not heard each step.
+#[must_use]
+pub const fn arrival_sound(severity: NotifySeverity) -> SoundEvent {
+    match severity {
+        NotifySeverity::Info | NotifySeverity::Success => SoundEvent::Notification,
+        NotifySeverity::Warning => SoundEvent::Warning,
+        NotifySeverity::Critical => SoundEvent::Error,
+    }
+}
 
 /// Most notifications the area holds at once.
 ///
@@ -244,24 +276,24 @@ impl NotificationArea {
 
     /// Raise a notification, or update it in place when one with the same
     /// `(producer, key)` is already showing (refreshing its recency).
-    /// Answers whether anything changed — re-raising byte-identical content
-    /// keeps its place and reports `false`.
+    /// Answers what it did — re-raising byte-identical content keeps its
+    /// place and is [`Raised::Unchanged`].
     ///
     /// # Errors
     ///
     /// [`Errno::LimitExceeded`] for a new notification past
     /// [`NOTIFICATIONS_MAX`] or its source's [`SOURCE_NOTIFICATIONS_MAX`];
     /// nothing changes. An update in place is never refused.
-    pub fn raise(&mut self, note: TransientNotification) -> Result<bool, Errno> {
+    pub fn raise(&mut self, note: TransientNotification) -> Result<Raised, Errno> {
         if let Some(pos) = self.position(note.producer.instance, note.key) {
             if self.notifications[pos].note == note {
-                return Ok(false);
+                return Ok(Raised::Unchanged);
             }
             let seq = self.alloc_seq();
             self.notifications[pos].note = note;
             self.notifications[pos].seq = seq;
             self.sort();
-            return Ok(true);
+            return Ok(Raised::Replaced);
         }
         let held = self
             .notifications
@@ -274,7 +306,7 @@ impl NotificationArea {
         let seq = self.alloc_seq();
         self.notifications.push(Stored { seq, note });
         self.sort();
-        Ok(true)
+        Ok(Raised::Shown)
     }
 
     /// Clear the notification identified by `(producer, key)`. Returns whether

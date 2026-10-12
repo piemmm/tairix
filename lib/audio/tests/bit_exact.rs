@@ -173,6 +173,7 @@ fn through_the_engine(
     let mut mixer = Mixer::new(
         SinkFormat {
             format,
+            resolution: format.valid_bits(),
             rate: rate(hz),
             channel_map: map,
         },
@@ -227,6 +228,7 @@ fn the_mixer_is_bit_exact_for_a_block_shorter_than_its_capacity() {
             for frames in [1usize, 2, 3, 7, 16, 31] {
                 let sink = SinkFormat {
                     format: *format,
+                    resolution: format.valid_bits(),
                     rate: rate(48_000),
                     channel_map: *map,
                 };
@@ -339,6 +341,7 @@ fn a_gain_that_is_not_unity_changes_the_samples_as_it_should() {
     let mut mixer = Mixer::new(
         SinkFormat {
             format: SampleFormat::S16,
+            resolution: 16,
             rate: rate(48_000),
             channel_map: map,
         },

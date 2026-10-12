@@ -140,16 +140,49 @@ fn a_multiplexed_stream_is_read_past_the_other_streams_pages() {
     assert_eq!(end, Ok(()));
 }
 
-/// A second stream chained on is refused where the first ends, once every
-/// one of the first's samples has been written.
+/// A stream chained on is read on into once the first ends: its own link,
+/// its frames counted from its own first, its tags its own.
 #[test]
-fn a_chained_stream_is_refused_where_the_first_ends() {
+fn a_chained_stream_is_read_on_into_where_the_first_ends() {
     let first = samples(3, 5000);
+    let second = samples(4, 3000);
     let mut file = ogg(&first, 1, false);
-    file.extend_from_slice(&ogg(&samples(4, 3000), 2, false));
-    let (_, decoded, end) = decode(&file, 700);
+    let boundary = file.len() as u64;
+    file.extend_from_slice(&ogg(&second, 2, true));
+    let (mut source, decoded, end) = decode(&file, 700);
     assert_eq!(decoded, pcm(&first));
-    assert_eq!(end, Err(DecodeError::OggChained));
+    assert_eq!(end, Ok(()));
+    assert_eq!(source.link(), crate::Link::FIRST);
+    let mut input = &file[..];
+    assert_eq!(source.next_link(&mut input), Ok(true));
+    assert_eq!(
+        source.link(),
+        crate::Link {
+            index: 1,
+            offset: boundary
+        }
+    );
+    assert_eq!(source.info().frames, Some(3000));
+    assert_eq!(source.position(), 0);
+    assert!(source
+        .metadata()
+        .tags
+        .iter()
+        .any(|tag| tag.value == "Over Ogg"));
+    let mut out = vec![0u8; 4 * 3000];
+    let mut got = Vec::new();
+    loop {
+        match source.next_block(&mut input, &mut out) {
+            Ok(0) => break,
+            Ok(written) => got.extend_from_slice(&out[..written * 4]),
+            Err(err) => panic!("{err:?}"),
+        }
+    }
+    assert_eq!(got, pcm(&second));
+    assert_eq!(source.next_link(&mut input), Ok(false));
+    let reopened = PcmSource::open_link(&mut &file[..], &LIMITS, source.link()).expect("reopens");
+    assert_eq!(reopened.info(), source.info());
+    assert_eq!(reopened.link(), source.link());
 }
 
 #[test]
@@ -192,12 +225,12 @@ fn a_damaged_or_missing_page_is_refused() {
 }
 
 #[test]
-fn an_ogg_file_holding_no_flac_stream_is_refused_by_name() {
+fn an_ogg_file_holding_no_codec_decoded_here_is_refused_by_name() {
     let mut other = PageWriter::new(5);
-    other.packet(b"\x01vorbis", 0);
+    other.packet(b"\x80theora", 0);
     other.flush(true);
     assert_eq!(
         PcmSource::open(&mut &other.into_bytes()[..], &LIMITS).map(|_| ()),
-        Err(DecodeError::OggNoFlacStream)
+        Err(DecodeError::OggNoCodec)
     );
 }

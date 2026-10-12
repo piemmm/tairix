@@ -25,7 +25,7 @@
 /* Array bounds. */
 #define TAIRIX_HW_COMPATIBLE_MAX ((uintptr_t)64u)
 #define TAIRIX_HW_NODE_MAX_MATCH_KEYS ((uintptr_t)4u)
-#define TAIRIX_HW_NODE_MAX_RESOURCES ((uintptr_t)16u)
+#define TAIRIX_HW_NODE_MAX_RESOURCES ((uintptr_t)32u)
 /* Length, in bytes, of an Ethernet MAC address. */
 #define TAIRIX_MAC_ADDRESS_LEN 6u
 
@@ -38,8 +38,8 @@
 #define TAIRIX_HW_RES_FLAG_DMA_SNOOPED 2u
 #define TAIRIX_HW_RES_FLAG_IRQ_MESSAGE 1u
 #define TAIRIX_HW_RES_FLAG_IRQ_EDGE 2u
-#define TAIRIX_HW_NODE_HEADER_LEN 18u
-#define TAIRIX_HW_NODE_WIRE_LEN 834u
+#define TAIRIX_HW_NODE_HEADER_LEN 19u
+#define TAIRIX_HW_NODE_WIRE_LEN 1347u
 
 /* Device classes (uint16_t). */
 #define TAIRIX_HW_CLASS_ROOT ((uint16_t)0u)
@@ -76,15 +76,14 @@
 #define TAIRIX_HW_RES_SHARED ((uint16_t)6u)
 #define TAIRIX_HW_RES_FRAMEBUFFER ((uint16_t)7u)
 #define TAIRIX_HW_RES_LINK_ADDRESS ((uint16_t)8u)
-#define TAIRIX_HW_RES_BUS_CHILD ((uint16_t)9u)
-#define TAIRIX_HW_RES_LINK_DUTY ((uint16_t)10u)
-#define TAIRIX_HW_RES_LINK_REQUEST ((uint16_t)11u)
-#define TAIRIX_HW_RES_IOMMU_STREAM ((uint16_t)12u)
-#define TAIRIX_HW_RES_IOMMU_RESERVED ((uint16_t)13u)
-#define TAIRIX_HW_RES_PROPERTY ((uint16_t)14u)
-#define TAIRIX_HW_RES_IOMMU_ALIAS ((uint16_t)15u)
-#define TAIRIX_HW_RES_IOMMU_GROUP ((uint16_t)16u)
-#define TAIRIX_HW_RES_MSI_DOORBELL ((uint16_t)17u)
+#define TAIRIX_HW_RES_LINK_DUTY ((uint16_t)9u)
+#define TAIRIX_HW_RES_LINK_REQUEST ((uint16_t)10u)
+#define TAIRIX_HW_RES_IOMMU_STREAM ((uint16_t)11u)
+#define TAIRIX_HW_RES_IOMMU_RESERVED ((uint16_t)12u)
+#define TAIRIX_HW_RES_PROPERTY ((uint16_t)13u)
+#define TAIRIX_HW_RES_IOMMU_ALIAS ((uint16_t)14u)
+#define TAIRIX_HW_RES_IOMMU_GROUP ((uint16_t)15u)
+#define TAIRIX_HW_RES_MSI_DOORBELL ((uint16_t)16u)
 
 /* Property keys (uint32_t). */
 #define TAIRIX_HW_PROPERTY_USB_INTERFACE ((uint32_t)1u)
@@ -92,6 +91,9 @@
 #define TAIRIX_HW_PROPERTY_KERNEL_DRIVEN ((uint32_t)3u)
 #define TAIRIX_HW_PROPERTY_USB_SPEED ((uint32_t)4u)
 #define TAIRIX_HW_PROPERTY_FIXED_CLOCK_RATE ((uint32_t)5u)
+#define TAIRIX_HW_PROPERTY_BUS_SPEED ((uint32_t)6u)
+#define TAIRIX_HW_PROPERTY_RADIO_COEXISTENCE ((uint32_t)7u)
+#define TAIRIX_HW_PROPERTY_BOOT_CONSOLE ((uint32_t)8u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is TAIRIX_HW_MATCH_KEY_WIRE_LEN. */

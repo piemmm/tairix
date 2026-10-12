@@ -22,7 +22,10 @@
 #[cfg(feature = "flac")]
 extern crate alloc;
 
+use core::iter;
 use core::sync::atomic::{AtomicBool, Ordering};
+
+use tairix_abi::sound_cue::SoundEvent;
 
 /// The rate the vertical runs at: every card's own, and the one a recorder
 /// that may be told a rate is told.
@@ -87,6 +90,20 @@ pub const SEAT_PASS_MARKER: &str = "AUDIO SEAT PASS";
 
 /// The sound player the `play` verticals run in the fixture's place.
 pub const PLAYER: &str = "play";
+
+/// The argument that has the fixture ask the cue authority for
+/// [`CUE_EVENT`], answered once it has played out, and then play a silent
+/// tail of its own so the cue has left the host backend's buffer before the
+/// run ends.
+pub const CUE_ARG: &str = "cue";
+
+/// The desktop sound the cue run asks for: an application's, so the fixture
+/// may, and longer than one ring, so the authority must refill it.
+pub const CUE_EVENT: SoundEvent = SoundEvent::NotificationReminder;
+
+/// The witness line the cue run prints once the cue played out and its tail
+/// drained with no lost frames.
+pub const CUE_PASS_MARKER: &str = "AUDIO CUE PASS";
 
 /// The guest's verdict on the run, fed every audited process `exit`.
 ///
@@ -282,8 +299,28 @@ pub enum WavMismatch {
     },
 }
 
+/// Whole buffers an emulated sound card reports discarding on its own, each
+/// `frames` frames long: what a card that drops audio when its host stalls
+/// says it dropped, so a capture is held to everything else exactly.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ReportedLoss {
+    /// Buffers discarded.
+    pub buffers: usize,
+    /// Frames each held.
+    pub frames: usize,
+}
+
+impl ReportedLoss {
+    /// A card that reported losing nothing.
+    pub const NONE: Self = Self {
+        buffers: 0,
+        frames: 0,
+    };
+}
+
 /// Check a host-captured WAV, whose header its recorder labels `label_hz`,
-/// holds exactly the signal the guest played.
+/// holds exactly the signal the guest played, apart from the whole buffers
+/// `loss` says the card itself discarded.
 ///
 /// The label is the recorder's and not always the stream's: a recorder that
 /// may not be told a rate states its own default over samples it never
@@ -300,8 +337,12 @@ pub enum WavMismatch {
 ///
 /// A [`WavMismatch`] naming what was wrong, so a failure says which frame
 /// diverged rather than only that one did.
-pub fn payload_matches_signal(wav: &[u8], label_hz: u32) -> Result<(), WavMismatch> {
-    matches_signal(wav, label_hz, None)
+pub fn payload_matches_signal(
+    wav: &[u8],
+    label_hz: u32,
+    loss: ReportedLoss,
+) -> Result<(), WavMismatch> {
+    matches(wav, label_hz, (0..SIGNAL_FRAMES).map(signal_frame), loss)
 }
 
 /// Check a host-captured WAV holds the signal the seat run played: every frame
@@ -312,12 +353,91 @@ pub fn payload_matches_signal(wav: &[u8], label_hz: u32) -> Result<(), WavMismat
 ///
 /// As [`payload_matches_signal`].
 pub fn payload_matches_held_signal(wav: &[u8], label_hz: u32) -> Result<(), WavMismatch> {
-    matches_signal(wav, label_hz, Some(HOLD_FRAME))
+    let held = (0..SIGNAL_FRAMES).flat_map(|frame| {
+        (frame == HOLD_FRAME)
+            .then_some(Expected::Pause)
+            .into_iter()
+            .chain(iter::once(signal_frame(frame)))
+    });
+    matches(wav, label_hz, held, ReportedLoss::NONE)
 }
 
-/// The comparison both checks share, allowing silence before the signal
-/// frame `gap_at` where one is named.
-fn matches_signal(wav: &[u8], label_hz: u32, gap_at: Option<usize>) -> Result<(), WavMismatch> {
+/// Check a host-captured WAV holds exactly `expected`, interleaved stereo
+/// samples decoded independently of the guest — a shipped sound's master.
+///
+/// A master begins and ends in silence, which is indistinguishable from the
+/// backend's own lead-in and tail, so both are trimmed from it as from the
+/// capture: everything from its first sounding frame to its last must arrive
+/// byte for byte, and nothing may sound after it.
+///
+/// # Errors
+///
+/// As [`payload_matches_signal`]; an `expected` that never sounds is
+/// [`WavMismatch::Short`], since it proves nothing.
+pub fn payload_matches_pcm(wav: &[u8], label_hz: u32, expected: &[i16]) -> Result<(), WavMismatch> {
+    payload_matches_sequence(wav, label_hz, &[expected])
+}
+
+/// Check a host-captured WAV holds each of `sounds` in order, as
+/// [`payload_matches_pcm`] holds one: each from its first sounding frame to
+/// its last, apart only by silence, and nothing sounding after the last.
+///
+/// # Errors
+///
+/// As [`payload_matches_pcm`], for the first sound that does not match; a
+/// frame is counted across every sound compared before it.
+pub fn payload_matches_sequence(
+    wav: &[u8],
+    label_hz: u32,
+    sounds: &[&[i16]],
+) -> Result<(), WavMismatch> {
+    if sounds.is_empty() || sounds.iter().any(|sound| sounding(sound).is_empty()) {
+        return Err(WavMismatch::Short { frames: 0 });
+    }
+    let steps = sounds.iter().flat_map(|sound| {
+        iter::once(Expected::Pause).chain(sounding(sound).iter().copied().map(Expected::Frame))
+    });
+    matches(wav, label_hz, steps, ReportedLoss::NONE)
+}
+
+/// `sound`'s frames from its first sounding one to its last, or none.
+fn sounding(sound: &[i16]) -> &[[i16; CHANNELS]] {
+    let (frames, _) = sound.as_chunks::<CHANNELS>();
+    let silent = |frame: &[i16; CHANNELS]| frame.iter().all(|&sample| sample == SILENCE);
+    let Some(first) = frames.iter().position(|frame| !silent(frame)) else {
+        return &[];
+    };
+    let last = frames
+        .iter()
+        .rposition(|frame| !silent(frame))
+        .unwrap_or(first);
+    &frames[first..=last]
+}
+
+/// One step of what a capture must hold.
+#[derive(Copy, Clone)]
+enum Expected {
+    /// Silence of any length may come here.
+    Pause,
+    /// This frame, exactly.
+    Frame([i16; CHANNELS]),
+}
+
+/// The signal's `frame`th frame.
+fn signal_frame(frame: usize) -> Expected {
+    Expected::Frame(core::array::from_fn(|channel| sample(frame, channel)))
+}
+
+/// The comparison every check shares: `expected` in order after the backend's
+/// lead-in, and nothing sounding after it. Where a frame differs or the
+/// capture ends early, one of the buffers `loss` reports may account for it,
+/// exactly as many frames as such a buffer holds.
+fn matches(
+    wav: &[u8],
+    label_hz: u32,
+    expected: impl IntoIterator<Item = Expected>,
+    loss: ReportedLoss,
+) -> Result<(), WavMismatch> {
     let (channels, rate, bits, payload) = parse_wav(wav)?;
     if usize::from(channels) != CHANNELS || rate != label_hz || bits != 16 {
         return Err(WavMismatch::WrongFormat {
@@ -335,30 +455,58 @@ fn matches_signal(wav: &[u8], label_hz: u32, gap_at: Option<usize>) -> Result<()
         .find(|frame| !frame_is_silent(payload, *frame))
         .unwrap_or(first);
     let mut recorded = first;
-    for frame in 0..SIGNAL_FRAMES {
-        if gap_at == Some(frame) {
+    let mut compared = 0;
+    let mut buffers_left = loss.buffers;
+    let mut steps = expected.into_iter();
+    while let Some(step) = steps.next() {
+        let Expected::Frame(frame) = step else {
             while recorded <= last && frame_is_silent(payload, recorded) {
                 recorded += 1;
             }
-        }
+            continue;
+        };
         if recorded > last {
-            return Err(WavMismatch::Short { frames: frame });
+            let left = 1 + steps
+                .filter(|step| matches!(step, Expected::Frame(_)))
+                .count();
+            if buffers_left > 0 && left <= loss.frames {
+                return Ok(());
+            }
+            return Err(WavMismatch::Short { frames: compared });
         }
-        let played = (0..CHANNELS).all(|channel| {
-            let at = (recorded * CHANNELS + channel) * 2;
-            i16::from_le_bytes([payload[at], payload[at + 1]]) == sample(frame, channel)
-        });
-        if !played {
-            return Err(WavMismatch::Differs { frame });
+        let played = |frame: &[i16; CHANNELS]| {
+            frame.iter().enumerate().all(|(channel, &sample)| {
+                let at = (recorded * CHANNELS + channel) * 2;
+                i16::from_le_bytes([payload[at], payload[at + 1]]) == sample
+            })
+        };
+        if !played(&frame) {
+            // The frames a buffers_left buffer held never arrived: what arrived in their
+            // place is the frame after them.
+            let after_loss = buffers_left > 0
+                && loss.frames > 0
+                && steps
+                    .by_ref()
+                    .filter_map(|step| match step {
+                        Expected::Frame(frame) => Some(frame),
+                        Expected::Pause => None,
+                    })
+                    .nth(loss.frames - 1)
+                    .is_some_and(|after| played(&after));
+            if !after_loss {
+                return Err(WavMismatch::Differs { frame: compared });
+            }
+            buffers_left -= 1;
+            compared += loss.frames;
         }
         recorded += 1;
+        compared += 1;
     }
-    // Past the signal the guest played nothing, so the device must have
-    // received nothing either: any sound there means the stack manufactured
-    // frames.
+    // Past what the guest played the device must have received nothing: any
+    // sound there means the stack manufactured frames.
     match (recorded..=last).position(|frame| !frame_is_silent(payload, frame)) {
         Some(extra) => Err(WavMismatch::Differs {
-            frame: SIGNAL_FRAMES + extra,
+            frame: compared + extra,
         }),
         None => Ok(()),
     }
@@ -436,11 +584,126 @@ mod tests {
     #[test]
     fn the_signal_is_accepted_with_or_without_the_backends_own_silence() {
         let bare = wav(&signal_bytes());
-        assert_eq!(payload_matches_signal(&bare, RATE_HZ), Ok(()));
+        assert_eq!(
+            payload_matches_signal(&bare, RATE_HZ, ReportedLoss::NONE),
+            Ok(())
+        );
         let mut padded = vec![0u8; 64 * FRAME_BYTES];
         padded.extend_from_slice(&signal_bytes());
         padded.extend(core::iter::repeat_n(0u8, 32 * FRAME_BYTES));
-        assert_eq!(payload_matches_signal(&wav(&padded), RATE_HZ), Ok(()));
+        assert_eq!(
+            payload_matches_signal(&wav(&padded), RATE_HZ, ReportedLoss::NONE),
+            Ok(())
+        );
+    }
+
+    /// A master with its own silent lead-in and tail, as every shipped sound
+    /// is authored.
+    fn master() -> Vec<i16> {
+        let mut samples = vec![0i16; 2 * 30];
+        samples.extend((1..400).flat_map(|n| [n, -n]));
+        // Silent on both channels mid-sound, which the comparison must keep.
+        samples.extend([0, 0]);
+        samples.extend([7, 0, 0, -7]);
+        samples.extend(vec![0i16; 2 * 12]);
+        samples
+    }
+
+    fn le(samples: &[i16]) -> Vec<u8> {
+        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn a_master_is_matched_from_its_first_sound_to_its_last() {
+        let master = master();
+        let sounding = &master[2 * 30..master.len() - 2 * 12];
+        // The backend's lead-in and a tail that lost the master's own
+        // trailing silence still hold the master.
+        let mut payload = vec![0u8; 100 * FRAME_BYTES];
+        payload.extend(le(sounding));
+        payload.extend(vec![0u8; 3 * FRAME_BYTES]);
+        assert_eq!(
+            payload_matches_pcm(&wav(&payload), RATE_HZ, &master),
+            Ok(())
+        );
+
+        let mut altered = payload.clone();
+        altered[(100 + 50) * FRAME_BYTES] ^= 1;
+        assert_eq!(
+            payload_matches_pcm(&wav(&altered), RATE_HZ, &master),
+            Err(WavMismatch::Differs { frame: 50 })
+        );
+        let mut trailing = payload.clone();
+        trailing.extend(le(&[0, 3]));
+        assert!(matches!(
+            payload_matches_pcm(&wav(&trailing), RATE_HZ, &master),
+            Err(WavMismatch::Differs { .. })
+        ));
+        let cut = &payload[..payload.len() - 6 * FRAME_BYTES];
+        assert!(matches!(
+            payload_matches_pcm(&wav(cut), RATE_HZ, &master),
+            Err(WavMismatch::Short { .. })
+        ));
+        assert_eq!(
+            payload_matches_pcm(&wav(&payload), RATE_HZ, &[0; 8]),
+            Err(WavMismatch::Short { frames: 0 }),
+            "a master that never sounds proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_sequence_is_matched_in_order_apart_only_by_silence() {
+        let first = master();
+        let second: Vec<i16> = [0, 0]
+            .into_iter()
+            .chain((1..200).flat_map(|n| [-n, n]))
+            .chain([0, 0])
+            .collect();
+        let first_frames = sounding(&first).len();
+        let capture = |sounds: &[&[i16]], apart: usize| {
+            let mut payload = vec![0u8; 40 * FRAME_BYTES];
+            for sound in sounds {
+                payload.extend(le(sounding(sound).as_flattened()));
+                payload.extend(vec![0u8; apart * FRAME_BYTES]);
+            }
+            wav(&payload)
+        };
+        for apart in [0, 900] {
+            assert_eq!(
+                payload_matches_sequence(
+                    &capture(&[&first, &second], apart),
+                    RATE_HZ,
+                    &[&first, &second]
+                ),
+                Ok(()),
+                "{apart} silent frames between"
+            );
+        }
+        assert_eq!(
+            payload_matches_sequence(
+                &capture(&[&second, &first], 900),
+                RATE_HZ,
+                &[&first, &second]
+            ),
+            Err(WavMismatch::Differs { frame: 0 })
+        );
+        assert_eq!(
+            payload_matches_sequence(&capture(&[&first], 900), RATE_HZ, &[&first, &second]),
+            Err(WavMismatch::Short {
+                frames: first_frames
+            })
+        );
+        assert_eq!(
+            payload_matches_sequence(&capture(&[&first, &second], 900), RATE_HZ, &[&first]),
+            Err(WavMismatch::Differs {
+                frame: first_frames + 900
+            }),
+            "a sound after the last expected one is manufactured"
+        );
+        assert_eq!(
+            payload_matches_sequence(&capture(&[&first], 0), RATE_HZ, &[]),
+            Err(WavMismatch::Short { frames: 0 })
+        );
     }
 
     #[test]
@@ -449,8 +712,50 @@ mod tests {
         let at = 500 * FRAME_BYTES;
         bytes[at] ^= 0x01;
         assert_eq!(
-            payload_matches_signal(&wav(&bytes), RATE_HZ),
+            payload_matches_signal(&wav(&bytes), RATE_HZ, ReportedLoss::NONE),
             Err(WavMismatch::Differs { frame: 500 })
+        );
+    }
+
+    /// A buffer the card reports discarding accounts for exactly its frames,
+    /// once, wherever it fell — the tail included — and for nothing else.
+    #[test]
+    fn a_reported_loss_accounts_for_its_own_frames_and_no_others() {
+        const BUFFER: usize = 2048;
+        let one = ReportedLoss {
+            buffers: 1,
+            frames: BUFFER,
+        };
+        let lose = |at: usize, frames: usize| {
+            let mut bytes = signal_bytes();
+            bytes.drain(at * FRAME_BYTES..(at + frames) * FRAME_BYTES);
+            wav(&bytes)
+        };
+        let gapped = lose(7757, BUFFER);
+        assert_eq!(payload_matches_signal(&gapped, RATE_HZ, one), Ok(()));
+        assert_eq!(
+            payload_matches_signal(&gapped, RATE_HZ, ReportedLoss::NONE),
+            Err(WavMismatch::Differs { frame: 7757 }),
+            "an unreported loss is a mismatch"
+        );
+        // The ramp repeats every 2000 frames, so a gap of 48 looks like one of
+        // 2048 where it falls; the rest of the capture tells them apart.
+        assert!(payload_matches_signal(&lose(7757, 48), RATE_HZ, one).is_err());
+        assert!(payload_matches_signal(&lose(7757, BUFFER - 1), RATE_HZ, one).is_err());
+        let mut twice = signal_bytes();
+        twice.drain(9000 * FRAME_BYTES..(9000 + BUFFER) * FRAME_BYTES);
+        twice.drain(1000 * FRAME_BYTES..(1000 + BUFFER) * FRAME_BYTES);
+        assert!(payload_matches_signal(&wav(&twice), RATE_HZ, one).is_err());
+        let two = ReportedLoss { buffers: 2, ..one };
+        assert_eq!(payload_matches_signal(&wav(&twice), RATE_HZ, two), Ok(()));
+        let tail = lose(SIGNAL_FRAMES - 1000, 1000);
+        assert_eq!(payload_matches_signal(&tail, RATE_HZ, one), Ok(()));
+        let mut altered = signal_bytes();
+        altered[500 * FRAME_BYTES] ^= 1;
+        assert_eq!(
+            payload_matches_signal(&wav(&altered), RATE_HZ, one),
+            Err(WavMismatch::Differs { frame: 500 }),
+            "a corrupt frame is no lost buffer"
         );
     }
 
@@ -458,9 +763,12 @@ mod tests {
     fn the_header_must_carry_the_label_its_recorder_states() {
         let mut labelled = wav(&signal_bytes());
         labelled[24..28].copy_from_slice(&44_100u32.to_le_bytes());
-        assert_eq!(payload_matches_signal(&labelled, 44_100), Ok(()));
         assert_eq!(
-            payload_matches_signal(&labelled, RATE_HZ),
+            payload_matches_signal(&labelled, 44_100, ReportedLoss::NONE),
+            Ok(())
+        );
+        assert_eq!(
+            payload_matches_signal(&labelled, RATE_HZ, ReportedLoss::NONE),
             Err(WavMismatch::WrongFormat {
                 channels: 2,
                 rate: 44_100,
@@ -473,15 +781,15 @@ mod tests {
     fn a_truncated_or_mis_shaped_capture_is_refused() {
         let short = &signal_bytes()[..1_000 * FRAME_BYTES];
         assert!(matches!(
-            payload_matches_signal(&wav(short), RATE_HZ),
+            payload_matches_signal(&wav(short), RATE_HZ, ReportedLoss::NONE),
             Err(WavMismatch::Short { .. })
         ));
         assert_eq!(
-            payload_matches_signal(b"not a wav", RATE_HZ),
+            payload_matches_signal(b"not a wav", RATE_HZ, ReportedLoss::NONE),
             Err(WavMismatch::TooShort)
         );
         assert_eq!(
-            payload_matches_signal(&[0u8; 64], RATE_HZ),
+            payload_matches_signal(&[0u8; 64], RATE_HZ, ReportedLoss::NONE),
             Err(WavMismatch::NotWave)
         );
     }
@@ -495,7 +803,10 @@ mod tests {
         let kept = (SIGNAL_FRAMES + 8) * FRAME_BYTES;
         let wav = wav(&stream[..kept]);
 
-        assert_eq!(payload_matches_signal(&wav, RATE_HZ), Ok(()));
+        assert_eq!(
+            payload_matches_signal(&wav, RATE_HZ, ReportedLoss::NONE),
+            Ok(())
+        );
     }
 
     #[test]
@@ -510,7 +821,10 @@ mod tests {
         let data_len = wav.len() - payload.len() - 4;
         wav[data_len..data_len + 4].copy_from_slice(&0u32.to_le_bytes());
 
-        assert_eq!(payload_matches_signal(&wav, RATE_HZ), Ok(()));
+        assert_eq!(
+            payload_matches_signal(&wav, RATE_HZ, ReportedLoss::NONE),
+            Ok(())
+        );
     }
 
     #[test]
@@ -529,7 +843,10 @@ mod tests {
     fn the_signal_file_holds_the_signal_and_its_silent_tail() {
         let mut file = vec![0u8; SIGNAL_WAV_LEN];
         assert_eq!(write_signal_wav(&mut file), SIGNAL_WAV_LEN);
-        assert_eq!(payload_matches_signal(&file, RATE_HZ), Ok(()));
+        assert_eq!(
+            payload_matches_signal(&file, RATE_HZ, ReportedLoss::NONE),
+            Ok(())
+        );
         assert_eq!(write_signal_wav(&mut file[..SIGNAL_WAV_LEN - 1]), 0);
     }
 
@@ -580,7 +897,7 @@ mod tests {
             Err(WavMismatch::Differs { frame: HOLD_FRAME })
         );
         assert_eq!(
-            payload_matches_signal(&wav(&held(HOLD_FRAME, 10)), RATE_HZ),
+            payload_matches_signal(&wav(&held(HOLD_FRAME, 10)), RATE_HZ, ReportedLoss::NONE),
             Err(WavMismatch::Differs { frame: HOLD_FRAME }),
             "the plain check allows no gap at all"
         );

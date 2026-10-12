@@ -289,13 +289,6 @@ pub fn silence(format: SampleFormat, out: &mut [u8]) {
     out.fill(format.silence_byte());
 }
 
-/// Whether quantising material of `source_bits` into `destination` throws away
-/// resolution, which is the only condition under which dither belongs.
-#[must_use]
-pub fn narrows(source_bits: u32, destination: SampleFormat) -> bool {
-    !destination.is_float() && destination.valid_bits() < source_bits
-}
-
 /// Whether a quantisation step is dithered.
 ///
 /// Deliberately has no [`Default`]: the engine's default is the triangular
@@ -341,18 +334,44 @@ impl DitherSource {
         uniform_24(word) - uniform_24(word >> 32)
     }
 
-    /// Add one step of triangular noise to every sample of `block`, scaled to
-    /// `destination`'s own quantisation step.
-    ///
-    /// A float destination has no step to dither to, so it is left alone.
-    pub fn apply(&mut self, destination: SampleFormat, block: &mut [f32]) {
-        if destination.is_float() {
-            return;
-        }
-        let step = 1.0 / full_scale_f32(destination);
+    /// Add one step of triangular noise to every sample of `block`, the step
+    /// of a `bits`-bit integer grid.
+    pub fn apply(&mut self, bits: u32, block: &mut [f32]) {
+        let step = grid_step(bits);
         for sample in block {
             *sample += self.next_triangular() * step;
         }
+    }
+}
+
+/// One step of a `bits`-bit two's-complement grid in the pivot: exactly a
+/// power of two.
+fn grid_step(bits: u32) -> f32 {
+    (1..bits).fold(1.0, |step, _| step * 0.5)
+}
+
+/// Round every sample of `block` onto the grid of a `bits`-bit
+/// two's-complement encoding, saturating as one does: what a device resolving
+/// `bits` of a wider encoding keeps, so the bits below encode as zero.
+///
+/// Where the grid is finer than the pivot's mantissa, the top kept is the
+/// largest step an `f32` holds below full scale, which keeps full scale on
+/// the grid.
+pub(crate) fn requantise(bits: u32, block: &mut [f32]) {
+    let Some(steps) = bits
+        .checked_sub(1)
+        .and_then(|shift| 1u32.checked_shl(shift))
+    else {
+        return;
+    };
+    let top = steps - (steps >> f32::MANTISSA_DIGITS).max(1);
+    let (Ok(min), Ok(max)) = (i32::try_from(-i64::from(steps)), i32::try_from(top)) else {
+        return;
+    };
+    let scale = f64::from(steps);
+    let step = grid_step(bits);
+    for sample in block {
+        *sample = to_pivot(quantise(*sample, scale, min, max)) * step;
     }
 }
 

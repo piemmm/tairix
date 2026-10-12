@@ -61,7 +61,7 @@ use tairix_abi::desktop::{
     DOUBLE_CLICK_MIN,
 };
 use tairix_abi::time::Duration64;
-use tairix_appconf::{ConfError, Document, Registry};
+use tairix_appconf::{merge_admitting, Document, Registry};
 use tairix_colour::Rgb;
 use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
@@ -82,41 +82,11 @@ use crate::sound::SoundControls;
 use crate::text::{TextFamily, TextSize};
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
-/// key.
-///
-/// A fixed validation bound on untrusted input: a wallpaper path names a
-/// file under the shipped store or somewhere in the user's own files, and a
-/// legitimate one is a handful of path components, so this bounds how much
-/// hostile work a single value can demand before the path parser even runs.
-/// It is the registry's own bound and must sit inside the format engine's
-/// [`tairix_appconf::MAX_VALUE_LEN`], or a path this crate accepts could
-/// never be written to the store; the assertion below holds that at compile
-/// time rather than leaving it to a test that could be deleted.
-pub const MAX_WALLPAPER_PATH_LEN: usize = 1024;
-
-const _: () = assert!(
-    MAX_WALLPAPER_PATH_LEN <= tairix_appconf::MAX_VALUE_LEN,
-    "a wallpaper path must fit one settings value"
-);
+/// key: the bound every path-valued setting shares.
+pub const MAX_WALLPAPER_PATH_LEN: usize = tairix_appconf::MAX_SETTING_PATH_LEN;
 
 /// Why a wallpaper path was refused.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum WallpaperPathError {
-    /// The path exceeded [`MAX_WALLPAPER_PATH_LEN`].
-    TooLong,
-    /// The path was empty, relative, held an embedded control character, or
-    /// otherwise failed to parse as an absolute session-view path.
-    Malformed,
-}
-
-impl fmt::Display for WallpaperPathError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooLong => f.write_str("wallpaper path is too long"),
-            Self::Malformed => f.write_str("wallpaper path is not an absolute path"),
-        }
-    }
-}
+pub type WallpaperPathError = tairix_appconf::SettingPathError;
 
 /// A validated absolute path naming a wallpaper image.
 ///
@@ -146,14 +116,7 @@ impl WallpaperPath {
     ///
     /// [`WallpaperPathError::TooLong`] or [`WallpaperPathError::Malformed`].
     pub fn new(path: &str) -> Result<Self, WallpaperPathError> {
-        if path.len() > MAX_WALLPAPER_PATH_LEN {
-            return Err(WallpaperPathError::TooLong);
-        }
-        let parsed = tairix_path::parse(path).map_err(|_| WallpaperPathError::Malformed)?;
-        if !matches!(parsed.root(), tairix_path::Root::View) || parsed.components().is_empty() {
-            return Err(WallpaperPathError::Malformed);
-        }
-        Ok(Self(parsed.to_string()))
+        tairix_appconf::SettingPath::new(path).map(|path| Self(path.into_string()))
     }
 
     /// Build the path for the shipped default wallpaper.
@@ -847,37 +810,11 @@ impl fmt::Display for SettingsKey {
     }
 }
 
-/// Why a pinboard settings document that arrived over a channel was refused.
+/// Why a settings document that arrived over a channel was refused.
 ///
-/// Only [`merge`] raises these: a document held in the store is read
-/// tolerantly, key by key, by [`Registry::load`].
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DocumentRefusal {
-    /// The document is outside the format engine's own bounds or grammar.
-    Malformed(ConfError),
-    /// A line the `key = value` grammar did not read as a setting, by its
-    /// 1-based line number.
-    Unparsed(usize),
-    /// A key outside the closed [`SettingsKey`] registry.
-    UnknownKey(String),
-    /// A value outside its key's closed set, or malformed.
-    InvalidValue(SettingsKey),
-    /// A key of the registry that is not one the reading admits
-    /// ([`merge_within`]).
-    OutsideGroup(SettingsKey),
-}
-
-impl fmt::Display for DocumentRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Malformed(err) => write!(f, "not a settings document ({err})"),
-            Self::Unparsed(line) => write!(f, "line {line}: not a setting"),
-            Self::UnknownKey(key) => write!(f, "unknown pinboard settings key `{key}`"),
-            Self::InvalidValue(key) => write!(f, "`{key}` is not a value that setting accepts"),
-            Self::OutsideGroup(key) => write!(f, "`{key}` is not a setting this request names"),
-        }
-    }
-}
+/// Only [`merge`] and its narrowings raise these: a document held in the
+/// store is read tolerantly, key by key, by [`Registry::load`].
+pub type DocumentRefusal = tairix_appconf::Refusal<SettingsKey>;
 
 /// The per-user pinboard settings: the desktop backdrop's wallpaper, fit,
 /// colour, and the `Desktop` folder's icon flow and sort order.
@@ -1298,29 +1235,6 @@ pub fn merge_within(
     group: &[SettingsKey],
 ) -> Result<DesktopSettings, DocumentRefusal> {
     merge_admitting(base, text, |key| group.contains(&key))
-}
-
-fn merge_admitting(
-    base: &DesktopSettings,
-    text: &str,
-    admits: impl Fn(SettingsKey) -> bool,
-) -> Result<DesktopSettings, DocumentRefusal> {
-    let document = Document::parse(text).map_err(DocumentRefusal::Malformed)?;
-    if let Some(line) = document.unparsed().next() {
-        return Err(DocumentRefusal::Unparsed(line.line));
-    }
-    let mut settings = base.clone();
-    for setting in document.settings() {
-        let key = SettingsKey::from_name(setting.key)
-            .ok_or_else(|| DocumentRefusal::UnknownKey(setting.key.to_string()))?;
-        if !admits(key) {
-            return Err(DocumentRefusal::OutsideGroup(key));
-        }
-        if !set_field(&mut settings, key, setting.value) {
-            return Err(DocumentRefusal::InvalidValue(key));
-        }
-    }
-    Ok(settings)
 }
 
 #[cfg(test)]

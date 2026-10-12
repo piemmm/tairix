@@ -11,27 +11,21 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The crate is **only** a binary: the `Run` entry point of the virtio-net
-# driver bundle, installed under `/System/Drivers/` and autoloaded into user
-# space by `devmgr` when a virtio-net device is discovered.
-# It links the userland runtime `tairix-rt`, so it is a separate crate from any
-# kernel-linked driver shell (the kernel must not pull in the userland `_start`
-# / panic handler / allocator), and depends only on `lib/*` crates so the
-# layering holds (no `drivers/*`→`drivers/*` edge). It is a freestanding
-# pure-Rust program on the native Tier-1 targets and an inert host stub
-# elsewhere (`src/main.rs` / `build.rs`), mirroring `drivers/input/virtio_kbd`
-# and `drivers/storage/usb_msd`.
+# Two targets: the `Run` entry point of the driver bundle (`src/main.rs`),
+# autoloaded into user space by `devmgr`, and the capabilities its signed
+# manifest requests (`src/lib.rs`), which the image builder reads too. It links
+# the userland runtime `tairix-rt`, so it is a separate crate from
+# any kernel-linked driver shell (the kernel must not pull in the userland `_start` / panic handler),
+# and depends only on `lib/*` crates so the layering holds. The binary is an
+# inert host stub off bare metal (`build.rs`).
 
-# Everything the freestanding program links is pulled in only for the bare-metal
-# targets the binary is actually built for; on the host the binary is an inert
-# stub with no dependencies.
-[target.'cfg(target_os = "none")'.dependencies]
-# The `abi-v1` surface: the role-tagged virtio-PCI / single-aperture MMIO
-# grant helpers the transport is shape-keyed from, the `Net` device trait,
-# and the capability ids the host is built over.
+[dependencies]
+# The capability vocabulary the manifest request is spelled in.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The capability-set type the rt-backed `DriverHost` is built over.
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+
+# Everything else the freestanding program links is pulled in only for the
+# bare-metal targets the binary is actually built for.
+[target.'cfg(target_os = "none")'.dependencies]
 # The bus-agnostic virtio-MMIO transport this driver builds over its granted
 # register window — a `lib/*` crate, so the layering holds (the driver
 # never names `drivers/bus/virtio`; the `lib/usb` ↔ `drivers/bus/usb`

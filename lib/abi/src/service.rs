@@ -242,10 +242,13 @@ pub enum ReadyCondition {
     /// The network stack is serving its endpoints, so a socket can be opened
     /// (provided by `netstack`). Says nothing of any link being up.
     NetworkUp = 0,
-    /// The system's filesystems are mounted and writable.
+    /// The system's filesystems are mounted and writable: the encrypted root
+    /// is unlocked. Asserted by the manager when it first sees the writable
+    /// root answer, and never withdrawn.
     FilesystemsMounted = 1,
-    /// Every boot-floor service has reached readiness — the point the
-    /// manager considers the system booted.
+    /// Every boot-floor service has settled — ready, or failed with no
+    /// relaunch pending — the point the manager considers the system booted.
+    /// Asserted by the manager once and never withdrawn.
     BootComplete = 2,
     /// A usable display is present (a display driver bound, a framebuffer
     /// available). Never satisfied on a headless boot.
@@ -356,6 +359,16 @@ impl ReadinessKind {
             ReadinessKind::Immediate => "immediate",
             ReadinessKind::Notify => "notify",
         }
+    }
+
+    /// Resolve a stable identifier, or `None` for any other word (fail
+    /// closed: an unrecognised readiness is a description defect, never a
+    /// default).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Immediate, Self::Notify]
+            .into_iter()
+            .find(|kind| kind.as_str() == name)
     }
 }
 
@@ -1423,7 +1436,10 @@ mod tests {
     #[test]
     fn readiness_kind_round_trips_and_defaults_immediate() {
         assert_eq!(ReadinessKind::default(), ReadinessKind::Immediate);
+        assert_eq!(ReadinessKind::from_name("Notify"), None);
+        assert_eq!(ReadinessKind::from_name(""), None);
         for kind in [ReadinessKind::Immediate, ReadinessKind::Notify] {
+            assert_eq!(ReadinessKind::from_name(kind.as_str()), Some(kind));
             assert_eq!(ReadinessKind::from_u8(kind.as_u8()), Some(kind));
         }
         assert_eq!(ReadinessKind::from_u8(2), None);

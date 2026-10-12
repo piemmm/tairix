@@ -1,6 +1,6 @@
 [package]
 name = "tairix-linkclient"
-description = "TAIRiX supplier-link clients: the consumer halves of the link seams a driver speaks to the drivers its node names — a DMA channel and the period wait its serve loop wakes on, and the clock its block runs from."
+description = "TAIRiX supplier-link clients: the consumer halves of the link seams a driver speaks to the drivers its node names — a DMA channel and the period wait its serve loop wakes on, the clock its block runs from, the codec it drives, the interrupt line it waits on, the I2C bus or target it talks to, and the encoder a display engine's output runs through."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,7 @@ workspace = true
 # The link protocols' frames and the link records a client quotes.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The blocking call and the posted call/reap pair the production transport
-# rides. The crate builds on the host, its traps failing closed there, so the
-# client stays host-testable with no target-conditional gate.
+# rides, and the mapping of a granted I2C channel buffer. The crate builds on
+# the host, its traps failing closed there, so the client stays host-testable
+# with no target-conditional gate.
 tairix-rt = { path = "../rt", version = "=0.0.0" }

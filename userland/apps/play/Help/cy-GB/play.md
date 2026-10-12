@@ -11,7 +11,10 @@ play — chwarae ffeiliau sain
 Yn chwarae pob ffeil yn ei thro ar allbwn. Caiff pob ffeil ei datgodio mewn
 proses ynysig heb unrhyw awdurdod o gwbl, felly ar y gwaethaf gall ffeil
 elyniaethus ddim ond dod â'i datgodio ei hun i ben: caiff ei hepgor gyda'r
-rheswm wedi'i nodi, a chwaraeir gweddill y rhestr. Darllenir ffeiliau AU, WAV a FLAC, FLAC yn frodorol neu mewn Ogg.
+rheswm wedi'i nodi, a chwaraeir gweddill y rhestr. Darllenir ffeiliau AU, WAV, FLAC,
+Vorbis, Opus a sain MPEG (MP1, MP2 ac MP3), FLAC yn frodorol neu mewn Ogg, a
+Vorbis ac Opus mewn Ogg;
+chwaraeir ffrydiau cadwynog ffeil Ogg y naill ar ôl y llall.
 
 Mae ffeiliau olynol o'r un gyfradd, yr un fformat sampl a'r un drefn sianeli yn
 chwarae'n ddi-fwlch, mewn un ffrwd. Mae ffeil o siâp arall yn aros i'r hyn sydd

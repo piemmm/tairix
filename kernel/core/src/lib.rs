@@ -211,9 +211,10 @@ pub use blockwait::{FallbackPark, IrqParkWaiter};
 pub use bootinfo::{BootInfo, BootInfoError, IrqRouting, KernelArch, MAX_COMMAND_LINE_BYTES};
 pub use cache_control::{CacheClass, CacheControl, CacheMode, CACHE_CONTROL};
 pub use console::{
-    BlockingConsoleRead, ConsoleDevice, ConsoleInput, ConsoleInputQueue, ConsoleRead, ConsoleWrite,
-    NullConsole, NullConsoleInput, NullConsoleRead, SecretFeedback, CONSOLE_INPUT_QUEUE_CAPACITY,
-    NO_CONSOLES, NULL_CONSOLE, NULL_CONSOLE_INPUT, NULL_CONSOLE_READ,
+    BlockingConsoleRead, ConsoleDevice, ConsoleInput, ConsoleInputQueue, ConsoleRead,
+    ConsoleSurface, ConsoleWrite, NullConsole, NullConsoleInput, NullConsoleRead, Relocation,
+    SecretFeedback, CONSOLE_INPUT_QUEUE_CAPACITY, NO_CONSOLES, NULL_CONSOLE, NULL_CONSOLE_INPUT,
+    NULL_CONSOLE_READ,
 };
 pub use cpu_state::{install as initialize_cpu_state, CpuStateInitError};
 pub use devres::{
@@ -244,7 +245,7 @@ pub use groups::{
     build_identity_table, load_groups_db, system_identity_table, GroupsDbSource, GroupsLoadError,
     LateGroupsDb, NullGroupsDbSource, GROUPS_DB_PATH, NULL_GROUPS_DB,
 };
-pub use hwtree::{HwNodeLiveness, HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
+pub use hwtree::{HwDriverTree, HwNodeLiveness, HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase, SchedWaitQueueArch};
 pub use introspect::{IntrospectSource, NullIntrospectSource, NULL_INTROSPECT};
 pub use introspect_source::KernelIntrospectSource;

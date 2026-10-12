@@ -8,9 +8,8 @@ Stability tier: **experimental**.
 
 ## What it plays
 
-FLAC (native and in Ogg), WAV and AU — every encoding `lib/sound` reads, each
-completely. MPEG audio, Vorbis and Opus are claimed with the decoders that
-read them.
+AU, WAV, FLAC (native and in Ogg), Vorbis and Opus (in Ogg) and MPEG audio —
+every encoding `lib/sound` reads, each completely.
 
 ## Capabilities
 

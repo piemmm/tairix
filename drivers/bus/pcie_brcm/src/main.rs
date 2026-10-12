@@ -63,8 +63,6 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::CapabilityId;
-    use tairix_caps::CapabilitySet;
     use tairix_drv_bus_pcie_brcm::wiring::{emit_vl805_node, pcie_bringup_from_resources};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_rt::ClockDelay;
@@ -92,25 +90,6 @@ mod program {
     /// spawning supervisor decides whether to relaunch. A reserved value.
     const EXIT_PARK_FAILED: i32 = 83;
 
-    /// The capability set the driver host re-checks up front before issuing a
-    /// `mmio_map` / `msi_alloc` / `hw_emit_node` trap, so a missing grant fails
-    /// fast without a round trip. It mirrors the authority this driver needs —
-    /// mapping the controller window and the BAR probe (`CAP_MMIO_MAP`),
-    /// allocating the controller's MSI vector so the matched xHCI driver parks
-    /// on its completion interrupt rather than busy-polling (`CAP_IRQ_BIND`,
-    /// which the `msi_alloc` trap is gated on), and publishing the enumerated
-    /// child node with its forwarded grants (`CAP_HW_EMIT`). The kernel is the
-    /// authority and re-checks every trap regardless: claiming a
-    /// capability the process was not granted only fails the trap kernel-side,
-    /// never widens authority.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::IRQ_BIND);
-        caps.insert(CapabilityId::HW_EMIT);
-        caps
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -120,7 +99,11 @@ mod program {
         // Build the host from the grants the kernel minted for this driver.
         // It carves no DMA, so no architecture-specific cache shim is supplied
         // (`coherency = None`).
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = tairix_drv_bus_pcie_brcm::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         // Parse the discovered controller/inbound/outbound windows from the
@@ -135,6 +118,9 @@ mod program {
         if emit_vl805_node(&host, &bringup, &delay).is_err() {
             return EXIT_BRINGUP_FAILED;
         }
+        // The bus holds the one function it enumerated; a refused settle only
+        // leaves the device manager to wait out its bound for this node.
+        let _ = tairix_rt::hw_node_settle();
         // The root complex must stay trained and this driver resident for
         // the life of the system: park off the run queue for good. A failed
         // park exits fail-loud rather than degrading into a yield spin.

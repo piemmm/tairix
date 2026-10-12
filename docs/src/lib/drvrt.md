@@ -95,6 +95,46 @@ so a driver refuses rather than guessing.
   never carry more authority than its emitter (§4); a refusal surfaces as
   `DriverError::PermissionDenied`.
 
+## Link suppliers
+
+A driver other nodes link to — a clock, DMA, codec, interrupt or I²C
+controller — serves its node's endpoint as a link supplier (`plans/SUPPLIERS.md`). What
+every supplier needs is defined here once:
+
+- **`SupplierHost`** is what a supplier asks the kernel about the call it is
+  serving: who the caller is, whether it holds a grant covering the record it
+  quotes (`call_peer_holds`), the reply, and a watch on the caller's end.
+  `RtSupplier` forwards each question to `tairix_rt`.
+- **`Supplier`** is the supplier as its loop drives it: serve a call, drop an
+  ended peer's holds, service a bound interrupt line, and keep a deadline — a
+  check its hardware raises no interrupt for, due at an instant on the
+  monotonic clock (`deadline_us`), run when it comes (`expired`), which moves
+  the deadline on or clears it. **`Recorder<R>`** is where its decisions of
+  kind `R` go.
+- **`serve::DutyNode`** is a supplier driver's bring-up: the node's grants
+  read and its duty of the role the driver serves found
+  (`DutyNode::open`), its one register window mapped, and every failure
+  recorded under the supplier's own event id and ended with one of the exit
+  codes every supplier shares (`serve::exit`).
+- **`refusal`** is the errno a protocol reply carries for a refusal from the
+  hardware a supplier drives: what the hardware cannot do is `NotSupported`,
+  what another holder has `Busy`, anything else its own `Errno`.
+- **`serve::Service`** binds the endpoint so only a caller whose grant covers
+  it may call, gathers it, peer exits and the supplier's bound interrupt lines
+  into one wait set (`Service::bind`), and serves the supplier until the
+  service ends (`Service::run`), answering why. The wait is a one-shot
+  timeout to the supplier's deadline, so the core sleeps until it, and a
+  deadline that has come is run before the next wait, so a stream of calls
+  cannot starve it. A driver logs its readiness
+  between the two, so readiness means bound. `serve::log_event` and
+  `serve::instance_field` write its records.
+- **`testkit`**, behind the `test-support` feature, is the kernel a
+  supplier's host tests are answered through. `FakeKernel` keeps the kernel's
+  rules: a grant counts only where it covers the record quoted, a call is in
+  service until it is answered or retired, an ended peer cannot be watched,
+  and a supplier that answers one call twice fails the test. `Records<R>`
+  keeps what was recorded.
+
 ## Not a privileged path
 
 The host adds no authority. It only resolves a driver's request to the grant

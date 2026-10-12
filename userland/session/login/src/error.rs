@@ -30,6 +30,10 @@ pub enum LoginError {
     /// refused to start their session; the wrapped [`Errno`] is the
     /// launcher's error verbatim.
     SessionLaunch(Errno),
+    /// Nothing was typed at the prompt, and the round gave way to a login
+    /// that became available while it waited. No session ran and no attempt
+    /// was spent.
+    Superseded,
 }
 
 impl fmt::Display for LoginError {
@@ -38,6 +42,7 @@ impl fmt::Display for LoginError {
             Self::TooManyAttempts => f.write_str("too many failed authentication attempts"),
             Self::Console(e) => write!(f, "console unavailable: {e}"),
             Self::SessionLaunch(e) => write!(f, "session launch failed: {e}"),
+            Self::Superseded => f.write_str("the round gave way to a login that became available"),
         }
     }
 }

@@ -95,6 +95,51 @@ pub(crate) fn read_exact(
     }
 }
 
+/// An input holding a file's bytes a page at a time, which answers "not yet"
+/// for a page it has not been given and is given that page once asked.
+#[cfg(test)]
+pub(crate) struct Patchy<'f> {
+    file: &'f [u8],
+    held: alloc::vec::Vec<bool>,
+}
+
+#[cfg(test)]
+impl<'f> Patchy<'f> {
+    const PAGE: usize = 512;
+
+    /// `file`, none of whose pages is held yet.
+    pub(crate) fn new(file: &'f [u8]) -> Self {
+        Self {
+            file,
+            held: alloc::vec![false; file.len().div_ceil(Self::PAGE)],
+        }
+    }
+}
+
+#[cfg(test)]
+impl SoundInput for Patchy<'_> {
+    fn len(&self) -> u64 {
+        self.file.len() as u64
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize, InputError> {
+        let offset = usize::try_from(offset).map_err(|_| InputError::Failed)?;
+        let end = (offset + buf.len()).min(self.file.len());
+        if offset >= end {
+            return Ok(0);
+        }
+        let mut missing = false;
+        for page in offset / Self::PAGE..=(end - 1) / Self::PAGE {
+            missing |= !core::mem::replace(&mut self.held[page], true);
+        }
+        if missing {
+            return Err(InputError::Unavailable);
+        }
+        buf[..end - offset].copy_from_slice(&self.file[offset..end]);
+        Ok(end - offset)
+    }
+}
+
 /// A run of bytes a decoder reads at offsets within it: a range of the file,
 /// or a container's packet laid across the file.
 pub(crate) trait Region {

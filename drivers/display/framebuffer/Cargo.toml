@@ -11,16 +11,14 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The crate is **only** a binary: the `Run` entry point of the framebuffer
-# display-service bundle, installed under `/System/Drivers/` and autoloaded
-# into user space by `devmgr` when a display node carrying a `Framebuffer`
-# resource is discovered. It links the userland runtime `tairix-rt` and
-# depends only on `lib/*` crates so the workspace layering holds (no
-# `drivers/*`→`drivers/*` edge); the linear-surface engine it hosts is
-# `tairix_display::Framebuffer`, the one shared definition the framebuffer
-# QEMU verticals also drive. It is a freestanding pure-Rust program on the
-# native Tier-1 targets and an inert host stub elsewhere (`src/main.rs` /
-# `build.rs`), mirroring `drivers/input/virtio_kbd`.
+# Two targets: the `Run` entry point of the framebuffer display-service bundle
+# (`src/main.rs`), autoloaded into user space by `devmgr` when a display node
+# carrying a `Framebuffer` resource is discovered, and its bind table and
+# manifest request (`src/lib.rs`). It links the userland runtime `tairix-rt`
+# and depends only on `lib/*` crates so the workspace layering holds; the
+# linear-surface engine it hosts is `tairix_display::Framebuffer`, the one
+# shared definition the framebuffer QEMU verticals also drive. The binary is
+# an inert host stub off bare metal (`build.rs`).
 
 # The `abi-v1` surface: the lib target's canonical `BIND_KEYS`
 # (`DriverBindKey`, `HwMatchKey`, the shared `simple-framebuffer`
@@ -34,8 +32,6 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # bare-metal targets the binary is actually built for; on the host the binary
 # is an inert stub with no further dependencies.
 [target.'cfg(target_os = "none")'.dependencies]
-# The capability-set type the rt-backed `DriverHost` is built over.
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The one display-service loop and the linear-surface `Framebuffer` engine —
 # the one definition of both, hosted here.
 tairix-display = { path = "../../../lib/display", version = "=0.0.0", features = ["service"] }

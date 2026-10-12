@@ -48,6 +48,8 @@
 //! - `font-atlas`   — generates (`--write`) or verifies the system font
 //!   glyph atlas in `lib/font/src/` from the committed faces in
 //!   `lib/font/assets/`
+//! - `sound-encode` — encodes authored WAV masters into a sound theme's FLAC
+//!   assets in `lib/soundtheme/assets/`, each decoded back sample for sample
 //! - `devids`       — verifies the compact PCI/USB ID-database tables (each
 //!   inside its consuming command bundle's `Resources/`) against the vetted
 //!   snapshots in

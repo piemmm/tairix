@@ -33,12 +33,13 @@ use tairix_abi::driver::audio::{
 };
 use tairix_abi::driver::audio_channel::{AttachParams, ConfigureGrant, ConfigureParams};
 use tairix_abi::driver::audio_ring::{PcmGeometry, PcmRing};
-use tairix_abi::{Errno, ProcId};
+use tairix_abi::Errno;
 use tairix_audio::channel::ChannelMatrix;
 use tairix_audio::clock::ClockModel;
 use tairix_audio::convert;
 use tairix_audio::mix::{Mixer, SinkFormat, StreamMix};
 use tairix_audio::resample::{FilterBank, Ratio, Resampler};
+use tairix_audio::route::Principal;
 use tairix_audio::volume::EndpointLevel;
 use tairix_log::{Field, FieldValue, Level, Sink};
 use tairix_util::fallible;
@@ -159,6 +160,16 @@ impl Active {
         self.grant.period_frames
     }
 
+    /// Mix onto the resolution `facts`, read again, give the device's
+    /// encoding: a sink replugged on the same connector may resolve more or
+    /// fewer bits.
+    pub(crate) fn follow(&mut self, facts: &AudioEndpointFacts) -> Result<(), Errno> {
+        let bits = facts.resolved_bits(self.sink.format);
+        self.mixer.set_resolution(bits)?;
+        self.sink.resolution = bits;
+        Ok(())
+    }
+
     /// Reserve (or find) the phase bank carrying `source` to this endpoint's
     /// rate, and answer its slot.
     fn acquire_bank(&mut self, source: Rate) -> Result<usize, Errno> {
@@ -224,9 +235,8 @@ pub(crate) struct Stream {
     pub(crate) direction: StreamDirection,
     /// What the sound is for.
     pub(crate) role: StreamRole,
-    /// The login session the owner lies within, which the seat's room is
-    /// arbitrated on.
-    pub(crate) session: Option<ProcId>,
+    /// Whom it plays for, which the seat's room is arbitrated on.
+    pub(crate) principal: Principal,
     /// What the client was told.
     pub(crate) grant: StreamGrant,
     /// The client ring's shape.
@@ -300,8 +310,8 @@ pub(crate) struct StreamOpen {
     pub(crate) direction: StreamDirection,
     /// What the sound is for.
     pub(crate) role: StreamRole,
-    /// The owner's login session.
-    pub(crate) session: Option<ProcId>,
+    /// Whom it plays for.
+    pub(crate) principal: Principal,
     /// Whether the room holds it from the moment it opens.
     pub(crate) held: bool,
     /// What the client is being told, which fixes its rate, format, layout
@@ -381,7 +391,7 @@ impl Stream {
             endpoint: params.endpoint,
             direction: params.direction,
             role: params.role,
-            session: params.session,
+            principal: params.principal,
             grant: params.grant,
             geometry: params.geometry,
             region: None,
@@ -659,6 +669,9 @@ impl Device {
     ) -> Result<Self, Errno> {
         let mut channel = AudioChannelClient::new(transport);
         let facts = channel.facts()?;
+        // Before the endpoints are read, so a connector that changes between
+        // the two is still told.
+        channel.watch(notify_endpoint)?;
         let mut endpoints = Vec::new();
         for index in 0..facts.endpoints {
             let endpoint_facts = channel.endpoint_facts(index)?;
@@ -716,55 +729,95 @@ pub(crate) fn configure_endpoint<H: RegionHost>(
     if endpoint.active.is_some() {
         return Ok(());
     }
-    let device_rate = endpoint.facts.rates.nearest(rate);
-    let device_format = device_format(&endpoint.facts, format)?;
-    let channel_map = endpoint.facts.channel_map;
+    let facts = endpoint.facts;
+    let device_rate = facts.rates.nearest(rate);
+    let device_format = device_format(&facts, format)?;
+    let channel_map = facts.channel_map;
     let target = scale_frames(latency_target_frames.max(2), rate, device_rate);
+    let index = endpoint.index;
     let grant = device.channel.configure(ConfigureParams {
-        endpoint: endpoint.index,
+        endpoint: index,
         rate: device_rate,
         format: device_format,
         channel_map,
-        period_frames: device_period(&endpoint.facts, target),
+        period_frames: device_period(&facts, target),
     })?;
+    let resolution = facts.resolved_bits(grant.format);
+    match attach_ring(device, regions, index, grant, resolution, dither_seed) {
+        Ok(active) => {
+            if let Some(endpoint) = device.endpoints.get_mut(slot) {
+                endpoint.active = Some(active);
+            }
+            Ok(())
+        }
+        Err(err) => {
+            // The driver holds a configuration until it is detached.
+            let _ = device.channel.detach(index);
+            Err(err)
+        }
+    }
+}
+
+/// Create the ring `grant` shapes, attach it to endpoint `index`, and build
+/// the state the endpoint is mixed through — onto the grid of `resolution`
+/// bits — the ring released on any refusal.
+fn attach_ring<H: RegionHost>(
+    device: &mut Device,
+    regions: &mut H,
+    index: u16,
+    grant: ConfigureGrant,
+    resolution: u32,
+    dither_seed: u64,
+) -> Result<Active, Errno> {
     let ring_frames = device_ring_frames(&grant)?;
     let geometry = grant.geometry(ring_frames)?;
     let region = regions.create(geometry.region_len())?;
-    let attached = regions
+    let active = regions
         .grant(region, device.channel_endpoint)
         .and_then(|region_grant| {
             device.channel.attach(AttachParams {
-                endpoint: endpoint.index,
+                endpoint: index,
                 ring_frames,
                 region_grant,
                 notify_endpoint: device.notify_endpoint,
             })
+        })
+        .and_then(|()| {
+            let sink = SinkFormat {
+                format: grant.format,
+                resolution,
+                rate: grant.rate,
+                channel_map: grant.channel_map,
+            };
+            let period = grant.period_frames as usize;
+            Ok(Active {
+                grant,
+                geometry,
+                region,
+                clock: ClockModel::new(grant.rate),
+                mixer: Mixer::new(sink, period, dither_seed)?,
+                sink,
+                period: fallible::filled(period * sink.frame_bytes(), 0u8)
+                    .ok_or(Errno::OutOfMemory)?,
+                pivot: fallible::filled(period * sink.channels(), 0.0f32)
+                    .ok_or(Errno::OutOfMemory)?,
+                banks: Vec::new(),
+                running: false,
+                position: Frames::ZERO,
+                xrun_frames: 0,
+            })
         });
-    if let Err(err) = attached {
+    if active.is_err() {
         regions.release(region);
-        return Err(err);
     }
-    let sink = SinkFormat {
-        format: grant.format,
-        rate: grant.rate,
-        channel_map: grant.channel_map,
-    };
-    let period = grant.period_frames as usize;
-    endpoint.active = Some(Active {
-        grant,
-        geometry,
-        region,
-        clock: ClockModel::new(grant.rate),
-        mixer: Mixer::new(sink, period, dither_seed)?,
-        sink,
-        period: fallible::filled(period * sink.frame_bytes(), 0u8).ok_or(Errno::OutOfMemory)?,
-        pivot: fallible::filled(period * sink.channels(), 0.0f32).ok_or(Errno::OutOfMemory)?,
-        banks: Vec::new(),
-        running: false,
-        position: Frames::ZERO,
-        xrun_frames: 0,
-    });
-    Ok(())
+    active
+}
+
+/// Whether `facts` still admit the configuration `grant` runs under.
+pub(crate) fn admits(facts: &AudioEndpointFacts, grant: &ConfigureGrant) -> bool {
+    facts.formats.contains(grant.format)
+        && facts.channel_map == grant.channel_map
+        && facts.rates.nearest(grant.rate) == grant.rate
 }
 
 /// Release a programmed endpoint: detach the driver's view of the ring and

@@ -116,21 +116,23 @@ pub enum WaitSourceKind {
     /// consumes the message (`plans/APPWIN.md` AW3: an app parks here
     /// for its window events, never a poll loop).
     Port = 4,
-    /// A readable pipe stream of the caller's **own** open table (its
-    /// `id` is the descriptor number a [`crate::SyscallNumber::PIPE_CREATE`]
-    /// read end landed at). Adding the member is owner- and
-    /// descriptor-checked against the calling task's open table: the
-    /// descriptor must be a pipe end opened for reading — a write end, a
-    /// path- or resource-backed descriptor, an unopened number, or
+    /// A readable stream of the caller's **own** (its `id` is the
+    /// descriptor number): a pipe read end, a pty master, or a pty slave its
+    /// open table holds opened for reading, or an inherited standard stream
+    /// reading a console the caller holds
+    /// [`CONSOLE_READ`](crate::CapabilityId::CONSOLE_READ) for. A write end,
+    /// a path- or resource-backed descriptor, an unopened number, and
     /// another task's descriptor all refuse with the same oracle-free
     /// `NotFound` the other kinds use. Ready when a read would not park:
     /// buffered bytes are waiting, **or** every write end is closed (the
     /// woken owner's read observes end-of-stream rather than waiting
-    /// forever on a dead writer). Readiness is a non-consuming peek — the
-    /// woken owner's read, not the wait, drains the bytes — so a still-
-    /// readable stream re-reports on the next wait (`plans/APPWIN.md`
-    /// AW4: the windowed terminal parks here for its shell's output,
-    /// never a poll loop).
+    /// forever on a dead writer). A console shows its input only to a
+    /// caller that may read it — its foreground owner, or anyone while it
+    /// has none — so no other process learns when keys are pressed.
+    /// Readiness is a non-consuming peek — the woken owner's read, not the
+    /// wait, drains the bytes — so a still-readable stream re-reports on the
+    /// next wait (`plans/APPWIN.md` AW4: the windowed terminal parks here
+    /// for its shell's output, never a poll loop).
     Stream = 5,
     /// The caller's **own** signal intake (its `id` is always `0`: a
     /// process has exactly one intake and can only ever observe its own).

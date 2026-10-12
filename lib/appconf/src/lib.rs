@@ -35,12 +35,14 @@ use tairix_abi::appdata_ipc::APPDATA_DOCUMENT_MAX;
 
 mod document;
 mod key;
+mod path;
 mod registry;
 mod value;
 
 pub use document::{line_shape, Document, LineShape, Lookup, Setting, Unparsed};
 pub use key::{validate_key, MAX_KEY_DEPTH, MAX_KEY_LEN};
-pub use registry::{overwrite, Keys, Live, Registry, MOST_KEYS};
+pub use path::{SettingPath, SettingPathError, MAX_SETTING_PATH_LEN};
+pub use registry::{merge_admitting, overwrite, Keys, Live, Refusal, Registry, MOST_KEYS};
 pub use value::{as_bool, as_i64, as_permille, as_u32, bool_text, MAX_VALUE_LEN, PERMILLE_FULL};
 
 /// Maximum length, in bytes, of a whole configuration document.

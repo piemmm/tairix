@@ -22,14 +22,15 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::FaultDomainState;
+use tairix_abi::blkio::{BlkStatus, FaultDomainState};
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{
-    HwDeviceClass, HwResource, HwResourceKind, HW_NODE_ROOT, HW_NODE_ROOT_ID,
+    ancestor_imposed_status_by, HwDeviceClass, HwResource, HwResourceKind, HW_NODE_ROOT,
+    HW_NODE_ROOT_ID,
 };
 use tairix_abi::{Errno, HwNode, HwTreeHeader};
 use tairix_kernel_core::callreg::LinkServiceObserver;
-use tairix_kernel_core::{HwNodeLiveness, HwTreeSource};
+use tairix_kernel_core::{HwDriverTree, HwNodeLiveness, HwTreeSource};
 use tairix_kernel_ipc::EndpointId;
 use tairix_sync::SpinLock;
 
@@ -159,7 +160,10 @@ impl HwTreeStore {
     /// reused after its node was removed would let one device's proof free
     /// another's memory. `parent_id` is the emitter's own matched node
     /// (resolved kernel-side from the caller's task id), so a driver cannot
-    /// forge its position in the tree.
+    /// forge its position in the tree. Nor does it claim any reading the
+    /// kernel keeps — the served roles, its domain's health, a settled
+    /// driver — and it is marked as arriving on a running machine exactly
+    /// when its emitter had settled ([`HwNode::admit_published`]).
     ///
     /// # Errors
     ///
@@ -173,9 +177,10 @@ impl HwTreeStore {
     pub fn publish_child(&self, parent_id: u32, mut node: HwNode) -> Result<u32, Errno> {
         let id = {
             let mut inner = self.inner.lock();
-            if inner.node(parent_id).is_none() {
+            let Some(parent) = inner.node(parent_id) else {
                 return Err(Errno::NotFound);
-            }
+            };
+            node.admit_published(parent.is_settled());
             let id = inner.next_id;
             if id == HW_NODE_ROOT {
                 return Err(Errno::NoSpace);
@@ -203,6 +208,13 @@ impl HwTreeStore {
     #[must_use]
     pub fn node(&self, node_id: u32) -> Option<HwNode> {
         self.inner.lock().node(node_id).copied()
+    }
+
+    /// The status the published health of live node `node_id`'s fault-domain
+    /// ancestors imposes on it, folded under the store's one guard.
+    pub fn ancestor_status(&self, node_id: u32) -> BlkStatus {
+        let inner = self.inner.lock();
+        ancestor_imposed_status_by(node_id, inner.nodes.len(), |id| inner.node(id).copied())
     }
 
     /// Visit every live node in id order with the store held: the visitor
@@ -301,6 +313,33 @@ impl HwTreeStore {
         // Wake parked `hw_tree_wait` callers on the change (see [`Self::seed`]);
         // done after the inner lock is dropped.
         tairix_kernel_core::hw_tree_wake();
+        Ok(())
+    }
+
+    /// Record whether the driver now driving the live non-root node `node_id`
+    /// has settled, bumping the generation and waking every parked
+    /// `hw_tree_wait` caller when that changes, so the device manager learns
+    /// the hardware present at boot has finished appearing.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if no live non-root node has id `node_id`.
+    pub fn set_settled(&self, node_id: u32, settled: bool) -> Result<(), Errno> {
+        let changed = {
+            let mut inner = self.inner.lock();
+            let Some(node) = inner.node_mut(node_id).filter(|node| !node.is_root()) else {
+                return Err(Errno::NotFound);
+            };
+            let changed = node.is_settled() != settled;
+            if changed {
+                node.set_settled(settled);
+                inner.generation += 1;
+            }
+            changed
+        };
+        if changed {
+            tairix_kernel_core::hw_tree_wake();
+        }
         Ok(())
     }
 
@@ -533,6 +572,14 @@ impl HwNodeLiveness for HwTreeStore {
     }
 }
 
+impl HwDriverTree for HwTreeStore {
+    fn driver_admitted(&self, node_id: u32, publishes: bool) {
+        // The node was resolved live for this admission; one a removal has
+        // just taken has no settling left to record.
+        let _ = self.set_settled(node_id, !publishes);
+    }
+}
+
 impl HwNodeLiveness for HwTreeStoreSource {
     fn is_live(&self, node_id: u32) -> bool {
         HW_TREE.is_live(node_id)
@@ -589,6 +636,10 @@ impl HwTreeSource for HwTreeStoreSource {
         Ok(HW_TREE.node(node_id))
     }
 
+    fn ancestor_status(&self, node_id: u32) -> Result<BlkStatus, Errno> {
+        Ok(HW_TREE.ancestor_status(node_id))
+    }
+
     fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno> {
         HW_TREE.for_each_node(visit);
         Ok(())
@@ -600,6 +651,10 @@ impl HwTreeSource for HwTreeStoreSource {
         // `remove` is, so the orderly-removal busy check reasons about the
         // caller's own node and a non-owner learns nothing (fail closed).
         HW_TREE.node_endpoints(parent_id, node_id)
+    }
+
+    fn settle(&self, node_id: u32) -> Result<(), Errno> {
+        HW_TREE.set_settled(node_id, true)
     }
 }
 
@@ -1076,6 +1131,67 @@ mod tests {
             Err(Errno::NotFound)
         );
         assert_eq!(store.generation(), before + 2);
+    }
+
+    #[test]
+    fn a_child_arrives_hot_only_once_its_emitter_has_settled() {
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("a fresh store seeds"); // ids 1 (root) and 2 (bus)
+        let found = store.publish_child(2, hid_child()).expect("published");
+        assert_eq!(store.set_settled(2, true), Ok(()));
+        let arrived = store.publish_child(2, hid_child()).expect("published");
+        let snap = snapshot(&store);
+        let by_id = |id| snap.iter().find(|node| node.id() == id).copied();
+        assert!(!by_id(found).is_some_and(|node| node.is_hot_arrival()));
+        assert!(by_id(arrived).is_some_and(|node| node.is_hot_arrival()));
+        assert!(by_id(2).is_some_and(|node| node.is_settled()));
+
+        // A driver reloaded for the node is unsettled until it settles again,
+        // so what it finds as it comes up is not read as arriving late; one
+        // that cannot publish has nothing to settle.
+        store.driver_admitted(2, true);
+        let refound = store.publish_child(2, hid_child()).expect("published");
+        assert!(!store
+            .node(refound)
+            .is_some_and(|node| node.is_hot_arrival()));
+        store.driver_admitted(2, false);
+        assert!(store.node(2).is_some_and(|node| node.is_settled()));
+    }
+
+    #[test]
+    fn a_published_node_claims_nothing_the_kernel_keeps() {
+        // Regression: a published node kept whatever served roles and
+        // fault-domain health its emitter wrote, so a driver could present a
+        // child as a serving supplier, or its domain as faulted, before its
+        // own driver had done anything.
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("a fresh store seeds");
+        let mut forged = hid_child();
+        forged.set_serves(LinkRole::Clock, true);
+        forged.set_fault_health(FaultDomainState::Offline);
+        forged.set_settled(true);
+        forged.set_removable(true);
+        let id = store.publish_child(2, forged).expect("published");
+        let node = store.node(id).expect("live");
+        assert!(!node.serves(LinkRole::Clock));
+        assert_eq!(node.fault_health(), FaultDomainState::Healthy);
+        assert!(!node.is_settled());
+        assert!(!node.is_hot_arrival());
+        assert!(node.is_removable(), "what the emitter describes stands");
+    }
+
+    #[test]
+    fn settling_bumps_the_generation_only_on_a_change_and_fails_closed() {
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("a fresh store seeds");
+        let before = store.generation();
+        assert_eq!(store.set_settled(2, true), Ok(()));
+        assert_eq!(store.generation(), before + 1);
+        assert_eq!(store.set_settled(2, true), Ok(()));
+        assert_eq!(store.generation(), before + 1, "no change, no wake");
+        assert_eq!(store.set_settled(1, true), Err(Errno::NotFound), "the root");
+        assert_eq!(store.set_settled(4242, true), Err(Errno::NotFound));
+        assert_eq!(store.generation(), before + 1);
     }
 
     #[test]

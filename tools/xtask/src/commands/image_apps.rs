@@ -1510,17 +1510,17 @@ mod tests {
     /// draw. Discovered from disk, so a new asset is judged the moment it is
     /// dropped in.
     ///
-    /// Only the icon-family rows of [`tairix_syshelp::GRAPHICS_FILES`] are
+    /// Only the icon-family rows of [`tairix_syshelp::ASSET_FILES`] are
     /// judged here: the icon and wallpaper families are different pictures
     /// under different contracts (see
     /// [`every_shipped_wallpaper_master_is_artwork_the_desktop_will_draw`]),
-    /// and dispatching on [`tairix_syshelp::GraphicsFamilyKind`] rather than
+    /// and dispatching on [`tairix_syshelp::AssetFamilyKind`] rather than
     /// a directory string is what keeps the two from being conflated.
     #[test]
     fn every_shipped_icon_master_is_artwork_the_desktop_will_draw() {
-        let icon_masters: Vec<_> = tairix_syshelp::GRAPHICS_FILES
+        let icon_masters: Vec<_> = tairix_syshelp::ASSET_FILES
             .iter()
-            .filter(|asset| asset.family == tairix_syshelp::GraphicsFamilyKind::Icon)
+            .filter(|asset| asset.family == tairix_syshelp::AssetFamilyKind::Icon)
             .collect();
         assert!(!icon_masters.is_empty(), "at least one icon master ships");
         // Decided from the bytes, exactly as the verification decides it.
@@ -1532,7 +1532,7 @@ mod tests {
         );
         for asset in icon_masters {
             verify_icon_master(
-                &format!("Graphics/{}/{}", asset.family.target_dir(), asset.file),
+                &format!("{}/{}", asset.family.target_dir().join("/"), asset.file),
                 asset.bytes,
                 &mut NoFonts,
             )
@@ -1647,7 +1647,7 @@ mod tests {
     /// Every wallpaper master the image ships is a photograph the desktop's
     /// own decoder can actually turn into a picture. Discovered from disk
     /// exactly as the icon masters above are (only the wallpaper-family rows
-    /// of [`tairix_syshelp::GRAPHICS_FILES`]), so a new wallpaper is judged
+    /// of [`tairix_syshelp::ASSET_FILES`]), so a new wallpaper is judged
     /// the moment it is dropped into `lib/wallpaper/assets/` — never a
     /// hand-maintained list.
     ///
@@ -1661,9 +1661,9 @@ mod tests {
     /// file name is only unique within its own category directory.
     #[test]
     fn every_shipped_wallpaper_master_is_artwork_the_desktop_will_draw() {
-        let wallpaper_masters: Vec<_> = tairix_syshelp::GRAPHICS_FILES
+        let wallpaper_masters: Vec<_> = tairix_syshelp::ASSET_FILES
             .iter()
-            .filter(|asset| asset.family == tairix_syshelp::GraphicsFamilyKind::Wallpaper)
+            .filter(|asset| asset.family == tairix_syshelp::AssetFamilyKind::Wallpaper)
             .collect();
         assert!(
             !wallpaper_masters.is_empty(),
@@ -1675,8 +1675,8 @@ mod tests {
                 .expect("a discovered wallpaper master is filed under a category");
             verify_wallpaper_master(
                 &format!(
-                    "Graphics/{}/{category}/{}",
-                    asset.family.target_dir(),
+                    "{}/{category}/{}",
+                    asset.family.target_dir().join("/"),
                     asset.file
                 ),
                 asset.bytes,
@@ -1709,15 +1709,15 @@ mod tests {
     /// Every screensaver's shipped preview is a picture a chooser will really
     /// show, and one per kind ships.
     ///
-    /// Only the preview rows of [`tairix_syshelp::GRAPHICS_FILES`] are judged
+    /// Only the preview rows of [`tairix_syshelp::ASSET_FILES`] are judged
     /// here, under their own contract: a preview is drawn in one fixed shape,
     /// so it is held to that shape, where a wallpaper is fitted to whatever
     /// screen it meets.
     #[test]
     fn every_shipped_screensaver_preview_is_a_picture_a_chooser_will_show() {
-        let previews: Vec<_> = tairix_syshelp::GRAPHICS_FILES
+        let previews: Vec<_> = tairix_syshelp::ASSET_FILES
             .iter()
-            .filter(|asset| asset.family == tairix_syshelp::GraphicsFamilyKind::ScreensaverPreview)
+            .filter(|asset| asset.family == tairix_syshelp::AssetFamilyKind::ScreensaverPreview)
             .collect();
         for kind in tairix_wallpaper::ScreensaverKind::ALL {
             assert!(
@@ -1729,7 +1729,7 @@ mod tests {
         }
         for asset in previews {
             verify_screensaver_preview(
-                &format!("Graphics/{}/{}", asset.family.target_dir(), asset.file),
+                &format!("{}/{}", asset.family.target_dir().join("/"), asset.file),
                 asset.bytes,
             )
             .expect("a shipped screensaver preview");
@@ -1821,17 +1821,17 @@ mod tests {
     /// rasterises to visible pixels with its hotspot inside its own
     /// artwork.
     ///
-    /// Only the cursor-family rows of [`tairix_syshelp::GRAPHICS_FILES`]
+    /// Only the cursor-family rows of [`tairix_syshelp::ASSET_FILES`]
     /// are judged here: a cursor is a tintable vector silhouette under its
     /// own contract, which is neither an icon master's nor a wallpaper's
     /// (see the two checks above), and dispatching on
-    /// [`tairix_syshelp::GraphicsFamilyKind`] rather than a directory
+    /// [`tairix_syshelp::AssetFamilyKind`] rather than a directory
     /// string is what keeps the three from being conflated.
     #[test]
     fn every_shipped_cursor_asset_is_artwork_the_desktop_will_draw() {
-        let cursor_assets: Vec<_> = tairix_syshelp::GRAPHICS_FILES
+        let cursor_assets: Vec<_> = tairix_syshelp::ASSET_FILES
             .iter()
-            .filter(|asset| asset.family == tairix_syshelp::GraphicsFamilyKind::Cursor)
+            .filter(|asset| asset.family == tairix_syshelp::AssetFamilyKind::Cursor)
             .collect();
         assert!(!cursor_assets.is_empty(), "at least one cursor asset ships");
         for asset in cursor_assets {
@@ -1840,8 +1840,8 @@ mod tests {
                 .expect("a discovered cursor asset is filed under a set");
             verify_cursor_asset(
                 &format!(
-                    "Graphics/{}/{set}/{}",
-                    asset.family.target_dir(),
+                    "{}/{set}/{}",
+                    asset.family.target_dir().join("/"),
                     asset.file
                 ),
                 asset.bytes,

@@ -19,9 +19,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # Orders descriptor and buffer writes before the doorbell that hands them to
 # the controller, and its writes before the reads they announce.
 tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
+# The display's ELD, read by the one sink-description parser.
+tairix-edid = { path = "../../../lib/edid", version = "=0.0.0" }
 
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

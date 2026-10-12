@@ -16,7 +16,12 @@
 //!
 //! * **It covers the screen.** The window is the compositor's full extent
 //!   and fully opaque, so no pixel of the session shows through. Someone
-//!   walking past a locked machine learns nothing about what is on it.
+//!   walking past a locked machine learns nothing about what is on it. The
+//!   screen can change size under it — a resume onto another account's mode,
+//!   an output arriving or leaving — so the lock redraws itself over the
+//!   screen now drawn before every composite, and one it cannot redraw is
+//!   [`uncovered`](ScreenLock::uncovered): the embedder then presents
+//!   nothing at all.
 //! * **It takes every event.** While locked, the embedder drains the pointer
 //!   and keyboard into [`handle`](ScreenLock::handle) and routes *nothing*
 //!   onward — not to the window manager, not to the taskbar, not to a served
@@ -55,10 +60,12 @@ pub enum LockOutcome {
     Unlocked,
 }
 
-/// One engaged lock: its full-screen window and the surface drawn into it.
+/// One engaged lock: its full-screen window, the surface drawn into it, and
+/// the screen it was drawn over.
 struct Engaged {
     wm: WindowId,
     surface: AuthSurface,
+    screen: Rect,
 }
 
 /// The session's screen lock.
@@ -118,20 +125,33 @@ impl ScreenLock {
         };
         let wm = compositor.add_window(screen.origin, frame);
         compositor.raise(wm);
-        self.engaged = Some(Engaged { wm, surface });
+        self.engaged = Some(Engaged {
+            wm,
+            surface,
+            screen,
+        });
         true
     }
 
     /// Raise the lock above everything but `above` — the screensaver, which
     /// hides the lock until the user comes back — so a window opened or
-    /// raised behind it cannot surface over it.
+    /// raised behind it cannot surface over it, redrawing it first over a
+    /// screen that is not the one it covers.
     ///
     /// The embedder calls this immediately before each composite while
     /// locked, after the screensaver has been kept on top. A lock already
     /// where it belongs restacks and repaints nothing, and it does nothing at
     /// all when the screen is not locked. An `above` the compositor does not
     /// hold leaves the lock on top.
-    pub fn keep_topmost(&self, compositor: &mut Compositor, above: Option<WindowId>) {
+    pub fn keep_topmost(
+        &mut self,
+        shell: &DesktopShell,
+        compositor: &mut Compositor,
+        above: Option<WindowId>,
+    ) {
+        if self.uncovered(compositor) {
+            self.repaint(shell, compositor);
+        }
         if let Some(engaged) = self.engaged.as_ref() {
             let beneath = above.is_some_and(|anchor| compositor.stack_below(engaged.wm, anchor));
             if !beneath {
@@ -229,19 +249,33 @@ impl ScreenLock {
         }
     }
 
+    /// Whether the screen is locked behind a frame drawn for a screen other
+    /// than the one the compositor draws now: one the lock could not redraw.
+    ///
+    /// While this is `true` the embedder MUST present nothing, because part
+    /// of the session lies outside what the lock covers.
+    #[must_use]
+    pub fn uncovered(&self, compositor: &Compositor) -> bool {
+        self.engaged
+            .as_ref()
+            .is_some_and(|engaged| engaged.screen != compositor.screen_rect())
+    }
+
     /// Repaint the lock, so a theme switch or a resolution change behind it
     /// redraws it at the right size in the appearance now in use.
     ///
     /// A surface that cannot be built leaves the previous frame up rather
     /// than uncovering the session.
-    pub fn repaint(&self, shell: &DesktopShell, compositor: &mut Compositor) {
+    pub fn repaint(&mut self, shell: &DesktopShell, compositor: &mut Compositor) {
         let screen = compositor.screen_rect();
         let scale = compositor.scale();
-        let Some(engaged) = self.engaged.as_ref() else {
+        let Some(engaged) = self.engaged.as_mut() else {
             return;
         };
         if let Some(frame) = render_frame(&engaged.surface, screen, scale, shell) {
             let _ = compositor.set_surface(engaged.wm, frame);
+            let _ = compositor.move_window(engaged.wm, screen.origin);
+            engaged.screen = screen;
         }
         let _ = compositor.raise(engaged.wm);
     }

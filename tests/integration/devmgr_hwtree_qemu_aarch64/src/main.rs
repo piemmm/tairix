@@ -226,6 +226,10 @@ mod kernel {
         ) -> Result<(), Errno> {
             HW_TREE_SOURCE.set_health(node_id, health)
         }
+
+        fn settle(&self, node_id: u32) -> Result<(), Errno> {
+            HW_TREE_SOURCE.settle(node_id)
+        }
     }
 
     static WITNESS_SOURCE: WitnessSource = WitnessSource;

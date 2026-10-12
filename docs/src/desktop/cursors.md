@@ -154,8 +154,8 @@ On-disk cursor sets follow the desktop's **SVG-first** asset rule
   unreachable or over-large artwork fails the *build*, never the desktop.
 
 The sets are discovered from `lib/cursor/assets/` at build time by the same
-`GRAPHICS_FAMILIES` walk that discovers the icon masters and the wallpapers
-(`GraphicsFamilyKind::Cursor`), never from a hand-maintained list. One set
+`ASSET_FAMILIES` walk that discovers the icon masters and the wallpapers
+(`AssetFamilyKind::Cursor`), never from a hand-maintained list. One set
 ships today: **High Visibility**, a dark pointer inside a two-pixel white
 outline declared on each asset, with bolder heads, which is what makes the
 `cursor.set` row a real choice rather than a control of one value. A shipped

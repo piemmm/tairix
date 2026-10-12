@@ -143,7 +143,12 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   `SerialNumber::decode` — which the transfer path calls. `describe_device`
   gives each interface node the device's bus position as its address, so a
   node kept across a reset still agrees with a sibling published after it, and
-  no device published beside it shares its address.
+  no device published beside it shares its address. It also marks the node
+  removable unless the port the device sits on is fixed: `PORTSC.DR` at a root
+  port (`PortStatus::removable`), the hub descriptor's `DeviceRemovable` map
+  below a hub (`HubDescriptor::fixed_ports`, the USB 2.0 map's bytes or the
+  SuperSpeed descriptor's word, masked to the ports the hub has), so a device
+  manager tells a plug from the machine's own wiring.
   The event ring is up to four page-sized segments, as many as the
   controller's `ERST Max` takes (QEMU takes one, the VL805 eight): an
   isochronous stream posts an event per service interval, and a page is the

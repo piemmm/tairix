@@ -22,9 +22,9 @@
 use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode};
 use tairix_fuzzseed::Prng;
 use tairix_vcmailbox::{
-    admit_request, encode_blank_screen, encode_clock_rate_query, encode_clock_rate_write,
+    admit_request, encode_clock_rate_query, encode_clock_rate_write, encode_display_done,
     encode_rtc_register_query, encode_rtc_register_write, encode_xhci_reset, ClockRateQuery,
-    FirmwareClock, RtcRegister, FIRMWARE_CLOCKS_KEY, FIRMWARE_FRAMEBUFFER_KEY, PROPERTY_WORDS,
+    FirmwareClock, RtcRegister, DISPLAY_ENGINE_KEY, FIRMWARE_CLOCKS_KEY, PROPERTY_WORDS,
     RPI_RTC_KEY, VL805_KEY,
 };
 
@@ -34,7 +34,7 @@ const SMOKE_ITERATIONS: u64 = 4_096;
 /// Each device whose driver the service answers, with the tags its driver may
 /// send, pinned here independently of the table they are checked against.
 const DEVICES: [(HwMatchKey, &[u32]); 4] = [
-    (FIRMWARE_FRAMEBUFFER_KEY, &[0x0004_0002]),
+    (DISPLAY_ENGINE_KEY, &[0x0003_0066]),
     (VL805_KEY, &[0x0003_0058]),
     (RPI_RTC_KEY, &[0x0003_0087, 0x0003_8087]),
     (
@@ -43,15 +43,22 @@ const DEVICES: [(HwMatchKey, &[u32]); 4] = [
     ),
 ];
 
-fn seeds() -> [[u32; PROPERTY_WORDS]; 7] {
+/// The clocks the firmware-clocks node's driver may name — the ARM, core, HDMI
+/// state-machine and HDMI pixel-path clocks — pinned by the firmware's own
+/// selectors.
+const FIRMWARE_CLOCKS_DRIVEN: [u32; 4] = [3, 4, 13, 14];
+
+fn seeds() -> [[u32; PROPERTY_WORDS]; 9] {
     [
-        encode_blank_screen(true),
+        encode_display_done(),
         encode_xhci_reset(),
         encode_rtc_register_query(RtcRegister::Time),
         encode_rtc_register_write(RtcRegister::Time, 1_700_000_000),
         encode_clock_rate_query(FirmwareClock::Arm, ClockRateQuery::Max),
         encode_clock_rate_write(FirmwareClock::Arm, 1_500_000_000),
         encode_clock_rate_query(FirmwareClock::Emmc2, ClockRateQuery::Current),
+        encode_clock_rate_query(FirmwareClock::M2mc, ClockRateQuery::Min),
+        encode_clock_rate_write(FirmwareClock::Core, 500_000_000),
     ]
 }
 
@@ -63,7 +70,7 @@ fn driver_of(key: HwMatchKey) -> HwNode {
 
 /// Check the invariants for `message`, from every client and from a caller
 /// loaded for no device.
-fn judge(message: &[u32; PROPERTY_WORDS], drivers: &[HwNode; 4]) {
+fn judge(message: &[u32; PROPERTY_WORDS], drivers: &[HwNode; DEVICES.len()]) {
     assert!(admit_request(message, None).is_err(), "{message:x?}");
     for (driver, (_, tags)) in drivers.iter().zip(DEVICES) {
         if admit_request(message, Some(driver)).is_err() {
@@ -78,6 +85,12 @@ fn judge(message: &[u32; PROPERTY_WORDS], drivers: &[HwNode; 4]) {
         assert_eq!(words, 2 + 3 + values + 1, "one tag, exactly framed");
         assert_eq!(message[words - 1], 0, "an end tag last");
         assert!(tags.contains(&message[2]), "admitted {message:x?}");
+        if driver.match_keys().contains(&FIRMWARE_CLOCKS_KEY) {
+            assert!(
+                FIRMWARE_CLOCKS_DRIVEN.contains(&message[5]),
+                "admitted a clock no driver drives: {message:x?}"
+            );
+        }
     }
 }
 

@@ -13,6 +13,17 @@ fn encoded(request: &ClockRequest) -> ([u8; CLOCK_MAX_REQUEST + 1], usize) {
 }
 
 #[test]
+fn a_controller_s_refusal_keeps_its_reason() {
+    assert_eq!(refusal(Errno::Busy), DriverError::Busy);
+    assert_eq!(refusal(Errno::NotSupported), DriverError::Unsupported);
+    assert_eq!(
+        refusal(Errno::NotFound),
+        DriverError::DeviceFault,
+        "the controller gone"
+    );
+}
+
+#[test]
 fn every_request_round_trips_at_exactly_its_length() {
     for request in [
         ClockRequest::Describe(link()),
@@ -21,6 +32,10 @@ fn every_request_round_trips_at_exactly_its_length() {
             hz: 100_000_000,
         },
         ClockRequest::Release(link()),
+        ClockRequest::Floor {
+            link: link(),
+            hz: 120_000_000,
+        },
     ] {
         let (frame, len) = encoded(&request);
         assert_eq!(ClockRequest::decode(&frame[..len]), Ok(request));
@@ -67,10 +82,12 @@ fn every_reply_round_trips_and_a_refusal_carries_its_reason() {
     for state in [
         ClockState {
             hz: 0,
+            max_hz: 54_000_000,
             held_elsewhere: false,
         },
         ClockState {
             hz: 3_072_000,
+            max_hz: 3_072_000,
             held_elsewhere: true,
         },
     ] {
@@ -93,13 +110,21 @@ fn a_reply_with_an_undefined_bit_or_the_wrong_length_is_refused() {
         &mut out,
         ClockState {
             hz: 1,
+            max_hz: 1,
             held_elsewhere: false,
         },
     )
     .expect("fits");
     let mut flagged = out;
-    flagged[REPLY_HEADER_LEN + 8] = 2;
+    flagged[REPLY_HEADER_LEN + 16] = 2;
     assert_eq!(decode_describe_reply(&flagged[..len]), Err(Errno::BadMagic));
+    let mut overrun = out;
+    overrun[REPLY_HEADER_LEN] = 2;
+    assert_eq!(
+        decode_describe_reply(&overrun[..len]),
+        Err(Errno::BadMagic),
+        "a clock running above its own highest rate"
+    );
     let mut reserved = out;
     reserved[STATUS_REPLY_LEN] = 1;
     assert_eq!(

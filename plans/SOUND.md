@@ -20,7 +20,7 @@ seek slider.
 | SND2 | `lib/abi`: `HwDeviceClass::Audio`, the PCM vocabulary, `audio_ring`, `audiochan-v1`, `audio-v1` | done |
 | SND3 | `lib/audio`: conversion, mixer, resampler, channel mapping, clock model, routing policy, volume model, the stream client — all host-tested, plus the ring's loom model | done |
 | SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | done |
-| SND5a | The DMA seam's ABI and discovery: `HwDeviceClass::Dma`, the DMA `LinkDuty` and `LinkRequest` resources (`plans/SUPPLIERS.md` SL1), the sixteen-resource node, the endpoint block and its wire protocol; the shared walk's `dmas` binding, per-entry `dma-ranges` and `interrupt-parent`; the Broadcom channel mask | done |
+| SND5a | The DMA seam's ABI and discovery: `HwDeviceClass::Dma`, the DMA `LinkDuty` and `LinkRequest` resources (`plans/SUPPLIERS.md` SL1), a node wide enough for the controller, the endpoint block and its wire protocol; the shared walk's `dmas` binding, per-entry `dma-ranges` and `interrupt-parent`; the Broadcom channel mask | done |
 | SND5b | The three kernel prerequisites — `shm_create_dma` (quarantined with its creator), `shm_grant_peer`, `call_peer_holds` — and the duty-gated controller endpoint | done |
 | SND5c | The `DmaEngine`/`DmaChannel` class trait and `drivers/dma/bcm2835`, host-tested against a register-level model that fetches control blocks | done |
 | SND6 | Isochronous transfer support: the endpoint kind, service intervals, feedback and pacing arithmetic, alternate settings with bandwidth reservation, and frame-indexed stream scheduling in `lib/usb`; the stream regions, grants and notifications in `drivers/bus/usb/xhci` | done |
@@ -41,19 +41,38 @@ seek slider.
 | SND13.1 | The two-session vertical: a fast user switch between two signed-in accounts, the departing session's stream held and resumed on its frame | blocked: needs the login vertical harness (`plans/NEW-DESKTOP-LOGIN.md` G7.2) |
 | SND14 | `userland/apps/music`, the shared engine `lib/player`, and the picker's folder pick | done |
 | SND15 | Desktop integration: device controls and their room, the machine baseline, locations, the Settings pane, the taskbar volume control and recording indicator, Switchboard, sysinfo, the `audio:` resolver, media types, `audioctl` | done |
-| SND16 | `lib/sound`: MPEG audio Layers I/II/III, verified against the ISO compliance limits | planned |
-| SND17 | `lib/sound`: Ogg container and Vorbis I | planned |
-| SND18 | `lib/sound`: Opus, verified against the RFC 6716 vectors | planned |
-| SND19 | `drivers/audio/rpi_hdmi` | blocked: needs a native VC6 HDMI encoder — the open decision below |
-| SND20 | `lib/soundtheme`: the `SoundEvent` vocabulary, the shipped theme catalog, the settings document and the cue client; the shipped masters and their build-time family contract in `tools/syshelp` | planned |
-| SND21 | `userland/system/soundd`: the cue authority, its two authority classes, resolution to silence, and the bounds; the sample-exact QEMU cue vertical | planned |
-| SND22 | The cue sites: session login/logout, machine startup/shutdown, hotplug attach/detach, the terminal's `Op::Bell`, and the notification area's own cues | planned |
+| SND16 | `lib/sound`: MPEG audio Layers I/II/III, verified against the ISO compliance limits | done |
+| SND17 | `lib/sound`: Ogg container and Vorbis I, over the shared fast transform that MPEG audio's filterbanks then use too | done |
+| SND18 | `lib/sound`: Opus in Ogg, verified against RFC 8251's conformance vectors | done |
+| SND19 | HDMI audio on the Pi 4, over a native display engine — §Native HDMI on the Pi 4 | in progress |
+| SND19a | `lib/dmaengine`: the `dmaengine-v1` controller endpoint and the freestanding bring-up and serve loop, written once over the class traits; `drivers/dma/bcm2835` moved onto it | done |
+| SND19b | The matched bind key: a driver learns its own node's match keys from `hw_self_node` and which of its bind keys matched through `lib/devmatch`'s rule, so one driver serves a binding family's variants | done |
+| SND19c | DMA4 (`brcm,bcm2711-dma`) in the Broadcom DMA driver: the 40-bit engine's register model and control blocks, beside the legacy engine, both reading the one request-cell binding | done |
+| SND19d | The hardware tree describes the devices SND19 binds: thirty-two resources a node, and every register window carrying its `reg-names` name, looked up by name | done |
+| SND19e | Interrupt lines through a second-level controller: the `InterruptLine` role (`plans/SUPPLIERS.md` SL4) over `irqline-v1` (`plans/GPIO.md` G1), and `drivers/irq/brcmstb_l2` | done |
+| SND19f | `lib/clock`, the `clock-v1` server every clock controller shares, with its exact and floored policies; `drivers/clock/bcm2711_dvp`, the HDMI blocks' audio clock gates | done |
+| SND19g | The firmware's clocks served over `clock-v1` by the firmware-clocks node's driver, `drivers/clock/rpi_firmware`, beside the ARM clock's frequency mechanism: the core and HDMI clocks floored, each link reaching only the clock its selector names, admitted by the mailbox service by caller and clock | done |
+| SND19h | I2C transactions (`plans/I2C.md` I1–I4): the shared-memory transfer protocol, target and bus links, the BCM2835 controller and every consumer moved onto them | done |
+| SND19i | `drivers/bus/i2c/brcmstb`: the HDMI blocks' DDC controllers, repeated START and all (`plans/I2C.md` I9) | done |
+| SND19j | `lib/edid`: EDID 1.4 with CTA-861 and DisplayID extensions — timings, the sink's audio descriptors and speaker allocation, the HDMI data blocks — fail-closed and fuzzed; the HD Audio driver's ELD read through it | done |
+| SND19k | The display that follows its output (`plans/DISPLAY.md` D12): no output, an output arriving and leaving, a new mode published and every client reconfiguring onto it | done |
+| SND19l | `encoder-v1` and the `Encoder` role: the display engine drives each encoder through its connector state, its modes and the phases of a mode set | done |
+| SND19m | `drivers/display/bcm2711_hvs`: the native display engine — the HVS and the pixel valves feeding the HDMI outputs — taking the display over from the firmware | done |
+| SND19n | `drivers/display/bcm2711_hdmi`: encoder, PHY, clocks, hotplug, EDID over DDC, the mode chosen, InfoFrames, SCDC | done |
+| SND19o | HDMI audio in `drivers/display/bcm2711_hdmi`: MAI fed by DMA4, N/CTS from the TMDS clock, IEC 60958 framing and channel status, the audio InfoFrame; an endpoint whose facts follow the sink | done |
+| SND19p | The image and discovery: the engine's nodes enabled, the aarch64 port's description of the engine's fixed wiring, the firmware-framebuffer path and `rpi_hvs` retired | done |
+| SND19q | The metal run (`plans/PI.md` P17): a Pi 4B with an HDMI monitor on each port, hotplugged, playing through each sink | planned |
+| SND20 | `lib/soundtheme`: the asset each `SoundEvent` plays, the shipped theme catalog, the settings document and the cue client, over the `cue-v1` protocol in `lib/abi`; the shipped masters and their build-time family contract in `tools/syshelp` | done |
+| SND21 | `userland/system/soundd`: the cue authority, its two authority classes, resolution to silence, and the bounds; the sample-exact QEMU cue vertical | done |
+| SND22 | The cue sites: session login/logout, machine startup/shutdown, hotplug attach/detach, the terminal's `Op::Bell`, and the notification area's own cues; the lifecycle QEMU vertical | done |
+| SND23 | The user's layer: the session pushes its user's sound policy when it claims the seat, and a chosen file reaches the decoder as a one-shot read descriptor | done |
+| SND24 | The user-layer QEMU vertical: a desktop session at the seat with a sound card, its user's choice of a file planted in its store, a layered cue provoked, and the host's capture held to that file's own samples | planned |
 
 The ledger is worked in dependency order: an item is complete before anything
 that depends on it begins, and each carries its own tests and documentation.
-Every item through SND19 depends on the one before it. SND20–SND22 depend on
+Every item through SND19 depends on the one before it. SND20–SND23 depend on
 SND9's sandboxed decode seam and on SND12's FLAC codec, which is the shipped
-sound set's format, and on nothing later.
+sound set's format, and on nothing later. SND24 depends on SND23.
 
 **What SND4 guarantees.** The vertical passes on all three Tier-1 QEMU
 targets: boot, discovery, signed-bundle autoload of the driver into its own
@@ -231,7 +250,11 @@ for the next. Streams run over four periods with the one after the one
 playing always written, positions read from the position buffer. The engine
 is host-tested against a register-level controller model and modelled codecs;
 the `intel-hda` verticals on all three QEMU targets assert the capture holds
-exactly the signal.
+exactly the signal, apart from whole codec buffers QEMU itself reports
+discarding: its `hda-output` refills an 8 KiB buffer by the virtual clock and
+drops the lot (`hda_audio_overrun`) when a stall of its main loop lets the
+buffer fill before the backend drains it, so the run logs that trace and the
+comparison allows exactly one buffer's frames for each, and nothing else.
 
 **What SND12 guarantees.** `lib/sound` decodes FLAC (RFC 9639) completely,
 native and in Ogg: every subframe kind and order, both Rice parameter widths,
@@ -249,9 +272,7 @@ crate states (`max_working_set`). Seeking bisects the stream's own frame
 headers, narrowed by a checked seek table; in Ogg it bisects pages on the
 frame each opens, never trusting a granule. The Ogg reader verifies every
 page's CRC and sequence and reads one logical stream among interleaved
-others; a chained link after it is refused by name (`OggChained`) once the
-first link's samples are all written — reading on into further links is the
-full container's, with Vorbis in SND17. The encoder, behind the off-by-default
+others; links chained after it are SND17's. The encoder, behind the off-by-default
 `encode` feature, is a core that emits exactly the constructs it is told
 (refusing any frame past the decoder's bound) under a chooser that picks the
 cheapest; both halves share one format model. Conformance rests on RFC 9639's
@@ -287,6 +308,81 @@ plays on while held, and takes it back; the guest witnesses the hold and the
 resume on that frame, and the host asserts the capture is the signal exactly,
 silent only there. A client that corrupts its own ring now faults its own
 stream alone rather than losing the device for every user.
+
+**What SND16 guarantees.** `lib/sound` decodes MPEG audio completely (the
+format's bullet below): MPEG-1, MPEG-2 and MPEG-2.5, Layers I, II and III, to
+`F32`. A stream is believed only where three frames agree, a free-format
+frame is measured from the next agreeing one, a protected frame's CRC is
+checked, and a sync with nothing agreeing after it, junk between frames, and
+ID3 and APE tags are stepped over. The first frame fixes the channels; a mono
+frame in a stereo stream drives both channels' filterbanks with its one
+channel — at the subbands for Layers I and II, at the spectrum for Layer III
+— so each output's filter state follows what it carries, and a stereo frame
+in a mono stream is refused. Xing's and VBRI's frame count is held to
+(`MpegTruncated`), and LAME's delay and padding, where its own CRC vouches
+for them, are trimmed with the decoder's 529. Seeking is exact: frame headers
+are walked from an index of every 32nd frame passed, and the preroll decodes
+the frames the target's filterbank state depends on — two for Layers I and
+II; for Layer III one at MPEG-1, two at the lower rates — and as many before
+them as fill the reservoir. Each frame is read whole before any state moves,
+so an input answering "not yet" changes nothing. Conformance rests on the
+ISO/IEC 11172-4 compliance streams, which the tree does not carry: each
+decodes within one 16-bit step of its reference output, inside the standard's
+accuracy limits. In the tree, every stage is checked against the standard's
+formula evaluated directly, streams written in the tests drive the framing,
+tags, CRC, free format, mode, trim and seek behaviour end to end, and the
+fuzz target writes streams in every layer and family that lean on the
+reservoir and holds them to exact seeks.
+
+**What SND17 guarantees.** The Ogg container is read in full: a link's
+streams opened together, the first whose codec is decoded here read and the
+others stepped over, and chained links read one after another, each with its
+own codec, rate, channels and tags. Where a link ends is found by bisecting
+the file on its serials, so a chain costs a few probes a link, and bytes
+trailing the last link end the file. `PcmSource` reads a link at a time:
+`next_link` moves on and `open_link` returns to one, the sandbox protocol
+carries both (an open names its link, a replacement worker comes back to the
+link it left), the engine plays a chain's links as one entry — gapless while
+their shape holds, an extent measured over the whole file, a seek within the
+link heard — and both players name each link as it opens; `soundd` reads a
+chained cue through its links of one shape. Vorbis I decodes completely (the
+format's bullet below) to `F32`, its inverse MDCT on the shared transform,
+which MPEG audio's filterbanks moved onto too. The mapping's granules place
+and trim the stream, and every other page's granule is held to the samples
+decoded, a non-audio packet refused, so a seek — bisecting the granules —
+lands exactly where decoding from the start does. A setup is bounded at many
+times what any encoder writes, a packet at the most its block can consume.
+Conformance rests on libvorbis's own decodes, kept beside its streams in the
+tree (the one format besides FLAC to keep foreign streams, for want of an
+output a stream can state): stereo with block switching, mono at 8 kHz, 5.1,
+and a stream written in the tests in the constructs libvorbis's encoder never
+writes, each within one 16-bit step. The specification's formulas evaluated
+directly check every construct, Ogg streams written in the tests drive the
+granules, chains, multiplexing and seeks, and the fuzz target corrupts
+libvorbis's streams beneath resealed pages and holds every link to the
+invariants, a seek's block to the decode from the start among them.
+
+**What SND18 guarantees.** Opus decodes completely: SILK, CELT and hybrid
+frames at every bandwidth and frame size, packets of up to 120 ms in all four
+framing codes held to RFC 6716's framing requirements, mono and stereo, every
+mode switch with and without a redundant frame, each layer's concealment for
+the empty frames discontinuous transmission leaves, and channel mapping
+families 0 and 1 from mono to 7.1, 6.1 included — which put a rear centre in
+the PCM vocabulary for every layer, the mixer's folds, HDMI's allocation, USB
+audio's clusters, virtio's maps and the FLAC, Vorbis and WAVE layouts among
+them. SILK is the reference's fixed point bit for bit and CELT libopus's float
+build's arithmetic. The Ogg mapping places the stream by its pre-skip and
+granules and refuses a timeline at odds with its samples; a seek lands on its
+frame exactly and decodes on from 160 ms before it, so its samples converge
+onto the decode from the start. Every packet of RFC 8251's twelve conformance
+vectors ends in the encoder's range state, the stereo decode is within one
+16-bit step of each reference, and both channel counts are within 2e-7 of
+libopus 1.4's float decoder. In the tree, nine streams libopus encoded with
+every packet's settings forced keep libopus's decode and each packet's range
+state beside them. The Ogg layer shared with Vorbis now refuses a stream
+whose serial a later link carries and one whose pages are lost behind
+another's damaged page, and the fuzz target drives libopus's streams through
+every link invariant, chained among Vorbis ones.
 
 **Why the two capabilities sit in SND4 rather than beside the ABI.** A
 capability is added with the subsystem that enforces it, never ahead of it: it
@@ -405,7 +501,8 @@ TAIRiX's answers, stated as binding invariants:
 | Drivers | `drivers/audio/<leaf>/`, `drivers/dma/<leaf>/` |
 | The command player | `userland/apps/play` |
 | The desktop player | `userland/apps/music` |
-| The desktop sound vocabulary, shipped themes, settings and cue client | `lib/soundtheme` |
+| The cue protocol and its event vocabulary (`cue-v1`) | `lib/abi/src/sound_cue.rs` |
+| The desktop sounds' assets, shipped themes, settings and cue client | `lib/soundtheme` |
 | The cue authority | `userland/system/soundd` |
 | The shipped sound masters, planted | `/System/Audio/Sounds/<Theme>/` |
 
@@ -445,8 +542,8 @@ A decoder answers a **`PcmSource`**: declared rate, channel count and channel
 map, sample format, total frame count where the container states one, and
 `next_block` yielding interleaved frames. Seeking is a separate, *optional*
 capability a format either has (FLAC's seek table, an Ogg page's granule
-position, an MP3's Xing TOC or a constant-bitrate frame index) or honestly does
-not; a format with no seek structure reports seeking as unavailable rather than
+position, MPEG audio's frame headers walked from the frames already passed) or
+honestly does not; a format with no seek structure reports seeking as unavailable rather than
 scanning the file and calling the result a seek.
 
 The decode is **pull, bounded, and streaming**: nothing decodes a whole file
@@ -542,6 +639,16 @@ rather than guessed at. What "complete" means per format:
 A format is one module unless it is genuinely more than one codec, which is
 `lib/image`'s rule: Ogg is `ogg` for the container plus `vorbis` and `opus` for
 the two bitstreams, and neither codec knows the container or the other.
+
+**The shared transform.** Vorbis's MDCT spans 64 to 8192 points and CELT's
+the multiples of 2, 3 and 5 its frame sizes make, so a direct form is out of
+the question for either: one mixed-radix FFT (radices 2, 3, 4 and 5) and the
+MDCT and DCT over it serve both, and arrive with Vorbis. MPEG audio's
+filterbanks — the synthesis's 32-point matrixing and Layer III's 36- and
+12-point IMDCTs — are direct forms until then, a small fraction of a core but
+not the efficient form, and move onto the shared transform in the same
+change: its 9-point FFT for the IMDCT and its 16-point for the matrixing,
+each held to the direct form it replaces.
 
 #### The FLAC encoder
 
@@ -739,11 +846,15 @@ The surface:
   hands to `audiod` — the discovery half, defined beside the endpoint block so
   the key emitted and the key looked for cannot drift.
 - `Facts` (the sinks and sources the device presents, their supported formats
-  and rates, period bounds, hardware gain), `Attach` (the mixer creates the
+  and rates, the bits of a sample each resolves where its format carries
+  more — so the mixer dithers to the converter's own grid — period bounds,
+  hardware gain), `Attach` (the mixer creates the
   ring region, grants it, and names its notify port), `Configure` (rate,
   format, channels, period — a device reconfiguration, performed at a period
   boundary), `Start`/`Stop`/`Drain`, `Service` (the doorbell), `Gain`,
-  `Detach`.
+  `Detach`, and `Watch`, which names a device-wide notify port the mixer
+  registers at bind, so a jack change reaches it whether or not a stream is
+  attached.
 - Notifications: `PeriodElapsed { frames, sampled_at }` — the clock pair that
   invariant 3 is built on — plus `Xrun`, `Drained`, `JackChanged`, and
   `Faulted`, which a driver sends when it can no longer serve an endpoint, so
@@ -849,7 +960,9 @@ what the user sees and what the log records cannot disagree.
 - **A device that fails is contained.** A driver that dies or a device that
   disappears mid-stream moves its streams to `DeviceLost` with their positions
   intact and states the reason; the service stays up and other devices are
-  untouched. `audiod` itself is restartable under the service manager's policy,
+  untouched. An endpoint whose facts change — a jack change re-reads them — no
+  longer admitting the configuration its streams run under loses that
+  endpoint alone, the same way, and the loss is audited. `audiod` itself is restartable under the service manager's policy,
   and a restart loses the streams rather than the system.
 
 ## The clock, the latency, and the seat
@@ -1024,26 +1137,17 @@ which is why none is reachable today, and SPI, SD and UART DMA want the same
 operations, so it is a shared seam written for a periodic slave transfer in
 general rather than for an audio ring — §The DMA-engine seam, below.
 
-1. **HDMI audio — `drivers/audio/rpi_hdmi`.** The VC6 HDMI controller's MAI
-   block: its FIFO fed by a cyclic DMA channel with the HDMI request line, the
-   sample-rate divider, the CEA-861 audio InfoFrame and channel status written
+1. **HDMI audio — in `drivers/display/bcm2711_hdmi`.** The HDMI controller's
+   MAI block: its FIFO fed by a cyclic DMA4 channel on the HDMI request line,
+   the sample-rate divider, the audio InfoFrame and channel status written
    into the controller's packet RAM, and the audio clock regeneration N/CTS
-   values derived from the active pixel clock. What the sink accepts comes from
+   values derived from the active TMDS clock. What the sink accepts comes from
    the EDID's short audio descriptors, and the sink appears and disappears with
    the connector's hotplug — because **HDMI audio is a function of a display
-   connector, not an independent device**, and TAIRiX models it that way.
-
-   **Why SND19's blocker is what it is.** TAIRiX's Pi
-   display path presently takes its framebuffer from the VideoCore firmware
-   through `lib/vcmailbox`, and the firmware therefore owns the HDMI
-   controller — its registers, its pixel clock and its EDID. Audio needs all
-   three. There are exactly two ways through, and only one of them is
-   acceptable: a native encoder on the TAIRiX side (mode set, N/CTS,
-   InfoFrames, EDID), which is display work belonging to `plans/PI.md`; or the
-   firmware's own audio service, which on the Pi means VCHIQ — a second
-   device-interconnect stack with no other use in this tree, putting the audio
-   path behind closed firmware. This plan refuses the second and states the
-   first as a dependency rather than smuggling either into an audio change.
+   connector, not an independent device**, and TAIRiX models it that way: the
+   driver that owns the connector owns its audio. Audio needs the HDMI
+   controller's registers, its clock and its EDID, so it needs a native
+   display engine; §Native HDMI on the Pi 4 is that engine.
 
 2. **The 3.5 mm jack — `drivers/audio/bcm2711_pwm`.** Fully native, no
    firmware: the BCM2711 PWM block driving the two channels the A/V jack's
@@ -1188,9 +1292,9 @@ facts alone.
 
 **The cross-process shape.** One endpoint per controller node, from a reserved
 block indexed by the node's id, bindable only by the holder of that node's
-DMA `LinkDuty`. It is the I²C `BusChild` precedent with one duty in place
-of one per child, because a DMA controller's consumers are scattered across the
-tree rather than beneath it and a duty per consumer would not fit a node. The
+DMA `LinkDuty`: one duty per controller, as every link role's supplier
+carries, because a DMA controller's consumers are scattered across the tree
+and a duty per consumer would not fit a node. The
 endpoint is restricted-sender on `CAP_IPC_ENDPOINT` with the grant coupled to
 the call, and a DMA `LinkRequest` grant covers *calling* its controller's endpoint —
 never serving it, so no consumer can squat the controller's rendezvous.
@@ -1256,8 +1360,8 @@ for every FDT port rather than `kernel/arch/aarch64` alone:
 Three properties of the walk hold with it, each found wanting against the
 pinned tree:
 
-- **A node carries up to sixteen resources** (`HW_NODE_MAX_RESOURCES`): the
-  legacy controller needs fifteen, and at eight its channels 7–10 had no line.
+- **A node carries up to thirty-two resources** (`HW_NODE_MAX_RESOURCES`): the
+  legacy controller needs fifteen, and the HDMI controller (SND19d) twenty-three.
 - **An interrupt keeps its place in its node's list**
   (`HwResource::interrupt_position`). The kernel mints one grant per distinct
   resource, so channels 7 and 8 sharing a line would otherwise collapse into
@@ -1285,9 +1389,11 @@ enforcement point in this change:
 (`brcm,bcm2835-dma`), named for the binding it serves: every default-tree
 consumer but HDMI names it, SND8's I²S among them. DMA4 (`brcm,bcm2711-dma`) is
 a different register model and block format on its own node, whose only
-default-tree consumers are the two HDMI audio paths, so it arrives with SND19
-as `drivers/dma/bcm2711`, and the serve loop moves into a `lib/*` crate when
-that second driver gives it two consumers. The seam has no pause (a paused DREQ-paced transfer starves
+default-tree consumers are the two HDMI audio paths; it joins the same driver
+with SND19 (SND19c), because both engines read one request-cell binding and a
+driver crate may not depend on another, and the driver tells the two apart by
+its matched bind key (SND19b). The endpoint and its serve loop, which know no
+controller, are `lib/dmaengine` (SND19a). The seam has no pause (a paused DREQ-paced transfer starves
 its peripheral; a consumer wanting silence writes silence), no
 memory-to-memory, and no one-shot scatter-gather, which SPI and SD bring with
 them when they arrive as consumers.
@@ -1517,8 +1623,10 @@ and no component needs both mechanisms.
 
 ### The vocabulary
 
-`SoundEvent`, a closed enum in `lib/soundtheme`, never a free-form string —
-for `GraphicsFamilyKind`'s reason: a consumer matches on the event, so adding
+`SoundEvent`, a closed enum, never a free-form string. It is defined with the
+cue protocol in `lib/abi`, because every type a program exchanges with a
+system service is part of the C-callable ABI, and `lib/soundtheme` re-exports
+it. It is closed for `AssetFamilyKind`'s reason: a consumer matches on the event, so adding
 one forces every reader to say what it means rather than silently ignoring a
 name it does not recognise.
 
@@ -1587,9 +1695,11 @@ vocabulary, a shipped default set discovered at build time, a bounded settings
 document, and a client that asks an authority to act. `no_std`,
 `forbid(unsafe_code)`, no I/O, host-tested.
 
-- `event` — `SoundEvent` and its authority class.
-- `catalog` — the shipped themes and their assets, and the bounded listing
-  model a chooser draws. A theme is a directory; adding one is dropping it in.
+- `event` — the asset each event plays (`SoundAsset::of`); the event and its
+  authority class are the protocol's.
+- `catalog` — the store, the shipped default theme, the asset bound and the
+  theme-name rule. A theme is a directory; adding one is dropping it in. The
+  listing model a chooser draws arrives with that chooser.
 - `settings` — the closed registry of the sound document, read tolerantly and
   merged strictly, the two readings the pinboard document already distinguishes.
 - `cue` — the client half: the request a program makes, over an injected
@@ -1620,10 +1730,91 @@ It is not the session either, for a simpler reason: `Startup` precedes every
 session, `Shutdown` outlives them, and a headless machine has none. Only a
 machine-scoped service is present for the whole set.
 
-`soundd` holds **no capability of its own**. It plays through the ordinary
-`audio-v1` client surface with no more authority than any program that makes a
-sound, and it reads `/System/Audio` and the machine settings document. It never
-holds `CAP_APPDATA_ADMIN` and never reaches into a user's files.
+`soundd` holds **no new capability**: only what any player holds — its reserved
+rendezvous (`CAP_IPC_BIND_PRIVILEGED`), the stream's ring (`CAP_SHM`), the
+decode sandbox (`CAP_SANDBOX_SPAWN`), its log (`CAP_LOG_EMIT`) and a read of
+`/System/Audio` (`CAP_FS_ACCESS`). It reads the machine settings document,
+never holds `CAP_APPDATA_ADMIN` and never reaches into a user's files.
+
+**How a cue reaches a room it is not in.** `audiod` admits playback only from a
+caller in the session that holds the room, and `soundd` belongs to no session.
+It runs as its own service account, and `audiod` admits a `Notification`-role
+playback stream from that kernel-attested account alone — the attested-service
+pattern the network stack's and discovery service's clients already
+authenticate by — opened under one of two tenancies:
+
+- **The machine's**, for a lifecycle cue. Admitted whatever the room, withheld
+  included: the login screen and a session switch both withhold the room, and
+  those are exactly when the machine's own sounds play. A machine sound carries
+  no session's data, which is all withholding protects.
+- **A session's**, for an application cue: the requester's attested login
+  session. `audiod` admits it only while that session holds the room, so it is
+  the one check on the stream — `soundd` reads the seat lease only to choose
+  whose choices apply (below), never to admit a stream — and its
+  `SeatNotOwner` is the requester's answer. A fast user switch between the cue
+  and the open cannot carry one user's cue into another's room.
+
+**The lifecycle principals, by attested identity.** No name in a request
+decides: `Startup` is cued only by init, PID 1, which the kernel starts first
+and which never restarts, once the boot floor is started; `Shutdown` by a holder
+of `CAP_SYSTEM_POWER`; `Login` and `Logout` by the login service's account; and
+`DeviceAttached` and `DeviceDetached` by the device manager's, the one
+principal that sees a device both arrive and leave, once per device rather
+than once per node of it. The two accounts' uids move into `lib/abi` beside
+the predicates that check them, as the network stack's did.
+
+**Shutdown waits for its sound.** A cue may ask to be answered once it has
+played out rather than once it starts (`Answer::PlayedOut`). The shutdown
+authority asks so before it powers the machine off, and the drain deadline —
+the sound's own length and a second — bounds the wait.
+
+**The tenancy is on the stream, so `audiod` stays the one judge of the room.**
+`audio-v1`'s open carries it: `Caller` for every program, `Machine` or
+`Session` only from `soundd`'s attested account and only for a notification.
+The routing policy reads a stream's principal (`route::Principal`) rather than
+its owner's session, which is the whole of the change the mixer needed.
+
+### The cue sites
+
+**What SND22 guarantees.** Every lifecycle sound comes from the principal that
+owns its transition, and every site posts its cue and collects the answer from
+its own wait-set, so nothing that makes a sound waits for one.
+
+- **Startup.** Init asserts `BootComplete` once every boot-floor service has
+  settled — ready, or terminal with no restart pending — and
+  `FilesystemsMounted` once the writable root first answers, which the `Mounts`
+  notice announces: the driver registry publishes every volume registered,
+  removed or changing availability. It cues `Startup` once both hold, once per
+  boot. `soundd` and `devmgr` are `ready=notify`, so the sound waits for the cue
+  authority and for the hardware present at boot. A provider or an on-demand
+  service is implicitly `ready=notify`, and declaring either `ready=immediate`
+  is refused as conflicting.
+- **Devices.** Each hardware-tree node carries its presence: removable (the
+  emitter's to state), settled and hot arrival (the kernel's, taken back from
+  every publish). A driver that may publish starts unsettled and says it has
+  settled with `hw_node_settle`. `devmgr` announces its readiness once
+  everything present at boot has settled, or lapsed after `SETTLE_BUDGET_NS`,
+  and from then cues one sound per removable device that arrives hot under a
+  parent already present or leaves one still present. A USB device's
+  removability is its port's: `PORTSC.DR` at a root port, the hub
+  descriptor's `DeviceRemovable` map below a hub.
+- **Login and logout.** The login service cues `Login` once it starts a
+  session — text, or a fresh desktop, never one a switch resumes — and
+  `Logout` once a session ends, never when a desktop steps aside.
+- **Shutdown.** Switchboard, the `CAP_SYSTEM_POWER` holder, cues `Shutdown`
+  with `Answer::PlayedOut` and performs the transition when the answer comes,
+  bounded by the sound's length and a second; one it cannot post performs the
+  transition at once.
+- **The bell and the notification area.** `terminal.app` cues `Bell` once per
+  batch of output that rang it. The desktop session cues a newly shown
+  notification's severity sound — `Notification`, `Warning`, `Error` — and
+  nothing for a replacement.
+
+`soundd` records a machine sound that played out whole
+(`MACHINE_CUE_PLAYED`). The lifecycle verticals, on all three QEMU targets,
+step their script on those records and hold the host's capture to the startup,
+login and logout masters in order. Every other audio vertical plants a machine
+document turning those three off, since each holds its capture to one signal.
 
 ### Resolution, and what silence means
 
@@ -1647,21 +1838,111 @@ without the audio path having to guess whether the quiet was intended.
 
 Two documents, layered, with no gap and no third place:
 
-- **The machine document** under `/System/Settings`, written through the
-  settings authority that already exists — where the default sink and
-  per-device gain live. It is the whole policy before login, on a headless
-  machine, and after the last session ends.
+- **The machine document**, `/System/Settings/Sound/sound.conf`: administrator
+  policy beside the default sink and per-device gain, read through the same
+  registry as a user's and written as `/System/Settings` is. It is the whole
+  policy before login, on a headless machine, and after the last session ends;
+  `soundd` reads it again only when the file changes. A file it names for an
+  event is the administrator's replacement, which `soundd` reads itself.
 - **The user's own choices**, layered over it while their session holds the
-  seat: a master enable, a per-event enable, a per-event gain, a per-event
-  asset override, and the theme.
+  seat: a master enable, a per-event enable, gain and file, and the theme. They
+  reach every sound but `Startup`, `Login` and `Logout`, which sound when no
+  session holds the seat and so are the machine document's alone.
+  They are the desktop session's private app-data document, and the session
+  is its only reader and writer, as it is of the pinboard document: the
+  Settings application's *Sound Effects* pane reads and edits it through the
+  session's apply rendezvous (`pinboard-v1`'s sound requests) and keeps no
+  store of its own.
 
-The interesting half is how the second reaches `soundd` without giving a
-machine service reach into a user's files. It does not fetch them: **the
-session pushes the resolved policy when it claims the seat**, exactly as the
-session is the only writer of the pinboard document. A user's own chosen file
-arrives as a **one-shot read descriptor** — the file-picker pattern §16.5
-already names — which `soundd` hands to the sandbox worker without ever holding
-a filesystem capability or interpreting a byte of it.
+**The session pushes; `soundd` follows the seat.** `soundd` never fetches a
+user's settings or files. While the session holds the seat — from bring-up,
+and again on every return to it — it pushes its user's document (`cue-v1`'s
+`Policy`), and pushes again whenever the document changes or `soundd`
+restarts. `soundd` admits a push only from the anchor of the login session the
+seat's display lease names at that moment, read from the kernel's
+`DisplayLease` notice, the one fact that says who is at the machine, and drops
+the layer, closing its files, the moment the lease moves on. So the layer is
+always the seat holder's: a backgrounded or crashed session's choices never
+outlive its hold, and nothing but the session at the seat can decide what the
+machine's own sounds say. While it holds the seat its user's layer governs
+every cue heard there but the machine's start and a session's start and end:
+those sound between sessions, when no one's choices are in force, and a layer
+that claimed them could only ever be the wrong user's or nobody's.
+
+**`soundd`'s instance is a notice.** On each bind of its rendezvous `soundd`
+publishes its own process instance (`NoticeTopic::CueAuthority`, kernel-attested
+by that bind): the recipient a session grants its files to and, as a new value,
+the news that a restarted authority holds no session's choices.
+
+**A chosen file is a one-shot read descriptor.** The pushed document names no
+path — `soundd` refuses one that does — and each event's own file arrives beside
+it as an `fd_grant` delegation to `soundd`'s instance, read-only, redeemed at
+once. `soundd` reads it under the session's captured identity, the delegation
+being its whole authority over the user's files, supplies the bytes to the
+sandbox worker and interprets none of them; the worker identifies the format,
+so a user's file may be any `lib/sound` reads, within the cue bounds. The user
+chooses it in the session's own trusted picker, which records its path in the
+user's document: the path never reaches the Settings application or `soundd`.
+
+**What SND23 guarantees.** Only the session at the seat decides what the seat's
+sounds say, only while it is there, and nothing it hands over is a path.
+
+- **The authority.** `soundd` admits a push only when the caller's instance is
+  the login session the `DisplayLease` notice names and that session's own
+  anchor, re-reading the holder before every request and dropping the layer —
+  its descriptors closed, its decodes invalidated and its refused-decode memory
+  forgotten — when the lease moves; a same session's push again keeps what is
+  known of each file it hands over unchanged. The layer decides only cues heard
+  at the seat — the machine's and the seat session's own — so no other
+  session's cue learns or reaches it. A session's own file sounds under that
+  session's tenancy, so the audio service stops it when the room moves, and a
+  machine's moment still waiting on one when the seat moves sounds as the seat
+  now decides. Binding `SOUND_CUE_ENDPOINT` is what admits
+  `soundd` to the lease, beside the display and audio services, and the
+  `CueAuthority` notice admits only the binder, naming only the instance the
+  kernel attests it is.
+- **The document.** A push is read strictly (`merge_pushed`): a file key, or any
+  setting of `Startup`, `Login` or `Logout`, refuses it whole, as does a handle
+  in one of those slots. The layer is the pushed document over the machine's,
+  laid again whenever the machine document changes. The session stores only
+  what its user set (`UserChoices`), so the machine document decides the rest,
+  in its *private* app-data scope, touching no other key there.
+- **The files.** Each chosen file is opened as the user, checked to be a
+  regular file within `MAX_SOUND_BYTES`, and delegated read-only; `soundd`
+  redeems every distinct handle once, bound to the session's instance, even
+  for a refused push, so none stays pending, shares one file chosen for several
+  events, and reads it under the session's identity. A
+  delegation names its path, so a push made again re-grants the pending
+  handle rather than leaking another. The worker identifies the format, so a
+  user's file may be any `lib/sound` reads; one that cannot be read is
+  `Undecodable`, never covered by the theme's; only a sound refused for itself
+  is remembered as undecodable, a failure of the machine's own being tried
+  again. The decoded-cue cache is
+  private: an entry is zeroed as it is given up, and samples a sounding cue
+  still holds are zeroed when it lets them go.
+- **The machine's replacement.** A file the machine document names is read by
+  `soundd` under its own identity and keyed by its event, so it plays for
+  everyone and no user can name one.
+- **The session.** It pushes at bring-up, on taking the seat back, on every
+  stored change and on every new authority instance: the files are delegated
+  on its sound-choices worker and the push is posted from the serve loop with
+  a deadline, collected with its cues, so nothing waits on the authority. A
+  push the authority had no room for or did not answer is retried on a growing
+  one-shot deadline (a quarter of a second, doubling to eight), any other
+  refusal waits for the next change, and an answer to a push made before the
+  authority last forgot the session's choices is not taken for one made since.
+  A store that cannot be read is read again on the same deadline, and nothing
+  is stored over choices it was not read for.
+- **The pane.** Settings' *Sound Effects* pane reads the choices in effect and
+  every theme through `pinboard-v1`, renders each change through the sound
+  registry, asks once a level settles — one round trip at a time, every setting
+  changed meanwhile carried in the next with its newest value — and reads again
+  after every answered change; a file is chosen in the session's picker, which
+  concludes the pick for the session itself (`Requester::Sound`).
+
+The cross-process path is held by the kernel's own tests of the notice
+authority and the lease's readers, and by host tests of every layer over its
+real codecs; the end-to-end run is SND24.
 
 A per-event gain defaults to unity and **the shipped theme is unity
 throughout**, which is what keeps the shipped cue path bit-exact and therefore
@@ -1669,9 +1950,8 @@ testable against the asset itself.
 
 ### The shipped set
 
-Fourteen masters authored as one family, all 48 kHz stereo 16-bit signed PCM,
-shipped losslessly as FLAC — roughly 0.75 MiB for the set, from 3.47 MiB of
-raw samples.
+Fourteen masters authored as one family, all 48 kHz stereo 16-bit signed PCM.
+The twelve that ship are FLAC: 554 KiB, from 3.1 MiB of raw samples.
 
 | Event | Asset | Seconds | Peak |
 |---|---|---|---|
@@ -1710,8 +1990,11 @@ The authoring contract, checked at build time, failing the build when broken:
   fourteen masters already satisfy this, with 7–20 ms of lead-in and a uniform
   12 ms tail.
 - Within `MAX_SOUND_BYTES`, as a wallpaper is within its own bound.
-- A name resolving to a live `SoundEvent`. An orphan asset fails the build,
-  which is also what catches a stray `.DS_Store` swept into an asset directory.
+- A name resolving to an asset a live `SoundEvent` plays. An orphan asset
+  fails the build; a stray `.DS_Store` or `Thumbs.db` never reaches the check,
+  because the walk skips such files before any family sees them.
+- The shipped default theme carries every asset, since every other theme
+  falls back to it.
 
 Decoding at build time is deliberately stronger than the graphics families'
 check, which validates a name, a byte bound and uniqueness. The asymmetry is
@@ -1720,12 +2003,11 @@ visible fallback glyph, and a bad sound degrades to silence, which is
 indistinguishable from working. Where failure is invisible at runtime, the
 build must look harder.
 
-**They ship as FLAC, and the size was measured rather than assumed.** A
-fixed-predictor Rice estimate over the set puts FLAC at 22% of the bytes: 3.47
-MiB becomes roughly 0.75 MiB. That saving is in the repository as well as in
-every image, it compounds with each further theme the catalog is built to hold,
-and it is 2.7 MiB that a Pi's SD card and the `images/tairix-web/` bundle both
-pay for on every build. FLAC is lossless, so the content in the table above is
+**They ship as FLAC, and the size was measured rather than assumed.** The
+encoder's own output is 17.5% of the bytes: 3.1 MiB becomes 554 KiB. That
+saving is in the repository as well as in every image, it compounds with each
+further theme the catalog is built to hold, and it is 2.5 MiB that a Pi's SD
+card and the `images/tairix-web/` bundle both pay for on every build. FLAC is lossless, so the content in the table above is
 exactly what is shipped and exactly what is played.
 
 Two properties decided it over WAV beyond the size:
@@ -1755,11 +2037,12 @@ event into the reclaimable cache, and a second of 48 kHz stereo FLAC is a few
 milliseconds of LPC and Rice work against a sandbox round trip that both
 formats pay identically.
 
-The masters are `plans/tairix-desktop-audio/` today. They are converted by
-`cargo xtask sound-encode` into `lib/soundtheme/assets/TAIRiX/<event>.flac`
-in the change that creates the crate, and that directory is deleted with them:
-a plan directory is not an asset store, and keeping the WAV beside a lossless
-encoding of it would be two copies of one thing.
+The twelve shipped masters were converted by `cargo xtask sound-encode` into
+`lib/soundtheme/assets/TAIRiX/<asset>.flac` and their WAVs deleted: the FLAC is
+the master now, because keeping a WAV beside a lossless encoding of it would be
+two copies of one thing. The two held for their publisher stay in
+`plans/tairix-desktop-audio/` until it lands, when they are encoded the same
+way and the directory goes with them.
 
 **Loudness normalisation is not claimed.** The measured peaks span −18.7 to
 −9.2 dBFS, and peak is not loudness. A real loudness match needs an ITU-R
@@ -1770,16 +2053,27 @@ than left implied by a table of peaks.
 
 ### What bounds it
 
-- **Concurrent cues are capped**, and the cap is a containment bound rather
-  than a capacity: it is what stops a cue storm opening unbounded streams in
-  the mixer. Past the cap a cue is **dropped and counted**, never queued — the
-  `Notification` role's own rule, for its own reason, since a sound arriving
-  after the thing it announces is noise.
-- **A repeat of one event by one principal inside a minimum retrigger interval
-  is coalesced** and counted. Two identical notification sounds 20 ms apart are
-  one notification and one bug.
-- **Per-principal cue rate is limited and fails closed**, so a misbehaving
-  application cannot hold the speakers.
+- **A cue is bounded in length as well as in bytes.** A FLAC holds a minute of
+  silence in a few hundred bytes, so a theme's file inside `MAX_SOUND_BYTES`
+  could still decode to more PCM than a cue may keep; the decode stops at
+  `MAX_CUE_SECONDS` (ten seconds) or `MAX_CUE_SAMPLES` (2^20 samples across
+  its channels, so at most four mebibytes), whichever comes first, and the cue
+  is answered as undecodable. The build holds every shipped asset to the same
+  bounds, and a decode that overruns five seconds is refused, so a hostile
+  file bounds what the cues queued behind it wait.
+- **Concurrent cues are capped** at four, decoding or playing, and the cap is
+  a containment bound rather than a capacity: it is what stops a cue storm
+  opening unbounded streams in the mixer. Past the cap a cue is **dropped and
+  counted**, never queued — the `Notification` role's own rule, for its own
+  reason, since a sound arriving after the thing it announces is noise.
+- **A repeat of one event by one principal inside 200 ms is coalesced** and
+  counted, and costs the principal nothing. Two identical notification sounds
+  20 ms apart are one notification and one bug.
+- **Per-principal cue rate is limited and fails closed** — eight at once, four
+  a second sustained, keyed on the attested uid — so a misbehaving application
+  cannot hold the speakers. Sixty-four principals are tracked; an idle record
+  is reclaimed, and a newcomer finding none is refused rather than one still
+  being limited forgotten.
 - **The decoded-PCM cache is reclaimable**, under `lib/reclaim`'s
   `DisposableUi` budget beside the album-art cache. Nothing about a cue is
   pinned: unlike a live stream's buffers, a cached cue re-decodes in
@@ -1942,6 +2236,166 @@ The consumers, each owned by its own plan:
   decode, the answer is silence and a reported reason, never a fabricated
   beep.
 
+## Native HDMI on the Pi 4
+
+TAIRiX drives the BCM2711 display engine itself, as Linux's full-KMS `vc4`
+does. The firmware lights the screen at boot; the engine driver has the
+kernel move its framebuffer console off the firmware's memory
+(`console_relocate`), then tells the firmware to stop (`NOTIFY_DISPLAY_DONE`,
+tag `0x0003_0066`, its answer recorded and the display taken over whatever it
+is), stops whatever pipe it left running in the order the hardware requires —
+encoder output, timing generator, HVS channel — and sets every mode itself.
+After that the firmware owns no part of the display, and nothing of the ARM's
+lives in the firmware's memory.
+
+**Two drivers, split where the hot path ends.**
+
+- `drivers/display/bcm2711_hvs` binds the HVS node and is the seat's display
+  service: the display lists, the context-output buffer, the three channels and
+  their output muxes, and the pixel valves feeding the HDMI outputs (PV2 on HVS
+  output 4 feeds HDMI0, PV4 on output 5 feeds HDMI1). Every present is its
+  own: it copies into a frame no channel composites or latches next, and each
+  channel latches it at its next frame start, so a present never tears, never
+  waits, and needs no interrupt — three frames serve one output, four serve
+  two. While the seat shows text it scans out the boot console's surface, and
+  black while another presenter takes over; a departed presenter's frames are
+  never shown again.
+- `drivers/display/bcm2711_hdmi` binds each HDMI node, its variant (maximum
+  TMDS clock, PHY lane order) chosen by its matched bind key: encoder, PHY, the
+  state machine and pixel-path clocks it holds links to — the first held only
+  while an output is up or the connector is read, since a register reached
+  without it stalls the bus — hotplug through the L2 interrupt controller,
+  EDID over E-DDC on its DDC controller, InfoFrames, SCDC, and the port's
+  audio. It serves `encoder-v1` to the engine. The block's reset is not
+  driven: every register a mode set relies on is written by the mode set.
+- A mode set and a hotplug are rare and cross that line by IPC; a frame never
+  does. Audio stays with the connector it belongs to.
+- **The pixel valves belong to the HVS node.** On the BCM2711 a pixel valve
+  reads one HVS output and drives one encoder, and a mode set interleaves its
+  steps with the HVS channel's, so the aarch64 port describes each HDMI-feeding
+  pixel valve as a named window of the HVS node (`valve2`, `valve4`, beside the
+  HVS's own `hvs`), read from the valve's own node, which stays disabled, rather
+  than as a node of its own; links the HVS node to each encoder it feeds
+  (`hdmi0`, `hdmi1`), which carries the matching duty; gives it its bus's DMA
+  windows; and marks it `BootConsole` in place of a boot display node, so the
+  generic framebuffer service never binds the firmware's surface and the
+  engine alone may have the kernel move the console off it
+  (`console_relocate`). That wiring is fixed silicon the
+  firmware's tree leaves implicit, and the architecture port is the one place a
+  platform's wiring is stated; the names are `tairix_vcmailbox::ENGINE_OUTPUTS`,
+  defined once for the port and the engine's driver. The HDMI binding lists its
+  interrupt controller's registers among its own (`intr2`); the port refuses an
+  encoder that window, which is the controller's grant.
+- **The image enables what the engine binds.** The pinned tree leaves the HVS,
+  both HDMI blocks, their DDC buses, the DVP gates and the L2 controller
+  disabled; the image's display overlay (`tairix-display`) enables them,
+  disables the firmware's own display devices (`fb`, `firmwarekms`) so the
+  firmware hands the display over as it does for `vc4-kms-v3d`, names
+  the HVS window, and gives the DDC buses the cell counts the I²C controller
+  binding states. The firmware-framebuffer service and the unwired `rpi_hvs`
+  layer compositor are gone: on a Pi 4 the native engine serves the seat's
+  display, powering its outputs down itself, and a board without it is served
+  by the generic framebuffer service.
+- Below them: DMA4 (SND19c), the L2 interrupt controller (SND19e), the DVP
+  gates (SND19f), the firmware's clocks (SND19g) and the DDC
+  controllers (SND19i), each its own driver behind its own link role.
+
+**`encoder-v1` (SND19l).** The engine drives each encoder over the `Encoder`
+link its node holds, through the phases a mode set interleaves with the pixel
+valve and the HVS channel (Linux `vc4`'s encoder callbacks):
+
+- **The connector.** `Describe` answers whether a sink is connected and the
+  mode the encoder will run for it — its own choice, since it alone knows the
+  sink and its variant's limits, within the pipe's that the engine states with
+  `Limit` (the pixel clock and the active pixel rate the HVS carries at the
+  core clock's ceiling) — with a count of the connector's moves. A
+  posted `Wait` naming the count the engine has seen is answered when the
+  count moves, so the engine parks on it as one of its event sources.
+- **The phases.** `Configure` (clocks, PHY and timing for the mode) → the
+  engine configures the pixel valve → `Prepare` (colour conversion, FIFO) →
+  the engine starts the valve's video → `Enable` (video and HDMI mode on,
+  InfoFrames, scrambling). Going down: the engine stops the valve's video →
+  `Disable` → the engine resets the valve and stops the HVS channel →
+  `PowerDown`. The server holds the encoder to that order and refuses any step
+  out of it; a `Configure` for a mode that is not the connector's is refused
+  `Stale`.
+- **The phase is the hardware's.** The server starts from the phase the
+  encoder finds its hardware in — the firmware leaves its pipe running — and
+  `Describe` reports it, so an engine taking over, or one restarted, brings
+  the output down in order before it sets a mode. A holder that ends leaves
+  the phase as it was: the encoder alone cannot order itself against the
+  valve.
+- **A lost link.** The connector counts the times its sink lost what the
+  running link set it up with — an HDMI 2.0 sink replugged under a scrambled
+  link forgets the scrambling, as Linux's `vc4_hdmi_reset_link` finds — and
+  the engine brings an output up under an older count down and up again,
+  keeping its surface, as DRM's link status asks of a compositor.
+- **Checks with no interrupt.** A check the hardware raises none for — whether
+  a sink sees its link scrambled, which Linux re-asks once a second until it
+  does — is the encoder's deadline, which `lib/drvrt`'s serve loop waits on
+  as a one-shot timeout, so the core sleeps between checks.
+- **One holder.** Only a caller whose grants cover the link, and only one at a
+  time; the device trait is `tairix_abi::driver::encoder::Encoder`, the server
+  `lib/encoder`, the client `tairix_linkclient::EncoderClient`.
+
+**Modes.** Each connected output runs the sink's preferred mode when the pipe
+carries it — a TMDS clock within the variant's limit and the sink's, with
+scrambling enabled over SCDC above 340 MHz when the sink declares it — and
+otherwise the largest mode both support. A DVI sink is held to a single
+link's 165 MHz, a timing with an odd part of a line or repeated pixels is
+passed over, a sink whose EDID cannot be read is given 1024x768 at 60 Hz as
+DVI, and where the board shares the 2.4 GHz band (the tree's
+`wifi-2.4ghz-coexistence`, the `RadioCoexistence` fact) a link inside its
+first channel is pulled down to 238.56 MHz. An HDMI sink is sent the AVI
+`InfoFrame` stating the timing's default RGB range, and one of the four 4K
+timings by its HDMI code in the vendor frame. The seat's display takes the first
+connected output's mode. A second connected output shows the same surface,
+scaled by the HVS to its own mode with the aspect kept. A disconnected output
+keeps nothing on screen and the display keeps its surface. With no output
+connected the display reports none (SND19k).
+
+**The EDID is untrusted device input.** It is parsed by the encoder driver,
+the least-authority process that acts on it (`plans/HID.md`'s rule for report
+descriptors), against fixed bounds, fail-closed, and fuzzed. One parser,
+`lib/edid`, serves every display driver and HD Audio's ELD descriptors.
+
+**Audio (SND19o).** Each HDMI port is also an audio endpoint, served by the
+same process on an `audiochan-v1` channel beside its encoder link
+(`tairix_encoder::serve_with_audio`). Its jack is present while a connected
+HDMI sink declares audio; a sink leaving keeps the facts its predecessor
+offered, so a stream its successor still plays need not be set up again. Sound
+is the video's companion, never its precondition: a port whose audio clock or
+DMA line is absent, or whose line opens no channel, says so and serves its
+encoder alone (`tairix_encoder::serve`).
+
+- **The facts are the sink's, per channel count.** A descriptor covers every
+  count up to its own and basic audio covers stereo, as CTA-861 has it, and
+  Linux's ELD constraints apply it: the endpoint offers the widest layout the
+  sink's speaker allocation places without a gap (stereo, 5.1, 7.1) at the
+  rates its descriptors name for that count. `Configure` refuses a layout
+  whose speakers the sink lacks and grants the nearest rate it names for the
+  layout's count.
+- **The MAI is set up as Linux's `vc4_hdmi` sets a BCM2711 block up**, fed
+  by a DMA4 channel from the cyclic engine's buffer and clocked from the DVP's
+  audio clock, which it holds with the state machine clock while a stream is
+  configured — so a stream outlives an output brought down, and when the link
+  sends again its N, CTS and audio `InfoFrame` follow the new TMDS clock.
+- **Samples leave as IEC 60958 subframes** with the consumer channel status:
+  the rate, and the word length of the widest sample the sink takes at the
+  stream's count, the bits below it sent as zero. That width is also the
+  endpoint's stated resolution, so the mixer dithers to it rather than the
+  sink truncating. A parked buffer's frames are marked invalid.
+- **N is the HDMI specification's recommended value**, and CTS the nearest
+  whole count: exact for every clock of whole kilohertz in the 32 and 48 kHz
+  families, and for every clock of whole multiples of 900 Hz in the 44.1 kHz
+  family. Both CTS registers carry the one value: the period registers that
+  would alternate two are undocumented on the BCM2711 and are not driven.
+
+**Verification.** Register-level models of the HVS, the pixel valve, the HDMI
+controller and its PHY, the DDC controller, the L2 controller, the DVP block
+and DMA4 carry the host tests; an EDID corpus and a fuzz target cover the
+parser. The metal run (SND19q, `plans/PI.md` P17) is the acceptance.
+
 ## Prerequisites and open decisions
 
 Two pieces of work sit below this plan's own items and neither is left as
@@ -1952,18 +2406,11 @@ someone else's problem:
   than audio-specific and both are specified above, shaped for their general
   case rather than for a sound card. `plans/USB.md` points here for the
   isochronous half; nothing is silently diverged from.
-- **A native VC6 HDMI encoder on the Pi (SND19's blocker)** is *not* owned
-  here. Without it HDMI audio cannot land, and with it the work is a display
-  change: mode set, N/CTS, InfoFrames and EDID, belonging to `plans/PI.md`.
-  The decision is whether to take that on as part of reaching HDMI audio, or to
-  ship Pi audio on the analogue jack and I2S first.
-
-  **The recommendation is the latter.** The jack and I2S are fully native,
-  unblocked by SND5, and prove the whole stack on real silicon; the encoder is
-  then one clean piece of display work taken on its own merits rather than a
-  large dependency dragged sideways into an audio change. There is no third
-  option: the only other route to HDMI audio is refused outright rather than
-  deferred, for the reason given above.
+- **A native display engine on the Pi (SND19)** is owned here, with every
+  prerequisite it depends on, because HDMI audio cannot land without it and the
+  only other route — the firmware's own audio service, VCHIQ, a second
+  device-interconnect stack putting the audio path behind closed firmware — is
+  refused. §Native HDMI on the Pi 4 is the design.
 
 SND5's design surfaced two decisions, both taken:
 
@@ -1975,10 +2422,8 @@ SND5's design surfaced two decisions, both taken:
   left running can never fetch its next block from reused memory. SND5's code
   needs no special case beyond resetting every masked channel before it
   declares.
-- **SND5's leaf is `drivers/dma/bcm2835`**, the legacy engine; DMA4 arrives
-  with SND19 (§Scope above). One crate for both would have needed a driver to
-  learn which of its bind keys matched — `devmgr` hands a driver only its
-  grants — and a DMA4 model nothing exercises before SND19.
+- **SND5's leaf is `drivers/dma/bcm2835`**, named for the binding family it
+  serves; DMA4 joins it with SND19 (§Scope above).
 
 SND8 inherits four facts, each needing a home before its drivers can bind or
 its metal acceptance can pass:
@@ -2014,7 +2459,27 @@ the tests are chosen to check it rather than to check that nothing crashed.
   limits refused *before* allocation. Every input synthesised in test code.
 - **Numeric accuracy against external oracles**, not against our own opinion:
   MPEG audio against the ISO 11172-4 / 13818-4 compliance limits, Opus against
-  the RFC 6716 vectors, Vorbis against the published vectors.
+  RFC 8251's conformance vectors, Vorbis against the reference decoder's own
+  output.
+- **Vorbis's oracle, and why it is kept in the tree.** A lossy codec states no
+  output of its own, so no stream verifies itself as FLAC's does, and a stream
+  written in the tests and read back proves only that the two halves agree.
+  The reference decoder is the oracle: `lib/sound/tests/vectors/` keeps a few
+  streams libvorbis encoded, each beside libvorbis's decode of it quantised to
+  16 bits and stored losslessly as FLAC, which the decoder must meet within
+  one step. libvorbis's encoder never writes floor 0, residue 0, a listing
+  lookup or a single-entry book, so a stream written in the tests in those
+  constructs carries libvorbis's decode of it the same way. Together they are
+  tens of kibibytes.
+- **Opus's oracles.** RFC 8251's vectors are the conformance oracle, run
+  outside the tree: they are 120 MB and carry no licence to ship. In the tree,
+  libopus 1.4 is the oracle as libvorbis is Vorbis's: a few streams it encoded
+  from signals synthesised for them, each packet's mode, bandwidth, frame size
+  and channels forced so that between them they reach every construct, beside
+  libopus's float decode quantised to 16 bits and stored as FLAC, and the range
+  coder's final state the encoder recorded for every packet. A decode within
+  one step of the reference shows the arithmetic; a matching range state shows
+  every symbol was read as it was written, which no output tolerance can.
 - **FLAC's oracles, and what each actually proves.** Encoder/decoder
   round-trip over synthesised material is the **breadth** check — every block
   size, bit depth, channel count, subframe type and partition shape — and it
@@ -2028,10 +2493,9 @@ the tests are chosen to check it rather than to check that nothing crashed.
   encoder produced — and there it is an unusually good one, because the file
   states its own expected output, so the fixture needs no companion PCM and no
   hash of ours to keep in step. That is exactly the case the
-  synthesise-every-input rule exists to avoid and does not cover, so FLAC is
-  the one format that also keeps a small set of committed foreign-encoded
-  streams: self-verifying, a few kibibytes, and worth more than any fixture we
-  could write ourselves.
+  synthesise-every-input rule exists to avoid and does not cover, so FLAC
+  keeps a small set of committed foreign-encoded streams: self-verifying, a
+  few kibibytes, and worth more than any fixture we could write ourselves.
 - The mixer's **bit-exactness property**: a 24-bit-or-narrower source at unity
   gain through the whole engine is byte-identical to its input. Property-tested
   across formats, rates, channel counts and block boundaries.

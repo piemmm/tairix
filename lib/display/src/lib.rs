@@ -54,7 +54,7 @@ pub mod winframe;
 pub use client::{DisplayClient, DisplayTransport, RemoteDisplay};
 pub use framebuffer::{Framebuffer, FramebufferConfig};
 #[cfg(feature = "rt")]
-pub use rt::{RtShmMapper, RtShmRegion};
+pub use rt::{establish_frames, FramesRefused, RtShmMapper, RtShmRegion};
 pub use scanout::{damage_list, scanout_len, sub_screen_damage, ChannelOrder};
 // The runner contract and the calling-thread runner a window-frame conversion
 // names, re-exported so a program that converts its own frame does not take a
@@ -94,6 +94,7 @@ pub fn driver_error_from_errno(err: Errno) -> DriverError {
         Errno::NoSpace => DriverError::NoSpace,
         Errno::SeatRevoked => DriverError::SeatRevoked,
         Errno::EndpointStalled => DriverError::EndpointStalled,
+        Errno::Stale => DriverError::Stale,
         // `Errno::DeviceFault` maps to itself; every other condition has
         // no driver-level equivalent and fails closed as a fault too.
         _ => DriverError::DeviceFault,

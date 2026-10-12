@@ -1,0 +1,33 @@
+[package]
+name = "tairix-drv-irq-brcmstb-l2"
+description = "TAIRiX autoloaded user-space driver for the Broadcom second-level interrupt controllers (brcm,l2-intc and its family): serves the node's irqline-v1 endpoint, so a device wired behind the controller — the BCM2711's HDMI hotplug lines among them — reaches its driver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `irqline-v1` protocol, the link records the server checks, and the
+# register seam.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The supplier seam the server asks the kernel about its callers through.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The rule the device manager matched the node by, which picks the layout.
+tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
+# The fake kernel the server's tests are answered through.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0", features = ["test-support"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The rule the device manager matched the node by, which picks the layout.
+tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
+# Every decision the server takes, recorded with a stable event id.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# `_start`, the wait set, the endpoint and the controller's own line.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

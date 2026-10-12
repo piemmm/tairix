@@ -104,6 +104,15 @@ and a setting a store says by its absence is left out. A record edited live
 (`Live`) adds one bridge, taking a setting from another record, from which the
 engine derives which settings two records disagree on as a `Keys` set.
 
+A document that arrives over a channel is read strictly instead, by the one
+`merge_admitting`: it is taken over a base record or refused whole — a line
+that is not a setting, a key outside the registry or outside what the reading
+admits, or a value its key does not take — with the `Refusal` naming the first
+fault. A key the document does not name keeps the base's value, so a sender
+renders only what it edits. A setting that names a file is a `SettingPath`: an
+absolute path in the `/` view, held in the path parser's canonical spelling and
+bounded by `MAX_SETTING_PATH_LEN`, which sits inside `MAX_VALUE_LEN`.
+
 The grammar is also *inside* the one `lib/abi` store-name grammar's shape:
 every bundle identifier and bulk-store name `validate_store_name` admits is a
 legal key, which is what lets a registry key on an identifier

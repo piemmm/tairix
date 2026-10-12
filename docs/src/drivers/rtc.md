@@ -139,39 +139,30 @@ believed as a 1970 reading, and the driver never waits on the mailbox for one.
 
 ## The I²C tier
 
-The three calendar chips above are the HAT parts a Pi 3 or Pi 4 adds, and they
-are reached through a bus path rather than an address of their own:
-`drivers/bus/i2c/bcm2835` drives the Broadcom Serial Controller, and
-`lib/i2c` holds the register-transaction protocol all three compose over. None
-of the three owns a register window, so none requests `CAP_MMIO_MAP` — their
-whole authority is one transfer endpoint.
+The three calendar chips above are the HAT parts a Pi 3 or Pi 4 adds, reached
+over a bus rather than an address of their own: `drivers/bus/i2c/bcm2835`
+drives the Broadcom Serial Controller and serves `i2c-v1`, and `lib/i2c` holds
+the register-transaction protocol all three compose over. None of the three
+owns a register window, so none requests `CAP_MMIO_MAP` — their whole
+authority is the link their node holds.
 
 I²C carries no enumeration protocol, and probing every address is forbidden
 (§18.5) and can be destructive on a write-only register block, so a bus's
-children are known only from the platform's device tree. Discovery therefore
-splits each child in two, and the shared FDT walk
-(`tairix_arch_api::fdtwalk`) recognises one by the Devicetree convention for a
-non-memory-mapped addressed bus — the parent declares `#address-cells = <1>`
-with `#size-cells = <0>`, so a child's single `reg` cell is its bus address
-rather than a window:
+targets are known only from the platform's device tree. The shared FDT walk
+(`tairix_arch_api::fdtwalk`) recognises an I²C controller by the Devicetree
+convention — an addressed bus (`#address-cells = <1>`, `#size-cells = <0>`)
+named `i2c` — gives its node the `I2c` duty to serve one endpoint, and gives
+each target below it an `I2c` link naming that endpoint and the address its
+`reg` states.
 
-* the **bus** node gets one `HwResourceKind::BusChild` resource per child,
-  pairing a transfer-endpoint id (derived from the child's hardware-tree node
-  id, so the mapping is collision-free) with that child's bus address — the
-  bus driver's duty list;
-* the **child** node gets an ordinary endpoint grant naming the same id — the
-  chip driver's sole authority.
+A chip driver opens a target channel over its link
+(`tairix_linkclient::I2cTarget`) and is granted a buffer the controller made
+for it. The controller believes the link only because the kernel attests the
+caller holds it, and holds every message to the one address it names, so a
+compromised chip driver still reaches only its own part; only the holder of
+the duty may serve the endpoint, so nobody can stand in for the controller and
+feed a chip's driver forged registers either. A target naming a reserved
+address gets no link and is left unbound and logged, which is what §18.4 asks
+of any node with no driver.
 
-The transfer wire carries no address at all: the bus driver takes it from the
-duty grant paired with the endpoint a request arrived on. A chip driver
-therefore has no field in which it could name a neighbour, and a compromised
-one still reaches only its own part. The endpoint block is reserved, and the
-kernel refuses to bind one unless the caller holds the matching duty grant, so
-a bystander cannot claim a chip's endpoint first and feed its driver forged
-registers either.
-
-A child whose duty the bus node's resource list could not hold gets no
-endpoint, so the two halves can never disagree: that chip is simply left
-unbound and logged, which is what §18.4 asks of any node with no driver.
-
-`plans/TIMESYNC.md` TS-4 carries the staged design.
+`plans/I2C.md` carries the protocol and the controllers.

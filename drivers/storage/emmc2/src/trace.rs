@@ -2,8 +2,8 @@
 //! controller and card answered, and how a wait on the controller ended when
 //! it did not get what it wanted.
 //!
-//! QEMU models no EMMC2, so on metal this is the only view into a bring-up.
-//! A host that records nothing keeps [`crate::SdhciHost::trace`]'s default.
+//! A host that records nothing keeps [`crate::SdhciHost::trace`]'s default;
+//! the bring-up tests read the records to check each step the engine took.
 
 use crate::bus::{Link, Rung};
 use crate::card::SCR_BYTES;
@@ -19,18 +19,6 @@ pub enum WaitEnd {
     /// The poll budget ran out: the register never reached the state, or the
     /// interrupt kept firing without the wanted status.
     Budget,
-}
-
-impl WaitEnd {
-    /// A stable, terse name, for the operator-facing trace.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Error => "error status",
-            Self::Silent => "no interrupt",
-            Self::Budget => "poll budget",
-        }
-    }
 }
 
 /// One report from the engine.

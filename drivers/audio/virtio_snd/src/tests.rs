@@ -905,10 +905,15 @@ fn a_channel_map_naming_a_position_this_stack_cannot_place_is_left_unpublished()
     let mut record = [0u8; wire::MAX_INFO_RECORD_LEN];
     record[wire::chmap_info::CHANNELS] = 2;
     record[wire::chmap_info::POSITIONS] = wire::chmap::FL;
-    // `VIRTIO_SND_CHMAP_RC` (rear centre) has no position in this vocabulary,
-    // so the whole map is refused rather than half-read.
-    record[wire::chmap_info::POSITIONS + 1] = 11;
+    // `VIRTIO_SND_CHMAP_FLC` (front left of centre) has no position in this
+    // vocabulary, so the whole map is refused rather than half-read.
+    record[wire::chmap_info::POSITIONS + 1] = 12;
     assert_eq!(decode_chmap(&record, 2), None);
+    record[wire::chmap_info::POSITIONS + 1] = wire::chmap::RC;
+    assert_eq!(
+        decode_chmap(&record, 2),
+        ChannelMap::new(&[ChannelPosition::FrontLeft, ChannelPosition::RearCentre]).ok()
+    );
 
     record[wire::chmap_info::POSITIONS + 1] = wire::chmap::FR;
     assert_eq!(decode_chmap(&record, 2), Some(ChannelMap::STEREO));

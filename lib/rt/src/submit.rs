@@ -67,8 +67,9 @@ impl Submission {
     ///
     /// [`Errno::WouldBlock`] when a submission is already in flight — the
     /// caller treats that as the unsuccessful attempt it is and restates the
-    /// figure on its next turn — or whatever the post itself refused (an absent
-    /// service is `NotFound`, an over-capacity endpoint `LengthOutOfRange`).
+    /// figure on its next turn, as it does for an endpoint already holding as
+    /// many calls as it takes — or whatever else the post refused (an absent
+    /// service is `NotFound`).
     pub fn post(&mut self, request: &[u8]) -> Result<(), Errno> {
         if self.ticket.is_some() {
             return Err(Errno::WouldBlock);

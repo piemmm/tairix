@@ -2448,6 +2448,11 @@ mod tests {
             Ok(1)
         }
 
+        fn input_ready(&self) -> bool {
+            let i = self.cursor.load(Ordering::Relaxed);
+            self.fail_at == Some(i) || i < self.bytes.len()
+        }
+
         fn set_secret(&self, secret: bool) {
             self.secret.store(secret, Ordering::Relaxed);
             if secret {

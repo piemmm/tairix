@@ -2670,7 +2670,7 @@ mod tests {
         assert!(!is_kernel_block_device(0));
         assert!(!is_kernel_block_device(crate::sysinfo::SYSINFO_ENDPOINT));
         assert!(!is_kernel_block_device(
-            crate::hwtree::BUS_CHILD_ENDPOINTS.endpoint(0)
+            crate::driver::i2c::I2C_CONTROLLER_ENDPOINTS.endpoint(0)
         ));
         assert!(!is_kernel_block_device(
             crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS.endpoint(0)

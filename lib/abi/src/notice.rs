@@ -7,7 +7,8 @@
 //! overflow, and nothing to drop. That is what makes it the right shape for
 //! facts a process must *agree* with rather than witness: the desktop's
 //! appearance and density, the mount table's composition, the memory-pressure
-//! band, the boot seat's display lease, whether the machine is recording.
+//! band, the boot seat's display lease, the display's output, whether the
+//! machine is recording, which process is the cue authority.
 //!
 //! The mechanism is three parts:
 //!
@@ -31,6 +32,7 @@
 
 use crate::desktop::DesktopInfo;
 use crate::le::{read_u32, read_u64};
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::seat::DisplayLease;
 use crate::Errno;
 
@@ -68,10 +70,12 @@ pub enum NoticeTopic {
     /// of a seat's live display lease — the one principal that owns what is on
     /// screen — and read by every windowed application.
     Desktop = 0,
-    /// The mount table's composition changed: a volume was attached,
-    /// re-backed, or removed. Payload-less — the generation *is* the news, and
-    /// what is mounted is then read through the System Information API under
-    /// the caller's own authority. Published by the kernel alone.
+    /// What the mount table reports changed: a mount point was attached,
+    /// re-backed, or removed, or the volume behind one came online — an
+    /// unlocked root — went, or became unavailable. Payload-less — the
+    /// generation *is* the news, and what is mounted is then read through the
+    /// System Information API under the caller's own authority. Published by
+    /// the kernel alone.
     Mounts = 1,
     /// The machine's memory-pressure band, as its depth. Published by the
     /// kernel alone, from the gauge whatever was spending memory refreshed.
@@ -84,12 +88,13 @@ pub enum NoticeTopic {
     /// acquire, release, revocation, and dead owner's reclaim, and by the
     /// text console taking back a handover. Published by the kernel alone.
     ///
-    /// Read by the two services that own the seat's devices: the display
-    /// service, which must never keep a configuration — or a switched-off
-    /// screen — past the lease that asked for it, and the audio service, which
-    /// mixes only the holder's session into the seat's speakers. Nothing else
-    /// may observe it, because the lease's history is the seat inventory's,
-    /// which is privileged.
+    /// Read by the services that follow the seat: the display service, which
+    /// must never keep a configuration — or a switched-off screen — past the
+    /// lease that asked for it, the audio service, which mixes only the
+    /// holder's session into the seat's speakers, and the cue authority,
+    /// which applies only the holder's sound choices. Nothing else may observe
+    /// it, because the lease's history is the seat inventory's, which is
+    /// privileged.
     DisplayLease = 3,
     /// How many capture streams are moving frames on this machine, as a
     /// `u32`: the recording indicator's whole input. Published by the audio
@@ -112,6 +117,19 @@ pub enum NoticeTopic {
     /// something moved, and what moved is read under the reader's own
     /// authority.
     Network = 6,
+    /// The display's output moved: a sink arrived or left, or the output
+    /// runs another mode. The payload is the display service's own count of
+    /// such moves, as a `u64`. Published by the display service alone, the
+    /// process the kernel attests bound the reserved display rendezvous, and
+    /// readable by any process: it says only that the output moved, and what
+    /// it runs now is read under the lease-gated display query.
+    DisplayOutput = 7,
+    /// The cue authority's process instance, as a [`ProcId`]: the one a
+    /// session hands its chosen sound files to, and, as a new value, the news
+    /// that a restarted authority holds no session's choices. Published by the
+    /// process the kernel attests bound the reserved cue rendezvous, naming
+    /// itself and nothing else, and readable by any process.
+    CueAuthority = 8,
 }
 
 impl NoticeTopic {
@@ -136,6 +154,8 @@ impl NoticeTopic {
             4 => Ok(Self::AudioCapture),
             5 => Ok(Self::AudioDevices),
             6 => Ok(Self::Network),
+            7 => Ok(Self::DisplayOutput),
+            8 => Ok(Self::CueAuthority),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -166,12 +186,13 @@ impl NoticeTopic {
             Self::MemoryPressure => 1,
             Self::DisplayLease => DisplayLease::WIRE_LEN,
             Self::AudioCapture => 4,
-            Self::AudioDevices | Self::Network => 8,
+            Self::AudioDevices | Self::Network | Self::DisplayOutput => 8,
+            Self::CueAuthority => PROC_ID_LEN,
         }
     }
 
     /// Every topic, for a caller that must cover them all.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Desktop,
         Self::Mounts,
         Self::MemoryPressure,
@@ -179,6 +200,8 @@ impl NoticeTopic {
         Self::AudioCapture,
         Self::AudioDevices,
         Self::Network,
+        Self::DisplayOutput,
+        Self::CueAuthority,
     ];
 }
 
@@ -217,6 +240,17 @@ pub enum Notice {
         /// The network stack's count of changes so far.
         changes: u64,
     },
+    /// [`NoticeTopic::DisplayOutput`]: the display's output moved; query it
+    /// to learn what it runs now.
+    DisplayOutput {
+        /// The display service's count of output moves so far.
+        changes: u64,
+    },
+    /// [`NoticeTopic::CueAuthority`]: the cue authority's instance.
+    CueAuthority {
+        /// The process instance serving the cue rendezvous.
+        instance: ProcId,
+    },
 }
 
 impl Notice {
@@ -231,6 +265,8 @@ impl Notice {
             Self::AudioCapture { .. } => NoticeTopic::AudioCapture,
             Self::AudioDevices { .. } => NoticeTopic::AudioDevices,
             Self::Network { .. } => NoticeTopic::Network,
+            Self::DisplayOutput { .. } => NoticeTopic::DisplayOutput,
+            Self::CueAuthority { .. } => NoticeTopic::CueAuthority,
         }
     }
 
@@ -241,11 +277,13 @@ impl Notice {
         match topic {
             NoticeTopic::AudioDevices => Some(Self::AudioDevices { changes }),
             NoticeTopic::Network => Some(Self::Network { changes }),
+            NoticeTopic::DisplayOutput => Some(Self::DisplayOutput { changes }),
             NoticeTopic::Desktop
             | NoticeTopic::Mounts
             | NoticeTopic::MemoryPressure
             | NoticeTopic::DisplayLease
-            | NoticeTopic::AudioCapture => None,
+            | NoticeTopic::AudioCapture
+            | NoticeTopic::CueAuthority => None,
         }
     }
 
@@ -253,12 +291,15 @@ impl Notice {
     #[must_use]
     pub const fn changes(&self) -> Option<u64> {
         match self {
-            Self::AudioDevices { changes } | Self::Network { changes } => Some(*changes),
+            Self::AudioDevices { changes }
+            | Self::Network { changes }
+            | Self::DisplayOutput { changes } => Some(*changes),
             Self::Desktop(_)
             | Self::Mounts
             | Self::MemoryPressure { .. }
             | Self::DisplayLease(_)
-            | Self::AudioCapture { .. } => None,
+            | Self::AudioCapture { .. }
+            | Self::CueAuthority { .. } => None,
         }
     }
 
@@ -288,6 +329,14 @@ impl Notice {
             NoticeTopic::Network => Ok(Self::Network {
                 changes: read_u64(bytes, 0),
             }),
+            NoticeTopic::DisplayOutput => Ok(Self::DisplayOutput {
+                changes: read_u64(bytes, 0),
+            }),
+            // No process is the kernel's sentinel, so no publish names it.
+            NoticeTopic::CueAuthority => match ProcId::from_bytes(bytes)? {
+                instance if instance.is_kernel() => Err(Errno::BadMagic),
+                instance => Ok(Self::CueAuthority { instance }),
+            },
         }
     }
 
@@ -296,7 +345,9 @@ impl Notice {
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] if `out` is shorter than the topic's
-    /// [`payload_len`](NoticeTopic::payload_len).
+    /// [`payload_len`](NoticeTopic::payload_len), and [`Errno::BadMagic`] for
+    /// a payload [`Self::decode`] would refuse: a cue authority naming no
+    /// process.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         let len = self.topic().payload_len();
         let Some(slot) = out.get_mut(..len) else {
@@ -308,9 +359,15 @@ impl Notice {
             Self::MemoryPressure { band } => slot[0] = *band,
             Self::DisplayLease(lease) => slot.copy_from_slice(&lease.to_le_bytes()),
             Self::AudioCapture { live } => slot.copy_from_slice(&live.to_le_bytes()),
-            Self::AudioDevices { changes } | Self::Network { changes } => {
+            Self::AudioDevices { changes }
+            | Self::Network { changes }
+            | Self::DisplayOutput { changes } => {
                 slot.copy_from_slice(&changes.to_le_bytes());
             }
+            Self::CueAuthority { instance } if instance.is_kernel() => {
+                return Err(Errno::BadMagic);
+            }
+            Self::CueAuthority { instance } => slot.copy_from_slice(instance.as_bytes()),
         }
         Ok(len)
     }
@@ -339,11 +396,13 @@ mod tests {
         assert_eq!(NoticeTopic::AudioCapture.as_u32(), 4);
         assert_eq!(NoticeTopic::AudioDevices.as_u32(), 5);
         assert_eq!(NoticeTopic::Network.as_u32(), 6);
+        assert_eq!(NoticeTopic::DisplayOutput.as_u32(), 7);
+        assert_eq!(NoticeTopic::CueAuthority.as_u32(), 8);
         for topic in NoticeTopic::ALL {
             assert_eq!(NoticeTopic::from_u32(topic.as_u32()), Ok(topic));
             assert_eq!(NoticeTopic::from_u64(u64::from(topic.as_u32())), Ok(topic));
         }
-        assert_eq!(NoticeTopic::from_u32(7), Err(Errno::OutOfRange));
+        assert_eq!(NoticeTopic::from_u32(9), Err(Errno::OutOfRange));
         assert_eq!(NoticeTopic::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -372,6 +431,10 @@ mod tests {
             Notice::AudioCapture { live: 2 },
             Notice::AudioDevices { changes: 9 },
             Notice::Network { changes: 11 },
+            Notice::DisplayOutput { changes: 13 },
+            Notice::CueAuthority {
+                instance: ProcId::from_raw([0x5d; 16]),
+            },
         ] {
             let mut buf = [0xAAu8; NOTICE_PAYLOAD_MAX];
             let topic = notice.topic();
@@ -387,7 +450,10 @@ mod tests {
     fn only_the_counted_topics_carry_a_count() {
         for topic in NoticeTopic::ALL {
             let counted = Notice::counted(topic, 7);
-            let is_counted = matches!(topic, NoticeTopic::AudioDevices | NoticeTopic::Network);
+            let is_counted = matches!(
+                topic,
+                NoticeTopic::AudioDevices | NoticeTopic::Network | NoticeTopic::DisplayOutput
+            );
             assert_eq!(counted.is_some(), is_counted, "{topic:?}");
             if let Some(notice) = counted {
                 assert_eq!(notice.topic(), topic);
@@ -447,5 +513,26 @@ mod tests {
     fn a_malformed_desktop_payload_is_refused() {
         let zeroed = [0u8; DesktopInfo::WIRE_LEN];
         assert!(Notice::decode(NoticeTopic::Desktop, &zeroed).is_err());
+    }
+
+    #[test]
+    fn a_cue_authority_naming_no_process_is_refused() {
+        assert_eq!(
+            Notice::decode(NoticeTopic::CueAuthority, ProcId::KERNEL.as_bytes()),
+            Err(Errno::BadMagic)
+        );
+        let mut out = [0u8; NOTICE_PAYLOAD_MAX];
+        assert_eq!(
+            Notice::CueAuthority {
+                instance: ProcId::KERNEL
+            }
+            .encode(&mut out),
+            Err(Errno::BadMagic),
+            "nor written"
+        );
+        assert_eq!(
+            Notice::decode(NoticeTopic::CueAuthority, &[7u8; 15]),
+            Err(Errno::LengthOutOfRange)
+        );
     }
 }

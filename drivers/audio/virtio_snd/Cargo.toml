@@ -45,8 +45,6 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
 # bare-metal targets the binary is actually built for; on the host the binary
 # is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
-# The capability-set type the rt-backed `DriverHost` is built over.
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The device-agnostic driver side of the `audiochan-v1` device channel: the
 # pure `AudioChannelServer` handler plus the serve loop (claim the reserved
 # endpoint, publish the `audiochan` node, park on the call endpoint and the

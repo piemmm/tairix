@@ -33,12 +33,13 @@ The desk is the worker's last type parameter, one of a sealed pair (`Desk`):
   the order asked, within a bound the owner grows and shrinks with what it
   serves (`grow`, `shrink`) — for work where every request is its own, such as
   the saves of a file. `submit` hands a job back when the bound is full,
-  `retain_waiting` withdraws what the owner no longer awaits. `collect_landed` adopts exactly the
-  answers that had landed when it began (`JobQueue::landed`), so a loop's pass
-  is bounded: what lands while it adopts waits for the next wake rather than
-  holding the loop from the input behind it. That wake is never missing: a
-  delivery owes one when it is the first since the loop last collected, not
-  only when the queue was empty.
+  `retain_waiting` withdraws what the owner no longer awaits. `collect_landed`
+  adopts exactly the answers that had landed when it began
+  (`JobQueue::landed_for_collection`), so a loop's pass is bounded: what lands
+  while it adopts waits for the next wake rather than holding the loop from the
+  input behind it. That wake is never missing: counting the pass re-arms it
+  under the desk's lock, so a delivery owes one when it is the first since the
+  pass counted, not only when the queue was empty.
 
 ## A machine that grants no worker is slower, never wrong
 

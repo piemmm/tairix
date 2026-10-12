@@ -133,12 +133,11 @@ impl StreamInfo {
 }
 
 /// The channels of a stream of `count` that states no mask (RFC 9639,
-/// section 9.1.3); seven channels place a back centre the PCM vocabulary
-/// has no position for.
+/// section 9.1.3).
 fn default_channels(count: u8) -> Option<ChannelMap> {
     use ChannelPosition::{
-        FrontCentre, FrontLeft, FrontRight, LowFrequency, Mono, RearLeft, RearRight, SideLeft,
-        SideRight,
+        FrontCentre, FrontLeft, FrontRight, LowFrequency, Mono, RearCentre, RearLeft, RearRight,
+        SideLeft, SideRight,
     };
     let positions: &[ChannelPosition] = match count {
         1 => &[Mono],
@@ -153,6 +152,15 @@ fn default_channels(count: u8) -> Option<ChannelMap> {
             LowFrequency,
             RearLeft,
             RearRight,
+        ],
+        7 => &[
+            FrontLeft,
+            FrontRight,
+            FrontCentre,
+            LowFrequency,
+            RearCentre,
+            SideLeft,
+            SideRight,
         ],
         8 => &[
             FrontLeft,
@@ -465,6 +473,12 @@ impl Decoder {
             }),
             verdict: None,
         }
+    }
+
+    /// Whether the samples, decoded whole and in order, matched the digest
+    /// the stream carries.
+    pub(crate) fn verified(&self) -> bool {
+        self.verdict == Some(true)
     }
 
     pub(crate) const fn stream(&self) -> &Stream {
@@ -842,6 +856,11 @@ fn block_header(
 }
 
 impl Flac {
+    /// Whether the stream, decoded whole and in order, matched its digest.
+    pub(crate) fn verified(&self) -> bool {
+        self.decoder.verified()
+    }
+
     /// Write the frames from `position` that `out` has room for. A frame
     /// whose bytes are not at hand ends the block early once one frame is
     /// written, so no call ever needs more than one frame read at once.

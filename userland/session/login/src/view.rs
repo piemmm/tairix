@@ -39,6 +39,11 @@
 //! [`Screen::getch`]; a dead console surfaces as a channel error and
 //! fails the read closed, exactly as before.
 //!
+//! The wait is the injected [`InputWait`]: on a running system one wait-set
+//! over the console's input and the notices a round's choice of login
+//! follows, so an untouched username prompt gives way the moment a graphical
+//! login becomes available.
+//!
 //! On [`session_handoff`](LoginView::session_handoff) the view leaves the
 //! alternate screen and restores the cooked input discipline, handing the
 //! terminal to the launched session; the next round re-enters it.
@@ -135,17 +140,51 @@ pub trait ConsoleMode {
     fn purge(&self);
 }
 
+/// What ended a wait for the next keystroke.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum InputWake {
+    /// Input is waiting to be read.
+    Input,
+    /// The bound elapsed with none.
+    Elapsed,
+    /// A graphical login became available, and the prompt may give way to
+    /// it.
+    Superseded,
+}
+
+/// Where the view waits for its next keystroke: the console's input, and
+/// whatever the round's choice of login rests on.
+///
+/// On a running system one wait-set holds both; in tests a script. A wait
+/// that cannot watch the console answers [`InputWake::Input`] at once, and
+/// the view's own bounded read waits instead.
+pub trait InputWait {
+    /// Wait up to `bound` for input. `may_yield` says nothing has been typed
+    /// at the prompt, which alone lets the wait answer
+    /// [`InputWake::Superseded`].
+    fn wait(&self, bound: Duration, may_yield: bool) -> InputWake;
+}
+
+impl<W: InputWait + ?Sized> InputWait for &W {
+    fn wait(&self, bound: Duration, may_yield: bool) -> InputWake {
+        (**self).wait(bound, may_yield)
+    }
+}
+
 /// The full-screen curses [`LoginView`] over an injected terminal
-/// channel, status source, and console-mode switch.
-pub struct CursesView<T: Tty, S: StatusSource, M: ConsoleMode> {
+/// channel, status source, console-mode switch, and input wait.
+pub struct CursesView<T: Tty, S: StatusSource, M: ConsoleMode, W: InputWait> {
     screen: RefCell<Screen<T>>,
     source: S,
     mode: M,
+    input: W,
     /// Rejected attempts since the last successful login.
     failures: Cell<u32>,
     /// Whether the console is in the raw (echo-off) discipline; a secret
     /// is read only while this holds.
     raw_active: Cell<bool>,
+    /// Whether this round's untouched username prompt may give way.
+    may_give_way: Cell<bool>,
     /// The figures currently on the bars, re-queried at each refresh.
     status: RefCell<LoginStatus>,
 }
@@ -312,19 +351,31 @@ fn failure_line(failures: u32) -> Option<String> {
     }
 }
 
-impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
+impl<T: Tty, S: StatusSource, M: ConsoleMode, W: InputWait> CursesView<T, S, M, W> {
     /// Build the view over `screen` (already sized to the terminal),
-    /// `source`, and `mode`.
+    /// `source`, `mode`, and `input`.
     #[must_use]
-    pub fn new(screen: Screen<T>, source: S, mode: M) -> Self {
+    pub fn new(screen: Screen<T>, source: S, mode: M, input: W) -> Self {
         Self {
             screen: RefCell::new(screen),
             source,
             mode,
+            input,
             failures: Cell::new(0),
             raw_active: Cell::new(false),
+            may_give_way: Cell::new(false),
             status: RefCell::new(LoginStatus::default()),
         }
+    }
+
+    /// Leave the login screen: back to the normal screen and the cooked
+    /// discipline, until the next round re-enters it.
+    fn leave(&self) {
+        self.raw_active.set(false);
+        let mut screen = self.screen.borrow_mut();
+        let _ = screen.leave_full_screen();
+        drop(screen);
+        self.mode.cooked();
     }
 
     /// Re-query the status source (bars are stale the moment they render;
@@ -440,10 +491,15 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
     /// A terminal resize is never a keystroke: it re-lays the page out and
     /// re-centres the box on the new screen size, leaving the field under
     /// edit whole and unsubmitted.
+    ///
+    /// A `yields` field in a round that may give way does so while nothing
+    /// is typed in it: when the input wait reports the round superseded, the
+    /// read ends with [`Errno::Interrupted`].
     fn read_field(
         &self,
         label: &str,
         echo: bool,
+        yields: bool,
         max_chars: usize,
         buf: &mut [u8],
     ) -> Result<usize, Errno> {
@@ -470,16 +526,30 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
                     .unwrap_or("")
             };
             self.draw(label, shown);
+            // While the marker is animating the next wake is its one-second
+            // frame; otherwise the idle status refresh.
+            let wait = match indicator.deadline_ns() {
+                Some(deadline) => Duration::from_nanos(deadline.saturating_sub(now_ns).max(1)),
+                None => REFRESH_INTERVAL,
+            };
             let event = {
                 let mut screen = self.screen.borrow_mut();
-                // While the marker is animating the next wake is its
-                // one-second frame; otherwise the idle status refresh.
-                let wait = match indicator.deadline_ns() {
-                    Some(deadline) => Duration::from_nanos(deadline.saturating_sub(now_ns).max(1)),
-                    None => REFRESH_INTERVAL,
+                // An event curses already holds is no longer the console's
+                // to report, so the wait would park over it.
+                let wake = if screen.has_pending_input() {
+                    InputWake::Input
+                } else {
+                    self.input
+                        .wait(wait, yields && len == 0 && self.may_give_way.get())
                 };
-                screen.set_input_mode(InputMode::Timeout(wait));
-                screen.getch()
+                match wake {
+                    InputWake::Input => {
+                        screen.set_input_mode(InputMode::Timeout(wait));
+                        screen.getch()
+                    }
+                    InputWake::Elapsed => Ok(None),
+                    InputWake::Superseded => return Err(Errno::Interrupted),
+                }
             };
             now_ns = self.source.monotonic_ns();
             // Advance every animation frame whose deadline has passed —
@@ -553,8 +623,9 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
     }
 }
 
-impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> {
-    fn round_begin(&self) {
+impl<T: Tty, S: StatusSource, M: ConsoleMode, W: InputWait> LoginView for CursesView<T, S, M, W> {
+    fn round_begin(&self, may_give_way: bool) {
+        self.may_give_way.set(may_give_way);
         self.raw_active.set(self.mode.raw());
         self.refresh_status();
         let mut screen = self.screen.borrow_mut();
@@ -567,7 +638,7 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
     fn read_username(&self, buf: &mut [u8]) -> Result<usize, Errno> {
         // Bounded at the account format's own username maximum, which
         // also keeps the echo inside the box's one-line field.
-        self.read_field("Username: ", true, MAX_USERNAME_LEN, buf)
+        self.read_field("Username: ", true, true, MAX_USERNAME_LEN, buf)
     }
 
     fn read_password(&self, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -577,7 +648,7 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
             return Err(Errno::PermissionDenied);
         }
         // Hidden, so only the buffer's own validation bound applies.
-        self.read_field("Password: ", false, usize::MAX, buf)
+        self.read_field("Password: ", false, false, usize::MAX, buf)
     }
 
     fn note_failure(&self) {
@@ -587,11 +658,11 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
 
     fn session_handoff(&self) {
         self.failures.set(0);
-        self.raw_active.set(false);
-        let mut screen = self.screen.borrow_mut();
-        let _ = screen.leave_full_screen();
-        drop(screen);
-        self.mode.cooked();
+        self.leave();
+    }
+
+    fn round_abandoned(&self) {
+        self.leave();
     }
 
     fn session_ended(&self) {
@@ -606,7 +677,7 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> LoginView for CursesView<T, S, M> 
 mod tests {
     use super::{
         bottom_line, failure_line, fit_tail, format_clock, format_load, pad_between, top_line,
-        ConsoleMode, CursesView, LoginStatus, StatusSource,
+        ConsoleMode, CursesView, InputWait, InputWake, LoginStatus, StatusSource,
     };
     use crate::session::LoginView;
     use alloc::collections::VecDeque;
@@ -705,6 +776,25 @@ mod tests {
         fn purge(&self) {}
     }
 
+    /// An input wait answering each wait from a script, then [`InputWake::Input`]
+    /// once it runs out — the view's own timed read then waits, as on a
+    /// console it cannot watch. Records what `may_yield` each wait was told.
+    #[derive(Default)]
+    struct ScriptWait {
+        wakes: RefCell<VecDeque<InputWake>>,
+        told: RefCell<Vec<bool>>,
+    }
+
+    impl InputWait for alloc::rc::Rc<ScriptWait> {
+        fn wait(&self, _bound: core::time::Duration, may_yield: bool) -> InputWake {
+            self.told.borrow_mut().push(may_yield);
+            self.wakes
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(InputWake::Input)
+        }
+    }
+
     fn status() -> LoginStatus {
         LoginStatus {
             hostname: Some(String::from("lovelace")),
@@ -731,7 +821,12 @@ mod tests {
     fn view_with(
         script: &[&[u8]],
     ) -> (
-        CursesView<ScriptTty, FixtureSource, alloc::rc::Rc<RecordingMode>>,
+        CursesView<
+            ScriptTty,
+            FixtureSource,
+            alloc::rc::Rc<RecordingMode>,
+            alloc::rc::Rc<ScriptWait>,
+        >,
         alloc::rc::Rc<RefCell<Vec<u8>>>,
         alloc::rc::Rc<RecordingMode>,
     ) {
@@ -746,7 +841,31 @@ mod tests {
         script: &[&[u8]],
         clock: &[u64],
     ) -> (
-        CursesView<ScriptTty, FixtureSource, alloc::rc::Rc<RecordingMode>>,
+        CursesView<
+            ScriptTty,
+            FixtureSource,
+            alloc::rc::Rc<RecordingMode>,
+            alloc::rc::Rc<ScriptWait>,
+        >,
+        alloc::rc::Rc<RefCell<Vec<u8>>>,
+        alloc::rc::Rc<RecordingMode>,
+    ) {
+        view_waiting(script, clock, alloc::rc::Rc::new(ScriptWait::default()))
+    }
+
+    /// [`view_with_clock`] over the input wait `wait`.
+    #[allow(clippy::type_complexity)]
+    fn view_waiting(
+        script: &[&[u8]],
+        clock: &[u64],
+        wait: alloc::rc::Rc<ScriptWait>,
+    ) -> (
+        CursesView<
+            ScriptTty,
+            FixtureSource,
+            alloc::rc::Rc<RecordingMode>,
+            alloc::rc::Rc<ScriptWait>,
+        >,
         alloc::rc::Rc<RefCell<Vec<u8>>>,
         alloc::rc::Rc<RecordingMode>,
     ) {
@@ -764,7 +883,94 @@ mod tests {
             now: Some(Time64::from_secs(1_783_100_640)),
             monotonic: RefCell::new(clock.iter().copied().collect()),
         };
-        (CursesView::new(screen, source, mode.clone()), written, mode)
+        (
+            CursesView::new(screen, source, mode.clone(), wait),
+            written,
+            mode,
+        )
+    }
+
+    /// A scripted wait that answers `wakes` in turn.
+    fn waking(wakes: &[InputWake]) -> alloc::rc::Rc<ScriptWait> {
+        alloc::rc::Rc::new(ScriptWait {
+            wakes: RefCell::new(wakes.iter().copied().collect()),
+            told: RefCell::new(Vec::new()),
+        })
+    }
+
+    /// An untouched username prompt gives way when the wait reports the
+    /// round superseded, and leaves the screen without spending an attempt.
+    #[test]
+    fn an_untouched_username_prompt_gives_way() {
+        let wait = waking(&[InputWake::Superseded]);
+        let (view, _, mode) = view_waiting(&[], &[], wait.clone());
+        view.round_begin(true);
+        let mut buf = [0u8; 16];
+        assert_eq!(view.read_username(&mut buf), Err(Errno::Interrupted));
+        assert_eq!(*wait.told.borrow(), [true]);
+        view.round_abandoned();
+        assert_eq!(mode.cookeds.get(), 1);
+    }
+
+    /// Once anything is typed the wait is told the prompt may no longer
+    /// give way, and the name typed is read whole.
+    #[test]
+    fn a_started_username_is_never_given_up() {
+        let wait = waking(&[]);
+        let (view, _, _) = view_waiting(&[b"a", b"\r"], &[], wait.clone());
+        view.round_begin(true);
+        let mut buf = [0u8; 16];
+        assert_eq!(view.read_username(&mut buf), Ok(1));
+        assert_eq!(&buf[..1], b"a");
+        assert_eq!(*wait.told.borrow(), [true, false]);
+    }
+
+    /// A round whose policy forbids giving way never lets even an untouched
+    /// prompt do so.
+    #[test]
+    fn a_round_that_may_not_give_way_never_does() {
+        let wait = waking(&[]);
+        let (view, _, _) = view_waiting(&[b"\r"], &[], wait.clone());
+        view.round_begin(false);
+        let mut buf = [0u8; 16];
+        assert_eq!(view.read_username(&mut buf), Ok(0));
+        assert_eq!(*wait.told.borrow(), [false]);
+    }
+
+    /// The password prompt follows a typed username, so it never gives way.
+    #[test]
+    fn the_password_prompt_never_gives_way() {
+        let wait = waking(&[]);
+        let (view, _, _) = view_waiting(&[b"\r"], &[], wait.clone());
+        view.round_begin(false);
+        let mut buf = [0u8; 16];
+        assert_eq!(view.read_password(&mut buf), Ok(0));
+        assert_eq!(*wait.told.borrow(), [false]);
+    }
+
+    /// An elapsed wait refreshes without reading the terminal, so the Enter
+    /// scripted after it is still the next thing read.
+    #[test]
+    fn an_elapsed_wait_reads_nothing() {
+        let wait = waking(&[InputWake::Elapsed]);
+        let (view, _, _) = view_waiting(&[b"\r"], &[], wait.clone());
+        view.round_begin(false);
+        let mut buf = [0u8; 16];
+        assert_eq!(view.read_username(&mut buf), Ok(0));
+        assert_eq!(wait.told.borrow().len(), 2);
+    }
+
+    /// Keys one read delivered together are taken from curses without
+    /// waiting on the console again, which no longer holds them.
+    #[test]
+    fn keys_read_together_are_not_waited_for() {
+        let wait = waking(&[]);
+        let (view, _, _) = view_waiting(&[b"ab\r"], &[], wait.clone());
+        view.round_begin(false);
+        let mut buf = [0u8; 16];
+        assert_eq!(view.read_username(&mut buf), Ok(2));
+        assert_eq!(&buf[..2], b"ab");
+        assert_eq!(wait.told.borrow().len(), 1);
     }
 
     fn transcript(written: &RefCell<Vec<u8>>) -> String {
@@ -872,7 +1078,7 @@ mod tests {
             &[b"x", b"", b"", b"\r"],
             &[0, 0, SECRET_TICK_NS, 2 * SECRET_TICK_NS],
         );
-        view.round_begin();
+        view.round_begin(false);
         let mut buf = [0u8; 32];
         let len = view.read_password(&mut buf).expect("password read");
         assert_eq!(&buf[..len], b"x");
@@ -889,7 +1095,7 @@ mod tests {
         // show exactly one dot, so watching it reveals nothing about how
         // many characters were typed.
         let (view, written, _mode) = view_with(&[b"x", b"y", b"z", b"\r"]);
-        view.round_begin();
+        view.round_begin(false);
         let mut buf = [0u8; 32];
         let len = view.read_password(&mut buf).expect("password read");
         assert_eq!(&buf[..len], b"xyz");
@@ -919,7 +1125,7 @@ mod tests {
                 SECRET_TICK_NS + SECRET_TICK_NS / 5,
             ],
         );
-        view.round_begin();
+        view.round_begin(false);
         let mut buf = [0u8; 32];
         let len = view.read_password(&mut buf).expect("password read");
         assert_eq!(&buf[..len], b"xyz");
@@ -951,7 +1157,7 @@ mod tests {
                 SECRET_ANIMATE_NS + SECRET_TICK_NS,
             ],
         );
-        view.round_begin();
+        view.round_begin(false);
         let mut buf = [0u8; 32];
         let len = view.read_password(&mut buf).expect("password read");
         assert_eq!(&buf[..len], b"x");
@@ -965,7 +1171,7 @@ mod tests {
     #[test]
     fn round_begin_draws_the_chrome_and_selects_raw_input() {
         let (view, written, mode) = view_with(&[]);
-        view.round_begin();
+        view.round_begin(false);
         let text = transcript(&written);
         // The minimal-diff renderer may split runs of blanks into cursor
         // jumps, so each visible word is asserted on its own.
@@ -1018,8 +1224,9 @@ mod tests {
             screen,
             CountingSource(calls.clone()),
             alloc::rc::Rc::new(RecordingMode::default()),
+            alloc::rc::Rc::new(ScriptWait::default()),
         );
-        view.round_begin();
+        view.round_begin(false);
         let mut buf = [0u8; 16];
         assert_eq!(view.read_username(&mut buf), Ok(0));
         assert_eq!(calls.get(), 3);
@@ -1078,7 +1285,12 @@ mod tests {
             now: Some(Time64::from_secs(1_783_100_640)),
             monotonic: RefCell::new(VecDeque::new()),
         };
-        let view = CursesView::new(screen, source, alloc::rc::Rc::new(RecordingMode::default()));
+        let view = CursesView::new(
+            screen,
+            source,
+            alloc::rc::Rc::new(RecordingMode::default()),
+            alloc::rc::Rc::new(ScriptWait::default()),
+        );
         let mut buf = [0u8; 32];
         // Reaching the scripted Enter at all proves the resize neither
         // ended the read nor counted as a keystroke, and the typed name
@@ -1107,8 +1319,13 @@ mod tests {
             now: None,
             monotonic: RefCell::new(VecDeque::new()),
         };
-        let view = CursesView::new(screen, source, StuckCookedMode);
-        view.round_begin();
+        let view = CursesView::new(
+            screen,
+            source,
+            StuckCookedMode,
+            alloc::rc::Rc::new(ScriptWait::default()),
+        );
+        view.round_begin(false);
         let mut buf = [0u8; 8];
         assert_eq!(view.read_password(&mut buf), Err(Errno::PermissionDenied));
     }
@@ -1118,7 +1335,7 @@ mod tests {
         // `z` and `q` appear nowhere in the chrome, so any echo of the
         // secret would surface them in the transcript.
         let (view, written, _mode) = view_with(&[b"zq", b"\r"]);
-        view.round_begin();
+        view.round_begin(false);
         let mut buf = [0u8; 32];
         let len = view.read_password(&mut buf).expect("password read");
         assert_eq!(&buf[..len], b"zq");
@@ -1166,13 +1383,13 @@ mod tests {
     #[test]
     fn handoff_restores_the_cooked_console_and_resets_failures() {
         let (view, written, mode) = view_with(&[]);
-        view.round_begin();
+        view.round_begin(false);
         view.note_failure();
         view.session_handoff();
         assert!(mode.cookeds.get() >= 1);
         // The next round starts with a clean slate: no failure line.
         written.borrow_mut().clear();
-        view.round_begin();
+        view.round_begin(false);
         assert!(!transcript(&written).contains("failed attempt"));
     }
 }

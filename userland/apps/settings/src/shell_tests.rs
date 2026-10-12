@@ -919,14 +919,14 @@ fn the_trail_names_where_the_surface_is() {
         shell.trail_labels(),
         alloc::vec!["Settings", "General", "About"]
     );
-    let sound = shell
+    let keyboard = shell
         .rows()
         .iter()
-        .position(|row| matches!(row, StripRow::Category(Category::Sound)))
-        .expect("the sound row");
-    let at = row_point(&shell, sound, WIDE, &theme).expect("a row");
+        .position(|row| matches!(row, StripRow::Category(Category::Keyboard)))
+        .expect("the keyboard row");
+    let at = row_point(&shell, keyboard, WIDE, &theme).expect("a row");
     click(&mut shell, at, WIDE, &theme);
-    assert_eq!(shell.trail_labels(), alloc::vec!["Settings", "Sound"]);
+    assert_eq!(shell.trail_labels(), alloc::vec!["Settings", "Keyboard"]);
 }
 
 // --- Search -------------------------------------------------------------
@@ -944,7 +944,7 @@ fn a_query_filters_the_strip_to_what_it_reaches() {
         WIDE,
         &theme,
     );
-    for ch in "sound".chars() {
+    for ch in "keyboard".chars() {
         shell.on_key(
             keystroke(Key::Char(ch)),
             WIDE,
@@ -953,7 +953,7 @@ fn a_query_filters_the_strip_to_what_it_reaches() {
             &mut sink,
         );
     }
-    assert_eq!(shell.rows(), &[StripRow::Category(Category::Sound)]);
+    assert_eq!(shell.rows(), &[StripRow::Category(Category::Keyboard)]);
 
     // Escape clears the query, and the strip is whole again.
     shell.on_key(
@@ -4445,6 +4445,86 @@ fn opening_a_list_reports_every_choice_it_draws() {
             "choice {index} at {choice:?} was drawn but not reported"
         );
     }
+}
+
+fn effects_reading(document: &str) -> crate::EffectsReading {
+    crate::EffectsReading::of(
+        &tairix_abi::pinboard_ipc::SoundReading {
+            document,
+            files: [tairix_abi::pinboard_ipc::SoundFile::Theme; 13],
+        },
+        alloc::vec![alloc::string::String::from("TAIRiX")],
+    )
+    .expect("a document the registry reads")
+}
+
+/// The Sound Effects pane asks for the user's choices as it comes on show,
+/// builds its rows from what the session answers, and carries a change out
+/// as an ask of the session; once one is answered it reads them again.
+#[test]
+fn the_sound_effects_pane_reads_the_sessions_choices_and_asks_it_to_change_them() {
+    let mut shell = shell_at(Location {
+        category: Category::Sound,
+        pane: Pane::SoundEffects,
+    });
+    assert!(
+        shell.effects_wanted(),
+        "coming on show asks for the choices"
+    );
+    shell.adopt_effects(Some(effects_reading("sound.enabled = false\n")));
+    assert!(!shell.effects_wanted());
+    let form = shell.form_for_test().expect("a composed form");
+    let tairix_controls::FieldControl::Toggle(toggle) = form.groups()[0].rows()[0].control() else {
+        panic!("the master switch is a toggle");
+    };
+    assert!(!toggle.is_on(), "built from what the session answered");
+    let asked = shell.conclude_for_test(crate::FormOutcome::Effects {
+        ask: Some(crate::EffectsAsk::Apply {
+            key: tairix_soundtheme::SoundKey::Enabled,
+            line: alloc::string::String::from("sound.enabled = true\n"),
+        }),
+        settled: true,
+    });
+    assert_eq!(
+        asked,
+        ShellOutcome::Effects(crate::EffectsAsk::Apply {
+            key: tairix_soundtheme::SoundKey::Enabled,
+            line: alloc::string::String::from("sound.enabled = true\n"),
+        })
+    );
+    shell.effects_moved();
+    assert!(shell.effects_wanted(), "an answered ask reads them again");
+}
+
+/// A reading of the choices landing while one of their levels is dragged
+/// waits for the drag to settle.
+#[test]
+fn a_sound_effects_reading_landing_mid_drag_waits_for_the_settle() {
+    let gain_shown = |shell: &Shell| {
+        let form = shell.form_for_test().expect("a composed form");
+        let tairix_controls::FieldControl::Slider(slider) = form.groups()[1].rows()[1].control()
+        else {
+            panic!("the level is a slider");
+        };
+        slider.value()
+    };
+    let mut shell = shell_at(Location {
+        category: Category::Sound,
+        pane: Pane::SoundEffects,
+    });
+    shell.adopt_effects(Some(effects_reading("")));
+    let before = gain_shown(&shell);
+    shell.conclude_for_test(crate::FormOutcome::Effects {
+        ask: None,
+        settled: false,
+    });
+    shell.adopt_effects(Some(effects_reading("sound.shutdown.gain = -30dB\n")));
+    assert_eq!(gain_shown(&shell), before, "held while the drag goes on");
+    shell.conclude_for_test(crate::FormOutcome::Effects {
+        ask: None,
+        settled: true,
+    });
+    assert_ne!(gain_shown(&shell), before, "adopted once it settles");
 }
 
 /// A sound reading landing while a level is dragged waits for the drag to

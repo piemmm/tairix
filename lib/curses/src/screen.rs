@@ -453,6 +453,15 @@ impl<T: Tty> Screen<T> {
         }
     }
 
+    /// Whether [`Screen::getch`] would return an event without reading: one
+    /// buffered by an earlier decode, or a resize already latched. A program
+    /// that waits on the terminal's descriptor itself asks this first, since
+    /// those events are no longer the descriptor's to report.
+    #[must_use]
+    pub fn has_pending_input(&self) -> bool {
+        !self.pending.is_empty() || self.pending_resize.is_some()
+    }
+
     /// Read all currently pending input and decode it into [`Event`]s (a
     /// batched, non-blocking `getch`).
     ///

@@ -6,9 +6,9 @@ use tairix_fuzzseed::Prng;
 use crate::cprman::{Cprman, Halted, Source, MASH_MAX_HZ, MAX_DIVISOR, MIN_DIVISOR, PCM, PWM};
 use crate::model::{
     pll_control, Model, Stopping, CHANNEL_DISABLED, CTL_ENABLE, CTL_KILL, MASH_FIRST_ORDER,
-    OSCILLATOR, PCM_CTL, PCM_DIV, PLLC_CTRL, PLLC_FRAC, PLLC_PER, PLLD_ANA1, PLLD_CTRL, PLLD_FRAC,
-    PLLD_PER, PLL_FEEDBACK_PREDIV, PLL_OUT_OF_RESET, PLL_POWER_DOWN, PWM_CTL, PWM_DIV,
-    SOURCE_OSCILLATOR, SOURCE_PLLC, SOURCE_PLLD, SOURCE_TEST,
+    OSCILLATOR, PCM_CTL, PCM_DIV, PLLC_CORE0, PLLC_CTRL, PLLC_FRAC, PLLC_PER, PLLD_ANA1, PLLD_CTRL,
+    PLLD_FRAC, PLLD_PER, PLL_FEEDBACK_PREDIV, PLL_OUT_OF_RESET, PLL_POWER_DOWN, PWM_CTL, PWM_DIV,
+    SOURCE_OSCILLATOR, SOURCE_PLLC, SOURCE_PLLD, SOURCE_TEST, VPU_CTL, VPU_DIV,
 };
 
 const PLLD_PER_HZ: u64 = 675_000_000;
@@ -187,6 +187,41 @@ fn no_divisor_of_either_source_comes_nearer_than_the_one_chosen() {
             }
         }
     }
+}
+
+#[test]
+fn the_vpu_clock_is_read_through_its_own_mux_and_its_eight_fraction_bits() {
+    let model = Model::new();
+    let cprman = Cprman::new(&model, OSCILLATOR).expect("valid");
+    assert_eq!(cprman.vpu_rate(), Ok(0), "stopped");
+    model.set(PLLC_CTRL, pll_control(1, 50));
+    model.set(PLLC_CORE0, 5);
+    model.set(VPU_CTL, 5 | CTL_ENABLE);
+    model.set(VPU_DIV, 1 << 12);
+    assert_eq!(
+        cprman.vpu_rate(),
+        Ok(540_000_000),
+        "PLLC's first core channel"
+    );
+    // A half step is in the eight bits it has; the four below are not.
+    model.set(VPU_DIV, 0x1_80F);
+    assert_eq!(cprman.vpu_rate(), Ok(360_000_000));
+    model.set(VPU_CTL, 1 | CTL_ENABLE);
+    model.set(VPU_DIV, 2 << 12);
+    assert_eq!(cprman.vpu_rate(), Ok(OSCILLATOR / 2));
+    model.set(VPU_CTL, 7 | CTL_ENABLE);
+    assert_eq!(
+        cprman.vpu_rate(),
+        Err(DriverError::Unsupported),
+        "PLLH, which this part lacks"
+    );
+    model.set(VPU_CTL, 5 | CTL_ENABLE);
+    model.set(VPU_DIV, 0x00F);
+    assert_eq!(
+        cprman.vpu_rate(),
+        Err(DriverError::Unsupported),
+        "no divisor"
+    );
 }
 
 #[test]

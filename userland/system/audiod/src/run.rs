@@ -82,15 +82,6 @@ mod program {
         index as u64 + 1
     }
 
-    /// The notify port this service binds for the `index`th device channel.
-    ///
-    /// Derived from this process's own pid so two audio services could never
-    /// collide, and unreserved so it needs no privileged bind; the mailbox is
-    /// owner-only to receive, so a bystander cannot steal a driver's wakes.
-    fn device_notify_endpoint(pid: u64, index: usize) -> u64 {
-        tairix_abi::audio::notify_endpoint_for(pid, index as u64)
-    }
-
     /// One shared PCM region this service holds, and where it came from.
     ///
     /// Only a region this service *created* carries a kernel id, because
@@ -474,7 +465,7 @@ mod program {
             return Err(Errno::PermissionDenied);
         }
         let index = service.bind_slot();
-        let port = device_notify_endpoint(pid, index);
+        let port = tairix_abi::driver::audio_channel::notify_endpoint_for(pid, index as u64);
         // A slot a reaped device left keeps its port and its wake: both are
         // this service's own and are reused. Anything else is a refusal.
         let exists = -i64::from(Errno::AlreadyExists.as_i32().unsigned_abs());

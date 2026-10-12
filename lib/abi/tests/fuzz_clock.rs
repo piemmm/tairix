@@ -54,6 +54,10 @@ fn request_seeds() -> Vec<Vec<u8>> {
             hz: 3_072_000,
         },
         ClockRequest::Release(link(2, &[], b"")),
+        ClockRequest::Floor {
+            link: link(3, &[13], b"hdmi"),
+            hz: 120_000_000,
+        },
     ]
     .iter()
     .map(|request| {
@@ -78,6 +82,7 @@ fn reply_seeds() -> Vec<Vec<u8>> {
             out,
             ClockState {
                 hz: 100_000_000,
+                max_hz: 500_000_000,
                 held_elsewhere: true,
             },
         )
@@ -107,6 +112,10 @@ fn exercise_request(bytes: &[u8]) {
 fn exercise_replies(bytes: &[u8]) {
     let mut out = vec![0u8; CLOCK_MAX_REPLY];
     if let Ok(state) = decode_describe_reply(bytes) {
+        assert!(
+            state.hz <= state.max_hz,
+            "a clock never runs above its highest rate"
+        );
         let len = encode_describe_reply(&mut out, state).expect("re-encodes");
         assert_eq!(&out[..len], bytes);
     }

@@ -63,10 +63,12 @@ Compromising it therefore yields a screen, not an account.
 
 1. **Acquire the boot seat's exclusive lease.** A seat already held means
    there is no screen to own.
-2. **Query the display mode** and size the scan-out from it.
-3. **Map a double-buffered frame region** and grant it to the display
-   service, so a frame is presented by handing over a region rather than
-   copying pixels through IPC.
+2. **Query the display's output** and size the scan-out from it. With no
+   output connected the greeter parks on the display's output announcement
+   until one arrives.
+3. **Establish a double-buffered frame region** for it
+   (`tairix_display::establish_frames`), so a frame is presented by handing
+   over a region rather than copying pixels through IPC.
 4. **Page the offerable accounts** off the authority's `session-v1`
    endpoint into chooser tiles. The walk is bounded three ways — by the
    `total` the first page announced, by a ceiling of eight pages' worth of
@@ -79,6 +81,13 @@ Compromising it therefore yields a screen, not an account.
    the display receives is full black.
 7. **Paint that frame** and audit `SCREEN_READY`.
 8. **Park**, which uncovers the chooser out of the black.
+
+The output can move while the screen is up (`plans/DISPLAY.md` D12): the
+greeter parks on its announcement beside the seat's input. With no output it
+presents nothing; with one, frames are established afresh — the output may
+be a new sink, or a restarted display service holding none of the old ones —
+and a new mode rebuilds the screen in place, keeping the account chosen and
+anything typed, and painting the whole of it.
 
 A verified secret fades the screen to black and then exits `0`, which also
 releases the seat: the authority is watching for that exit and starts the

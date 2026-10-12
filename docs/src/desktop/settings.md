@@ -47,10 +47,10 @@ the other's applies. The desktop's one launch funnel resolves that, so every
 route in — the system menu, the Program Library, a shell — behaves the same.
 
 **Four write paths, and no fifth.** Every settable reaches one of exactly
-four owners: the desktop session, for the user's own desktop; the tool that
-already writes a machine-wide store, run as a re-authenticated account; the
-syscall's own tool, likewise; or the audio service, for a sound device's own
-controls. A pane whose write path is refused states the refusal and changes
+four owners: the desktop session, for the user's own desktop and sounds; the
+tool that already writes a machine-wide store, run as a re-authenticated
+account; the syscall's own tool, likewise; or the audio service, for a sound
+device's own controls. A pane whose write path is refused states the refusal and changes
 nothing — it never reports a success it did not get.
 
 ## The surface
@@ -684,7 +684,12 @@ have to land.
 
 ## Sound
 
-Sound is one composed pane of plates discovered from the audio service: one
+Sound is two panes: **Output & Input**, the sound devices, and **Sound
+Effects**, the desktop's own sounds.
+
+### Output & Input
+
+The devices pane is composed of plates discovered from the audio service: one
 per sink and source — its default choice, its level and its mute — and a
 Recording plate naming the user's own live captures and counting everyone
 else's (the machine's `AudioCapture` count less the user's own). Its controls
@@ -703,6 +708,30 @@ mid-drag is held until the drag settles rather than rebuilding the slider
 under the pointer. The `AudioDevices` and `AudioCapture` notices re-read the
 pane whenever anything moves, whoever moved it. Settings remembers nothing:
 the desktop session follows the same notices and keeps the user's choices.
+
+### Sound Effects
+
+The effects pane is the user's own sound choices, which their desktop session
+keeps and hands the cue authority while it holds the seat (`plans/SOUND.md`
+SND23). A first plate holds the master switch, the theme — the installed
+themes, and the one in effect though no store holds it — and a statement that
+the start-up, sign-in and sign-out sounds are the machine's, since they sound
+while no one's choices are in force. Then one plate per sound a user decides:
+its switch, its level, which file plays — the theme's, a chosen file by its
+name alone, or one that cannot be read — *Choose…*, and *Use Theme Sound*.
+
+Its write path is the desktop session's: each change is a
+[pinboard](./pinboard.md) sound request rendering only the settings it
+changes, and a file is chosen in the session's own trusted picker, so no path
+ever reaches this application. A level asks once, where it settles. The round
+trips run on a worker, one at a time (`EffectsAsks`): every setting changed
+meanwhile waits with its newest value and goes in the next request together,
+so a level stepped faster than the session answers costs one store a round
+trip and the value asked last is the one that lands, while picks and returns
+to the theme's sound keep their order. Once one is answered the pane reads the
+choices again, so it shows what the session holds rather than what was asked;
+a reading that lands mid-drag waits for the drag to settle, as the devices
+pane's does.
 
 ## On a running machine
 

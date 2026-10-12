@@ -8,6 +8,9 @@
 //! this trait in `userland/gui/wm`.
 
 use super::DriverError;
+use crate::le::{put_u16, put_u32, read_u16, read_u32};
+use crate::seat::ReleaseSurface;
+use crate::Errno;
 
 /// The live seat-lease check a display driver applies before scanout.
 ///
@@ -430,7 +433,184 @@ impl DamageRect {
     }
 }
 
-/// Mode-information record returned by [`Display::mode_info`].
+/// Which way a sync pulse goes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Polarity {
+    /// High during the pulse.
+    Positive,
+    /// Low during the pulse.
+    Negative,
+}
+
+/// Whether a frame is sent whole or as two fields.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Scan {
+    /// Every line of each frame.
+    Progressive,
+    /// Alternate lines in each of two fields.
+    Interlaced,
+}
+
+/// One axis of a timing: what is shown, then the front porch, the sync pulse
+/// and the back porch.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Axis {
+    /// Pixels or lines shown.
+    pub active: u16,
+    /// Blanking before the sync pulse.
+    pub front: u16,
+    /// The sync pulse.
+    pub sync: u16,
+    /// Blanking after it.
+    pub back: u16,
+}
+
+impl Axis {
+    /// The whole axis, shown and blanked.
+    #[must_use]
+    pub const fn total(&self) -> u32 {
+        self.active as u32 + self.front as u32 + self.sync as u32 + self.back as u32
+    }
+}
+
+/// How a frame is clocked out.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Timing {
+    /// The pixel clock, in kHz.
+    pub clock_khz: u32,
+    /// Pixels per line.
+    pub horizontal: Axis,
+    /// Lines per frame, an interlaced frame's two fields together.
+    pub vertical: Axis,
+    /// The horizontal sync pulse's polarity.
+    pub hsync: Polarity,
+    /// The vertical sync pulse's polarity.
+    pub vsync: Polarity,
+    /// Whether the frame is interlaced.
+    pub scan: Scan,
+    /// How many times each pixel is sent: 2 where a code doubles a narrow
+    /// timing's clock.
+    pub repetition: u8,
+}
+
+impl Timing {
+    /// The frame rate, in millihertz; `0` for a timing with no blanking or
+    /// clock to divide.
+    #[must_use]
+    pub fn refresh_mhz(&self) -> u32 {
+        let pixels = u64::from(self.horizontal.total()) * u64::from(self.vertical.total());
+        let clock_hz = u64::from(self.clock_khz) * 1_000;
+        clock_hz
+            .saturating_mul(1_000)
+            .checked_div(pixels)
+            .and_then(|refresh| u32::try_from(refresh).ok())
+            .unwrap_or(0)
+    }
+
+    /// The rate a line's active pixels pass at, in kHz: the pixel clock
+    /// scaled by the active share of a line, which is what a compositor that
+    /// fills each line during its active part must keep up with; `0` for a
+    /// line with no blanking or clock.
+    #[must_use]
+    pub fn active_rate_khz(&self) -> u32 {
+        (u64::from(self.clock_khz) * u64::from(self.horizontal.active))
+            .checked_div(u64::from(self.horizontal.total()))
+            .and_then(|rate| u32::try_from(rate).ok())
+            .unwrap_or(0)
+    }
+}
+
+impl Timing {
+    /// Encoded size on the wire: the clock (4), each axis's active, front,
+    /// sync and back (8 each), the flags (1) — the horizontal and vertical
+    /// syncs' polarities and the scan — the repetition (1), and a reserved
+    /// pair (2) that must be zero.
+    pub const WIRE_LEN: usize = 24;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.clock_khz);
+        for (at, axis) in [(4, &self.horizontal), (12, &self.vertical)] {
+            put_u16(&mut out, at, axis.active);
+            put_u16(&mut out, at + 2, axis.front);
+            put_u16(&mut out, at + 4, axis.sync);
+            put_u16(&mut out, at + 6, axis.back);
+        }
+        out[20] = (u8::from(self.hsync == Polarity::Positive) * TIMING_HSYNC_POSITIVE)
+            | (u8::from(self.vsync == Polarity::Positive) * TIMING_VSYNC_POSITIVE)
+            | (u8::from(self.scan == Scan::Interlaced) * TIMING_INTERLACED);
+        out[21] = self.repetition;
+        out
+    }
+
+    /// Decode from `bytes`, refusing a timing nothing could clock out.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` is shorter than
+    ///   [`Self::WIRE_LEN`].
+    /// * [`Errno::BadMagic`] — an unknown flag or a dirty reserved pair.
+    /// * [`Errno::LengthOutOfRange`] — no clock, an axis showing nothing or
+    ///   pulsing no sync, or a repetition outside `1..=MAX_REPETITION`.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        let bytes = bytes.get(..Self::WIRE_LEN).ok_or(Errno::BufferTooSmall)?;
+        let flags = bytes[20];
+        if flags & !TIMING_FLAGS_KNOWN != 0 || bytes[22] != 0 || bytes[23] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let axis = |at: usize| Axis {
+            active: read_u16(bytes, at),
+            front: read_u16(bytes, at + 2),
+            sync: read_u16(bytes, at + 4),
+            back: read_u16(bytes, at + 6),
+        };
+        let polarity = |bit: u8| {
+            if flags & bit == 0 {
+                Polarity::Negative
+            } else {
+                Polarity::Positive
+            }
+        };
+        let timing = Self {
+            clock_khz: read_u32(bytes, 0),
+            horizontal: axis(4),
+            vertical: axis(12),
+            hsync: polarity(TIMING_HSYNC_POSITIVE),
+            vsync: polarity(TIMING_VSYNC_POSITIVE),
+            scan: if flags & TIMING_INTERLACED == 0 {
+                Scan::Progressive
+            } else {
+                Scan::Interlaced
+            },
+            repetition: bytes[21],
+        };
+        let shown = |axis: &Axis| axis.active != 0 && axis.sync != 0;
+        if timing.clock_khz == 0
+            || !shown(&timing.horizontal)
+            || !shown(&timing.vertical)
+            || !(1..=MAX_REPETITION).contains(&timing.repetition)
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(timing)
+    }
+}
+
+/// The most times a timing may send each pixel: CTA-861's ten.
+pub const MAX_REPETITION: u8 = 10;
+
+/// A timing's flag: the horizontal sync pulses high.
+const TIMING_HSYNC_POSITIVE: u8 = 1 << 0;
+/// A timing's flag: the vertical sync pulses high.
+const TIMING_VSYNC_POSITIVE: u8 = 1 << 1;
+/// A timing's flag: the frame is interlaced.
+const TIMING_INTERLACED: u8 = 1 << 2;
+/// Every flag a timing's wire form defines.
+const TIMING_FLAGS_KNOWN: u8 = TIMING_HSYNC_POSITIVE | TIMING_VSYNC_POSITIVE | TIMING_INTERLACED;
+
+/// The mode a display's output runs, as [`Display::output`] answers it.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DisplayMode {
@@ -490,20 +670,43 @@ impl DisplayDeviceReport {
 ///
 /// [`DriverHandle`]: crate::driver::DriverHandle
 pub trait Display {
-    /// Report the active mode.
+    /// The mode the display's output runs, or [`None`] while there is no
+    /// output: no sink connected, or none the device can drive.
     ///
-    /// # Errors
-    ///
-    /// * [`DriverError::DeviceFault`] if hardware enumeration fails.
-    /// * [`DriverError::Unsupported`] if the driver was loaded into a
-    ///   headless host that cannot expose a surface.
+    /// The mode is the driver's to choose for the sink it has. It moves only
+    /// across [`Self::service_events`], so a caller that read it before a
+    /// call it then makes on the display has read the state that call meets.
     ///
     /// # Capabilities
     ///
     /// Caller must present the driver's [`DriverHandle`].
     ///
     /// [`DriverHandle`]: crate::driver::DriverHandle
-    fn mode_info(&self) -> Result<DisplayMode, DriverError>;
+    fn output(&self) -> Option<DisplayMode>;
+
+    /// Collect what woke the display's event sources — a sink arriving or
+    /// leaving, a sink's mode, a mode set completing — and move
+    /// [`Self::output`] to match.
+    ///
+    /// The hosting loop calls it when, and only when, one of the sources the
+    /// driver handed it fired. Every source that fired is quiet again on
+    /// return, whatever the answer: a source that cannot be quieted is the
+    /// driver's to stop raising, so a failing device cannot spin the loop.
+    /// The default does nothing, for a display whose output never moves and
+    /// which therefore names no source.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the device's state could not be
+    ///   read. [`Self::output`] then says what the display can still drive.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's
+    /// [`DriverHandle`](crate::driver::DriverHandle).
+    fn service_events(&mut self) -> Result<(), DriverError> {
+        Ok(())
+    }
 
     /// Report what this device owns and what its compositor can do.
     ///
@@ -518,12 +721,12 @@ pub trait Display {
 
     /// Present a fully-rendered frame.
     ///
-    /// `frame` must contain at least
-    /// `mode_info()?.stride_bytes * mode_info()?.height_px` bytes laid
-    /// out in the format reported by [`Self::mode_info`].
+    /// `frame` must contain at least `stride_bytes * height_px` bytes of the
+    /// mode [`Self::output`] answers, laid out in its format.
     ///
     /// # Errors
     ///
+    /// * [`DriverError::Stale`] if there is no output.
     /// * [`DriverError::BufferTooSmall`] if `frame` is shorter than
     ///   the active mode requires.
     /// * [`DriverError::DeviceFault`] if the underlying hardware
@@ -560,6 +763,7 @@ pub trait Display {
     ///
     /// # Errors
     ///
+    /// * [`DriverError::Stale`] if there is no output.
     /// * [`DriverError::LengthOutOfRange`] if the list is empty, longer than
     ///   [`MAX_DAMAGE_RECTS`], or holds a rectangle that is empty or falls
     ///   outside the active mode's surface.
@@ -571,10 +775,21 @@ pub trait Display {
     /// [`DriverHandle`](crate::driver::DriverHandle), exactly as for
     /// [`Self::present`].
     fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
-        let mode = self.mode_info()?;
+        let mode = self.output().ok_or(DriverError::Stale)?;
         DamageRect::validate_list(damage, &mode)?;
         self.present(frame)
     }
+
+    /// The lease the display's frames were presented under has ended, and
+    /// `surface` says what the seat shows until a presenter's next frame:
+    /// its text console, or nothing while another presenter takes over.
+    ///
+    /// A display that scans out frames of its own shows the console's
+    /// surface, or nothing, never the frames the outgoing presenter left:
+    /// one principal's screen is never shown to the next. The default does
+    /// nothing, for a display whose surface the console draws into itself,
+    /// which repaints or clears it.
+    fn released(&mut self, _surface: ReleaseSurface) {}
 
     /// Switch the display's output on or off.
     ///
@@ -809,8 +1024,8 @@ mod tests {
     }
 
     impl Display for MockDisplay {
-        fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-            Ok(self.mode)
+        fn output(&self) -> Option<DisplayMode> {
+            Some(self.mode)
         }
 
         fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -835,13 +1050,105 @@ mod tests {
             frame_len_seen: core::cell::Cell::new(0),
         };
         let dyn_ref: &mut dyn Display = &mut d;
-        let Ok(info) = dyn_ref.mode_info() else {
-            unreachable!("mock always succeeds")
+        let Some(info) = dyn_ref.output() else {
+            unreachable!("mock always has an output")
         };
         assert_eq!(info.width_px, 4);
+        assert_eq!(dyn_ref.service_events(), Ok(()));
         assert_eq!(dyn_ref.present(&[0u8; 8]), Err(DriverError::BufferTooSmall));
         assert!(dyn_ref.present(&[0u8; 32]).is_ok());
         assert_eq!(d.frame_len_seen.get(), 32);
+    }
+
+    /// 1080i60: interlaced, both syncs high — every flag set at once.
+    const INTERLACED_1080: Timing = Timing {
+        clock_khz: 74_250,
+        horizontal: Axis {
+            active: 1920,
+            front: 88,
+            sync: 44,
+            back: 148,
+        },
+        vertical: Axis {
+            active: 1080,
+            front: 4,
+            sync: 10,
+            back: 31,
+        },
+        hsync: Polarity::Positive,
+        vsync: Polarity::Positive,
+        scan: Scan::Interlaced,
+        repetition: 1,
+    };
+
+    #[test]
+    fn a_timing_round_trips_through_its_wire_form() {
+        let doubled = Timing {
+            hsync: Polarity::Negative,
+            vsync: Polarity::Negative,
+            scan: Scan::Progressive,
+            repetition: 2,
+            ..INTERLACED_1080
+        };
+        for timing in [INTERLACED_1080, doubled] {
+            assert_eq!(Timing::from_bytes(&timing.to_le_bytes()), Ok(timing));
+        }
+    }
+
+    #[test]
+    fn a_timing_nothing_could_clock_out_is_refused() {
+        let good = INTERLACED_1080.to_le_bytes();
+        assert_eq!(
+            Timing::from_bytes(&good[..Timing::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut flag = good;
+        flag[20] |= 1 << 3;
+        assert_eq!(Timing::from_bytes(&flag), Err(Errno::BadMagic));
+        let mut reserved = good;
+        reserved[23] = 1;
+        assert_eq!(Timing::from_bytes(&reserved), Err(Errno::BadMagic));
+        for (at, value) in [(0, 0u8), (4, 0), (8, 0), (12, 0), (16, 0)] {
+            let mut zeroed = good;
+            let width = if at == 0 { 4 } else { 2 };
+            zeroed[at..at + width].fill(value);
+            assert_eq!(
+                Timing::from_bytes(&zeroed),
+                Err(Errno::LengthOutOfRange),
+                "{at}"
+            );
+        }
+        for repetition in [0, MAX_REPETITION + 1] {
+            let mut repeated = good;
+            repeated[21] = repetition;
+            assert_eq!(Timing::from_bytes(&repeated), Err(Errno::LengthOutOfRange));
+        }
+    }
+
+    /// A display with nothing connected, counting what reaches its present.
+    struct Unplugged {
+        presents: usize,
+    }
+
+    impl Display for Unplugged {
+        fn output(&self) -> Option<DisplayMode> {
+            None
+        }
+
+        fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
+            self.presents += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn damage_with_no_output_is_stale_and_presents_nothing() {
+        let mut display = Unplugged { presents: 0 };
+        assert_eq!(
+            display.present_rects(&[0u8; 32], &[rect(0, 0, 1, 1)]),
+            Err(DriverError::Stale)
+        );
+        assert_eq!(display.presents, 0);
     }
 
     fn layer(width: u32, height: u32, stride: u32) -> AccelLayer<'static> {
@@ -889,8 +1196,8 @@ mod tests {
     }
 
     impl Display for MockAccel {
-        fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-            Ok(self.mode)
+        fn output(&self) -> Option<DisplayMode> {
+            Some(self.mode)
         }
         fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
             Ok(())

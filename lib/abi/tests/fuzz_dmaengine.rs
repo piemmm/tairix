@@ -22,10 +22,11 @@ use core::num::NonZeroU32;
 use tairix_abi::driver::dmaengine::{
     decode_done_reply, decode_open_reply, decode_position_reply, decode_prepare_reply,
     decode_wait_reply, encode_done_reply, encode_error_reply, encode_open_reply,
-    encode_position_reply, encode_prepare_reply, encode_wait_reply, CyclicParams, DmaBufferGrant,
-    DmaDirection, DmaEngineOp, DmaEngineRequest, WaitEnd, WaitReport, DMA_CONTROLLER_ENDPOINTS,
+    encode_position_reply, encode_prepare_reply, encode_wait_reply, CyclicParams, DmaDirection,
+    DmaEngineOp, DmaEngineRequest, WaitEnd, WaitReport, DMA_CONTROLLER_ENDPOINTS,
     DMA_CYCLIC_MIN_PERIODS, DMA_ENGINE_MAX_REPLY, DMA_ENGINE_MAX_REQUEST, DMA_MAX_CHANNELS,
 };
+use tairix_abi::hwlink::RegionGrant;
 use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole};
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Duration64;
@@ -99,7 +100,7 @@ fn reply_seeds() -> Vec<Vec<u8>> {
     push(&|out| {
         encode_prepare_reply(
             out,
-            &DmaBufferGrant {
+            &RegionGrant {
                 grant: 0x42,
                 grantor: ProcId::from_raw([0x5A; PROC_ID_LEN]),
             },

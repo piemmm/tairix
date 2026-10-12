@@ -227,6 +227,12 @@ pub enum ControlError {
     /// The administrator override document could not be written, for this
     /// reason; the running system was not touched either.
     NotRecorded(Errno),
+    /// The administrator override document has not been read — the root
+    /// holding it is not unlocked, or it will not read — so a change written
+    /// now would replace it with one built over nothing.
+    RecordUnread,
+    /// The service is part of the boot floor, which no enrolment governs.
+    BootFloor,
 }
 
 impl ControlError {
@@ -242,13 +248,15 @@ impl ControlError {
             // Retryable: the service is simply not in a state to serve it.
             Self::Unavailable => Errno::Busy,
             // Not `PermissionDenied`: reaching the gated endpoint proved the
-            // caller's authority, and it is the target's bundle that the load
-            // gate refused.
-            Self::NotStartable => Errno::NotSupported,
+            // caller's authority, and it is the target that refuses — its
+            // bundle the load gate turned away, or its place in the boot
+            // floor.
+            Self::NotStartable | Self::BootFloor => Errno::NotSupported,
             Self::RecordFull => Errno::LimitExceeded,
             // The store's own answer, which is about the record rather than
             // the caller.
             Self::NotRecorded(err) => err,
+            Self::RecordUnread => Errno::NoData,
         }
     }
 }
@@ -263,6 +271,8 @@ impl fmt::Display for ControlError {
             Self::NotRecorded(err) => {
                 return write!(f, "the enrolment record could not be written: {err}")
             }
+            Self::RecordUnread => "the enrolment record has not been read yet",
+            Self::BootFloor => "a boot-floor service, which no enrolment governs",
         };
         f.write_str(message)
     }
@@ -294,6 +304,8 @@ mod tests {
             ControlError::NotRecorded(Errno::NoSpace).errno(),
             Errno::NoSpace
         );
+        assert_eq!(ControlError::RecordUnread.errno(), Errno::NoData);
+        assert_eq!(ControlError::BootFloor.errno(), Errno::NotSupported);
         assert_eq!(ActivateError::Denied.errno(), Errno::PermissionDenied);
         assert_eq!(ActivateError::QueueFull.errno(), Errno::WouldBlock);
         assert_eq!(ActivateError::NotActivatable.errno(), Errno::NotSupported);

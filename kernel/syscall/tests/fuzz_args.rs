@@ -698,7 +698,15 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
-    fn hw_self_node(&self, _c: &CallerContext<'_>) -> SyscallResult {
+    fn hw_self_node(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn hw_node_settle(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn console_relocate(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }

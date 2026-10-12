@@ -35,8 +35,10 @@ shared definition, which every display service runs:
 
 A firmware linear surface has no power control of its own, so a `SetPower`
 is refused `Unsupported`; the desktop then keeps its screensaver black and
-still instead. A surface the platform *can* switch off is bound by its own,
-more specific driver above this one (`drivers/display/rpi_fb`).
+still instead. A display engine that scans a surface out and can power its
+outputs down is that engine's driver's, and its surface is published on the
+engine's node rather than as a boot display this service binds
+(`drivers/display/bcm2711_hvs`).
 
 ## Supported hardware
 
@@ -45,7 +47,7 @@ Any platform whose discovery publishes a linear scan-out surface as a
 model, QEMU `ramfb`, a UEFI GOP hand-off normalised by the x86_64
 port). The service does not enumerate or program a display controller;
 mode-setting on programmable controllers is a separate driver class
-(see `gpu_virtio`, `rpi_hvs`).
+(see `gpu_virtio`, `bcm2711_hvs`).
 
 ## Required capabilities
 

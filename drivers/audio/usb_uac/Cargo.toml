@@ -24,7 +24,6 @@ tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0" }
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # The grants the matched node carried: the URB endpoint, the shared buffer,
 # the interface number.
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }

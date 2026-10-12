@@ -62,6 +62,7 @@ use crate::driver::audio::{
     GAIN_RANGE_WIRE_LEN, MAX_DEVICE_ENDPOINTS, RATE_SUPPORT_WIRE_LEN,
 };
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::time::{Duration64, Time64};
 use crate::Errno;
 
@@ -274,18 +275,26 @@ mod enumerate {
 
 /// Byte offsets within the [`AudioRequest::Open`] body.
 mod open {
-    use super::CHANNEL_MAP_WIRE_LEN;
+    use super::{CHANNEL_MAP_WIRE_LEN, PROC_ID_LEN};
 
     pub const DEVICE: usize = 0;
     pub const DIRECTION: usize = 4;
     pub const FORMAT: usize = 5;
     pub const ROLE: usize = 6;
-    pub const RESERVED0: usize = 7;
+    pub const TENANCY: usize = 7;
     pub const RATE: usize = 8;
     pub const LATENCY: usize = 12;
     pub const CHANNEL_MAP: usize = 16;
-    pub const RESERVED1: usize = CHANNEL_MAP + CHANNEL_MAP_WIRE_LEN;
-    pub const LEN: usize = RESERVED1 + 3;
+    pub const RESERVED: usize = CHANNEL_MAP + CHANNEL_MAP_WIRE_LEN;
+    pub const SESSION: usize = RESERVED + 3;
+    pub const LEN: usize = SESSION + PROC_ID_LEN;
+}
+
+/// [`Tenancy`] discriminants (the open body's tenancy byte).
+mod tenancy {
+    pub const CALLER: u8 = 0;
+    pub const MACHINE: u8 = 1;
+    pub const SESSION: u8 = 2;
 }
 
 /// Byte offsets within the [`AudioRequest::Attach`] body.
@@ -769,6 +778,27 @@ pub struct OpenParams {
     /// The latency the client would like, in frames at its own rate. The
     /// service answers the latency it granted rather than failing.
     pub latency_target_frames: u32,
+    /// Whose sound it is.
+    pub tenancy: Tenancy,
+}
+
+/// Whose sound a stream is, which decides the rooms it plays in.
+///
+/// A program's stream is its own. The other two tenancies are the cue
+/// authority's alone, because it plays desktop sounds on others' behalf and
+/// belongs to no session itself; the service refuses them from any other
+/// caller, and for anything but a notification.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Tenancy {
+    /// The login session the kernel attests the caller lies within, or none.
+    Caller,
+    /// The machine's own: a sound announcing a transition the machine made,
+    /// played whoever holds the room. A withheld room included, because the
+    /// login screen and a session switch are exactly when such sounds play,
+    /// and a machine sound carries no session's data.
+    Machine,
+    /// This login session's, played only while it holds the room.
+    Session(ProcId),
 }
 
 impl AudioRequest {
@@ -1074,10 +1104,31 @@ fn encode_open(body: &mut [u8], params: &OpenParams) {
     put_u32(body, open::LATENCY, params.latency_target_frames);
     body[open::CHANNEL_MAP..open::CHANNEL_MAP + CHANNEL_MAP_WIRE_LEN]
         .copy_from_slice(&params.channel_map.to_wire());
+    let (kind, session) = match params.tenancy {
+        Tenancy::Caller => (tenancy::CALLER, ProcId::KERNEL),
+        Tenancy::Machine => (tenancy::MACHINE, ProcId::KERNEL),
+        Tenancy::Session(session) => (tenancy::SESSION, session),
+    };
+    body[open::TENANCY] = kind;
+    body[open::SESSION..open::LEN].copy_from_slice(session.as_bytes());
+}
+
+/// The tenancy an open body names. The session field is zero unless the
+/// tenancy is a session's, and a session's is never the zero no session is.
+fn decode_tenancy(body: &[u8]) -> Result<Tenancy, Errno> {
+    let session = ProcId::from_bytes(&body[open::SESSION..open::LEN])?;
+    match body[open::TENANCY] {
+        tenancy::SESSION if session.is_kernel() => Err(Errno::OutOfRange),
+        tenancy::SESSION => Ok(Tenancy::Session(session)),
+        tenancy::CALLER | tenancy::MACHINE if !session.is_kernel() => Err(Errno::BadMagic),
+        tenancy::CALLER => Ok(Tenancy::Caller),
+        tenancy::MACHINE => Ok(Tenancy::Machine),
+        _ => Err(Errno::OutOfRange),
+    }
 }
 
 fn decode_open(body: &[u8]) -> Result<OpenParams, Errno> {
-    if body[open::RESERVED0] != 0 || body[open::RESERVED1..].iter().any(|b| *b != 0) {
+    if body[open::RESERVED..open::SESSION].iter().any(|b| *b != 0) {
         return Err(Errno::BadMagic);
     }
     let latency_target_frames = read_u32(body, open::LATENCY);
@@ -1095,6 +1146,7 @@ fn decode_open(body: &[u8]) -> Result<OpenParams, Errno> {
         channel_map: ChannelMap::from_wire(&body[open::CHANNEL_MAP..])?,
         role: StreamRole::from_u8(body[open::ROLE])?,
         latency_target_frames,
+        tenancy: decode_tenancy(body)?,
     })
 }
 

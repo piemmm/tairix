@@ -82,6 +82,16 @@ pub fn serve_stdio<S: Service>(service: &mut S) -> ServeEnd {
     serve(&mut chan, service)
 }
 
+/// A fresh draw to key a decoder's page cache with, so a file cannot choose
+/// which of its pages collide; `None` when the kernel has no secure bytes to
+/// give.
+#[must_use]
+pub fn draw_seed() -> Option<tairix_hash::HashSeed> {
+    let mut key = [0u8; tairix_hash::HashSeed::LEN];
+    tairix_rt::random_fill(&mut key).ok()?;
+    Some(tairix_hash::HashSeed::from_bytes(key))
+}
+
 /// Serve a duplex session over the wired standard streams until the parent
 /// closes the request pipe or the service closes the session.
 ///

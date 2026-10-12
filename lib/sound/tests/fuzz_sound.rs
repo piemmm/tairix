@@ -1,4 +1,5 @@
-//! Fuzz harness for the sound-file decoders: untrusted AU and WAVE bytes.
+//! Fuzz harness for the sound-file decoders: untrusted AU, WAVE, FLAC, Ogg
+//! and MPEG audio bytes.
 //!
 //! Invariants, for every input:
 //!
@@ -14,10 +15,15 @@
 //!
 //! 6. A FLAC stream the encoder wrote, unmutated, decodes to exactly the
 //!    samples it was given, natively and in Ogg.
+//! 7. Every link of a chained file holds the invariants above, read link
+//!    after link as a player reads them.
 //!
-//! Inputs are arbitrary bytes, and structured AU, WAVE and FLAC files — every
-//! encoding and codec the decoders name, chunks in random order, every FLAC
-//! construct the encoder's core can be told to emit — then mutated.
+//! Inputs are arbitrary bytes, and structured AU, WAVE, FLAC and MPEG audio
+//! files — every encoding and codec the decoders name, chunks in random
+//! order, every FLAC construct the encoder's core can be told to emit, MPEG
+//! streams in every layer and family that lean on Layer III's reservoir —
+//! and libvorbis's and libopus's own streams chained, interleaved and
+//! corrupted beneath resealed pages, then mutated.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -31,7 +37,8 @@ use tairix_sound::flac_encode::{
     Stereo, Subframe, Writer,
 };
 use tairix_sound::{
-    probe, sniff, DecodeError, DecodeLimits, InputError, PcmSource, SoundFormat, SoundInput,
+    probe, sniff, DecodeError, DecodeLimits, Encoding, InputError, PcmSource, SoundFormat,
+    SoundInput,
 };
 
 #[global_allocator]
@@ -59,9 +66,102 @@ const fn flac_peak(file: usize) -> usize {
     65_535 * 8 * 8 + 3 * file + 2 * (27 + 255 + 255 * 255) + 4 * 1024 + 65_536
 }
 
-/// Every frame `source` gives, read through `input`, asking again after a
-/// call that met missing bytes.
-fn drain(source: &mut PcmSource, input: &mut impl SoundInput) -> Result<Vec<u8>, DecodeError> {
+/// The most a Vorbis decode may hold: a setup at its bounds — 2^18 entries,
+/// each a length while read and a packed codeword after, 2^19 vector values,
+/// a fast lookup for each of 256 books, two Bark maps for each of 64 floors
+/// — the setup packet and the largest audio packet, the block buffers of
+/// eight channels, two pages, and the metadata limits with slack.
+const fn vorbis_peak(file: usize) -> usize {
+    (1 << 18) * 9
+        + (1 << 19) * 4
+        + 256 * 4096
+        + 64 * 2 * 4096 * 2
+        + 256 * 1024
+        + 4096 * 8 * 36
+        + 8 * 4096 * 4 * 4
+        + 3 * file
+        + 2 * (27 + 255 + 255 * 255)
+        + 4 * 1024
+        + 4 * 65_536
+}
+
+/// The most an Opus decode may hold: the state of the decoder of each of
+/// eight streams and the frame scratch they share, the streams' decoded
+/// samples, the largest packet's samples in eight channels, the largest
+/// packet held while read and the one it outgrew, two pages, and the
+/// metadata limits with slack.
+const fn opus_peak(file: usize) -> usize {
+    8 * OPUS_STREAM_STATE
+        + OPUS_SHARED_SCRATCH
+        + 2 * 5760 * 4
+        + 5760 * 8 * 4
+        + 2 * 61_440
+        + 3 * file
+        + 2 * (27 + 255 + 255 * 255)
+        + 4 * 1024
+        + 65_536
+}
+
+/// The heap one Opus stream's decoder keeps between packets, stereo, with
+/// slack: about 40 KiB measured, CELT's history and SILK's state.
+const OPUS_STREAM_STATE: usize = 48 * 1024;
+
+/// The frame scratch a packet's streams share, with slack: about 68 KiB
+/// measured, most of it CELT's transforms.
+const OPUS_SHARED_SCRATCH: usize = 80 * 1024;
+
+/// The most links of a chained file one case reads.
+const MAX_LINKS: usize = 8;
+
+/// Every frame of every link `source` gives, read through `input`, asking
+/// again after a call that met missing bytes; and how the decode ended.
+fn drain_links(
+    source: &mut PcmSource,
+    input: &mut impl SoundInput,
+) -> (Vec<u8>, Result<(), DecodeError>) {
+    let (mut all, mut end) = drain(source, input);
+    for _ in 1..MAX_LINKS {
+        if end.is_err() {
+            break;
+        }
+        let link = source.link();
+        let moved = loop {
+            match source.next_link(input) {
+                Err(DecodeError::InputUnavailable) => {
+                    assert_eq!(source.link(), link, "a miss moved the link");
+                }
+                other => break other,
+            }
+        };
+        match moved {
+            Ok(true) => {
+                assert_eq!(source.link().index, link.index + 1);
+                assert!(source.link().offset > link.offset, "a link behind the last");
+                assert_eq!(source.position(), 0);
+                assert!(
+                    source.metadata().within(&LIMITS),
+                    "metadata past the limits"
+                );
+                let (more, ended) = drain(source, input);
+                all.extend_from_slice(&more);
+                end = ended;
+            }
+            Ok(false) => break,
+            Err(err) => {
+                end = Err(err);
+                break;
+            }
+        }
+    }
+    (all, end)
+}
+
+/// Every frame `source` gives of its link, read through `input`, asking
+/// again after a call that met missing bytes; and how the decode ended.
+fn drain(
+    source: &mut PcmSource,
+    input: &mut impl SoundInput,
+) -> (Vec<u8>, Result<(), DecodeError>) {
     let frame = source.info().frame_bytes();
     let mut block = vec![0u8; BLOCK_FRAMES * frame];
     let mut all = Vec::new();
@@ -74,10 +174,10 @@ fn drain(source: &mut PcmSource, input: &mut impl SoundInput) -> Result<Vec<u8>,
                 assert_eq!(source.position(), position, "a miss moved the stream");
                 continue;
             }
-            Err(err) => return Err(err),
+            Err(err) => return (all, Err(err)),
         };
         if written == 0 {
-            return Ok(all);
+            return (all, Ok(()));
         }
         assert!(written <= BLOCK_FRAMES);
         all.extend_from_slice(&block[..written * frame]);
@@ -139,22 +239,32 @@ fn exercise(bytes: &[u8], rng: &mut Prng) {
     let (outcome, metering) = metered(|| {
         let mut input = bytes;
         let mut source = PcmSource::open(&mut input, &LIMITS).ok()?;
-        let decoded = drain(&mut source, &mut input);
+        let decoded = drain_links(&mut source, &mut input);
         Some((source, decoded))
     });
     let bound = match sniff(bytes) {
-        Some(SoundFormat::Flac | SoundFormat::Ogg) => flac_peak(bytes.len()),
+        Some(SoundFormat::Ogg) => flac_peak(bytes.len())
+            .max(vorbis_peak(bytes.len()))
+            .max(opus_peak(bytes.len())),
+        Some(SoundFormat::Flac) => flac_peak(bytes.len()),
         _ if bytes.starts_with(b"ID3") => flac_peak(bytes.len()),
         _ => PEAK_BOUND,
     };
+    // What the harness kept of the output is its own, not the decode's: the
+    // buffer, and the one it outgrew while doubling.
+    let kept = outcome
+        .as_ref()
+        .map_or(0, |(_, (decoded, _))| decoded.capacity() * 3 / 2);
     assert!(
-        metering.peak <= bound,
-        "a decode held {} bytes past a bound of {bound}",
+        metering.peak <= bound + kept,
+        "a decode held {} bytes past a bound of {bound} and {kept} of output",
         metering.peak
     );
-    let Some((mut source, direct)) = outcome else {
+    let Some((_, direct)) = outcome else {
         return;
     };
+    let mut input = bytes;
+    let mut source = PcmSource::open(&mut input, &LIMITS).expect("it opened once");
     assert_eq!(
         probed.as_ref().ok(),
         Some(source.info()),
@@ -177,14 +287,16 @@ fn exercise(bytes: &[u8], rng: &mut Prng) {
         "the cache changed the metadata"
     );
     assert_eq!(
-        drain(&mut reopened, &mut cache),
+        drain_links(&mut reopened, &mut cache),
         direct,
         "a decode through the cache differs"
     );
-    let (true, Some(frames), Ok(direct)) = (source.info().seekable, source.info().frames, direct)
+    let (direct, first_end) = drain(&mut source, &mut input);
+    let (true, Some(frames), Ok(())) = (source.info().seekable, source.info().frames, first_end)
     else {
         return;
     };
+    let mut source = PcmSource::open(&mut input, &LIMITS).expect("it opened once");
     let target = rng.next_u64() % (frames + 1);
     source.seek(target).expect("a stated frame is reachable");
     let frame = source.info().frame_bytes();
@@ -194,11 +306,22 @@ fn exercise(bytes: &[u8], rng: &mut Prng) {
         .next_block(&mut input, &mut block)
         .expect("the decode read it once");
     let at = usize::try_from(target).expect("small") * frame;
-    assert_eq!(
-        direct.get(at..at + written * frame),
-        Some(&block[..written * frame]),
-        "a block entered at {target} differs"
-    );
+    let entered = direct.get(at..at + written * frame);
+    // A seek into Opus decodes on from a pre-roll, so its samples converge
+    // on the decode from the start rather than repeat it.
+    if source.info().encoding == Encoding::Opus {
+        assert_eq!(
+            entered.map(<[u8]>::len),
+            Some(written * frame),
+            "a block entered at {target} is misplaced"
+        );
+    } else {
+        assert_eq!(
+            entered,
+            Some(&block[..written * frame]),
+            "a block entered at {target} differs"
+        );
+    }
 }
 
 /// A plausible AU file, its fields drawn from what the format defines.
@@ -325,6 +448,451 @@ fn wave(rng: &mut Prng) -> Vec<u8> {
     file.extend(b"WAVE");
     file.extend(body);
     file
+}
+
+/// Bits laid most significant first.
+#[derive(Default)]
+struct Bits {
+    bytes: Vec<u8>,
+    len: usize,
+}
+
+impl Bits {
+    fn put(&mut self, value: u32, count: u32) {
+        for bit in (0..count).rev() {
+            if self.len.is_multiple_of(8) {
+                self.bytes.push(0);
+            }
+            if (value >> bit) & 1 == 1 {
+                let last = self.bytes.len() - 1;
+                self.bytes[last] |= 0x80 >> (self.len % 8);
+            }
+            self.len += 1;
+        }
+    }
+}
+
+/// MPEG audio's frame check, x^16 + x^15 + x^2 + 1 over the first `bits`
+/// bits of `data`, carried on from `crc`.
+fn mpeg_crc(mut crc: u16, data: &[u8], bits: usize) -> u16 {
+    for at in 0..bits {
+        let bit = u16::from(data[at / 8] >> (7 - at % 8)) & 1;
+        let top = crc >> 15;
+        crc <<= 1;
+        if top ^ bit == 1 {
+            crc ^= 0x8005;
+        }
+    }
+    crc
+}
+
+/// The reflected CRC-16 LAME guards its tag with.
+fn lame_crc(data: &[u8]) -> u16 {
+    data.iter().fold(0u16, |mut crc, &byte| {
+        crc ^= u16::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 0 {
+                crc >> 1
+            } else {
+                (crc >> 1) ^ 0xA001
+            };
+        }
+        crc
+    })
+}
+
+/// ISO/IEC 11172-3 and 13818-3's bitrates in kbit/s, by index: MPEG-1's
+/// Layers I, II and III, then the lower rates' Layer I and Layers II and III.
+const MPEG_BITRATES: [[u32; 15]; 5] = [
+    [
+        0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448,
+    ],
+    [
+        0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384,
+    ],
+    [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ],
+    [
+        0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256,
+    ],
+    [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+];
+
+/// Sample rates by index, for MPEG-1, MPEG-2 and MPEG-2.5.
+const MPEG_RATES: [[u32; 3]; 3] = [
+    [44_100, 48_000, 32_000],
+    [22_050, 24_000, 16_000],
+    [11_025, 12_000, 8_000],
+];
+
+/// One MPEG audio frame's shape, as its header codes it.
+#[derive(Copy, Clone)]
+struct MpegShape {
+    /// 0 for MPEG-1, 1 for MPEG-2, 2 for MPEG-2.5.
+    family: usize,
+    /// 1, 2 or 3.
+    layer: u32,
+    protected: bool,
+    bitrate: usize,
+    rate: usize,
+    mode: u32,
+    extension: u32,
+}
+
+impl MpegShape {
+    fn header(self, padded: bool) -> [u8; 4] {
+        let version = [3u8, 2, 0][self.family];
+        let layer = [3u8, 2, 1][self.layer as usize - 1];
+        [
+            0xFF,
+            0xE0 | version << 3 | layer << 1 | u8::from(!self.protected),
+            (self.bitrate as u8) << 4 | (self.rate as u8) << 2 | u8::from(padded) << 1,
+            (self.mode as u8) << 6 | (self.extension as u8) << 4,
+        ]
+    }
+
+    fn channels(self) -> usize {
+        if self.mode == 3 {
+            1
+        } else {
+            2
+        }
+    }
+
+    fn len(self, padded: bool) -> usize {
+        let row = match (self.family, self.layer) {
+            (0, layer) => layer as usize - 1,
+            (_, 1) => 3,
+            _ => 4,
+        };
+        let bits = MPEG_BITRATES[row][self.bitrate] * 1000;
+        let rate = MPEG_RATES[self.family][self.rate];
+        let padding = usize::from(padded);
+        match (self.layer, self.family) {
+            (1, _) => (12 * bits / rate) as usize * 4 + 4 * padding,
+            (3, 1 | 2) => (72 * bits / rate) as usize + padding,
+            _ => (144 * bits / rate) as usize + padding,
+        }
+    }
+
+    fn side_info_len(self) -> usize {
+        match (self.family == 0, self.channels()) {
+            (true, 1) | (false, 2) => 17,
+            (true, _) => 32,
+            (false, _) => 9,
+        }
+    }
+
+    fn data_start(self) -> usize {
+        let side = if self.layer == 3 {
+            self.side_info_len()
+        } else {
+            0
+        };
+        4 + 2 * usize::from(self.protected) + side
+    }
+}
+
+/// A plausible MPEG audio frame shape: any family, Layers I, II or III at a
+/// stated bitrate, any mode; protected sometimes.
+fn mpeg_shape(rng: &mut Prng) -> MpegShape {
+    let layer = *rng.pick(&[1u32, 2, 3, 3, 3]);
+    MpegShape {
+        family: rng.below(3),
+        layer,
+        // Layer II's allocation tables are not restated here, so its CRC
+        // cannot be: its frames go unprotected.
+        protected: layer != 2 && rng.below(4) == 0,
+        bitrate: 1 + rng.below(14),
+        rate: rng.below(3),
+        mode: rng.below(4) as u32,
+        extension: rng.below(4) as u32,
+    }
+}
+
+/// Layer I's audio data within `budget` bits — subbands allocated sparsely,
+/// their scalefactors and samples drawn at random within range — and the
+/// bits its CRC covers.
+fn layer1_data(rng: &mut Prng, shape: MpegShape, budget: usize) -> (Bits, usize) {
+    let channels = shape.channels();
+    let bound = if shape.mode == 1 {
+        4 + 4 * shape.extension as usize
+    } else {
+        32
+    };
+    let mut allocation = [[0u32; 2]; 32];
+    for (subband, allocation) in allocation.iter_mut().enumerate() {
+        for channel in 0..channels {
+            allocation[channel] = if channel == 1 && subband >= bound {
+                allocation[0]
+            } else if rng.below(6) == 0 {
+                1 + rng.below(14) as u32
+            } else {
+                0
+            };
+        }
+    }
+    let codes: usize = allocation
+        .iter()
+        .enumerate()
+        .map(|(subband, allocation)| {
+            let carried = if subband >= bound { 1 } else { channels };
+            allocation[..carried]
+                .iter()
+                .map(|&a| if a == 0 { 0 } else { a as usize + 1 })
+                .sum::<usize>()
+        })
+        .sum();
+    let factors = allocation
+        .iter()
+        .flat_map(|a| &a[..channels])
+        .filter(|&&a| a != 0)
+        .count();
+    let allocation_bits = 4 * (bound.min(32) * channels + 32usize.saturating_sub(bound));
+    if allocation_bits + 6 * factors + 12 * codes > budget {
+        allocation = [[0; 2]; 32];
+    }
+    let mut bits = Bits::default();
+    for (subband, allocation) in allocation.iter().enumerate() {
+        let carried = if subband >= bound { 1 } else { channels };
+        for &a in &allocation[..carried] {
+            bits.put(a, 4);
+        }
+    }
+    let protected = bits.len;
+    for allocation in &allocation {
+        for _ in allocation[..channels].iter().filter(|&&a| a != 0) {
+            bits.put(rng.below(63) as u32, 6);
+        }
+    }
+    for _ in 0..12 {
+        for (subband, allocation) in allocation.iter().enumerate() {
+            let carried = if subband >= bound { 1 } else { channels };
+            for &a in allocation[..carried].iter().filter(|&&a| a != 0) {
+                let steps = (1u32 << (a + 1)) - 1;
+                bits.put(rng.next_u32() % steps, a + 1);
+            }
+        }
+    }
+    (bits, protected)
+}
+
+/// One Layer III granule's lines in its count1 region under table B: a
+/// random number of quadruples, each its inverted four bits and the signs
+/// of its set ones, within `budget` bits.
+fn count1(rng: &mut Prng, bits: &mut Bits, budget: usize) -> u32 {
+    let start = bits.len;
+    for _ in 0..rng.below((budget / 8).min(144) + 1) {
+        let value = rng.below(16) as u32;
+        bits.put(15 - value, 4);
+        for _ in 0..value.count_ones() {
+            bits.put(rng.below(2) as u32, 1);
+        }
+    }
+    (bits.len - start) as u32
+}
+
+/// Layer III side information for granules of `lengths` bits: every block
+/// shape, unscaled, the big values empty and the count1 region under table B.
+fn layer3_side(rng: &mut Prng, shape: MpegShape, begin: usize, lengths: &[[u32; 2]; 2]) -> Vec<u8> {
+    let lsf = shape.family != 0;
+    let channels = shape.channels();
+    let mut bits = Bits::default();
+    bits.put(begin as u32, if lsf { 8 } else { 9 });
+    bits.put(
+        0,
+        match (lsf, channels) {
+            (false, 1) => 5,
+            (false, _) => 3,
+            (true, 1) => 1,
+            (true, _) => 2,
+        },
+    );
+    if !lsf {
+        bits.put(0, 4 * channels as u32);
+    }
+    for granule in lengths.iter().take(if lsf { 1 } else { 2 }) {
+        for &length in granule.iter().take(channels) {
+            bits.put(length, 12);
+            bits.put(0, 9);
+            bits.put(100 + rng.below(110) as u32, 8);
+            bits.put(0, if lsf { 9 } else { 4 });
+            if rng.below(2) == 0 {
+                bits.put(1, 1);
+                bits.put(1 + rng.below(3) as u32, 2);
+                bits.put(rng.below(2) as u32, 1);
+                bits.put(0, 10);
+                bits.put(rng.below(512) as u32, 9);
+            } else {
+                bits.put(0, 1);
+                bits.put(0, 15);
+                bits.put(rng.below(128) as u32, 7);
+            }
+            if !lsf {
+                bits.put(rng.below(2) as u32, 1);
+            }
+            bits.put(rng.below(2) as u32, 1);
+            bits.put(1, 1);
+        }
+    }
+    bits.bytes
+}
+
+/// Seal a protected frame with its CRC over the header's last two bytes and
+/// the first `bits` bits after the CRC field.
+fn seal(bytes: &mut [u8], shape: MpegShape, bits: usize) {
+    if shape.protected {
+        let bits = bits.min((bytes.len() - 6) * 8);
+        let crc = mpeg_crc(mpeg_crc(0xFFFF, &bytes[2..4], 16), &bytes[6..], bits);
+        bytes[4..6].copy_from_slice(&crc.to_be_bytes());
+    }
+}
+
+/// A Layer I frame's samples, or a Layer II frame's silence.
+fn layer12_frame(rng: &mut Prng, shape: MpegShape, padded: bool) -> Vec<u8> {
+    let (len, start) = (shape.len(padded), shape.data_start());
+    let mut bytes = shape.header(padded).to_vec();
+    bytes.resize(len, 0);
+    if shape.layer == 1 {
+        // A frame too short for even its allocations is cut, and refused.
+        let (bits, protected) = layer1_data(rng, shape, (len - start) * 8);
+        let fits = bits.bytes.len().min(len - start);
+        bytes[start..start + fits].copy_from_slice(&bits.bytes[..fits]);
+        seal(&mut bytes, shape, protected);
+    }
+    bytes
+}
+
+/// Layer III frames of `frames`' shapes, each frame's main data laid into
+/// the reservoir as far back as `reach` bytes, so frames lean on the ones
+/// before them.
+fn layer3_frames(rng: &mut Prng, frames: &[(MpegShape, bool)], reach: usize) -> Vec<Vec<u8>> {
+    let mut coded = Vec::new();
+    for &(shape, padded) in frames {
+        let area = shape.len(padded) - shape.data_start();
+        let granules = if shape.family == 0 { 2 } else { 1 };
+        let parts = granules * shape.channels();
+        let mut data = Bits::default();
+        let mut lengths = [[0u32; 2]; 2];
+        for granule in lengths.iter_mut().take(granules) {
+            for length in granule.iter_mut().take(shape.channels()) {
+                *length = count1(rng, &mut data, area * 8 / parts);
+            }
+        }
+        coded.push((data.bytes, lengths, area));
+    }
+    let mut main = vec![0u8; coded.iter().map(|(_, _, area)| area).sum()];
+    let mut begins = Vec::new();
+    let (mut area_start, mut end) = (0usize, 0usize);
+    for (data, _, area) in &coded {
+        let start = end.max(area_start.saturating_sub(reach));
+        main[start..start + data.len()].copy_from_slice(data);
+        begins.push(area_start - start);
+        end = start + data.len();
+        area_start += area;
+    }
+    let mut area_start = 0;
+    let mut out = Vec::new();
+    for ((&(shape, padded), (_, lengths, area)), &begin) in frames.iter().zip(&coded).zip(&begins) {
+        let mut bytes = shape.header(padded).to_vec();
+        bytes.resize(shape.data_start() - shape.side_info_len(), 0);
+        bytes.extend(layer3_side(rng, shape, begin, lengths));
+        bytes.extend_from_slice(&main[area_start..area_start + area]);
+        seal(&mut bytes, shape, shape.side_info_len() * 8);
+        out.push(bytes);
+        area_start += area;
+    }
+    out
+}
+
+/// A plausible MPEG audio stream: frames whose headers agree and whose
+/// audio is mostly decodable — Layer I's samples, Layer II's silence,
+/// Layer III's count1 region in every block shape and joint stereo, leaning
+/// on its reservoir — sometimes behind a gapless tag frame, between ID3 and
+/// APE tags, with bytes between frames or a frame of another mode.
+fn mpeg(rng: &mut Prng) -> Vec<u8> {
+    let first = mpeg_shape(rng);
+    let mut frames = Vec::new();
+    for at in 0..=rng.below(40) {
+        let mut shape = first;
+        if at > 0 && rng.below(12) == 0 {
+            shape.mode = rng.below(4) as u32;
+        }
+        let padded = rng.below(2) == 0;
+        if shape.len(padded) <= shape.data_start() {
+            break;
+        }
+        frames.push((shape, padded));
+    }
+    let bodies = if first.layer == 3 {
+        let reach = *rng.pick(&[0usize, 64, if first.family == 0 { 511 } else { 255 }]);
+        layer3_frames(rng, &frames, reach)
+    } else {
+        frames
+            .iter()
+            .map(|&(shape, padded)| layer12_frame(rng, shape, padded))
+            .collect()
+    };
+    let mut file = Vec::new();
+    if rng.below(4) == 0 {
+        let body = rng.below(200);
+        file.extend(b"ID3\x04\x00\x00\x00\x00");
+        file.extend([(body >> 7) as u8 & 0x7F, body as u8 & 0x7F]);
+        let mut tag = vec![0u8; body];
+        rng.fill(&mut tag);
+        file.extend(tag);
+    }
+    if first.layer == 3 && !frames.is_empty() && rng.below(3) == 0 {
+        file.extend(mpeg_tag_frame(rng, first, frames.len() as u32));
+    }
+    for body in bodies {
+        if rng.below(30) == 0 {
+            let mut junk = vec![0u8; rng.below(20)];
+            rng.fill(&mut junk);
+            file.extend(junk);
+        }
+        file.extend(body);
+    }
+    if rng.below(4) == 0 {
+        let mut ape = vec![0u8; 32];
+        ape[..8].copy_from_slice(b"APETAGEX");
+        ape[12..16].copy_from_slice(&32u32.to_le_bytes());
+        file.extend(ape);
+    }
+    if rng.below(4) == 0 {
+        let mut id3v1 = vec![0u8; 128];
+        id3v1[..3].copy_from_slice(b"TAG");
+        file.extend(id3v1);
+    }
+    file
+}
+
+/// A Layer III tag frame of `shape` stating `frames`, with LAME's extension
+/// stating a delay and padding, its CRC holding or not.
+fn mpeg_tag_frame(rng: &mut Prng, shape: MpegShape, frames: u32) -> Vec<u8> {
+    let len = shape.len(false);
+    let mut frame = shape.header(false).to_vec();
+    frame.resize(shape.data_start(), 0);
+    frame.extend(if rng.below(2) == 0 { b"Xing" } else { b"Info" });
+    frame.extend(1u32.to_be_bytes());
+    frame.extend(frames.to_be_bytes());
+    let at = frame.len();
+    let mut lame = [0u8; 36];
+    lame[..4].copy_from_slice(b"LAME");
+    let (delay, padding) = (rng.below(4096), rng.below(4096));
+    lame[21] = (delay >> 4) as u8;
+    lame[22] = ((delay & 0xF) << 4) as u8 | (padding >> 8) as u8;
+    lame[23] = padding as u8;
+    frame.extend(lame);
+    let crc = lame_crc(&frame[..at + 34]) ^ u16::from(rng.below(4) == 0);
+    frame[at + 34..at + 36].copy_from_slice(&crc.to_be_bytes());
+    if frame.len() > len {
+        return Vec::new();
+    }
+    frame.resize(len, 0);
+    seal(&mut frame, shape, shape.side_info_len() * 8);
+    frame
 }
 
 /// Samples of `bits` for `frames` frames of `channels`: a random walk, so a
@@ -655,7 +1223,8 @@ fn arbitrary_bytes_never_panic() {
         let mut bytes = vec![0u8; rng.below(400)];
         rng.fill(&mut bytes);
         if rng.below(2) == 0 && bytes.len() >= 12 {
-            let signature: &[u8] = rng.pick(&[b".snd".as_slice(), b"RIFF", b"RF64"]);
+            let signature: &[u8] =
+                rng.pick(&[b".snd".as_slice(), b"RIFF", b"RF64", b"\xFF\xFB\x90\x40"]);
             bytes[..4].copy_from_slice(signature);
             bytes[8..12].copy_from_slice(b"WAVE");
         }
@@ -692,6 +1261,20 @@ fn structured_wave_files_hold_every_invariant() {
 }
 
 #[test]
+fn structured_mpeg_streams_hold_every_invariant() {
+    sweep("structured_mpeg_streams_hold_every_invariant", |rng| {
+        let mut file = mpeg(rng);
+        if rng.below(2) == 0 {
+            mutate(&mut file, rng);
+        }
+        if rng.below(4) == 0 {
+            file.truncate(rng.below(file.len() + 1));
+        }
+        exercise(&file, rng);
+    });
+}
+
+#[test]
 fn structured_flac_files_hold_every_invariant() {
     sweep("structured_flac_files_hold_every_invariant", |rng| {
         let (mut file, interleaved) = flac(rng);
@@ -706,6 +1289,158 @@ fn structured_flac_files_hold_every_invariant() {
             file.truncate(rng.below(file.len() + 1));
         } else if !mutated {
             round_trips(&file, &interleaved);
+        }
+        exercise(&file, rng);
+    });
+}
+
+/// libvorbis's own streams: stereo with its block switching, mono at 8 kHz,
+/// and 5.1.
+const VORBIS: [&[u8]; 3] = [
+    include_bytes!("vectors/vorbis-stereo.ogg"),
+    include_bytes!("vectors/vorbis-mono.ogg"),
+    include_bytes!("vectors/vorbis-surround.ogg"),
+];
+
+/// The Ogg CRC (RFC 3533, section 6): polynomial 0x04C11DB7, unreflected,
+/// no final inversion.
+fn ogg_crc(bytes: &[u8]) -> u32 {
+    let mut crc = 0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                crc << 1 ^ 0x04C1_1DB7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
+/// The pages of `file`, each whole, as far as they hold together.
+fn ogg_pages(file: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + 27 <= file.len() {
+        let segments = usize::from(file[at + 26]);
+        let Some(lacing) = file.get(at + 27..at + 27 + segments) else {
+            break;
+        };
+        let len = 27 + segments + lacing.iter().map(|&len| usize::from(len)).sum::<usize>();
+        let Some(page) = file.get(at..at + len) else {
+            break;
+        };
+        out.push(page.to_vec());
+        at += len;
+    }
+    out
+}
+
+/// `page` with its CRC made good again.
+fn reseal(page: &mut [u8]) {
+    page[22..26].fill(0);
+    let crc = ogg_crc(page);
+    page[22..26].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// libopus's own streams: every mode, bandwidth and frame size, the switches
+/// between modes, redundancy, discontinuous transmission, padding, 5.1, 6.1
+/// and 7.1.
+const OPUS: [&[u8]; 9] = [
+    include_bytes!("vectors/opus-celt.opus"),
+    include_bytes!("vectors/opus-silk.opus"),
+    include_bytes!("vectors/opus-hybrid.opus"),
+    include_bytes!("vectors/opus-switching.opus"),
+    include_bytes!("vectors/opus-cbr.opus"),
+    include_bytes!("vectors/opus-dtx.opus"),
+    include_bytes!("vectors/opus-surround.opus"),
+    include_bytes!("vectors/opus-octophonic.opus"),
+    include_bytes!("vectors/opus-heptaphonic.opus"),
+];
+
+/// The pages of one of `streams`, mostly under a serial of their own so
+/// that links chained or interleaved from them are well formed.
+fn library_pages(rng: &mut Prng, streams: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut pages = ogg_pages(rng.pick(streams));
+    if rng.below(4) != 0 {
+        let serial = rng.next_u32().to_le_bytes();
+        for page in &mut pages {
+            page[14..18].copy_from_slice(&serial);
+            reseal(page);
+        }
+    }
+    pages
+}
+
+/// An Ogg file built from a codec library's `streams`: one, a chain of them
+/// — sometimes two sharing a serial, against the format's rule — or two
+/// interleaved, then corrupted within pages whose CRCs are made good, so the
+/// damage reaches the codec rather than the container's check.
+fn library_streams(rng: &mut Prng, streams: &[&[u8]]) -> Vec<u8> {
+    let links = 1 + rng.below(3);
+    let mut pages: Vec<Vec<u8>> = Vec::new();
+    if rng.below(4) == 0 {
+        let first = library_pages(rng, streams);
+        let second = library_pages(rng, streams);
+        let (mut a, mut b) = (first.into_iter(), second.into_iter());
+        loop {
+            match (a.next(), b.next()) {
+                (None, None) => break,
+                (x, y) => pages.extend(x.into_iter().chain(y)),
+            }
+        }
+    } else {
+        for _ in 0..links {
+            pages.extend(library_pages(rng, streams));
+        }
+    }
+    for _ in 0..rng.below(4) {
+        let page = rng.below(pages.len());
+        let body = 27 + usize::from(pages[page][26]);
+        if pages[page].len() > body {
+            let at = body + rng.below(pages[page].len() - body);
+            pages[page][at] ^= rng.next_u8() | 1;
+            reseal(&mut pages[page]);
+        }
+    }
+    if rng.below(6) == 0 && pages.len() > 2 {
+        pages.remove(1 + rng.below(pages.len() - 1));
+    }
+    pages.concat()
+}
+
+#[test]
+fn structured_vorbis_streams_hold_every_invariant() {
+    sweep("structured_vorbis_streams_hold_every_invariant", |rng| {
+        let mut file = library_streams(rng, &VORBIS);
+        if rng.below(4) == 0 {
+            mutate(&mut file, rng);
+        }
+        if rng.below(5) == 0 {
+            file.truncate(rng.below(file.len() + 1));
+        }
+        exercise(&file, rng);
+    });
+}
+
+/// Opus links, sometimes chained or interleaved with Vorbis ones.
+#[test]
+fn structured_opus_streams_hold_every_invariant() {
+    sweep("structured_opus_streams_hold_every_invariant", |rng| {
+        let mixed: Vec<&[u8]> = OPUS.iter().chain(&VORBIS).copied().collect();
+        let streams = if rng.below(4) == 0 {
+            &mixed[..]
+        } else {
+            &OPUS[..]
+        };
+        let mut file = library_streams(rng, streams);
+        if rng.below(4) == 0 {
+            mutate(&mut file, rng);
+        }
+        if rng.below(5) == 0 {
+            file.truncate(rng.below(file.len() + 1));
         }
         exercise(&file, rng);
     });

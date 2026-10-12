@@ -12,11 +12,10 @@ crate owns that protocol once:
   `decode_framebuffer_response` (allocate a scan-out surface) and
   `encode_display_size_query` / `decode_display_size_response` (probe the
   attached display's EDID-derived geometry; `0×0` means no display), and
-  `encode_blank_screen` / `decode_blank_screen_response` (switch the
-  firmware's display output off and on, the Raspberry Pi display service's
-  power switch). `FIRMWARE_FRAMEBUFFER_COMPATIBLE` is the binding a
-  firmware-allocated surface is published under, so the port that publishes
-  it and the driver that binds it name it once. Every firmware answer is
+  `encode_display_done` (the display engine's driver telling the firmware
+  the display is its own), whose answer `decode_display_done_response`
+  confirms only for a tag the firmware processed and otherwise reports in
+  the firmware's own codes (`Unconfirmed`). Every firmware answer is
   validated fail-closed — the firmware is an external input (`AGENTS.md`
   §5.4).
 - the **bus ↔ ARM-physical translation** (`bus_to_arm_physical`,
@@ -51,12 +50,16 @@ crate owns that protocol once:
   GPU memory, voltage, one-time-programmable bits, GPIO, framebuffer
   allocation, even the revision probe — is refused, and a malformed buffer is
   refused before any tag in it is trusted.
-- the **client devices**: `FIRMWARE_FRAMEBUFFER_KEY`, `RPI_RTC_KEY`,
+- the **client devices**: `DISPLAY_ENGINE_KEY`, `RPI_RTC_KEY`,
   `FIRMWARE_CLOCKS_KEY` and `VL805_KEY` (with `VL805_FIRMWARE_DEV_ADDR`, the
   one address the xHCI reset may name). Each driver's bind table is built from
   its key, so the device it binds is the device its requests are judged
   against. `SERVICE_CAPS` beside `BIND_KEYS` is the service's own capability
   set, the single source its bundle's manifest is authored from.
+- the **display engine's wiring**: `ENGINE_OUTPUTS`, each HDMI output's pixel
+  valve and encoder bindings and the names its valve's window and encoder
+  link carry on the engine's node — what the aarch64 port states and the
+  engine's driver finds by, defined once for both.
 
 ## Why it lives in `lib/` (the §2.20 / §2.22 carve-out, legitimately)
 
@@ -64,9 +67,9 @@ This is single-device support — it knows the BCM2711 `VideoCore` — yet it
 **stays** in `lib/*`, unlike the VL805 / BCM2711-PCIe device logic, which was
 collapsed into its driver crate (`AGENTS.md` §2.22). The difference is the
 second consumer: independent consumers speak this protocol — the aarch64
-port's framebuffer boot console (`kernel/arch/aarch64`, P7b), the HVS display
-driver (`drivers/display/rpi_hvs`, P7), the firmware framebuffer's display
-service (`drivers/display/rpi_fb`, P7c), the VL805 firmware reload
+port's framebuffer boot console (`kernel/arch/aarch64`, P7b), the display
+engine (`drivers/display/bcm2711_hvs`, `plans/SOUND.md` SND19m), the firmware
+clocks (`drivers/clock/rpi_firmware`), the VL805 firmware reload
 (`drivers/bus/usb/vl805`, P10), the PMIC clock (`drivers/rtc/rpi`), and the
 storage floor's SD-card bring-up (`kernel/arch/aarch64::sd_supply`, P8). The
 boot console is a

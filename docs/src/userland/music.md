@@ -26,7 +26,9 @@ worker the player's own binary is re-entered as.
   the rectangles it changed; a paint reads only state.
 * **Playback** is the engine on a thread of its own, parked on the decoder's
   pipes, the stream's mailbox and the window's orders. It posts its status and
-  wakes the window. A level the window posts displaces any not yet carried out,
+  wakes the window, and with them what each further link of a chained file says
+  of itself as it opens, so the panel names a recording's songs as each is
+  heard rather than its first throughout. A level the window posts displaces any not yet carried out,
   so a dragged volume costs the stream one call however fast it moves.
 * **The worker** reads each track's tags, decodes its cover, lists the output
   devices and saves the listener's settings. A job the worker has no room for

@@ -76,6 +76,6 @@ pub use clock::ClockModel;
 pub use convert::{Dither, DitherSource};
 pub use mix::{Mixer, SinkFormat, StreamMix};
 pub use resample::{FilterBank, Ratio, Resampler};
-pub use route::{Routing, SinkState, StreamRequest};
+pub use route::{Principal, Routing, SinkState, StreamRequest};
 pub use stream::{AudioTransport, StreamClient, Written};
 pub use volume::{EndpointLevel, VolumeRequest};

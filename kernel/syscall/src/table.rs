@@ -2035,20 +2035,63 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
-    /// Report the hardware-tree node id the calling driver was autoloaded for
-    /// (`plans/FIX-IO.md` IO4, leaf-side fault-domain attribution).
+    /// Write the calling driver's own node record — its id and the keys it
+    /// is matched by — into the `len`-byte buffer at `buf`, answering the
+    /// bytes written: where a leaf attributes a fault to its ancestors
+    /// (`plans/FIX-IO.md` IO4) and how a driver of a binding family tells
+    /// which variant it drives.
     ///
-    /// The call needs no capability (a driver learning its *own* node id is
-    /// the unprivileged self-identity baseline, like reading one's own pid).
-    /// The implementation resolves the caller's own matched node from its task
-    /// id (never a caller-supplied id — no ambient authority, no window onto
-    /// the global tree) and returns that node id. A caller with no matched
-    /// node (not an autoloaded driver) fails closed with [`Errno::NotFound`].
+    /// The call needs no capability (a driver learning its *own* node is the
+    /// unprivileged self-identity baseline, like reading one's own pid). The
+    /// implementation resolves the caller's own matched node from its task id
+    /// (never a caller-supplied id — no ambient authority, no window onto the
+    /// global tree). A caller with no matched node (not an autoloaded driver)
+    /// fails closed with [`Errno::NotFound`], one whose node has left the tree
+    /// with [`Errno::DeviceOffline`], and a buffer too small for the record
+    /// with [`Errno::BufferTooSmall`].
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
     /// `kernel/core`.
-    fn hw_self_node(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+    fn hw_self_node(&self, _caller: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Mark the calling driver's own node settled: every child its device
+    /// presented when it came up is published, so what it publishes next
+    /// arrived on a running machine.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::HW_EMIT`]. The implementation resolves the caller's own
+    /// matched node from its task id (never a caller-supplied id) and fails
+    /// closed for a caller with no loaded node. Returns `Ok(0)` once recorded.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn hw_node_settle(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Move the kernel's framebuffer console off the firmware's memory onto a
+    /// block the kernel owns below the caller's device's DMA reach, writing
+    /// that surface into `(buf, len)` as one framebuffer
+    /// [`tairix_abi::hwtree::HwResource`] and answering the bytes written.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::MEM_DMA`] and that `buf` is a non-null `UserPtr`. The
+    /// implementation answers only the driver of a node discovery marked
+    /// [`tairix_abi::HwProperty::BootConsole`], resolved from its task id.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn console_relocate(
+        &self,
+        _caller: &CallerContext<'_>,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -3827,9 +3870,10 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.hw_node_health(caller, args.0[0])
             }
             SyscallNumber::HW_SELF_NODE => {
-                // No arguments: the handler resolves the caller's own matched
-                // node from its task id and returns that node id.
-                self.handlers.hw_self_node(caller)
+                // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
+                // is the buffer capacity.
+                let len = decode_len(args.0[1])?;
+                self.handlers.hw_self_node(caller, args.0[0], len)
             }
             SyscallNumber::MSI_ALLOC => {
                 // args[0] is the non-null out `UserPtr` (dispatcher-checked);
@@ -4129,6 +4173,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // args[0] is the descriptor naming the terminal;
                 // `validate_arg` guarantees it fits `u32`.
                 self.handlers.foreground_held(caller, decode_u32(args.0[0]))
+            }
+            SyscallNumber::HW_NODE_SETTLE => self.handlers.hw_node_settle(caller),
+            SyscallNumber::CONSOLE_RELOCATE => {
+                // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
+                // is the buffer capacity.
+                let len = decode_len(args.0[1])?;
+                self.handlers.console_relocate(caller, args.0[0], len)
             }
             SyscallNumber::PORT_RESOLVE => {
                 // args[0] is the non-null name `UserPtr`
@@ -5444,11 +5495,23 @@ mod tests {
             Ok(0)
         }
 
-        fn hw_self_node(&self, _c: &CallerContext<'_>) -> SyscallResult {
+        fn hw_self_node(&self, _c: &CallerContext<'_>, _buf: u64, _len: usize) -> SyscallResult {
             self.record("hw_self_node");
             // Echo a node id so the reachability test sees a non-error result
             // without wiring a real address-space registry here.
             Ok(9)
+        }
+
+        fn hw_node_settle(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("hw_node_settle");
+            Ok(0)
+        }
+
+        fn console_relocate(&self, _c: &CallerContext<'_>, _buf: u64, len: usize) -> SyscallResult {
+            self.record("console_relocate");
+            // Echo the capacity so the reachability test sees both arguments
+            // decoded.
+            Ok(len as u64)
         }
 
         fn msi_alloc(&self, _c: &CallerContext<'_>, _out: u64, out_len: usize) -> SyscallResult {

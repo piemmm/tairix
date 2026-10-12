@@ -21,6 +21,7 @@ fn endpoint_facts() -> AudioEndpointFacts {
         formats: SampleFormats::EMPTY
             .with(SampleFormat::S16)
             .with(SampleFormat::S24In32),
+        resolution: None,
         channel_map: ChannelMap::STEREO,
         rates: stereo_rates(),
         min_period_frames: 48,
@@ -100,11 +101,12 @@ fn every_channel_position_round_trips_and_an_undefined_one_is_refused() {
         ChannelPosition::RearRight,
         ChannelPosition::SideLeft,
         ChannelPosition::SideRight,
+        ChannelPosition::RearCentre,
     ] {
         assert_eq!(ChannelPosition::from_u8(position.as_u8()), Ok(position));
     }
     assert_eq!(ChannelPosition::from_u8(0), Err(Errno::OutOfRange));
-    assert_eq!(ChannelPosition::from_u8(10), Err(Errno::OutOfRange));
+    assert_eq!(ChannelPosition::from_u8(11), Err(Errno::OutOfRange));
 }
 
 #[test]
@@ -491,6 +493,7 @@ fn endpoint_facts_round_trip_through_the_wire() {
         direction: StreamDirection::Capture,
         jack: JackState::Unknown,
         formats: SampleFormats::EMPTY.with(SampleFormat::U8),
+        resolution: None,
         channel_map: ChannelMap::MONO,
         rates: RateSupport::Continuous {
             min: Rate::new(8_000).expect("in range"),
@@ -504,6 +507,30 @@ fn endpoint_facts_round_trip_through_the_wire() {
     };
     assert_eq!(bare.validate(), Ok(()));
     assert_eq!(AudioEndpointFacts::from_wire(&bare.to_wire()), Ok(bare));
+
+    let narrow = AudioEndpointFacts {
+        resolution: Some(20),
+        ..endpoint_facts()
+    };
+    assert_eq!(AudioEndpointFacts::from_wire(&narrow.to_wire()), Ok(narrow));
+}
+
+#[test]
+fn a_resolution_narrows_only_the_formats_carrying_more() {
+    let facts = AudioEndpointFacts {
+        resolution: Some(20),
+        ..endpoint_facts()
+    };
+    assert_eq!(facts.resolved_bits(SampleFormat::S24In32), 20);
+    assert_eq!(facts.resolved_bits(SampleFormat::S16), 16);
+    assert_eq!(endpoint_facts().resolved_bits(SampleFormat::S24In32), 24);
+    for (bits, valid) in [(0, false), (1, true), (32, true), (33, false)] {
+        let facts = AudioEndpointFacts {
+            resolution: Some(bits),
+            ..endpoint_facts()
+        };
+        assert_eq!(facts.validate().is_ok(), valid, "{bits} bits");
+    }
 }
 
 #[test]
@@ -575,6 +602,13 @@ fn endpoint_facts_decode_fails_closed() {
     no_formats[endpoint::FORMATS..endpoint::FORMATS + 2].copy_from_slice(&0u16.to_le_bytes());
     assert_eq!(
         AudioEndpointFacts::from_wire(&no_formats),
+        Err(Errno::OutOfRange)
+    );
+
+    let mut unencodable = wire;
+    unencodable[endpoint::RESOLUTION] = 64;
+    assert_eq!(
+        AudioEndpointFacts::from_wire(&unencodable),
         Err(Errno::OutOfRange)
     );
 

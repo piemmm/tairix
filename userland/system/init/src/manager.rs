@@ -312,6 +312,9 @@ struct Service {
     /// withdrawn, so [`reap`](Init::reap) returns it to admission rather than
     /// to rest: it runs again once the condition holds again.
     held: bool,
+    /// Whether the enrolment governs it: registered from the enrolled tier
+    /// or enabled at runtime, never the boot floor.
+    enrolled: bool,
 }
 
 impl Service {
@@ -414,6 +417,10 @@ pub struct Init<'a> {
     /// The administrator's override layer, holding only what differs from
     /// the image's. Empty until the document it lives in is readable.
     overrides: EnrolmentOverride,
+    /// Whether [`Self::overrides`] is the administrator's layer as read. Until
+    /// it is, no enrolment change is written, since one would replace the
+    /// record on disk with one built over nothing.
+    overrides_read: bool,
     /// Discovered bundles the effective enrolment did **not** admit to the
     /// registry this boot.
     ///
@@ -437,6 +444,7 @@ impl<'a> Init<'a> {
             released_clients: Vec::new(),
             vendor: Enrolment::empty(),
             overrides: EnrolmentOverride::empty(),
+            overrides_read: false,
             unenrolled: Vec::new(),
         }
     }
@@ -528,6 +536,7 @@ impl<'a> Init<'a> {
             watchdog_deadline: None,
             killed_by_watchdog: false,
             held: false,
+            enrolled: false,
         });
         Ok(())
     }
@@ -550,6 +559,8 @@ impl<'a> Init<'a> {
     /// The manager adopts both layers, so the document it later writes back on
     /// an enrolment request is derived from the same image layer it booted
     /// from — a caller cannot hand it an effective set that disagrees.
+    /// `overrides` is `None` while the document holding them cannot be read
+    /// yet; [`Self::adopt_overrides`] brings them then.
     ///
     /// Registration only records the service; the kernel still derives the
     /// capability grant from the signed bundle and the service account's
@@ -569,14 +580,16 @@ impl<'a> Init<'a> {
         &mut self,
         discovered: Vec<ServiceSpec>,
         vendor: Enrolment,
-        overrides: EnrolmentOverride,
+        overrides: Option<EnrolmentOverride>,
     ) -> Result<(), InitError> {
-        let enrolment = effective(&vendor, &overrides);
+        self.overrides_read = overrides.is_some();
+        self.overrides = overrides.unwrap_or_else(EnrolmentOverride::empty);
+        let enrolment = effective(&vendor, &self.overrides);
         self.vendor = vendor;
-        self.overrides = overrides;
         for spec in discovered {
             if enrolment.is_enabled(spec.name()) {
                 self.register(spec)?;
+                self.mark_enrolled();
             } else {
                 self.audit(
                     events::SERVICE_NOT_ENROLLED,
@@ -629,6 +642,32 @@ impl<'a> Init<'a> {
         self.asserted[condition.as_u16() as usize] = true;
         self.satisfy_condition_inner(condition);
         self.pump()
+    }
+
+    /// Assert [`ReadyCondition::BootComplete`] once every service named in
+    /// `floor` has settled — ready, or down with no relaunch pending — and
+    /// report what that admitted.
+    ///
+    /// [`None`] while any is still coming up, and on every call after the
+    /// one that asserted it: the machine boots once, and a floor service
+    /// restarting later does not un-boot it. A failed service settles rather
+    /// than holding the machine's start back for ever, so the condition marks
+    /// the point the floor stopped changing, degraded or not.
+    pub fn complete_boot<'n>(
+        &mut self,
+        floor: impl IntoIterator<Item = &'n str>,
+    ) -> Option<StartReport> {
+        if self.asserted[ReadyCondition::BootComplete.as_u16() as usize] {
+            return None;
+        }
+        let settled = floor.into_iter().all(|name| {
+            self.index_of(name).is_none_or(|idx| {
+                let service = &self.services[idx];
+                service.state.is_ready()
+                    || (service.state.is_terminal() && service.restart_deadline.is_none())
+            })
+        });
+        settled.then(|| self.satisfy_condition(ReadyCondition::BootComplete))
     }
 
     /// Apply a readiness notification a service sent about itself.
@@ -1751,6 +1790,10 @@ impl<'a> Init<'a> {
     /// * [`ControlError::UnknownService`] for a policy-invalid name or one this
     ///   manager does not know, including one whose account is outside its
     ///   scope.
+    /// * [`ControlError::RecordUnread`] before the administrator's layer, which
+    ///   every change is written over, has been read.
+    /// * [`ControlError::BootFloor`] for a boot-floor service, which no
+    ///   enrolment governs.
     /// * [`ControlError::Unavailable`] when enabling a service this boot did
     ///   not register whose dependencies are not all registered.
     /// * [`ControlError::RecordFull`] when the override document would exceed
@@ -1765,8 +1808,16 @@ impl<'a> Init<'a> {
         let name = request.name;
         let refusal = if validate_service_name(name).is_err() {
             Some((ControlError::UnknownService, "invalid service name"))
-        } else if self.index_of(name).is_some() {
-            None
+        } else if !self.overrides_read {
+            Some((
+                ControlError::RecordUnread,
+                "the administrator's record has not been read yet",
+            ))
+        } else if let Some(at) = self.index_of(name) {
+            (!self.services[at].enrolled).then_some((
+                ControlError::BootFloor,
+                "a boot-floor service, which no enrolment governs",
+            ))
         } else {
             match self.unenrolled.iter().find(|s| s.name() == name) {
                 None => Some((ControlError::UnknownService, "unknown service")),
@@ -1876,6 +1927,7 @@ impl<'a> Init<'a> {
                     );
                     return Err(ControlError::UnknownService);
                 }
+                self.mark_enrolled();
                 // Its dependencies are registered and nothing registered can
                 // depend on it, so last is a valid place in the admission order.
                 self.order.push(self.services.len() - 1);
@@ -1900,8 +1952,9 @@ impl<'a> Init<'a> {
     ///
     /// Pre-unlock the manager obeys the image's enrolment layer alone, because
     /// the override document lives on the root volume. This is the moment
-    /// that narrowing arrives: every service the overrides disable and this
-    /// boot started is stopped, each recorded with
+    /// that narrowing arrives, and from it an enrolment change may be written:
+    /// every service the overrides disable and this boot started is stopped,
+    /// each recorded with
     /// [`events::SERVICE_ENROLMENT_REVOKED`]. Nothing is *started* here — an
     /// override that enables a service the image does not is honoured at the
     /// next boot's registration, so a late document can never bring an
@@ -1914,11 +1967,12 @@ impl<'a> Init<'a> {
         now: Duration64,
     ) -> Vec<String> {
         self.overrides = overrides;
+        self.overrides_read = true;
         let enrolment = effective(&self.vendor, &self.overrides);
         let revoked: Vec<String> = self
             .services
             .iter()
-            .filter(|s| !enrolment.is_enabled(s.spec.name()))
+            .filter(|s| s.enrolled && !enrolment.is_enabled(s.spec.name()))
             .map(|s| String::from(s.spec.name()))
             .collect();
         for name in &revoked {
@@ -1931,6 +1985,19 @@ impl<'a> Init<'a> {
             let _ = self.stop(name, now);
         }
         revoked
+    }
+
+    /// Mark the service registered last as one the enrolment governs.
+    fn mark_enrolled(&mut self) {
+        if let Some(service) = self.services.last_mut() {
+            service.enrolled = true;
+        }
+    }
+
+    /// Whether the administrator's override layer has been read.
+    #[must_use]
+    pub const fn overrides_read(&self) -> bool {
+        self.overrides_read
     }
 
     /// Whether the effective enrolment enables `name`.
@@ -2999,7 +3066,7 @@ mod tests {
         ];
         let enrolment = Enrolment::of(["netstack", "sysinfod"]).expect("valid names");
 
-        init.register_enrolled(discovered, enrolment, EnrolmentOverride::empty())
+        init.register_enrolled(discovered, enrolment, Some(EnrolmentOverride::empty()))
             .unwrap();
 
         // The present-but-unenrolled `rogue` bundle is never registered:
@@ -3025,8 +3092,12 @@ mod tests {
         // A missing or corrupt store resolves to the empty enrolment, so no
         // discovered bundle is eligible — nothing auto-starts, fail closed.
         let discovered = alloc::vec![spec("netstack", &[]), spec("sysinfod", &[])];
-        init.register_enrolled(discovered, Enrolment::empty(), EnrolmentOverride::empty())
-            .unwrap();
+        init.register_enrolled(
+            discovered,
+            Enrolment::empty(),
+            Some(EnrolmentOverride::empty()),
+        )
+        .unwrap();
 
         assert_eq!(init.registered_count(), 0);
         assert_eq!(sink.count(events::SERVICE_NOT_ENROLLED), 2);
@@ -3125,7 +3196,7 @@ mod tests {
         let enrolment = Enrolment::of(["privileged"]).expect("valid names");
         let discovered = alloc::vec![spec_account("privileged", 0)];
         assert_eq!(
-            init.register_enrolled(discovered, enrolment, EnrolmentOverride::empty()),
+            init.register_enrolled(discovered, enrolment, Some(EnrolmentOverride::empty())),
             Err(InitError::ScopeViolation),
         );
         assert_eq!(init.registered_count(), 0);
@@ -3283,6 +3354,66 @@ mod tests {
         assert_eq!(init.state_of("client"), Some(ServiceState::Running));
         assert!(init.condition_satisfied(ReadyCondition::NetworkUp));
         assert_eq!(sink.count(events::CONDITION_SATISFIED), 1);
+    }
+
+    #[test]
+    fn the_machine_boots_once_its_floor_settles_and_only_once() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("plain", &[])).unwrap();
+        init.register(notify_spec("announcer", &[])).unwrap();
+        init.register(restart_spec("flaky", RestartPolicy::OnFailure))
+            .unwrap();
+        init.register(spec("waiter", &[]).requiring([ReadyCondition::BootComplete]))
+            .unwrap();
+        init.start_all().unwrap();
+        let floor = ["plain", "announcer", "flaky"];
+
+        // A service still starting holds the boot back.
+        assert_eq!(init.complete_boot(floor), None);
+        assert_eq!(init.state_of("waiter"), Some(ServiceState::Inactive));
+        init.notify("announcer", LifecycleSignal::Ready).unwrap();
+
+        // So does one that crashed with a relaunch pending...
+        let pid = init.running_pid("flaky").unwrap();
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(Duration64::from_secs(1));
+        assert!(init.restart_deadline("flaky").is_some());
+        assert_eq!(init.complete_boot(floor), None);
+
+        // ...until it is back.
+        let deadline = init.restart_deadline("flaky").unwrap();
+        init.expire_restart_backoff("flaky", deadline);
+        let report = init.complete_boot(floor).expect("the floor has settled");
+        assert_eq!(started_names(&report), ["waiter"]);
+        assert!(init.condition_satisfied(ReadyCondition::BootComplete));
+
+        // Once: a later crash and recovery neither withdraws nor repeats it.
+        let pid = init.running_pid("flaky").unwrap();
+        reaper.push(ReapedChild { pid, exit_code: 1 });
+        init.reap(Duration64::from_secs(2));
+        assert!(init.condition_satisfied(ReadyCondition::BootComplete));
+        let deadline = init.restart_deadline("flaky").unwrap();
+        init.expire_restart_backoff("flaky", deadline);
+        assert_eq!(init.complete_boot(floor), None);
+    }
+
+    #[test]
+    fn a_floor_service_that_failed_for_good_does_not_hold_the_boot_back() {
+        let spawner = MockSpawner {
+            fail: Some("broken"),
+            ..MockSpawner::new()
+        };
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("broken", &[])).unwrap();
+        init.register(spec("fine", &[])).unwrap();
+        init.start_all().unwrap();
+        assert_eq!(init.state_of("broken"), Some(ServiceState::Failed));
+        assert!(init.complete_boot(["broken", "fine"]).is_some());
     }
 
     #[test]
@@ -4847,8 +4978,88 @@ mod tests {
         init.register_enrolled(
             discovered,
             Enrolment::of(vendor.iter().copied()).expect("valid names"),
-            EnrolmentOverride::empty(),
+            Some(EnrolmentOverride::empty()),
         )
+    }
+
+    #[test]
+    fn an_enrolment_change_waits_for_the_administrators_record() {
+        // Regression: a change made before the override document was read was
+        // written over the empty layer, erasing every decision it held.
+        use tairix_enrolment::{overrides_for, unenrol, Enrolment};
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        let vendor = Enrolment::of(["netstack", "timed"]).expect("valid names");
+        let discovered = ["netstack", "timed"].iter().map(|n| spec(n, &[])).collect();
+        init.register_enrolled(discovered, vendor.clone(), None)
+            .unwrap();
+        init.start_all().unwrap();
+        let now = Duration64::from_secs(5);
+        let store = OverrideStore::default();
+        assert_eq!(
+            init.enrol_control(disable_req("timed"), now, store.persist()),
+            Err(ControlError::RecordUnread)
+        );
+        assert_eq!(
+            store.writes(),
+            0,
+            "nothing is written over an unread record"
+        );
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 1);
+
+        let record = overrides_for(
+            &vendor,
+            &unenrol(&vendor, "netstack").expect("netstack is enrolled"),
+        );
+        assert_eq!(init.adopt_overrides(record, now), ["netstack"]);
+        assert!(init.overrides_read());
+        init.enrol_control(disable_req("timed"), now, store.persist())
+            .unwrap();
+        assert_eq!(
+            store.last().entries(),
+            [
+                (String::from("netstack"), ServiceEnrolment::Disabled),
+                (String::from("timed"), ServiceEnrolment::Disabled),
+            ],
+            "the administrator's earlier decision survives the change"
+        );
+    }
+
+    #[test]
+    fn adopting_the_administrators_record_never_stops_a_boot_floor_service() {
+        // Regression: adoption stopped every registered service the
+        // enrolment did not enable, so the boot floor — which no enrolment
+        // names — went down the moment any record was read.
+        use tairix_enrolment::{overrides_for, unenrol, Enrolment};
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("sysinfod", &[])).unwrap();
+        let vendor = Enrolment::of(["timed"]).expect("valid names");
+        init.register_enrolled(alloc::vec![spec("timed", &[])], vendor.clone(), None)
+            .unwrap();
+        init.start_all().unwrap();
+        let now = Duration64::from_secs(5);
+        assert_eq!(
+            init.adopt_overrides(tairix_enrolment::EnrolmentOverride::empty(), now),
+            Vec::<String>::new(),
+            "an empty record stops nothing"
+        );
+        let disabled = overrides_for(&vendor, &unenrol(&vendor, "timed").expect("enrolled"));
+        assert_eq!(init.adopt_overrides(disabled, now), ["timed"]);
+        assert_eq!(init.state_of("sysinfod"), Some(ServiceState::Running));
+        let store = OverrideStore::default();
+        assert_eq!(
+            init.enrol_control(disable_req("sysinfod"), now, store.persist()),
+            Err(ControlError::BootFloor),
+            "no enrolment change reaches the boot floor"
+        );
+        assert_eq!(store.writes(), 0);
+        assert_eq!(init.state_of("sysinfod"), Some(ServiceState::Running));
     }
 
     #[test]
@@ -4981,7 +5192,7 @@ mod tests {
         init.register_enrolled(
             alloc::vec![spec_account("privileged", 0)],
             Enrolment::empty(),
-            EnrolmentOverride::empty(),
+            Some(EnrolmentOverride::empty()),
         )
         .unwrap();
 
@@ -5048,7 +5259,7 @@ mod tests {
         init.register_enrolled(
             names.iter().map(|n| spec(n, &[])).collect(),
             vendor.clone(),
-            overrides_for(&vendor, &desired),
+            Some(overrides_for(&vendor, &desired)),
         )
         .unwrap();
 
@@ -5105,7 +5316,7 @@ mod tests {
         init.register_enrolled(
             [spec("netstack", &[]), spec("discoveryd", &["netstack"])].into(),
             Enrolment::empty(),
-            EnrolmentOverride::empty(),
+            Some(EnrolmentOverride::empty()),
         )
         .unwrap();
 
@@ -5148,7 +5359,7 @@ mod tests {
         init.register_enrolled(
             [spec("discoveryd", &[]).requiring([ReadyCondition::NetworkUp])].into(),
             Enrolment::empty(),
-            EnrolmentOverride::empty(),
+            Some(EnrolmentOverride::empty()),
         )
         .unwrap();
 
@@ -5203,7 +5414,7 @@ mod tests {
         init.register_enrolled(
             [spec("discoveryd", &[]).requiring([ReadyCondition::NetworkUp])].into(),
             Enrolment::of(["discoveryd"]).expect("valid names"),
-            EnrolmentOverride::empty(),
+            Some(EnrolmentOverride::empty()),
         )
         .unwrap();
         init.start_all().unwrap();

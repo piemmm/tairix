@@ -29,6 +29,15 @@
 //! frame. Each step waits for the service's own notification, so no step races
 //! the one before it.
 //!
+//! # The cue run
+//!
+//! `audiotone cue` asks the cue authority for
+//! [`CUE_EVENT`](tairix_test_audio_wire::CUE_EVENT), to be answered once it
+//! has played out, so the host can hold the capture to the shipped master's
+//! own samples (`plans/SOUND.md` SND21). It then plays a silent tail of its
+//! own: the backend writes its file a tick at a time, and the tail is what
+//! moves the cue's last tick out of it before the run ends.
+//!
 //! It never self-exits on a failure path other than by saying why: a
 //! shortfall prints its reason on `stderr` and exits non-zero, so the run
 //! fails loud rather than quietly passing.
@@ -45,7 +54,7 @@ mod program {
     use alloc::vec;
     use core::fmt::Write as _;
 
-    use tairix_abi::audio::{AudioNotify, OpenParams, StreamRole, StreamState};
+    use tairix_abi::audio::{AudioNotify, OpenParams, StreamRole, StreamState, Tenancy};
     use tairix_abi::driver::audio::{ChannelMap, Frames, Rate, SampleFormat, StreamDirection};
     use tairix_abi::seat::{ReleaseSurface, SEAT_PRIMARY};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
@@ -53,6 +62,8 @@ mod program {
     use tairix_audio::live::{LiveStream, RtAudio};
     use tairix_audio::stream::OpenFailure;
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_soundtheme::cue::RtCue;
+    use tairix_soundtheme::{cue, Answer, CueOutcome};
     use tairix_test_audio_wire as wire;
 
     /// Exit code when the audio service refused, or was not there.
@@ -67,6 +78,8 @@ mod program {
     const NO_SEAT: i32 = 73;
     /// Exit code when the stream did not follow the seat as it must.
     const NOT_HELD: i32 = 74;
+    /// Exit code when the cue authority refused the cue or made no sound.
+    const NOT_CUED: i32 = 75;
 
     /// Notifies to take before giving up on the drain completing.
     ///
@@ -138,6 +151,7 @@ mod program {
             channel_map: ChannelMap::STEREO,
             role: StreamRole::Media,
             latency_target_frames: wire::RING_FRAMES,
+            tenancy: Tenancy::Caller,
         };
         LiveStream::open(transport, &params).map_err(|failure| match failure {
             OpenFailure::Refused(err) => {
@@ -267,15 +281,41 @@ mod program {
         told(transport, stream, set, StreamState::Idle).map(|_| ())
     }
 
+    /// Which run the arguments ask for.
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    enum Run {
+        Plain,
+        Seat,
+        Cue,
+    }
+
+    /// Ask for the cue run's sound and wait for it to play out.
+    fn cued() -> Result<(), i32> {
+        match cue(&mut RtCue, wire::CUE_EVENT, Answer::PlayedOut) {
+            Ok(CueOutcome::Played) => Ok(()),
+            Ok(CueOutcome::Silent(_)) => {
+                write_stderr_line("audiotone: the cue authority made no sound");
+                Err(NOT_CUED)
+            }
+            Err(err) => Err(fail("the cue authority refused the cue", err, NOT_CUED)),
+        }
+    }
+
     fn main() -> i32 {
-        let seat_run = match tairix_rt::args().as_deref() {
-            Some([]) => false,
-            Some([arg]) if *arg == wire::SEAT_ARG => true,
+        let run = match tairix_rt::args().as_deref() {
+            Some([]) => Run::Plain,
+            Some([arg]) if *arg == wire::SEAT_ARG => Run::Seat,
+            Some([arg]) if *arg == wire::CUE_ARG => Run::Cue,
             _ => {
-                write_stderr_line("audiotone: usage: audiotone [seat]");
+                write_stderr_line("audiotone: usage: audiotone [seat | cue]");
                 return USAGE;
             }
         };
+        if run == Run::Cue {
+            if let Err(code) = cued() {
+                return code;
+            }
+        }
         let mut transport = RtAudio::new();
         let mut stream = match arm(&mut transport) {
             Ok(stream) => stream,
@@ -284,9 +324,12 @@ mod program {
         // Queue the whole stream *before* the device is clocked: a device
         // that cannot run dry makes the capture exact. The signal is
         // followed by its silent tail, so the signal has left the host
-        // backend's buffer before the stream ends.
+        // backend's buffer before the stream ends; the cue run plays the
+        // tail alone, after the cue.
         let mut samples = vec![0u8; wire::STREAM_FRAMES * wire::FRAME_BYTES];
-        if wire::fill_signal(&mut samples) != wire::SIGNAL_FRAMES * wire::FRAME_BYTES {
+        if run != Run::Cue
+            && wire::fill_signal(&mut samples) != wire::SIGNAL_FRAMES * wire::FRAME_BYTES
+        {
             return fail(
                 "the signal did not fit its buffer",
                 Errno::BufferTooSmall,
@@ -313,15 +356,13 @@ mod program {
                 NOT_PLAYED,
             );
         };
-        let joined = transport.notify_port().is_some_and(|port| {
-            tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Port,
-                port,
-                NOTIFY_TOKEN,
-            ) == 0
-        });
+        let joined = tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::Port,
+            stream.notify_port(),
+            NOTIFY_TOKEN,
+        ) == 0;
         if !joined {
             return fail(
                 "the notify port would not join the wait set",
@@ -329,12 +370,12 @@ mod program {
                 NOT_PLAYED,
             );
         }
-        let run = if seat_run {
+        let outcome = if run == Run::Seat {
             held_and_resumed(&mut transport, &mut stream, set)
         } else {
             played(&mut transport, &mut stream, set)
         };
-        if let Err(code) = run {
+        if let Err(code) = outcome {
             return code;
         }
         let report = match stream.client_mut().report(&mut transport) {
@@ -361,10 +402,10 @@ mod program {
             buf: &mut marker,
             len: 0,
         };
-        let marker_line = if seat_run {
-            wire::SEAT_PASS_MARKER
-        } else {
-            wire::PASS_MARKER
+        let marker_line = match run {
+            Run::Plain => wire::PASS_MARKER,
+            Run::Seat => wire::SEAT_PASS_MARKER,
+            Run::Cue => wire::CUE_PASS_MARKER,
         };
         let _ = writeln!(cursor, "{marker_line}");
         let len = cursor.len;

@@ -1534,6 +1534,20 @@ mod tests {
         CapabilityId::LOG_EMIT,
     ];
 
+    // The `soundd` cue authority (plans/SOUND.md SND21): the reserved cue
+    // rendezvous, the rings its sounds play through, the decode sandbox, its
+    // audit records and a read of the theme store — what any player holds.
+    // Launched by init from its on-disk bundle, never as an embedded
+    // spawn-floor program, so the list lives only in this pin; the effective
+    // set is this request intersected with `SOUNDD_CEILING`, the same five.
+    const SOUNDD_REQUEST: &[CapabilityId] = &[
+        CapabilityId::IPC_BIND_PRIVILEGED,
+        CapabilityId::SHM,
+        CapabilityId::SANDBOX_SPAWN,
+        CapabilityId::LOG_EMIT,
+        CapabilityId::FS_ACCESS,
+    ];
+
     // The `greeter` login screen (plans/NEW-DESKTOP-LOGIN.md G3):
     // `CAP_DISPLAY` holds the seat's lease, configures the display service
     // and switches the display off while the login screen sleeps,
@@ -1635,6 +1649,7 @@ mod tests {
         ("servicectl", ProgramKind::Command, SERVICECTL_TOOL_REQUEST),
         ("settings", ProgramKind::Application, WINDOWED_APP_REQUEST),
         ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("soundd", ProgramKind::Service, SOUNDD_REQUEST),
         ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
         ("stat", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("stress", ProgramKind::Command, STRESS_MANIFEST),

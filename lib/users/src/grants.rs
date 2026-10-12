@@ -375,6 +375,24 @@ pub const AUDIOD_CEILING: &[CapabilityId] = &[
     CapabilityId::LOG_EMIT,
 ];
 
+/// The `soundd` cue authority's grant ceiling: serve the reserved cue
+/// rendezvous, carve the rings its sounds play through, decode each sound in
+/// the parser sandbox, read the theme store and its own settings document,
+/// and emit its audit records — nothing more.
+///
+/// No new capability: what any player holds. The authority it exercises —
+/// playing a notification for the machine, or for a session other than its
+/// own — is the audio service's to grant, on this account's attested uid,
+/// and it holds neither audio capability nor any users-database, network or
+/// spawn authority beyond the canonical sandbox.
+pub const SOUNDD_CEILING: &[CapabilityId] = &[
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::SHM,
+    CapabilityId::SANDBOX_SPAWN,
+    CapabilityId::LOG_EMIT,
+    CapabilityId::FS_ACCESS,
+];
+
 /// The `greeter` service account's grant ceiling: draw the graphical login
 /// screen on one seat and read that seat's input — nothing that could reach
 /// an account.
@@ -520,6 +538,22 @@ mod tests {
         assert_eq!(LOGIN_CEILING.len(), 9);
         assert_eq!(GREETER_CEILING.len(), 5);
         assert_eq!(DISCOVERYD_CEILING.len(), 5);
+        assert_eq!(SOUNDD_CEILING.len(), 5);
+        // The cue authority plays through the audio service; it neither
+        // drives a device, records, nor reaches another app's data.
+        let soundd = capability_set(SOUNDD_CEILING);
+        for cap in [
+            CapabilityId::AUDIO_DEVICE,
+            CapabilityId::AUDIO_CAPTURE,
+            CapabilityId::APPDATA_ADMIN,
+            CapabilityId::PROC_SPAWN,
+            CapabilityId::USERS_READ,
+        ] {
+            assert!(
+                !soundd.contains(cap),
+                "{cap:?} must stay off the cue authority"
+            );
+        }
         // The discovery service enforces the whole-segment grant; it never
         // holds it.
         assert!(!capability_set(DISCOVERYD_CEILING).contains(CapabilityId::NET_DISCOVER_ALL));

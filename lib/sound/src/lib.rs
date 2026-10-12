@@ -8,11 +8,13 @@
 //! devices.
 //!
 //! [`PcmSource::open`] dispatches on the format [`sniff`] recognises — AU
-//! ([`SoundFormat::Au`]), WAV ([`SoundFormat::Wav`]) or FLAC
-//! ([`SoundFormat::Flac`]) — each read by its own private module; [`probe`]
+//! ([`SoundFormat::Au`]), WAV ([`SoundFormat::Wav`]), FLAC
+//! ([`SoundFormat::Flac`]), Ogg ([`SoundFormat::Ogg`]) or MPEG audio
+//! ([`SoundFormat::Mpeg`]) — each read by its own private module; [`probe`]
 //! reads only what the header states. Every format claimed is claimed
 //! completely, and a variant that would be half-read is refused by name. An
-//! `ID3v2` tag other software put ahead of a FLAC stream is stepped over.
+//! `ID3v2` tag other software put ahead of a FLAC or MPEG stream is stepped
+//! over.
 //!
 //! # Streaming
 //!
@@ -59,9 +61,13 @@ mod ima;
 mod input;
 mod md5;
 mod meta;
+mod mpeg;
 mod msadpcm;
 mod ogg;
+mod opus;
 mod pcm;
+mod transform;
+mod vorbis;
 mod wav;
 
 pub use input::{InputError, SoundInput, MAX_READ};
@@ -78,6 +84,8 @@ pub enum SoundFormat {
     Flac,
     /// Ogg (`.ogg`, `.oga`), whose logical streams carry the codec.
     Ogg,
+    /// MPEG audio, Layers I, II and III (`.mp1`, `.mp2`, `.mp3`).
+    Mpeg,
 }
 
 impl SoundFormat {
@@ -89,12 +97,13 @@ impl SoundFormat {
             Self::Wav => "wav",
             Self::Flac => "flac",
             Self::Ogg => "ogg",
+            Self::Mpeg => "mpeg",
         }
     }
 
     /// Whether other software may put an `ID3v2` tag ahead of the format.
     const fn follows_id3(self) -> bool {
-        matches!(self, Self::Flac)
+        matches!(self, Self::Flac | Self::Mpeg)
     }
 }
 
@@ -105,6 +114,7 @@ impl core::fmt::Display for SoundFormat {
             Self::Wav => "WAV",
             Self::Flac => "FLAC",
             Self::Ogg => "Ogg",
+            Self::Mpeg => "MPEG audio",
         })
     }
 }
@@ -124,6 +134,8 @@ pub fn sniff(bytes: &[u8]) -> Option<SoundFormat> {
         Some(SoundFormat::Flac)
     } else if ogg::has_signature(bytes) {
         Some(SoundFormat::Ogg)
+    } else if mpeg::has_signature(bytes) {
+        Some(SoundFormat::Mpeg)
     } else {
         None
     }
@@ -165,6 +177,16 @@ pub enum Encoding {
     ImaAdpcm,
     /// FLAC.
     Flac,
+    /// MPEG audio Layer I.
+    MpegLayer1,
+    /// MPEG audio Layer II.
+    MpegLayer2,
+    /// MPEG audio Layer III.
+    MpegLayer3,
+    /// Vorbis I.
+    Vorbis,
+    /// Opus.
+    Opus,
 }
 
 impl Encoding {
@@ -185,6 +207,11 @@ impl Encoding {
             Self::MsAdpcm => "ms-adpcm",
             Self::ImaAdpcm => "ima-adpcm",
             Self::Flac => "flac",
+            Self::MpegLayer1 => "mp1",
+            Self::MpegLayer2 => "mp2",
+            Self::MpegLayer3 => "mp3",
+            Self::Vorbis => "vorbis",
+            Self::Opus => "opus",
         }
     }
 
@@ -213,6 +240,11 @@ impl core::fmt::Display for Encoding {
             Self::MsAdpcm => f.write_str("Microsoft ADPCM"),
             Self::ImaAdpcm => f.write_str("IMA ADPCM"),
             Self::Flac => f.write_str("FLAC"),
+            Self::MpegLayer1 => f.write_str("MPEG audio Layer I"),
+            Self::MpegLayer2 => f.write_str("MPEG audio Layer II"),
+            Self::MpegLayer3 => f.write_str("MPEG audio Layer III"),
+            Self::Vorbis => f.write_str("Vorbis"),
+            Self::Opus => f.write_str("Opus"),
         }
     }
 }
@@ -247,6 +279,28 @@ pub struct SoundInfo {
     /// The disagreement between the data length declared and held, where
     /// there was one.
     pub data_length: Option<DataLength>,
+}
+
+/// One link of a file: its place in the file's chain, from zero, and the byte
+/// it begins at. A file that is no chain is its own one link.
+///
+/// Ogg chains streams one after another — how internet radio is saved — and
+/// each link states its own rate, channels and tags, so a source reads one
+/// link at a time and moves to the next when asked.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Link {
+    /// Its place in the chain.
+    pub index: u32,
+    /// The byte it begins at.
+    pub offset: u64,
+}
+
+impl Link {
+    /// A file's first link, and a file's only one where it is no chain.
+    pub const FIRST: Self = Self {
+        index: 0,
+        offset: 0,
+    };
 }
 
 impl SoundInfo {
@@ -295,6 +349,16 @@ impl DecodeLimits {
     pub const fn max_markers(&self) -> u32 {
         self.markers
     }
+}
+
+/// `value` rounded to the single precision samples are kept in; constants
+/// are worked in double so each rounds once.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "rounding to single precision is the conversion asked for"
+)]
+pub(crate) fn single(value: f64) -> f32 {
+    value as f32
 }
 
 /// What a probe keeps: nothing past what the header states.
@@ -461,15 +525,60 @@ pub enum DecodeError {
     OggBadPacket,
     /// A packet longer than anything it may hold.
     OggPacketTooLarge,
-    /// No logical stream holding a codec decoded here.
-    OggNoFlacStream,
+    /// No logical stream of a link holds a codec decoded here.
+    OggNoCodec,
     /// A FLAC mapping header of another version or form.
     OggBadFlacMapping,
     /// The stream ends within its headers.
     OggNoAudio,
-    /// A stream chained after the one decoded, which this decoder does not
-    /// read on into.
-    OggChained,
+    /// A link that does not open as a link must: no page opening a stream
+    /// where one begins, or two streams of one serial.
+    OggBadLink,
+    /// A link opening more logical streams than any file carries.
+    OggTooManyStreams,
+    /// A page's granule position that disagrees with the samples before it,
+    /// or a last page cutting short more than its final packet.
+    OggGranuleMismatch,
+
+    /// No frames agree where a stream should start.
+    MpegNoSync,
+    /// A protected frame that fails its CRC.
+    MpegFrameCrc,
+    /// A frame whose values cannot hold: a forbidden allocation or
+    /// scalefactor, a group past its levels, side information the format
+    /// forbids, or coded values that run past their bits.
+    MpegFrameInvalid,
+    /// A frame whose family, layer, rate or channels differ from the
+    /// stream's.
+    MpegFrameMismatch,
+    /// The stream ends before the frames its tag states.
+    MpegTruncated,
+
+    /// A Vorbis identification header that does not hold together.
+    VorbisBadIdentification,
+    /// A Vorbis comment header that does not hold together.
+    VorbisBadComment,
+    /// A Vorbis setup header that does not hold together.
+    VorbisBadSetup,
+    /// A Vorbis setup past the bounds every encoder's falls far within.
+    VorbisSetupTooLarge,
+    /// A Vorbis audio packet whose samples cannot hold: a value past what a
+    /// float holds.
+    VorbisPacketInvalid,
+    /// A packet among a Vorbis stream's audio that is not an audio packet,
+    /// or names a mode its setup lacks.
+    VorbisBadPacket,
+
+    /// An Opus identification header that does not hold together.
+    OpusBadIdentification,
+    /// An Opus comment header that does not hold together, or shares its
+    /// last page with audio.
+    OpusBadComment,
+    /// An Opus stream of an encapsulation version this decoder predates.
+    OpusUnsupportedVersion,
+    /// An Opus packet whose framing RFC 6716 forbids, or a frame whose
+    /// coded values run past its bytes.
+    OpusPacketInvalid,
 }
 
 impl DecodeError {
@@ -548,10 +657,29 @@ impl DecodeError {
             Self::OggPageLost => "Ogg: a page is missing",
             Self::OggBadPacket => "Ogg: a malformed packet",
             Self::OggPacketTooLarge => "Ogg: a packet larger than it may be",
-            Self::OggNoFlacStream => "Ogg: no stream decoded here",
+            Self::OggNoCodec => "Ogg: no stream holds a codec decoded here",
             Self::OggBadFlacMapping => "Ogg: an unknown FLAC mapping",
             Self::OggNoAudio => "Ogg: the stream ends within its headers",
-            Self::OggChained => "Ogg: a chained stream follows, which is not read on into",
+            Self::OggBadLink => "Ogg: a link that does not open its streams as it must",
+            Self::OggTooManyStreams => "Ogg: a link opening more streams than any file carries",
+            Self::OggGranuleMismatch => {
+                "Ogg: a granule position disagrees with the stream's samples"
+            }
+            Self::MpegNoSync => "MPEG audio: no frames agree where the stream should start",
+            Self::MpegFrameCrc => "MPEG audio: a frame fails its CRC",
+            Self::MpegFrameInvalid => "MPEG audio: a frame whose values cannot hold",
+            Self::MpegFrameMismatch => "MPEG audio: a frame disagrees with the stream",
+            Self::MpegTruncated => "MPEG audio: the stream ends before the frames it states",
+            Self::VorbisBadIdentification => "Vorbis: a malformed identification header",
+            Self::VorbisBadComment => "Vorbis: a malformed comment header",
+            Self::VorbisBadSetup => "Vorbis: a malformed setup header",
+            Self::VorbisSetupTooLarge => "Vorbis: a setup larger than any encoder writes",
+            Self::VorbisPacketInvalid => "Vorbis: a packet whose samples cannot hold",
+            Self::VorbisBadPacket => "Vorbis: an audio packet that is not one",
+            Self::OpusBadIdentification => "Opus: a malformed identification header",
+            Self::OpusBadComment => "Opus: a malformed comment header",
+            Self::OpusUnsupportedVersion => "Opus: an encapsulation version not read here",
+            Self::OpusPacketInvalid => "Opus: a malformed packet",
         }
     }
 }
@@ -562,12 +690,8 @@ impl core::fmt::Display for DecodeError {
     }
 }
 
-/// The channel map of `count` channels within `limits`, in the conventional
-/// order a format that states no positions has.
-pub(crate) fn conventional_channels(
-    count: u32,
-    limits: &DecodeLimits,
-) -> Result<ChannelMap, DecodeError> {
+/// The channel count a header states, held to `limits`.
+pub(crate) fn channel_count(count: u32, limits: &DecodeLimits) -> Result<u8, DecodeError> {
     if count == 0 {
         return Err(DecodeError::NoChannels);
     }
@@ -575,7 +699,17 @@ pub(crate) fn conventional_channels(
     if count > limits.max_channels() {
         return Err(DecodeError::ChannelsExceedLimit);
     }
-    ChannelMap::conventional(count).ok_or(DecodeError::ChannelLayoutUnsupported)
+    Ok(count)
+}
+
+/// The channel map of `count` channels within `limits`, in the conventional
+/// order a format that states no positions has.
+pub(crate) fn conventional_channels(
+    count: u32,
+    limits: &DecodeLimits,
+) -> Result<ChannelMap, DecodeError> {
+    ChannelMap::conventional(channel_count(count, limits)?)
+        .ok_or(DecodeError::ChannelLayoutUnsupported)
 }
 
 /// The channel map a WAVE speaker mask states for `count` channels: the
@@ -601,6 +735,7 @@ pub(crate) fn speaker_map(count: u8, mask: u32) -> Option<ChannelMap> {
             0x8 => ChannelPosition::LowFrequency,
             0x10 => ChannelPosition::RearLeft,
             0x20 => ChannelPosition::RearRight,
+            0x100 => ChannelPosition::RearCentre,
             0x200 => ChannelPosition::SideLeft,
             0x400 => ChannelPosition::SideRight,
             _ => return None,
@@ -618,12 +753,14 @@ pub const fn max_working_set(limits: &DecodeLimits, block_frames: u32) -> u64 {
     let channels = limits.max_channels() as u64;
     let sampled = block_frames as u64 * channels * 8;
     let adpcm = block_frames as u64 * channels + 2 * u16::MAX as u64;
-    let flac = ogg::max_working_set(limits);
+    let ogg = ogg::max_working_set(limits, block_frames);
     let pcm = if sampled > adpcm { sampled } else { adpcm };
-    if pcm > flac {
-        pcm
+    let largest = if pcm > ogg { pcm } else { ogg };
+    let mpeg = mpeg::MAX_WORKING_SET;
+    if largest > mpeg {
+        largest
     } else {
-        flac
+        mpeg
     }
 }
 
@@ -636,7 +773,8 @@ enum Body {
     Au(au::Au),
     Wav(wav::Wav),
     Flac(flac::Flac),
-    Ogg(ogg::OggFlac),
+    Ogg(ogg::Ogg),
+    Mpeg(mpeg::Mpeg),
 }
 
 /// The PCM a sound file holds, read a block at a time.
@@ -650,6 +788,8 @@ pub struct PcmSource {
     body: Body,
     position: u64,
     scratch: Vec<u8>,
+    limits: DecodeLimits,
+    link: Link,
 }
 
 impl PcmSource {
@@ -703,8 +843,13 @@ impl PcmSource {
                 (info, Body::Flac(flac))
             }
             SoundFormat::Ogg => {
-                let (info, ogg) = ogg::open(input, limits, &mut collector)?;
+                let (info, ogg) = ogg::open(input, 0, limits, &mut collector)?;
                 (info, Body::Ogg(ogg))
+            }
+            SoundFormat::Mpeg => {
+                let start = Self::past_id3(input)?;
+                let (info, mpeg) = mpeg::open(input, start, limits)?;
+                (info, Body::Mpeg(mpeg))
             }
         };
         Ok(Self {
@@ -713,6 +858,39 @@ impl PcmSource {
             body,
             position: 0,
             scratch: Vec::new(),
+            limits: *limits,
+            link: Link::FIRST,
+        })
+    }
+
+    /// Open the link `link` names of the file `input` holds: its first, as
+    /// [`Self::open`] does, or a later link of an Ogg chain at the byte it
+    /// begins at, which is checked to open a link there.
+    ///
+    /// # Errors
+    ///
+    /// The format's refusal, or the container's of a link that does not begin
+    /// where `link` says.
+    pub fn open_link(
+        input: &mut (impl SoundInput + ?Sized),
+        limits: &DecodeLimits,
+        link: Link,
+    ) -> Result<Self, DecodeError> {
+        if link.offset == 0 {
+            let mut source = Self::open(input, limits)?;
+            source.link.index = link.index;
+            return Ok(source);
+        }
+        let mut collector = meta::Collector::new(limits);
+        let (info, ogg) = ogg::open(input, link.offset, limits, &mut collector)?;
+        Ok(Self {
+            info,
+            metadata: collector.finish(),
+            body: Body::Ogg(ogg),
+            position: 0,
+            scratch: Vec::new(),
+            limits: *limits,
+            link,
         })
     }
 
@@ -742,10 +920,62 @@ impl PcmSource {
         self.position
     }
 
+    /// The link being read.
+    #[must_use]
+    pub const fn link(&self) -> Link {
+        self.link
+    }
+
+    /// Move to the next link of a chained file once this one has ended: its
+    /// stream, metadata and positions are then the source's, from its first
+    /// frame. `false` where none follows, the source unmoved.
+    ///
+    /// # Errors
+    ///
+    /// [`DecodeError::InputUnavailable`] with nothing changed, or the
+    /// container's refusal of the next link.
+    pub fn next_link(
+        &mut self,
+        input: &mut (impl SoundInput + ?Sized),
+    ) -> Result<bool, DecodeError> {
+        let Body::Ogg(ogg) = &self.body else {
+            return Ok(false);
+        };
+        let Some(offset) = ogg.next_link()? else {
+            return Ok(false);
+        };
+        let index = self
+            .link
+            .index
+            .checked_add(1)
+            .ok_or(DecodeError::OggBadLink)?;
+        let mut collector = meta::Collector::new(&self.limits);
+        let (info, ogg) = ogg::open(input, offset, &self.limits, &mut collector)?;
+        self.info = info;
+        self.metadata = collector.finish();
+        self.body = Body::Ogg(ogg);
+        self.position = 0;
+        self.link = Link { index, offset };
+        Ok(true)
+    }
+
+    /// Whether the samples, decoded whole and in order, matched a digest the
+    /// stream itself carries: never before the stream has ended, and never
+    /// for a format or a stream that carries none.
+    #[must_use]
+    pub fn verified(&self) -> bool {
+        match &self.body {
+            Body::Flac(flac) => flac.verified(),
+            Body::Ogg(ogg) => ogg.verified(),
+            Body::Au(_) | Body::Wav(_) | Body::Mpeg(_) => false,
+        }
+    }
+
     /// Write whole frames into `out` from the position on, answering how
-    /// many: as many as it holds, unless the stream ends first or a format
+    /// many: as many as it holds, unless the link ends first or a format
     /// that reads its file a frame at a time meets bytes not yet at hand once
-    /// it has written some; none once the stream has ended.
+    /// it has written some; none once the link has ended, where
+    /// [`Self::next_link`] moves on to a chain's next.
     ///
     /// # Errors
     ///
@@ -768,6 +998,7 @@ impl PcmSource {
             Body::Wav(wav) => wav.read(input, self.position, out, &mut self.scratch)?,
             Body::Flac(flac) => flac.read(input, self.position, out)?,
             Body::Ogg(ogg) => ogg.read(input, self.position, out)?,
+            Body::Mpeg(mpeg) => mpeg.read(input, self.position, out)?,
         };
         self.position += u64::try_from(written).map_err(|_| DecodeError::OutOfMemory)?;
         Ok(written)
@@ -808,7 +1039,7 @@ mod tests {
 
     use super::{Encoding, SoundFormat};
 
-    const ENCODINGS: [Encoding; 12] = [
+    const ENCODINGS: [Encoding; 17] = [
         Encoding::Linear { bits: 16 },
         Encoding::Fixed { bits: 24 },
         Encoding::Float { bits: 32 },
@@ -821,6 +1052,11 @@ mod tests {
         Encoding::MsAdpcm,
         Encoding::ImaAdpcm,
         Encoding::Flac,
+        Encoding::MpegLayer1,
+        Encoding::MpegLayer2,
+        Encoding::MpegLayer3,
+        Encoding::Vorbis,
+        Encoding::Opus,
     ];
 
     /// A tool tells encodings apart by the token alone, so no two share one.

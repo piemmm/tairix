@@ -118,17 +118,24 @@ impl Serial {
     pub fn read_available(&mut self, buf: &mut [u8]) -> usize {
         let mut read = 0;
         for slot in buf.iter_mut() {
-            // SAFETY: LSR (base+5) and RBR (base) are the 16550's status and
-            // data ports; both `inb`s are well-defined in ring 0.
-            unsafe {
-                if !lsr_data_ready(inb(self.base + 5)) {
-                    break;
-                }
-                *slot = inb(self.base);
+            if !self.data_ready() {
+                break;
             }
+            // SAFETY: RBR (base) is the 16550's data port, read only once LSR
+            // reported a byte; the `inb` is well-defined in ring 0.
+            *slot = unsafe { inb(self.base) };
             read += 1;
         }
         read
+    }
+
+    /// Whether the receive FIFO holds a byte: the Line Status Register's
+    /// Data-Ready bit, read without taking the byte.
+    #[must_use]
+    pub fn data_ready(&self) -> bool {
+        // SAFETY: LSR (base+5) is the 16550's status port; the `inb` is
+        // well-defined in ring 0 and takes no byte.
+        lsr_data_ready(unsafe { inb(self.base + 5) })
     }
 
     /// Enable the Received-Data-Available interrupt (IER bit 0), so a byte
@@ -356,6 +363,13 @@ fn tx_send_bounded(_base: u16, _byte: u8) -> bool {
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn read_console_bytes(buf: &mut [u8]) -> usize {
     Serial::at(COM1_BASE).read_available(buf)
+}
+
+/// Whether COM1's receive FIFO holds a byte; see [`Serial::data_ready`].
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub fn console_rx_pending() -> bool {
+    Serial::at(COM1_BASE).data_ready()
 }
 
 /// Enable COM1's Received-Data-Available interrupt; see

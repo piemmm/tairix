@@ -35,10 +35,12 @@ impl LinkCall for &mut Controller {
                 reply,
                 ClockState {
                     hz: 100_000_000,
+                    max_hz: 500_000_000,
                     held_elsewhere: true,
                 },
             ),
             ClockRequest::Run { hz, .. } => encode_run_reply(reply, hz - 1),
+            ClockRequest::Floor { hz, .. } => encode_run_reply(reply, hz + 1),
             ClockRequest::Release(_) => encode_release_reply(reply),
         }
     }
@@ -60,6 +62,7 @@ fn every_request_names_the_link_and_the_reply_is_decoded() {
         clock.describe(),
         Ok(ClockState {
             hz: 100_000_000,
+            max_hz: 500_000_000,
             held_elsewhere: true,
         })
     );
@@ -67,6 +70,11 @@ fn every_request_names_the_link_and_the_reply_is_decoded() {
         clock.run(100_000_000),
         Ok(99_999_999),
         "the rate it runs at"
+    );
+    assert_eq!(
+        clock.floor(120_000_000),
+        Ok(120_000_001),
+        "at least the floor"
     );
     assert_eq!(clock.release(), Ok(()));
     assert_eq!(
@@ -76,6 +84,10 @@ fn every_request_names_the_link_and_the_reply_is_decoded() {
             ClockRequest::Run {
                 link: link(),
                 hz: 100_000_000,
+            },
+            ClockRequest::Floor {
+                link: link(),
+                hz: 120_000_000,
             },
             ClockRequest::Release(link()),
         ]

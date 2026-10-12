@@ -164,13 +164,15 @@ fn a_recorded_enrolment_the_running_system_could_not_follow_reports_both_facts()
 }
 
 #[test]
-fn an_enrolment_refused_for_its_graph_or_the_record_s_bound_says_which() {
+fn an_enrolment_refused_for_its_graph_or_its_record_says_which() {
     for (err, reason) in [
         (Errno::Busy, "a service it depends on is not enabled"),
         (
             Errno::LimitExceeded,
             "the enrolment record cannot hold another change",
         ),
+        (Errno::NoData, "the enrolment record has not been read yet"),
+        (Errno::NotSupported, "part of the boot floor"),
     ] {
         let mut channel = MockChannel::refusing(err);
         let mut io = MockIo::default();

@@ -1,26 +1,26 @@
 //! The endpoint driven over the real engine and the register-level model,
-//! with a kernel that answers the grant questions by the kernel's own rule.
+//! answered through the shared fake kernel.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::vec::Vec;
 
 use tairix_abi::driver::dmaengine::{
     decode_done_reply, decode_open_reply, decode_position_reply, decode_prepare_reply,
-    decode_wait_reply, CyclicParams, DmaBufferGrant, DmaChannel, DmaDirection, DmaEngine,
-    DmaEngineOp, DmaEngineRequest, WaitEnd, WaitReport, DMA_CONTROLLER_ENDPOINTS,
-    DMA_ENGINE_MAX_REQUEST,
+    decode_wait_reply, CyclicParams, DmaChannel, DmaDirection, DmaEngine, DmaEngineOp,
+    DmaEngineRequest, WaitEnd, WaitReport, DMA_CONTROLLER_ENDPOINTS, DMA_ENGINE_MAX_REQUEST,
 };
 use tairix_abi::hwlink::LinkRequest;
+use tairix_abi::hwlink::RegionGrant;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Duration64;
 use tairix_abi::{Errno, ProcId, PROC_ID_LEN};
-use tairix_drvrt::SupplierHost;
+use tairix_dmaengine::{Buffer, Controller, ControllerHost, Record};
+use tairix_drvrt::testkit::{FakeKernel, Records};
+use tairix_drvrt::Recorder;
 
-use crate::controller::{split_windows, Buffer, Controller, ControllerHost, Record};
-use crate::engine::Bcm2835Dma;
-use crate::model::{
+use crate::legacy::Bcm2835Dma;
+use crate::legacy_model::{
     Model, ModelStore, Timeline, Trace, CONBLK_AD, CS, CS_ERROR, CS_RESET, DEBUG_READ_ERROR,
     LITE_MAX_BLOCK,
 };
@@ -73,108 +73,60 @@ fn carved_bus(region: u64) -> u64 {
     0xC000_0000 + region * 0x0010_0000
 }
 
+/// What the kernel holds for the endpoint beyond its callers: the buffers it
+/// carved and granted, the clock, and whether it refuses either.
 #[derive(Default)]
-struct Kernel {
-    callers: BTreeMap<u64, ProcId>,
-    next_ticket: u64,
-    holdings: Vec<(ProcId, HwResource)>,
-    ended: Vec<ProcId>,
-    watched: Vec<ProcId>,
+struct Memory {
     next_region: u64,
     live: Vec<Buffer>,
     granted: Vec<(u64, u64)>,
     refuse_grants: bool,
     refuse_carves: bool,
-    replies: Vec<(u64, Vec<u8>)>,
-    unanswerable: Vec<u64>,
     now: u64,
-    records: Vec<Record>,
 }
 
 struct Host {
-    kernel: Rc<RefCell<Kernel>>,
+    memory: Rc<RefCell<Memory>>,
+    records: Records<Record>,
     timeline: Timeline,
-}
-
-impl SupplierHost for Host {
-    fn caller(&self, ticket: u64) -> Result<ProcId, Errno> {
-        self.kernel
-            .borrow()
-            .callers
-            .get(&ticket)
-            .copied()
-            .ok_or(Errno::NotFound)
-    }
-    fn caller_holds(&self, ticket: u64, record: &HwResource) -> Result<bool, Errno> {
-        let kernel = self.kernel.borrow();
-        let caller = kernel.callers.get(&ticket).ok_or(Errno::NotFound)?;
-        Ok(kernel
-            .holdings
-            .iter()
-            .any(|(holder, grant)| holder == caller && grant.covers(record)))
-    }
-    fn reply(&mut self, ticket: u64, frame: &[u8]) -> Result<(), Errno> {
-        let mut kernel = self.kernel.borrow_mut();
-        if kernel.unanswerable.contains(&ticket) {
-            return Err(Errno::NotFound);
-        }
-        kernel.replies.push((ticket, frame.to_vec()));
-        Ok(())
-    }
-    fn watch(&mut self, peer: ProcId) -> Result<(), Errno> {
-        let mut kernel = self.kernel.borrow_mut();
-        if kernel.ended.contains(&peer) {
-            return Err(Errno::NotFound);
-        }
-        if !kernel.watched.contains(&peer) {
-            kernel.watched.push(peer);
-        }
-        Ok(())
-    }
-    fn unwatch(&mut self, peer: ProcId) {
-        self.kernel
-            .borrow_mut()
-            .watched
-            .retain(|watched| *watched != peer);
-    }
 }
 
 impl ControllerHost for Host {
     fn carve(&mut self, bytes: u32) -> Result<Buffer, Errno> {
-        let mut kernel = self.kernel.borrow_mut();
-        if kernel.refuse_carves {
+        let mut memory = self.memory.borrow_mut();
+        if memory.refuse_carves {
             return Err(Errno::OutOfMemory);
         }
-        kernel.next_region += 1;
-        let region = kernel.next_region;
+        memory.next_region += 1;
+        let region = memory.next_region;
         let buffer = Buffer {
             region,
             base: 0x10_0000_0000 + region * 0x10_0000,
             len: usize::try_from(bytes).expect("fits"),
             bus: carved_bus(region),
         };
-        kernel.live.push(buffer);
+        memory.live.push(buffer);
         Ok(buffer)
     }
 
     fn release(&mut self, buffer: &Buffer) {
-        self.kernel.borrow_mut().live.retain(|live| live != buffer);
+        self.memory.borrow_mut().live.retain(|live| live != buffer);
         self.timeline
             .borrow_mut()
             .push(Trace::Released { bus: buffer.bus });
     }
 
     fn grant(&mut self, buffer: &Buffer, ticket: u64) -> Result<u64, Errno> {
-        let mut kernel = self.kernel.borrow_mut();
-        if kernel.refuse_grants {
+        let mut memory = self.memory.borrow_mut();
+        if memory.refuse_grants {
             return Err(Errno::PermissionDenied);
         }
-        kernel.granted.push((buffer.region, ticket));
+        memory.granted.push((buffer.region, ticket));
         Ok(0x1000 + buffer.region)
     }
 
     fn now(&self) -> Duration64 {
-        Duration64::from_nanos(self.kernel.borrow().now)
+        Duration64::from_nanos(self.memory.borrow().now)
     }
 
     fn instance(&self) -> ProcId {
@@ -182,36 +134,35 @@ impl ControllerHost for Host {
     }
 
     fn record(&mut self, record: Record) {
-        self.kernel.borrow_mut().records.push(record);
+        self.records.record(record);
     }
 }
 
-type Endpoint<'a> = Controller<Bcm2835Dma<'a, ModelStore>, Host>;
+type Endpoint<'a> = Controller<Bcm2835Dma<'a, ModelStore>, FakeKernel, Host>;
 
 struct Rig {
     model: Model,
     store: ModelStore,
-    kernel: Rc<RefCell<Kernel>>,
+    kernel: FakeKernel,
+    memory: Rc<RefCell<Memory>>,
+    records: Records<Record>,
 }
 
 impl Rig {
     fn new() -> Self {
         let model = Model::pi4();
         let store = model.store();
-        let kernel = Rc::new(RefCell::new(Kernel::default()));
-        {
-            let mut kernel = kernel.borrow_mut();
-            for (holder, dreq) in [(PLAYER, 2), (RECORDER, 3)] {
-                kernel
-                    .holdings
-                    .push((holder, HwResource::request(&line(dreq, 0))));
-                kernel.holdings.push((holder, HwResource::mmio(PCM, 0x24)));
-            }
+        let kernel = FakeKernel::new();
+        for (holder, dreq) in [(PLAYER, 2), (RECORDER, 3)] {
+            kernel.grant(holder, HwResource::request(&line(dreq, 0)));
+            kernel.grant(holder, HwResource::mmio(PCM, 0x24));
         }
         Self {
             model,
             store,
             kernel,
+            memory: Rc::default(),
+            records: Records::default(),
         }
     }
 
@@ -225,6 +176,7 @@ impl Rig {
         let engine = Bcm2835Dma::new(&self.model, &self.store).expect("whole channels");
         Controller::new(
             engine,
+            self.kernel.clone(),
             self.host(),
             endpoint_id(),
             (owned, usable),
@@ -234,7 +186,8 @@ impl Rig {
 
     fn host(&self) -> Host {
         Host {
-            kernel: Rc::clone(&self.kernel),
+            memory: Rc::clone(&self.memory),
+            records: self.records.clone(),
             timeline: self.model.timeline(),
         }
     }
@@ -258,25 +211,13 @@ impl Rig {
         caller: ProcId,
         frame: &[u8],
     ) -> (u64, Option<Vec<u8>>) {
-        let ticket = {
-            let mut kernel = self.kernel.borrow_mut();
-            kernel.next_ticket += 1;
-            let ticket = kernel.next_ticket;
-            kernel.callers.insert(ticket, caller);
-            ticket
-        };
+        let ticket = self.kernel.call(caller);
         endpoint.serve(ticket, frame);
         (ticket, self.reply(ticket))
     }
 
     fn reply(&self, ticket: u64) -> Option<Vec<u8>> {
-        self.kernel
-            .borrow()
-            .replies
-            .iter()
-            .rev()
-            .find(|(answered, _)| *answered == ticket)
-            .map(|(_, frame)| frame.clone())
+        self.kernel.answer(ticket)
     }
 
     fn open(&self, endpoint: &mut Endpoint<'_>, caller: ProcId, dreq: u32) -> Result<u8, Errno> {
@@ -290,7 +231,7 @@ impl Rig {
         caller: ProcId,
         channel: u8,
         params: CyclicParams,
-    ) -> Result<DmaBufferGrant, Errno> {
+    ) -> Result<RegionGrant, Errno> {
         let (_, reply) = self.call(
             endpoint,
             caller,
@@ -315,7 +256,7 @@ impl Rig {
         let channel = self.open(endpoint, PLAYER, 2).expect("opens");
         self.prepare(endpoint, PLAYER, channel, params())
             .expect("prepares");
-        let bus = self.kernel.borrow().live.last().expect("carved").bus;
+        let bus = self.memory.borrow().live.last().expect("carved").bus;
         self.model
             .own(usize::from(channel), bus, u64::from(PERIOD * PERIODS));
         self.done(endpoint, PLAYER, &DmaEngineRequest::Start { channel })
@@ -324,11 +265,11 @@ impl Rig {
     }
 
     fn records(&self) -> Vec<Record> {
-        self.kernel.borrow().records.clone()
+        self.records.all()
     }
 
     fn tick(&self, nanos: u64) {
-        self.kernel.borrow_mut().now += nanos;
+        self.memory.borrow_mut().now += nanos;
     }
 }
 
@@ -413,7 +354,7 @@ fn an_owned_channel_is_reset_at_bring_up_though_it_is_not_served() {
 #[test]
 fn a_channel_that_will_not_reset_keeps_the_memory_quarantined() {
     let rig = Rig::new();
-    let refusing = crate::model::Unresettable {
+    let refusing = crate::legacy_model::Unresettable {
         model: &rig.model,
         armed: core::cell::Cell::new(true),
         ignored: false,
@@ -421,6 +362,7 @@ fn a_channel_that_will_not_reset_keeps_the_memory_quarantined() {
     let engine = Bcm2835Dma::new(&refusing, &rig.store).expect("whole channels");
     assert!(Controller::new(
         engine,
+        rig.kernel.clone(),
         rig.host(),
         endpoint_id(),
         (MASK, MASK),
@@ -452,7 +394,7 @@ fn a_channel_opens_only_for_a_line_the_caller_holds() {
     );
     assert_eq!(rig.open(&mut endpoint, PLAYER, 2), Ok(0));
     assert_eq!(rig.open(&mut endpoint, RECORDER, 3), Ok(2));
-    assert!(rig.kernel.borrow().watched.contains(&PLAYER));
+    assert!(rig.kernel.watched().contains(&PLAYER));
 }
 
 #[test]
@@ -461,10 +403,7 @@ fn a_line_naming_another_controller_or_an_undefined_serving_is_refused() {
     let mut endpoint = rig.endpoint(MASK);
     let elsewhere =
         LinkRequest::new(DMA_CONTROLLER_ENDPOINTS.endpoint(13), 0, &[2], b"tx").expect("valid");
-    rig.kernel
-        .borrow_mut()
-        .holdings
-        .push((PLAYER, HwResource::request(&elsewhere)));
+    rig.kernel.grant(PLAYER, HwResource::request(&elsewhere));
     let (_, reply) = rig.call(&mut endpoint, PLAYER, &DmaEngineRequest::Open(elsewhere));
     assert_eq!(
         decode_open_reply(&reply.expect("answered")),
@@ -472,10 +411,7 @@ fn a_line_naming_another_controller_or_an_undefined_serving_is_refused() {
     );
 
     let undefined = line(2 | 1 << 26, 1);
-    rig.kernel
-        .borrow_mut()
-        .holdings
-        .push((PLAYER, HwResource::request(&undefined)));
+    rig.kernel.grant(PLAYER, HwResource::request(&undefined));
     let (_, reply) = rig.call(&mut endpoint, PLAYER, &DmaEngineRequest::Open(undefined));
     assert_eq!(
         decode_open_reply(&reply.expect("answered")),
@@ -490,10 +426,7 @@ fn the_lowest_free_usable_channel_is_claimed_until_none_is_left() {
     assert_eq!(rig.open(&mut endpoint, PLAYER, 2), Ok(0));
     assert_eq!(rig.open(&mut endpoint, RECORDER, 3), Ok(2));
     let third = line(4, 0);
-    rig.kernel
-        .borrow_mut()
-        .holdings
-        .push((PLAYER, HwResource::request(&third)));
+    rig.kernel.grant(PLAYER, HwResource::request(&third));
     let (_, reply) = rig.call(&mut endpoint, PLAYER, &DmaEngineRequest::Open(third));
     assert_eq!(
         decode_open_reply(&reply.expect("answered")),
@@ -513,18 +446,16 @@ fn a_line_stays_with_a_holder_that_lives_and_is_reclaimed_from_one_that_has_ende
     let channel = rig.running(&mut endpoint);
     let successor = instance(9);
     rig.kernel
-        .borrow_mut()
-        .holdings
-        .push((successor, HwResource::request(&line(2, 0))));
+        .grant(successor, HwResource::request(&line(2, 0)));
     // Two nodes may carry one line; while its holder lives it stays theirs.
     assert_eq!(rig.open(&mut endpoint, successor, 2), Err(Errno::Busy));
     assert!(rig.model.active(usize::from(channel)));
 
-    rig.kernel.borrow_mut().ended.push(PLAYER);
+    rig.kernel.end(PLAYER);
     assert_eq!(rig.open(&mut endpoint, successor, 2), Ok(channel));
     assert!(!rig.model.active(usize::from(channel)));
     assert!(
-        rig.kernel.borrow().live.is_empty(),
+        rig.memory.borrow().live.is_empty(),
         "the old buffer was released"
     );
     assert!(rig.records().contains(&Record::Reclaimed {
@@ -584,9 +515,9 @@ fn prepare_carves_the_buffer_and_grants_it_to_the_caller_alone() {
     let buffer = decode_prepare_reply(&reply.expect("answered")).expect("prepared");
     assert_eq!(buffer.grantor, INSTANCE);
     assert_eq!(buffer.grant, 0x1001);
-    assert_eq!(rig.kernel.borrow().granted, [(1, ticket)]);
+    assert_eq!(rig.memory.borrow().granted, [(1, ticket)]);
     assert_eq!(
-        rig.kernel.borrow().live.first().map(|live| live.len),
+        rig.memory.borrow().live.first().map(|live| live.len),
         Some(usize::try_from(PERIOD * PERIODS).expect("fits"))
     );
     rig.model.own(
@@ -621,7 +552,7 @@ fn a_fifo_outside_the_callers_windows_is_refused_before_anything_is_carved() {
             "{fifo:#x}: {refused:?}"
         );
     }
-    assert_eq!(rig.kernel.borrow().next_region, 0);
+    assert_eq!(rig.memory.borrow().next_region, 0);
     assert_eq!(rig.model.carved(), 0);
 }
 
@@ -633,9 +564,7 @@ fn a_fifo_the_controller_cannot_reach_is_refused() {
     // The player holds a window the controller's windows do not reach.
     let unreachable = 0x6_0000_0000;
     rig.kernel
-        .borrow_mut()
-        .holdings
-        .push((PLAYER, HwResource::mmio(unreachable, 0x1000)));
+        .grant(PLAYER, HwResource::mmio(unreachable, 0x1000));
     assert_eq!(
         rig.prepare(
             &mut endpoint,
@@ -648,7 +577,7 @@ fn a_fifo_the_controller_cannot_reach_is_refused() {
         ),
         Err(Errno::OutOfRange)
     );
-    assert_eq!(rig.kernel.borrow().next_region, 0);
+    assert_eq!(rig.memory.borrow().next_region, 0);
 }
 
 /// A region the caller holds inside the node's memory window, the first GiB,
@@ -660,9 +589,7 @@ fn a_fifo_in_memory_is_refused() {
     let channel = rig.open(&mut endpoint, PLAYER, 2).expect("opens");
     let in_memory = 0x3000_0000;
     rig.kernel
-        .borrow_mut()
-        .holdings
-        .push((PLAYER, HwResource::mmio(in_memory, 0x1000)));
+        .grant(PLAYER, HwResource::mmio(in_memory, 0x1000));
     assert_eq!(
         rig.prepare(
             &mut endpoint,
@@ -685,18 +612,18 @@ fn a_failed_grant_leaves_neither_a_buffer_nor_a_chain() {
     let channel = rig.open(&mut endpoint, PLAYER, 2).expect("opens");
     rig.prepare(&mut endpoint, PLAYER, channel, params())
         .expect("prepares");
-    rig.kernel.borrow_mut().refuse_grants = true;
+    rig.memory.borrow_mut().refuse_grants = true;
     assert_eq!(
         rig.prepare(&mut endpoint, PLAYER, channel, params()),
         Err(Errno::PermissionDenied)
     );
-    assert!(rig.kernel.borrow().live.is_empty());
+    assert!(rig.memory.borrow().live.is_empty());
     assert_eq!(rig.model.live_tables(), 0);
     assert_eq!(
         rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Start { channel }),
         Err(Errno::NotFound)
     );
-    rig.kernel.borrow_mut().refuse_carves = true;
+    rig.memory.borrow_mut().refuse_carves = true;
     assert_eq!(
         rig.prepare(&mut endpoint, PLAYER, channel, params()),
         Err(Errno::OutOfMemory)
@@ -708,6 +635,7 @@ fn endpoint_over<'a>(rig: &'a Rig, regs: &'a dyn tairix_abi::RegisterBlock) -> E
     let engine = Bcm2835Dma::new(regs, &rig.store).expect("whole channels");
     Controller::new(
         engine,
+        rig.kernel.clone(),
         rig.host(),
         endpoint_id(),
         (MASK, MASK),
@@ -721,7 +649,7 @@ fn endpoint_over<'a>(rig: &'a Rig, regs: &'a dyn tairix_abi::RegisterBlock) -> E
 #[test]
 fn a_channel_that_refuses_its_reset_takes_only_stop_and_close() {
     let rig = Rig::new();
-    let refusing = crate::model::Unresettable {
+    let refusing = crate::legacy_model::Unresettable {
         model: &rig.model,
         armed: core::cell::Cell::new(false),
         ignored: false,
@@ -773,7 +701,7 @@ fn a_channel_that_refuses_its_reset_takes_only_stop_and_close() {
     );
     rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Close { channel })
         .expect("closes");
-    assert_eq!(rig.kernel.borrow().live.len(), 1, "its buffer stays held");
+    assert_eq!(rig.memory.borrow().live.len(), 1, "its buffer stays held");
     assert_eq!(rig.model.live_tables(), 1, "and so does its chain");
 }
 
@@ -782,7 +710,7 @@ fn a_channel_that_refuses_its_reset_takes_only_stop_and_close() {
 #[test]
 fn a_channel_that_ignores_its_reset_is_withdrawn_and_keeps_what_it_reached() {
     let rig = Rig::new();
-    let ignoring = crate::model::Unresettable {
+    let ignoring = crate::legacy_model::Unresettable {
         model: &rig.model,
         armed: core::cell::Cell::new(false),
         ignored: true,
@@ -799,33 +727,8 @@ fn a_channel_that_ignores_its_reset_is_withdrawn_and_keeps_what_it_reached() {
         .count();
     assert_eq!(unreset, 1, "one reset tried, not a second on release");
     assert_eq!(endpoint.usable() & (1 << channel), 0, "withdrawn");
-    assert_eq!(rig.kernel.borrow().live.len(), 1, "its buffer stays held");
+    assert_eq!(rig.memory.borrow().live.len(), 1, "its buffer stays held");
     assert_eq!(rig.model.live_tables(), 1, "and so does its chain");
-}
-
-#[test]
-fn the_window_covering_the_registers_is_the_peripherals_and_another_the_memory() {
-    let memory = HwResource::dma_translated(
-        0x0000_0000,
-        0x4000_0000,
-        0xC000_0000,
-        tairix_abi::DmaCoherence::Snooped,
-    );
-    let registers = 0xFE00_7000;
-    for order in [[peripheral_window(), memory], [memory, peripheral_window()]] {
-        assert_eq!(
-            split_windows(&order, registers, 0x1000),
-            (Some(peripheral_window()), Some(memory))
-        );
-    }
-    assert_eq!(
-        split_windows(&[peripheral_window()], registers, 0x1000),
-        (Some(peripheral_window()), None)
-    );
-    assert_eq!(
-        split_windows(&[memory], registers, 0x1000),
-        (None, Some(memory))
-    );
 }
 
 /// A grant refused on a channel that then refuses its reset frees neither
@@ -833,7 +736,7 @@ fn the_window_covering_the_registers_is_the_peripherals_and_another_the_memory()
 #[test]
 fn a_failed_grant_on_a_channel_that_refuses_its_reset_keeps_both_buffers() {
     let rig = Rig::new();
-    let refusing = crate::model::Unresettable {
+    let refusing = crate::legacy_model::Unresettable {
         model: &rig.model,
         armed: core::cell::Cell::new(false),
         ignored: false,
@@ -842,13 +745,13 @@ fn a_failed_grant_on_a_channel_that_refuses_its_reset_keeps_both_buffers() {
     let channel = rig.open(&mut endpoint, PLAYER, 2).expect("opens");
     rig.prepare(&mut endpoint, PLAYER, channel, params())
         .expect("prepares");
-    rig.kernel.borrow_mut().refuse_grants = true;
+    rig.memory.borrow_mut().refuse_grants = true;
     refusing.armed.set(true);
     assert_eq!(
         rig.prepare(&mut endpoint, PLAYER, channel, params()),
         Err(Errno::PermissionDenied)
     );
-    assert_eq!(rig.kernel.borrow().live.len(), 2, "neither buffer is freed");
+    assert_eq!(rig.memory.borrow().live.len(), 2, "neither buffer is freed");
     assert_eq!(rig.model.live_tables(), 1);
     assert_eq!(
         rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Start { channel }),
@@ -1054,7 +957,7 @@ fn a_wait_that_cannot_be_answered_stops_the_channel() {
         PLAYER,
         &DmaEngineRequest::Wait { channel, after: 0 },
     );
-    rig.kernel.borrow_mut().unanswerable.push(ticket);
+    rig.kernel.retire(ticket);
     rig.model.advance(usize::from(channel), PERIOD);
     endpoint.interrupt(1 << channel);
     assert!(!rig.model.active(usize::from(channel)));
@@ -1068,7 +971,7 @@ fn an_ended_owner_releases_every_channel_it_held_after_resetting_it() {
     rig.model.advance(usize::from(channel), 700);
     endpoint.peer_exited(PLAYER);
     assert!(!rig.model.active(usize::from(channel)));
-    assert!(rig.kernel.borrow().live.is_empty());
+    assert!(rig.memory.borrow().live.is_empty());
     assert_eq!(rig.model.live_tables(), 0);
     assert!(rig.records().contains(&Record::Abandoned { channel }));
     let timeline = rig.model.timeline();
@@ -1101,10 +1004,10 @@ fn close_releases_the_chain_and_the_buffer_and_forgets_the_owner() {
     let channel = rig.running(&mut endpoint);
     rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Close { channel })
         .expect("closes");
-    assert!(rig.kernel.borrow().live.is_empty());
+    assert!(rig.memory.borrow().live.is_empty());
     assert_eq!(rig.model.live_tables(), 0);
     assert_eq!(rig.model.writes(usize::from(channel), CONBLK_AD).len(), 1);
-    assert!(!rig.kernel.borrow().watched.contains(&PLAYER));
+    assert!(!rig.kernel.watched().contains(&PLAYER));
     assert_eq!(
         rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Start { channel }),
         Err(Errno::PermissionDenied)
@@ -1135,7 +1038,7 @@ fn prepare_on_a_stopped_channel_replaces_its_buffer() {
         .expect("prepares");
     assert_eq!(replaced.grant, 0x1002);
     let live: Vec<u64> = rig
-        .kernel
+        .memory
         .borrow()
         .live
         .iter()
@@ -1301,7 +1204,7 @@ impl<'r> Walk<'r> {
         // One buffer and one chain at most per served channel, whatever the
         // interleaving.
         let served = MASK.count_ones() as usize;
-        assert!(rig.kernel.borrow().live.len() <= served);
+        assert!(rig.memory.borrow().live.len() <= served);
         assert!(rig.model.live_tables() <= served);
     }
 
@@ -1316,13 +1219,13 @@ impl<'r> Walk<'r> {
             period_bytes: *self.rng.pick(&WALK_PERIOD_BYTES),
             periods: *self.rng.pick(&WALK_PERIODS),
         };
-        let before = self.rig.kernel.borrow().next_region;
+        let before = self.rig.memory.borrow().next_region;
         if self
             .rig
             .prepare(&mut self.endpoint, caller, channel, params)
             .is_ok()
         {
-            let region = self.rig.kernel.borrow().next_region;
+            let region = self.rig.memory.borrow().next_region;
             assert_eq!(region, before + 1, "one carve per prepare");
             let bytes = params.buffer_bytes().expect("admitted");
             self.rig
@@ -1337,9 +1240,9 @@ impl<'r> Walk<'r> {
         } else {
             self.rng.next_u64() & MASK
         };
-        let answered = self.rig.kernel.borrow().replies.len();
+        let answered = self.rig.kernel.answered();
         self.endpoint.interrupt(fired);
-        self.served_boundaries += self.rig.kernel.borrow().replies.len() - answered;
+        self.served_boundaries += self.rig.kernel.answered() - answered;
     }
 
     /// A holder ends, and a successor holding the same grants takes its place,
@@ -1352,18 +1255,17 @@ impl<'r> Walk<'r> {
         let mut raw = [0x5A; PROC_ID_LEN];
         raw[..8].copy_from_slice(&self.successors.to_le_bytes());
         let successor = ProcId::from_raw(raw);
-        let mut kernel = self.rig.kernel.borrow_mut();
-        kernel
-            .holdings
-            .push((successor, HwResource::request(&line(dreq, 0))));
-        kernel
-            .holdings
-            .push((successor, HwResource::mmio(PCM, 0x24)));
+        self.rig
+            .kernel
+            .grant(successor, HwResource::request(&line(dreq, 0)));
+        self.rig
+            .kernel
+            .grant(successor, HwResource::mmio(PCM, 0x24));
         self.holders[slot] = (successor, dreq);
     }
 
     fn end(&mut self, holder: ProcId) {
-        self.rig.kernel.borrow_mut().ended.push(holder);
+        self.rig.kernel.end(holder);
         self.endpoint.peer_exited(holder);
     }
 }
@@ -1389,7 +1291,7 @@ fn a_random_walk_never_reaches_outside_a_buffer_or_leaks_one() {
         walk.end(holder);
     }
     assert!(
-        rig.kernel.borrow().live.is_empty(),
+        rig.memory.borrow().live.is_empty(),
         "every buffer was released"
     );
     assert_eq!(rig.model.live_tables(), 0, "every chain was freed");

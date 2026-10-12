@@ -52,6 +52,7 @@ members = [
     "lib/browse",
     "lib/kalloc",
     "lib/caps",
+    "lib/clock",
     "lib/cmdres",
     "lib/codec",
     "lib/collections",
@@ -74,7 +75,10 @@ members = [
     "lib/discovery",
     "lib/display",
     "lib/dma-barrier",
+    "lib/dmaengine",
     "lib/drvrt",
+    "lib/edid",
+    "lib/encoder",
     "lib/enrolment",
     "lib/fbcon",
     "lib/fdt",
@@ -90,9 +94,11 @@ members = [
     "lib/help",
     "lib/hid",
     "lib/i2c",
+    "lib/i2cbus",
     "lib/icon",
     "lib/image",
     "lib/sound",
+    "lib/soundtheme",
     "lib/player",
     "lib/inline",
     "lib/input",
@@ -152,8 +158,8 @@ members = [
     "drivers/display/vesa",
     "drivers/display/framebuffer",
     "drivers/display/gpu_virtio",
-    "drivers/display/rpi_hvs",
-    "drivers/display/rpi_fb",
+    "drivers/display/bcm2711_hdmi",
+    "drivers/display/bcm2711_hvs",
 
     # Drivers — filesystem
     "drivers/filesystem/adfs",
@@ -172,6 +178,7 @@ members = [
     "drivers/bus/usb/vl805",
     "drivers/bus/pcie_brcm",
     "drivers/bus/i2c/bcm2835",
+    "drivers/bus/i2c/brcmstb",
     "drivers/bus/mailbox/vcmailbox",
     "drivers/bus/virtio",
     "drivers/bus/mmio",
@@ -193,9 +200,6 @@ members = [
     "drivers/rtc/mc146818",
     "drivers/rtc/rpi",
 
-    # Drivers — CPU frequency
-    "drivers/cpufreq/rpi",
-
     # Drivers — accelerator
     "drivers/accelerator/virtio_crypto",
 
@@ -208,9 +212,16 @@ members = [
     "drivers/audio/virtio_snd",
     "drivers/audio/usb_uac",
 
-    # Drivers — DMA engines
+    # Drivers — clocks
     "drivers/clock/bcm2711_cprman",
+    "drivers/clock/bcm2711_dvp",
+    "drivers/clock/rpi_firmware",
+
+    # Drivers — DMA engines
     "drivers/dma/bcm2835",
+
+    # Drivers — interrupt controllers
+    "drivers/irq/brcmstb_l2",
 
     # Drivers — network
     "drivers/network/genet",
@@ -224,6 +235,7 @@ members = [
     "userland/system/devmgr",
     "userland/system/drvhost",
     "userland/system/seatmgr",
+    "userland/system/soundd",
     "userland/system/sysinfod",
     "userland/system/timed",
     "userland/system/fontd",

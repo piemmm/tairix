@@ -3,7 +3,7 @@
 `plans/HID.md` H5. One instance per HID interface a host-controller driver
 publishes, whatever its sub-class or protocol: every keyboard, mouse, touch pad
 and touch screen application on the interface is served through `lib/hid`. The
-crate is a `lib` (`BIND_KEYS`, `REQUIRED_CAPS`, and the host-testable bring-up)
+crate is a `lib` (`BIND_KEYS`, `REQUIRED_CAPABILITIES`, and the host-testable bring-up)
 and the `Run` program `devmgr` autoloads.
 
 ## What it does

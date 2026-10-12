@@ -66,6 +66,17 @@ impl Cursor {
         self.at
     }
 
+    /// Hold the pointer on a screen of `mode` instead: where it is, where
+    /// that lies on the new screen, and otherwise at its nearest edge.
+    pub fn rescreen(&mut self, mode: &DisplayMode) {
+        self.width = i32::try_from(mode.width_px).unwrap_or(i32::MAX);
+        self.height = i32::try_from(mode.height_px).unwrap_or(i32::MAX);
+        self.at = Point::new(
+            on_axis(self.at.x, self.width),
+            on_axis(self.at.y, self.height),
+        );
+    }
+
     /// Move by `(dx, dy)` and report where that landed.
     pub fn moved_by(&mut self, dx: i32, dy: i32) -> Point {
         self.at = Point::new(
@@ -97,6 +108,21 @@ mod tests {
             stride_bytes: width_px.saturating_mul(4),
             format: DisplayFormat::Rgba8888,
         }
+    }
+
+    #[test]
+    fn a_pointer_moved_onto_a_smaller_screen_is_held_on_it() {
+        let mut cursor = Cursor::centred(&mode(1920, 1080));
+        let _ = cursor.moved_by(800, 400);
+        cursor.rescreen(&mode(1024, 768));
+        assert_eq!(cursor.at(), Point::new(1023, 767));
+        cursor.rescreen(&mode(3840, 2160));
+        assert_eq!(
+            cursor.at(),
+            Point::new(1023, 767),
+            "a larger screen keeps it"
+        );
+        assert_eq!(cursor.moved_by(4000, 0).x, 3839);
     }
 
     #[test]

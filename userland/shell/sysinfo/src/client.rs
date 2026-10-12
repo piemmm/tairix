@@ -407,7 +407,14 @@ fn run_hardware(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysin
 fn run_graphics_devices(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
     emit(
         out,
-        "graphics device   scan-out              busy%   vram-used     vram      layers",
+        &graphics_line(
+            "graphics device",
+            "scan-out",
+            "busy%",
+            "vram-used",
+            "vram",
+            "layers",
+        ),
     )?;
     walk_records(
         transport,
@@ -447,17 +454,38 @@ fn graphics_row(stats: &DisplayStats) -> String {
         || String::from("software"),
         |caps| format!("{}", caps.max_layers),
     );
-    format!(
-        "seat {:<11}  {:>4}x{:<4} {:<7}  {:>5}  {:>10}  {:>9}  {:>6}",
-        stats.seat_id,
-        stats.mode.width_px,
-        stats.mode.height_px,
-        stats.mode.format.name(),
-        busy,
-        used,
-        total,
-        layers,
+    let scanout = stats.mode.map_or_else(
+        || String::from("no output"),
+        |mode| {
+            format!(
+                "{:>4}x{:<4} {}",
+                mode.width_px,
+                mode.height_px,
+                mode.format.name()
+            )
+        },
+    );
+    graphics_line(
+        &format!("seat {}", stats.seat_id),
+        &scanout,
+        &busy,
+        &used,
+        &total,
+        &layers,
     )
+}
+
+/// One line of the graphics table, its heading included, so every line
+/// shares one set of column widths.
+fn graphics_line(
+    device: &str,
+    scanout: &str,
+    busy: &str,
+    used: &str,
+    total: &str,
+    layers: &str,
+) -> String {
+    format!("{device:<16}  {scanout:<20}  {busy:>5}  {used:>10}  {total:>9}  {layers:>6}")
 }
 
 /// Fetch and render the machine identity.
@@ -1280,7 +1308,7 @@ fn name_lossy(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{run as engine_run, USAGE};
+    use super::{graphics_row, run as engine_run, run_graphics_devices, USAGE};
     use crate::command::Command;
     use crate::error::SysinfoError;
     use alloc::string::{String, ToString};
@@ -1430,24 +1458,24 @@ mod tests {
                         per_layer_opacity: true,
                     }),
                 },
-                mode: DisplayMode {
+                mode: Some(DisplayMode {
                     width_px: 1920,
                     height_px: 1080,
                     stride_bytes: 7680,
                     format: DisplayFormat::Bgra8888,
-                },
+                }),
             },
             DisplayStats {
                 seat_id: 0,
                 busy_ns: 0,
                 idle_ns: 0,
                 device: DisplayDeviceReport::SOFTWARE,
-                mode: DisplayMode {
+                mode: Some(DisplayMode {
                     width_px: 800,
                     height_px: 600,
                     stride_bytes: 3200,
                     format: DisplayFormat::Rgba8888,
-                },
+                }),
             },
         ]
     }
@@ -2504,6 +2532,27 @@ mod tests {
             run(Command::Limits, &fixture, &out),
             Err(SysinfoError::Service(Errno::BufferTooSmall))
         );
+    }
+
+    #[test]
+    fn a_graphics_device_with_no_output_says_so_in_its_scanout_column() {
+        let devices = fixture_graphics_devices();
+        let unplugged = DisplayStats {
+            mode: None,
+            ..devices[0]
+        };
+        let row = graphics_row(&unplugged);
+        assert!(row.contains("no output"));
+        // The columns after the scan-out line up with a device that has one,
+        // and with the heading.
+        let busy_end = |line: &str| line.find('%').map(|at| at + 1);
+        assert_eq!(busy_end(&row), busy_end(&graphics_row(&devices[0])));
+        let out = Recorder::new();
+        assert_eq!(
+            run_graphics_devices(&Fixture::new(Vec::new()), &out),
+            Ok(())
+        );
+        assert_eq!(busy_end(&row), busy_end(&out.lines()[0]));
     }
 
     #[test]

@@ -11,8 +11,10 @@ play — riprodurre file sonori
 Riproduce ogni file a turno su un'uscita. Ogni file viene decodificato in un
 processo isolato privo di qualsiasi autorità, così che un file ostile può al
 massimo porre fine alla propria decodifica: viene escluso indicandone il motivo
-e il resto dell'elenco viene riprodotto. Si leggono file AU, WAV e FLAC,
-quest'ultimo nativo o in Ogg.
+e il resto dell'elenco viene riprodotto. Si leggono file AU, WAV, FLAC, Vorbis,
+Opus e audio MPEG (MP1, MP2 e MP3), FLAC nativo o in Ogg, Vorbis e Opus in Ogg; i
+flussi
+concatenati di un file Ogg vengono riprodotti uno dopo l'altro.
 
 I file consecutivi con stessa frequenza, stesso formato di campione e stessa
 disposizione dei canali si susseguono senza pause, in un solo flusso. Un file

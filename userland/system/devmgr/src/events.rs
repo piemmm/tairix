@@ -139,12 +139,20 @@ pub const AUDIO_BASELINE_DELIVERED: EventId = EventId(13_024);
 /// The audio baseline could not be delivered: the service refused it or was
 /// unreachable. Retried on the next reaction.
 pub const AUDIO_BASELINE_DELIVERY_FAILED: EventId = EventId(13_025);
+/// The hardware present at boot has settled: matched, its drivers settled and
+/// its channels handed on. The device manager announces its readiness.
+pub const DEVICES_SETTLED: EventId = EventId(13_026);
+/// A device was waited on for the whole settle budget without settling; the
+/// boot settles without it. `node` names it, or `channels` for the hand-offs.
+pub const SETTLE_LAPSED: EventId = EventId(13_027);
+/// The service manager did not record the device manager's readiness.
+pub const READINESS_REFUSED: EventId = EventId(13_028);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ALL: [EventId; 25] = [
+    const ALL: [EventId; 28] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -170,6 +178,9 @@ mod tests {
         AUDIOD_UNBOUND,
         AUDIO_BASELINE_DELIVERED,
         AUDIO_BASELINE_DELIVERY_FAILED,
+        DEVICES_SETTLED,
+        SETTLE_LAPSED,
+        READINESS_REFUSED,
     ];
 
     #[test]

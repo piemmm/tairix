@@ -2620,17 +2620,24 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::HW_SELF_NODE,
         name: "hw_self_node",
-        arg_count: 0,
-        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
-        // `U64` register convention: the caller's own node id on success, else
-        // `-errno` (a caller with no matched node fails closed `NotFound`).
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` convention: an
+        // `HwSelfNode` record, the caller's own node id and match keys (a
+        // caller with no matched node fails closed `NotFound`).
         ret: AbiType::U64,
-        // Needs no capability: a driver learning *its own* node id is the
-        // unprivileged self-identity baseline (the "read my own pid" / `mem_map`
-        // precedent) — it reveals only which node the caller itself bound to,
-        // never the global tree, which `hw_tree_read` guards. Not audited: a
-        // read of one's own identity is not a security decision and is polled on
-        // the leaf's recovery path (it must not flood the log).
+        // Needs no capability: a driver learning *its own* node's identity is
+        // the unprivileged self-identity baseline (the "read my own pid" /
+        // `mem_map` precedent) — it reveals only the node the caller itself
+        // bound to, never the global tree, which `hw_tree_read` guards. Not
+        // audited: a read of one's own identity is not a security decision.
         required_capability: None,
         audit: false,
     },
@@ -3420,6 +3427,41 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // record.
         required_capability: Some(CapabilityId::CONSOLE_READ),
         audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::HW_NODE_SETTLE,
+        name: "hw_node_settle",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        // `Errno` register convention: `Ok(0)` once the caller's own node is
+        // settled, else `-errno`.
+        ret: AbiType::Errno,
+        // The publish path's grant: settling says the publishing is done.
+        // A progress report that changes no authority, once per driver, so
+        // it is no decision worth a record.
+        required_capability: Some(CapabilityId::HW_EMIT),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::CONSOLE_RELOCATE,
+        name: "console_relocate",
+        arg_count: 2,
+        args: [
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // `U64` carries the bytes-written-or-`-errno` convention: the
+        // console's new surface as one framebuffer `HwResource`.
+        ret: AbiType::U64,
+        // The caller's device reads the surface by DMA, so the DMA grant
+        // gates it; the handler answers only the driver of the node
+        // discovery marked `BootConsole`. Audited: it moves the console.
+        required_capability: Some(CapabilityId::MEM_DMA),
+        audit: true,
     },
 ];
 

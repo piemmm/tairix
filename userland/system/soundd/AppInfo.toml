@@ -1,0 +1,10 @@
+# Signed-AppInfo manifest source for the cue authority (plans/SOUND.md
+# SND21). No new capability: the reserved rendezvous, the shared PCM rings,
+# the decode sandbox, its audit records, and a read of /System/Audio and its
+# own settings document — what any player holds.
+id = "os.tairix.soundd"
+name = "soundd"
+title = "Soundd"
+version = "0.1.0"
+kind = "service"
+capabilities = ["CAP_IPC_BIND_PRIVILEGED", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT", "CAP_FS_ACCESS"]

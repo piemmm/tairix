@@ -51,33 +51,24 @@ reprograms one.
 
 ## Testing
 
-Host tests drive the generators and the endpoint against a register-level
-model that asserts the hardware's rules: the password on every write, writes
-to the two served generators only, nothing reconfigured while busy, and no
-enable in the write that configures. The endpoint's tests answer the
-kernel's grant questions by the kernel's own coverage rule, and a seeded walk
-checks that a clock runs exactly while held, at its first holder's rate.
+Host tests drive the generators against a register-level model that asserts
+the hardware's rules: the password on every write, writes to the two served
+generators only, nothing reconfigured while busy, and no enable in the write
+that configures. The endpoint tests run the generators behind `lib/clock`'s
+endpoint through its rig, answered by the shared fake kernel, and a seeded
+walk checks that a clock runs exactly while held, at its first holder's rate.
 
 There is no QEMU vertical for the Pi board (no firmware tree hand-off,
 `plans/PI.md`), so metal acceptance is `plans/PI.md` P14.
 
 ## Events
 
-| Id | Level | Decision |
-|---|---|---|
-| 24300 | Info | serving |
-| 24301 | Error | ending, with the reason |
-| 24302 | Info | a clock set running or retuned |
-| 24303 | Info | a consumer joined a shared clock |
-| 24304 | Info | a clock stopped with its last holder |
-| 24305 | Info | a hold dropped with its ended holder |
-| 24306 | Warn | a generator reset mid-period |
-| 24307 | Error | a generator running through its reset |
-| 24308 | Warn | a request refused |
+The endpoint's, recorded by `lib/clock` (`docs/src/lib/clock.md`): ids 24300
+to 24308.
 
 ## References
 
 - BCM2835 ARM Peripherals, section 6.3 — the generators the PCM and PWM
   clocks share with the general-purpose ones.
 - Linux `drivers/clk/bcm/clk-bcm2835.c` — the PLL registers.
-- `plans/SOUND.md` SND8c — the staged design this driver lands.
+- `plans/SOUND.md` SND8 — the staged design this driver lands.

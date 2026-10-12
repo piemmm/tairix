@@ -23,9 +23,10 @@ table of boards or codecs:
   share a converter with.
 * Each input connector is routed to a converter that can capture it; inputs
   sharing a converter cannot run together (`Busy`).
-* An HDMI or DisplayPort pin is named for its monitor from the display's ELD,
-  is present only while that ELD is valid, and is told its channel count by
-  an audio infoframe.
+* An HDMI or DisplayPort pin is named for its monitor and the link it is on
+  from the display's ELD, read whole and parsed by `lib/edid`, is present
+  only while that ELD is valid, and is told its channel count by an audio
+  infoframe.
 * Gain and mute are the first adjustable and the first mutable amplifier from
   each converter outwards; an endpoint with neither leaves its level to the
   mixer, and one that cannot mute switches its pins off instead.
@@ -69,4 +70,7 @@ converter, a cyclic loopback mixer, S/PDIF and three inputs behind selectors,
 a laptop's speaker and headphones on one converter, and an HDMI connector
 with and without a monitor. The end-to-end QEMU verticals
 (`audio_qemu_{aarch64,riscv64,x86_64}` with the HD Audio disk) play the audio
-fixture through `intel-hda` and assert the capture sample for sample.
+fixture through `intel-hda` and assert the capture sample for sample, apart
+from the whole 8 KiB codec buffers QEMU traces discarding
+(`hda_audio_overrun`) when its own main loop stalls — one buffer's frames for
+each logged overrun, and nothing else.

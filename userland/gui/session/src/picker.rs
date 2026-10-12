@@ -30,6 +30,10 @@
 //! ([`ShellWindowHost`](crate::ShellWindowHost)) drives: accepting a
 //! validated pick request, and aborting a pick whose requesting window
 //! died. Keeping the trait object-safe keeps the bridge non-generic.
+//!
+//! The session also picks for itself ([`Requester::Sound`]): the file a
+//! desktop sound plays, whose path it keeps in its user's sound choices and
+//! hands to nobody.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -37,6 +41,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::fs::OpenFlags;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::window_ipc::{PickPurpose, SaveEndings, WINDOW_TITLE_MAX};
 use tairix_abi::{Errno, FS_NAME_MAX};
 use tairix_browse::render::{
@@ -164,6 +169,27 @@ impl PickAccess {
             ),
         }
     }
+}
+
+/// Who a pick is for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Requester {
+    /// An application's window, by its window-channel id: its owner is handed
+    /// what the user chose, through the embedder ([`PickStep`]).
+    Window(u64),
+    /// The session itself, choosing the file a desktop sound plays: the
+    /// picker concludes it on its own ([`OwnPick`]), since nothing is opened
+    /// or handed to anyone.
+    Sound(SoundEvent),
+}
+
+/// A pick the session made for itself, concluded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnPick {
+    /// What it was for.
+    pub requester: Requester,
+    /// The chosen file's absolute path, or `None` where the user walked away.
+    pub path: Option<String>,
 }
 
 /// What the showing pick asks of the embedder.
@@ -366,10 +392,10 @@ impl FolderBand {
     }
 }
 
-/// One live pick: the requesting window, the picker's compositor window,
-/// and the browser state behind it.
+/// One live pick: who it is for, the picker's compositor window, and the
+/// browser state behind it.
 struct ActivePick<S: DirectorySource> {
-    for_window: u64,
+    requester: Requester,
     wm: WindowId,
     browser: Browser<S>,
     /// The save band, for a pick choosing where to save.
@@ -425,6 +451,8 @@ pub struct SessionPicker<S: DirectorySource, F: FnMut() -> S> {
     active: Option<ActivePick<S>>,
     /// The serial the last open asked for.
     serial: u64,
+    /// The session's own pick concluded and not yet taken.
+    own: Option<OwnPick>,
 }
 
 impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
@@ -435,6 +463,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             start: Vec::new(),
             active: None,
             serial: 0,
+            own: None,
         }
     }
 
@@ -812,7 +841,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<PickStep> {
-        let for_window = self.close(shell, compositor)?;
+        let for_window = self.close_window_pick(None, shell, compositor)?;
         Some(PickStep::Cancelled { for_window })
     }
 
@@ -839,7 +868,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             return None;
         }
         let Some(band) = active.save.as_mut() else {
-            let for_window = self.close(shell, compositor)?;
+            let for_window = self.close_window_pick(None, shell, compositor)?;
             return Some(match result {
                 Ok(()) => PickEnd::Chosen {
                     for_window,
@@ -850,7 +879,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         };
         match result {
             Ok(()) => {
-                let for_window = self.close(shell, compositor)?;
+                let for_window = self.close_window_pick(None, shell, compositor)?;
                 Some(PickEnd::Chosen {
                     for_window,
                     name: waiting.name,
@@ -1132,6 +1161,11 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         compositor: &mut Compositor,
     ) -> Option<PickStep> {
         let active = self.active.as_mut()?;
+        let Requester::Window(for_window) = active.requester else {
+            // The session keeps the path; nothing is opened for it.
+            let _ = self.close_window_pick(Some(path), shell, compositor);
+            return None;
+        };
         self.serial += 1;
         let serial = self.serial;
         if let Some(band) = active.save.as_mut() {
@@ -1150,7 +1184,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         });
         Some(PickStep::Open {
             serial,
-            for_window: active.for_window,
+            for_window,
             path,
             access,
         })
@@ -1210,46 +1244,43 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         }
     }
 
-    /// Close the picker window, answering the window the pick was for.
-    fn close(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) -> Option<u64> {
+    /// Close the picker window, answering the window the pick was for; a pick
+    /// the session made for itself concludes with `chosen` instead, kept for
+    /// [`Self::take_own`].
+    fn close_window_pick(
+        &mut self,
+        chosen: Option<String>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<u64> {
         let active = self.active.take()?;
         let _ = shell.close_window(compositor, active.wm);
-        Some(active.for_window)
+        match active.requester {
+            Requester::Window(for_window) => Some(for_window),
+            requester @ Requester::Sound(_) => {
+                self.own = Some(OwnPick {
+                    requester,
+                    path: chosen,
+                });
+                None
+            }
+        }
     }
-}
 
-/// Keep, of a chosen folder's `entries`, the regular files whose content type
-/// is one of `kinds`, in the order the picker lists them and at most the most
-/// one folder pick delegates, answering how many matching files the bound left
-/// out.
-///
-/// A link is never kept: a pick hands over only what the folder itself holds.
-pub fn folder_selection(entries: &mut Vec<Entry>, kinds: &[String]) -> u32 {
-    entries.retain(|entry| {
-        entry.kind() == EntryKind::File
-            && tairix_browse::media::media_for_name(entry.name())
-                .is_some_and(|media| kinds.iter().any(|kind| kind == media.as_str()))
-    });
-    tairix_browse::sort_entries(entries, tairix_browse::SortMode::default_order());
-    let left_out = entries
-        .len()
-        .saturating_sub(tairix_abi::window_ipc::WINDOW_FOLDER_PICK_MAX);
-    entries.truncate(tairix_abi::window_ipc::WINDOW_FOLDER_PICK_MAX);
-    u32::try_from(left_out).unwrap_or(u32::MAX)
-}
+    /// The pick the session made for itself that has concluded since this was
+    /// last asked.
+    pub fn take_own(&mut self) -> Option<OwnPick> {
+        self.own.take()
+    }
 
-/// The path of the file `name` in the folder `components` names, or `None`
-/// for a name the shared spelling refuses.
-fn shown_path(components: &[String], name: &str) -> Option<String> {
-    let mut path = components.to_vec();
-    path.push(String::from(name));
-    vfs::absolute_path(&path).ok()
-}
-
-impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
-    fn begin(
+    /// Open the picker for `requester`'s pick of `purpose`.
+    ///
+    /// # Errors
+    ///
+    /// As [`PickerSlot::begin`].
+    pub fn begin_for(
         &mut self,
-        for_window: u64,
+        requester: Requester,
         purpose: &PickPurpose,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -1299,7 +1330,7 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         shell.decorate_window(compositor, wm, &titled, false);
         let lost = browser.is_listing();
         self.active = Some(ActivePick {
-            for_window,
+            requester,
             wm,
             browser,
             save,
@@ -1311,14 +1342,54 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         });
         Ok(())
     }
+}
+
+/// Keep, of a chosen folder's `entries`, the regular files whose content type
+/// is one of `kinds`, in the order the picker lists them and at most the most
+/// one folder pick delegates, answering how many matching files the bound left
+/// out.
+///
+/// A link is never kept: a pick hands over only what the folder itself holds.
+pub fn folder_selection(entries: &mut Vec<Entry>, kinds: &[String]) -> u32 {
+    entries.retain(|entry| {
+        entry.kind() == EntryKind::File
+            && tairix_browse::media::media_for_name(entry.name())
+                .is_some_and(|media| kinds.iter().any(|kind| kind == media.as_str()))
+    });
+    tairix_browse::sort_entries(entries, tairix_browse::SortMode::default_order());
+    let left_out = entries
+        .len()
+        .saturating_sub(tairix_abi::window_ipc::WINDOW_FOLDER_PICK_MAX);
+    entries.truncate(tairix_abi::window_ipc::WINDOW_FOLDER_PICK_MAX);
+    u32::try_from(left_out).unwrap_or(u32::MAX)
+}
+
+/// The path of the file `name` in the folder `components` names, or `None`
+/// for a name the shared spelling refuses.
+fn shown_path(components: &[String], name: &str) -> Option<String> {
+    let mut path = components.to_vec();
+    path.push(String::from(name));
+    vfs::absolute_path(&path).ok()
+}
+
+impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
+    fn begin(
+        &mut self,
+        for_window: u64,
+        purpose: &PickPurpose,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Result<(), Errno> {
+        self.begin_for(Requester::Window(for_window), purpose, shell, compositor)
+    }
 
     fn abort_for(&mut self, window_id: u64, shell: &mut DesktopShell, compositor: &mut Compositor) {
         if self
             .active
             .as_ref()
-            .is_some_and(|active| active.for_window == window_id)
+            .is_some_and(|active| active.requester == Requester::Window(window_id))
         {
-            let _ = self.close(shell, compositor);
+            let _ = self.close_window_pick(None, shell, compositor);
         }
     }
 }

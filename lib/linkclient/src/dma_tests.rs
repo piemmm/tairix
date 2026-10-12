@@ -10,17 +10,18 @@ use std::vec::Vec;
 
 use tairix_abi::driver::dmaengine::{
     encode_done_reply, encode_error_reply, encode_open_reply, encode_position_reply,
-    encode_prepare_reply, encode_wait_reply, CyclicParams, DmaBufferGrant, DmaDirection,
-    DmaEngineRequest, WaitEnd, WaitReport, DMA_CONTROLLER_ENDPOINTS, DMA_ENGINE_MAX_REPLY,
+    encode_prepare_reply, encode_wait_reply, CyclicParams, DmaDirection, DmaEngineRequest, WaitEnd,
+    WaitReport, DMA_CONTROLLER_ENDPOINTS, DMA_ENGINE_MAX_REPLY,
 };
 use tairix_abi::hwlink::LinkRequest;
+use tairix_abi::hwlink::RegionGrant;
 use tairix_abi::time::Duration64;
 use tairix_abi::{Errno, ProcId, PROC_ID_LEN};
 
 use crate::{DmaClient, LinkCall};
 
 const CHANNEL: u8 = 5;
-const GRANT: DmaBufferGrant = DmaBufferGrant {
+const GRANT: RegionGrant = RegionGrant {
     grant: 0x77,
     grantor: ProcId::from_raw([0xC0; PROC_ID_LEN]),
 };

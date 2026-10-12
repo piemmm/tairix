@@ -22,6 +22,7 @@ program = [
     "dep:tairix-rt",
     "dep:tairix-procinfo",
     "dep:tairix-font",
+    "tairix-display/rt",
 ]
 
 # The package is both the `tairix-greeter-service` engine library (the

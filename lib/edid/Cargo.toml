@@ -1,0 +1,31 @@
+[package]
+name = "tairix-edid"
+description = "TAIRiX display-sink description parser: EDID 1.4 with its CTA-861 and DisplayID extensions — the sink's identity, timings, audio and HDMI capabilities — and an HD Audio codec's ELD, every field untrusted and held to its block, fail-closed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The video timing a description states, which an encoder is driven with.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The bounded vectors and strings a description is read into, allocating
+# nothing.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
+
+[features]
+# The synthetic descriptions tests build sinks from, for this crate's own
+# tests and a display driver's; never in a TAIRiX build.
+test-support = []
+
+[dev-dependencies]
+# The fuzz harness's seed and wall-clock budget.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The crate itself with its synthetic descriptions, which its integration
+# tests build their sinks from.
+tairix-edid = { path = ".", features = ["test-support"] }

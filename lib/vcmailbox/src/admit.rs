@@ -11,11 +11,11 @@
 use tairix_abi::{Errno, HwMatchKey, HwNode};
 
 use crate::{
-    FirmwareClock, Malformed, RtcRegister, Tags, CODE_REQUEST, FIRMWARE_CLOCKS_KEY,
-    FIRMWARE_FRAMEBUFFER_KEY, HEADER_WORDS, PROPERTY_WORDS, RPI_RTC_KEY, SKIP_SETTING_TURBO,
-    TAG_BLANK_SCREEN, TAG_GET_CLOCK_RATE, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE,
-    TAG_GET_RTC_REG, TAG_NOTIFY_XHCI_RESET, TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG,
-    VL805_FIRMWARE_DEV_ADDR, VL805_KEY,
+    FirmwareClock, Malformed, RtcRegister, Tags, CODE_REQUEST, DISPLAY_ENGINE_KEY,
+    FIRMWARE_CLOCKS_KEY, HEADER_WORDS, LINKED_CLOCKS, PROPERTY_WORDS, RPI_RTC_KEY,
+    SKIP_SETTING_TURBO, TAG_GET_CLOCK_RATE, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE,
+    TAG_GET_RTC_REG, TAG_NOTIFY_DISPLAY_DONE, TAG_NOTIFY_XHCI_RESET, TAG_SET_CLOCK_RATE,
+    TAG_SET_RTC_REG, VL805_FIRMWARE_DEV_ADDR, VL805_KEY,
 };
 
 /// Why the service refused a request.
@@ -72,16 +72,28 @@ impl Admitted {
 /// A slot the firmware answers into, which every driver sends zeroed.
 const SLOT: Word = Word::OneOf(&[0]);
 
-/// Only the ARM core clock: every other clock feeds a device another driver
-/// owns.
-const ARM_CLOCK: Word = Word::OneOf(&[FirmwareClock::Arm.as_u32()]);
+/// The clocks the firmware-clocks node's driver drives: the ARM clock and the
+/// clocks it serves to the nodes linking to them. Every other clock feeds a
+/// device another driver owns.
+const DRIVEN_CLOCKS: [u32; 1 + LINKED_CLOCKS.len()] = {
+    let mut driven = [FirmwareClock::Arm.as_u32(); 1 + LINKED_CLOCKS.len()];
+    let mut at = 0;
+    while at < LINKED_CLOCKS.len() {
+        driven[1 + at] = LINKED_CLOCKS[at].as_u32();
+        at += 1;
+    }
+    driven
+};
+
+/// A clock the firmware-clocks node's driver drives.
+const DRIVEN_CLOCK: Word = Word::OneOf(&DRIVEN_CLOCKS);
 
 /// Every request the service forwards: each driver's working set and no more.
 const ADMITTED: [Admitted; 8] = [
     Admitted {
-        tag: TAG_BLANK_SCREEN,
-        device: FIRMWARE_FRAMEBUFFER_KEY,
-        values: &[Word::OneOf(&[0, 1])],
+        tag: TAG_NOTIFY_DISPLAY_DONE,
+        device: DISPLAY_ENGINE_KEY,
+        values: &[],
     },
     Admitted {
         tag: TAG_NOTIFY_XHCI_RESET,
@@ -109,24 +121,24 @@ const ADMITTED: [Admitted; 8] = [
     Admitted {
         tag: TAG_GET_CLOCK_RATE,
         device: FIRMWARE_CLOCKS_KEY,
-        values: &[ARM_CLOCK, SLOT],
+        values: &[DRIVEN_CLOCK, SLOT],
     },
     Admitted {
         tag: TAG_GET_MAX_CLOCK_RATE,
         device: FIRMWARE_CLOCKS_KEY,
-        values: &[ARM_CLOCK, SLOT],
+        values: &[DRIVEN_CLOCK, SLOT],
     },
     Admitted {
         tag: TAG_GET_MIN_CLOCK_RATE,
         device: FIRMWARE_CLOCKS_KEY,
-        values: &[ARM_CLOCK, SLOT],
+        values: &[DRIVEN_CLOCK, SLOT],
     },
     // Never the turbo transition: it moves the part to its turbo point
     // whatever rate was asked for.
     Admitted {
         tag: TAG_SET_CLOCK_RATE,
         device: FIRMWARE_CLOCKS_KEY,
-        values: &[ARM_CLOCK, Word::Any, Word::OneOf(&[SKIP_SETTING_TURBO])],
+        values: &[DRIVEN_CLOCK, Word::Any, Word::OneOf(&[SKIP_SETTING_TURBO])],
     },
 ];
 

@@ -1610,24 +1610,24 @@ mod tests {
                             per_layer_opacity: true,
                         }),
                     },
-                    mode: DisplayMode {
+                    mode: Some(DisplayMode {
                         width_px: 1920,
                         height_px: 1080,
                         stride_bytes: 7680,
                         format: DisplayFormat::Bgra8888,
-                    },
+                    }),
                 },
                 DisplayStats {
                     seat_id: 0,
                     busy_ns: 0,
                     idle_ns: 0,
                     device: DisplayDeviceReport::SOFTWARE,
-                    mode: DisplayMode {
+                    mode: Some(DisplayMode {
                         width_px: 800,
                         height_px: 600,
                         stride_bytes: 3200,
                         format: DisplayFormat::Bgra8888,
-                    },
+                    }),
                 },
             ])
         }
@@ -3461,7 +3461,7 @@ mod tests {
             4,
             "the driver's own capability report reaches the reader"
         );
-        assert_eq!(first.mode.width_px, 1920);
+        assert_eq!(first.mode.map(|mode| mode.width_px), Some(1920));
         assert!(second.device.accel.is_none());
         assert_eq!(second.device.mem_total_bytes, 0, "no memory of its own");
         assert_eq!(

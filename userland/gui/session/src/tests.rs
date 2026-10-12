@@ -3924,7 +3924,9 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 
 // --- The trusted file picker (plans/APPWIN.md AW5, CU6) -----------------
 
-use crate::picker::{PickAccess, PickEnd, PickStep, PickerSlot, SessionPicker, PICKER_ORIGIN};
+use crate::picker::{
+    OwnPick, PickAccess, PickEnd, PickStep, PickerSlot, Requester, SessionPicker, PICKER_ORIGIN,
+};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_abi::window_ipc::{DocumentName, PickPurpose, SaveEndings};
 use tairix_browse::render::chrome_height;
@@ -4428,6 +4430,58 @@ fn a_refused_open_ends_the_pick_and_a_late_answer_is_not_the_picks() {
         "the user may still walk away while the open is answered"
     );
     assert_eq!(picker.opened(serial, Ok(()), &mut shell, &mut comp), None);
+}
+
+/// The session picks a sound's file for itself through the same picker: the
+/// choice concludes there, asking nothing of the embedder, and a window
+/// closing does not take the session's own pick down.
+#[test]
+fn the_session_picks_a_sounds_file_for_itself() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+    let sound = Requester::Sound(tairix_abi::sound_cue::SoundEvent::Error);
+    picker
+        .begin_for(sound, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    assert_eq!(
+        picker.begin(7, &OPEN, &mut shell, &mut comp),
+        Err(Errno::AlreadyExists),
+        "one picker at a time"
+    );
+    picker.abort_for(7, &mut shell, &mut comp);
+    assert!(picker.wm_id().is_some(), "no window's to abort");
+    picker.handle_key(&down, &mut shell, &mut comp);
+    picker.handle_key(&down, &mut shell, &mut comp);
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "nothing is opened for the session"
+    );
+    assert_eq!(picker.wm_id(), None, "the choice closed it");
+    assert_eq!(
+        picker.take_own(),
+        Some(OwnPick {
+            requester: sound,
+            path: Some(String::from("/readme.md")),
+        })
+    );
+    assert_eq!(picker.take_own(), None, "taken once");
+
+    picker
+        .begin_for(sound, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    assert_eq!(picker.handle_key(&escape, &mut shell, &mut comp), None);
+    assert_eq!(
+        picker.take_own(),
+        Some(OwnPick {
+            requester: sound,
+            path: None,
+        }),
+        "walked away from"
+    );
 }
 
 /// A navigation step repaints the picker into the buffer its window already
@@ -7316,7 +7370,8 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
     let policy = tairix_wallpaper::NotifyPolicy::default();
     let battery = producer_origin(42, 42, "os.tairix.battery");
 
-    // The producer raises a notification: it lands keyed to that instance.
+    // The producer raises a notification: it lands keyed to that instance,
+    // and a warning is heard as one.
     assert_eq!(
         shell.serve_notify(
             &mut comp,
@@ -7324,7 +7379,17 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
             raise(1, NotifySeverity::Warning),
             &policy
         ),
-        Ok(())
+        Ok(Some(tairix_abi::sound_cue::SoundEvent::Warning))
+    );
+    // Updated in place under its key, it is not heard again.
+    assert_eq!(
+        shell.serve_notify(
+            &mut comp,
+            &battery,
+            raise(1, NotifySeverity::Critical),
+            &policy
+        ),
+        Ok(None)
     );
     assert_eq!(notification_count(&shell), 1);
     let note = shell
@@ -7336,12 +7401,13 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
     assert_eq!(note.producer.instance, battery.proc_id());
     assert_eq!(note.producer.source.as_str(), "os.tairix.battery");
     assert_eq!(note.title.as_str(), "Battery low");
+    assert_eq!(note.severity, NotifySeverity::Critical);
 
     // A different producer cannot clear it.
     let other = producer_origin(99, 99, "com.example.other");
     assert_eq!(
         shell.serve_notify(&mut comp, &other, NotifyRequest::Clear { key: 1 }, &policy),
-        Ok(())
+        Ok(None)
     );
     assert_eq!(notification_count(&shell), 1);
 
@@ -7375,7 +7441,7 @@ fn notifications_relay_raise_dismiss_and_isolate_producers() {
             NotifyRequest::Clear { key: 1 },
             &policy
         ),
-        Ok(())
+        Ok(None)
     );
     assert_eq!(notification_count(&shell), 0);
 }
@@ -7398,8 +7464,8 @@ fn a_notice_the_policy_refuses_is_never_shown() {
         .is_ok());
     assert_eq!(
         shell.serve_notify(&mut comp, &chat, raise(1, NotifySeverity::Warning), &policy),
-        Ok(()),
-        "a suppressed notice is not the producer's fault"
+        Ok(None),
+        "a suppressed notice is not the producer's fault, and is not heard"
     );
     assert_eq!(
         notification_count(&shell),
@@ -10643,12 +10709,45 @@ fn keep_topmost_raises_the_lock_above_a_window_added_after_it() {
         "a window added after the lock is on top of it by default"
     );
 
-    lock.keep_topmost(&mut comp, None);
+    lock.keep_topmost(&shell, &mut comp, None);
 
     assert_eq!(
         comp.window_at(Point::new(0, 0)),
         Some(lock_id),
         "keep_topmost raises the lock back above it"
+    );
+}
+
+/// The screen can grow under a locked session — a resume onto another
+/// account's larger mode, a larger monitor plugged in — and a lock drawn for
+/// the old screen would leave the session showing around it.
+#[test]
+fn a_lock_redraws_itself_over_a_screen_that_grew_beneath_it() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
+    let lock_id = locked_window(&comp);
+    let small = comp.mode();
+    let large = DisplayMode {
+        width_px: small.width_px * 2,
+        height_px: small.height_px * 2,
+        stride_bytes: small.stride_bytes * 2,
+        format: small.format,
+    };
+    assert!(comp.set_mode(large));
+    assert!(
+        lock.uncovered(&comp),
+        "the old frame covers the old screen only"
+    );
+
+    lock.keep_topmost(&shell, &mut comp, None);
+
+    assert!(!lock.uncovered(&comp));
+    assert_eq!(
+        comp.window(lock_id).map(Window::bounds),
+        Some(comp.screen_rect()),
+        "the lock covers the whole of the screen now drawn"
     );
 }
 
@@ -10677,11 +10776,11 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
         assert!(saver.start(tairix_wallpaper::ScreensaverKind::Blank, setup, comp, 0));
         saver
     };
-    let keep = |saver: &crate::Screensaver, lock: &ScreenLock, comp: &mut Compositor| {
-        saver.keep_topmost(comp);
-        lock.keep_topmost(comp, saver.window());
-    };
     let shell = shell();
+    let keep = |saver: &crate::Screensaver, lock: &mut ScreenLock, comp: &mut Compositor| {
+        saver.keep_topmost(comp);
+        lock.keep_topmost(&shell, comp, saver.window());
+    };
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
     assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
@@ -10690,7 +10789,7 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
     let mut saver = blank(&mut comp);
     let intruder = opaque_window(&mut comp, Point::new(0, 0), 10, 10);
     comp.raise(intruder);
-    keep(&saver, &lock, &mut comp);
+    keep(&saver, &mut lock, &mut comp);
     assert_eq!(comp.window_at(Point::new(0, 0)), saver.window());
     assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
     assert_eq!(
@@ -10700,9 +10799,9 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
     );
 
     let saver = blank(&mut comp);
-    keep(&saver, &lock, &mut comp);
+    keep(&saver, &mut lock, &mut comp);
     let _ = comp.composite();
-    keep(&saver, &lock, &mut comp);
+    keep(&saver, &mut lock, &mut comp);
     assert!(
         !comp.has_damage(),
         "holding an order that already stands repaints nothing"
@@ -10898,7 +10997,7 @@ fn an_unengaged_lock_is_harmless() {
     assert!(!lock.is_locked());
     assert_eq!(comp.window_count(), 0, "nothing was ever added");
 
-    lock.keep_topmost(&mut comp, None);
+    lock.keep_topmost(&shell, &mut comp, None);
     lock.repaint(&shell, &mut comp);
     lock.abandon(&mut comp);
 
@@ -14529,8 +14628,8 @@ struct RefusingDisplay {
 }
 
 impl Display for RefusingDisplay {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(self.mode)
+    fn output(&self) -> Option<DisplayMode> {
+        Some(self.mode)
     }
 
     fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {

@@ -206,12 +206,12 @@ fn graphics_device() -> DisplayStats {
                 per_layer_opacity: true,
             }),
         },
-        mode: DisplayMode {
+        mode: Some(DisplayMode {
             width_px: 1_920,
             height_px: 1_080,
             stride_bytes: 7_680,
             format: DisplayFormat::Bgra8888,
-        },
+        }),
     }
 }
 
@@ -1587,6 +1587,27 @@ fn the_graphics_pane_publishes_the_devices_own_capability_and_memory() {
 }
 
 #[test]
+fn a_device_with_no_output_connected_says_so_in_its_scan_out() {
+    let sample = Sample {
+        hardware: Some(alloc::vec![HwNode::new(
+            1,
+            HW_NODE_ROOT,
+            HwDeviceClass::Display
+        )]),
+        gpu_stats: Some(alloc::vec![DisplayStats {
+            mode: None,
+            ..graphics_device()
+        }]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    assert_eq!(
+        fact(device(&report, DeviceId::Graphics), "Scan-out"),
+        &Reading::measured("No output connected")
+    );
+}
+
+#[test]
 fn a_device_with_no_memory_of_its_own_says_so_rather_than_reading_zero() {
     let sample = Sample {
         hardware: Some(alloc::vec![HwNode::new(
@@ -1599,12 +1620,12 @@ fn a_device_with_no_memory_of_its_own_says_so_rather_than_reading_zero() {
             busy_ns: 0,
             idle_ns: 0,
             device: DisplayDeviceReport::SOFTWARE,
-            mode: DisplayMode {
+            mode: Some(DisplayMode {
                 width_px: 800,
                 height_px: 600,
                 stride_bytes: 3_200,
                 format: DisplayFormat::Bgra8888,
-            },
+            }),
         }]),
         ..permitted()
     };

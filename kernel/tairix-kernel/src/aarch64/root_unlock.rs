@@ -43,7 +43,7 @@ use tairix_kernel_core::{
 use tairix_kernel_irq::{IrqTable, Trigger, WaitOutcome};
 use tairix_kernel_mem::{window_slots, DmaPool, FrameAllocator, PageTable, PhysAddr, PhysMap};
 use tairix_kernel_sec::captable::TaskCapabilities;
-use tairix_kernel_sec::dma::alloc_dma;
+use tairix_kernel_sec::dma::{alloc_dma, DmaGateError};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::KernelMmioMapper;
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
@@ -51,8 +51,7 @@ use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
 use tairix_vcmailbox::{
     arm_physical_to_bus, query_clock_rate, BufferCoherency, ClockRateQuery, FirmwareClock,
-    MailboxError, MailboxTransport, MmioMailbox, APERTURE_LIMIT, DEFAULT_BUS_ALIAS,
-    MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES, PROPERTY_WORDS,
+    MmioMailbox, APERTURE_LIMIT, DEFAULT_BUS_ALIAS, MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES,
 };
 
 use crate::aarch64::arch_wrapper::{
@@ -60,7 +59,6 @@ use crate::aarch64::arch_wrapper::{
 };
 use crate::aarch64::gic_irq::{published_irq_table, COMPOSITE_IRQ_CONTROLLER};
 use crate::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
-use crate::aarch64::storage_trace::{self, flag, hex, text, unsigned};
 use crate::driver_catalog::{EMMC2_PATH, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::floor_dma::Confinement;
@@ -234,8 +232,6 @@ const EMMC2_SILENCE_BUDGET_NS: u64 = 2_000_000_000;
 /// shared for life behind the block layer.
 struct Emmc2Completion {
     waiter: IrqParkWaiter,
-    #[cfg(feature = "storage-trace")]
-    trace: storage_trace::EngineTrace,
 }
 
 impl CompletionWait for Emmc2Completion {
@@ -250,11 +246,6 @@ impl CompletionWait for Emmc2Completion {
             | WaitOutcome::Quarantined
             | WaitOutcome::Aborted(_) => CompletionSignal::TimedOut,
         }
-    }
-
-    #[cfg(feature = "storage-trace")]
-    fn trace(&self, record: tairix_drv_storage_emmc2::trace::Trace) {
-        self.trace.record(record);
     }
 }
 
@@ -275,12 +266,10 @@ struct UnlockDelay;
 
 impl Delay for UnlockDelay {
     fn delay_us(&self, us: u32) {
-        storage_trace::line("emmc2 trace: delay", &[unsigned("us", us)]);
         let span_ns = u64::from(us) * 1_000;
         let parked =
             wait_now_ns().is_some_and(|now| park_until(deadline_for(now, span_ns)).is_ok());
         if !parked {
-            storage_trace::line("emmc2 trace: delay not parkable", &[unsigned("us", us)]);
             busy_delay_us(us);
         }
     }
@@ -629,15 +618,12 @@ fn emmc2_unlock<'a>(
         .map_err(|_| "root-unlock: device tree unreadable; emmc2 root unbound")?;
     // With no interrupt the driver would park forever, so fail closed.
     let intid = emmc2_spi(&fdt).ok_or("root-unlock: no emmc2 interrupt in DTB")?;
-    storage_trace::line("emmc2 trace: interrupt", &[unsigned("intid", intid)]);
     // An SDHCI controller signals by level until its status is cleared.
     let armed = Aarch64Floor::lines()
         .ok_or("root-unlock: no published IRQ table")?
         .bind(intid, Some(Trigger::Level), UNLOCK_TASK)?;
     let waiter = Emmc2Completion {
         waiter: armed.waiter(),
-        #[cfg(feature = "storage-trace")]
-        trace: storage_trace::EngineTrace::new(),
     };
 
     let mmio = register_map::<Aarch64Floor>()?;
@@ -656,8 +642,6 @@ fn emmc2_unlock<'a>(
         // the DMA host. Without the firmware the card is still brought up,
         // at 3.3 V, on the capabilities' own base clock.
         let mut firmware = Emmc2Firmware::open(&fdt, &mapper, &mut dma_pool, caller, audit);
-        trace_firmware(firmware.as_ref());
-        trace_dma_window(&binding.node, window);
         let dma_host: &'static Emmc2DmaHost<'static, _, dyn Sink + Sync> =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(Emmc2DmaHost::new(
                 dma_pool,
@@ -794,32 +778,8 @@ fn note_emmc2_link(audit: &dyn Sink, link: &Link) {
 /// the `vcmailbox` service is loaded from the store this bring-up reaches —
 /// and the transport is dropped before that store is served.
 struct Emmc2Firmware<'f> {
-    mailbox: TracedMailbox,
+    mailbox: MmioMailbox,
     supplies: Option<SdSupplies<'f>>,
-}
-
-/// The bring-up's doorbell, tracing each exchange's answer: the header code,
-/// and the first tag's code word and values, as the firmware left them.
-struct TracedMailbox(MmioMailbox);
-
-impl MailboxTransport for TracedMailbox {
-    fn exchange(&mut self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
-        let tag = message[2];
-        let answer = self.0.exchange(message);
-        let [mut t, mut h, mut c, mut v0, mut v1] = [[0u8; 16]; 5];
-        storage_trace::line(
-            "emmc2 trace: firmware exchange",
-            &[
-                hex("tag_hex", tag.into(), &mut t),
-                flag("answered", answer.is_ok()),
-                hex("header_hex", message[1].into(), &mut h),
-                hex("code_hex", message[4].into(), &mut c),
-                hex("value0_hex", message[5].into(), &mut v0),
-                hex("value1_hex", message[6].into(), &mut v1),
-            ],
-        );
-        answer
-    }
 }
 
 impl<'f> Emmc2Firmware<'f> {
@@ -856,20 +816,20 @@ impl<'f> Emmc2Firmware<'f> {
         )
         .ok()?;
         Some(Self {
-            mailbox: TracedMailbox(mailbox),
+            mailbox,
             supplies: find_sd_supplies(fdt),
         })
     }
 
     /// The base clock the firmware feeds the controller, when it reports one.
     fn base_clock_hz(&mut self) -> Option<u32> {
-        let answer = query_clock_rate(
+        query_clock_rate(
             &mut self.mailbox,
             FirmwareClock::Emmc2,
             ClockRateQuery::Current,
-        );
-        trace_firmware_clock(answer);
-        answer.ok().filter(|&hz| hz != 0)
+        )
+        .ok()
+        .filter(|&hz| hz != 0)
     }
 
     /// The card's supplies, switched over this transport and timed by
@@ -881,66 +841,6 @@ impl<'f> Emmc2Firmware<'f> {
             supplies,
             delay,
         )))
-    }
-}
-
-/// Trace what the firmware offers the bring-up: its doorbell, and the SD
-/// supplies the tree says it switches.
-fn trace_firmware(firmware: Option<&Emmc2Firmware<'_>>) {
-    let supplies = firmware.and_then(|firmware| firmware.supplies);
-    storage_trace::line(
-        "emmc2 trace: firmware",
-        &[
-            flag("mailbox", firmware.is_some()),
-            flag("supplies", supplies.is_some()),
-            unsigned(
-                "signalling_line",
-                supplies.map_or(u8::MAX, |s| s.signalling_line()),
-            ),
-            unsigned("power_line", supplies.map_or(u8::MAX, |s| s.power_line())),
-        ],
-    );
-}
-
-/// Trace the firmware's answer to the EMMC2 base-clock query.
-fn trace_firmware_clock(answer: Result<u32, MailboxError>) {
-    match answer {
-        Ok(hz) => storage_trace::line("emmc2 trace: firmware clock", &[unsigned("hz", hz)]),
-        Err(error) => {
-            storage_trace::debug_line("emmc2 trace: firmware clock refused", "error", &error);
-        }
-    }
-}
-
-/// Trace every DMA window the discovered node carries, and the one the
-/// staging will be carved in.
-fn trace_dma_window(node: &tairix_abi::HwNode, chosen: Option<DmaConstraint>) {
-    let dma = node
-        .resources()
-        .iter()
-        .filter(|r| r.kind() == Some(tairix_abi::HwResourceKind::Dma));
-    for window in dma {
-        let [mut base, mut length, mut bus] = [[0u8; 16]; 3];
-        storage_trace::line(
-            "emmc2 trace: dma resource",
-            &[
-                hex("base_hex", window.base(), &mut base),
-                hex("length_hex", window.length(), &mut length),
-                hex("bus_base_hex", window.translated_base(), &mut bus),
-                flag("translated", window.is_translated_dma_window()),
-            ],
-        );
-    }
-    let [mut limit, mut bus] = [[0u8; 16]; 2];
-    match chosen {
-        Some(window) => storage_trace::line(
-            "emmc2 trace: dma window",
-            &[
-                hex("addr_limit_hex", window.addr_limit, &mut limit),
-                hex("bus_base_hex", window.translated_base, &mut bus),
-            ],
-        ),
-        None => storage_trace::line("emmc2 trace: dma window", &[text("window", "none")]),
     }
 }
 
@@ -1049,30 +949,23 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> Emmc2DmaHost<'a, P, S> {
         }
     }
 
-    /// Carve `size` bytes inside `window`: the buffer's physical address,
-    /// CPU base, device address, and length.
+    /// Carve `size` bytes inside `window`: the buffer's CPU base, device
+    /// address, and length.
     fn carve(
         &self,
         size: usize,
         window: &DmaConstraint,
-    ) -> Result<(u64, core::ptr::NonNull<u8>, u64, usize), DriverError> {
+    ) -> Result<(core::ptr::NonNull<u8>, u64, usize), DriverError> {
         let mut pool = self.pool.lock();
-        let buf = match alloc_dma(&mut *pool, self.caller, size, window.addr_limit, self.audit) {
-            Ok(buf) => buf,
-            Err(refusal) => {
-                drop(pool);
-                storage_trace::debug_line("emmc2 trace: staging carve refused", "reason", &refusal);
-                // Any refusal leaves the driver on programmed I/O.
-                return Err(refusal.as_driver_error());
-            }
-        };
+        // Any refusal leaves the driver on programmed I/O.
+        let buf = alloc_dma(&mut *pool, self.caller, size, window.addr_limit, self.audit)
+            .map_err(DmaGateError::as_driver_error)?;
         let base = pool
             .slot_base(&buf)
             .map_err(|_| DriverError::LengthOutOfRange)?;
-        let phys = buf.phys().as_u64();
-        let device =
-            translate_device_addr(window, phys).map_err(|_| DriverError::LengthOutOfRange)?;
-        Ok((phys, base, device, buf.len()))
+        let device = translate_device_addr(window, buf.phys().as_u64())
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        Ok((base, device, buf.len()))
     }
 }
 
@@ -1084,28 +977,11 @@ fn sync_emmc2_dma_range(base: *const u8, len: usize) {
 
 impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for Emmc2DmaHost<'_, P, S> {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
-        storage_trace::line(
-            "emmc2 trace: staging carve",
-            &[
-                unsigned("bytes", size),
-                flag("window", self.window.is_some()),
-            ],
-        );
         if size == 0 {
             return Err(DriverError::BufferTooSmall);
         }
         let window = self.window.ok_or(DriverError::Unsupported)?;
-        let (phys, base, device, len) = self.carve(size, &window)?;
-        let [mut phys_buf, mut cpu_buf, mut device_buf] = [[0u8; 16]; 3];
-        storage_trace::line(
-            "emmc2 trace: staging carved",
-            &[
-                hex("phys_hex", phys, &mut phys_buf),
-                hex("cpu_hex", base.as_ptr().addr() as u64, &mut cpu_buf),
-                hex("device_hex", device, &mut device_buf),
-                unsigned("bytes", len),
-            ],
-        );
+        let (base, device, len) = self.carve(size, &window)?;
         // SAFETY: `carve` took exactly `len` bytes of zeroed,
         // physically-contiguous, guard-bracketed DMA memory from `alloc_dma`;
         // `base` is its non-null cacheable CPU base and `device` its address

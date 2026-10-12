@@ -9,7 +9,12 @@
 use crate::driver::clock::CLOCK_CONTROLLER_ENDPOINTS;
 use crate::driver::codec::CODEC_ENDPOINTS;
 use crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
-use crate::hwtree::NodeEndpointBlock;
+use crate::driver::encoder::ENCODER_ENDPOINTS;
+use crate::driver::i2c::I2C_CONTROLLER_ENDPOINTS;
+use crate::driver::irqline::INTERRUPT_LINE_ENDPOINTS;
+use crate::hwtree::{HwResource, NodeEndpointBlock};
+use crate::le::{put_u64, read_u64};
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::Errno;
 
 /// The most selector cells a request carries; discovery drops a wider entry
@@ -29,11 +34,24 @@ pub enum LinkRole {
     Clock = 2,
     /// An audio codec's digital audio interface (`codec-v1`).
     Codec = 3,
+    /// A second-level interrupt controller's line (`irqline-v1`).
+    InterruptLine = 4,
+    /// An I²C controller's target, or its whole bus (`i2c-v1`).
+    I2c = 5,
+    /// A display engine's encoder (`encoder-v1`).
+    Encoder = 6,
 }
 
 impl LinkRole {
     /// Every role.
-    pub const ALL: &'static [Self] = &[Self::Dma, Self::Clock, Self::Codec];
+    pub const ALL: &'static [Self] = &[
+        Self::Dma,
+        Self::Clock,
+        Self::Codec,
+        Self::InterruptLine,
+        Self::I2c,
+        Self::Encoder,
+    ];
 
     /// The node-indexed endpoints the role's suppliers serve.
     #[must_use]
@@ -42,6 +60,9 @@ impl LinkRole {
             Self::Dma => DMA_CONTROLLER_ENDPOINTS,
             Self::Clock => CLOCK_CONTROLLER_ENDPOINTS,
             Self::Codec => CODEC_ENDPOINTS,
+            Self::InterruptLine => INTERRUPT_LINE_ENDPOINTS,
+            Self::I2c => I2C_CONTROLLER_ENDPOINTS,
+            Self::Encoder => ENCODER_ENDPOINTS,
         }
     }
 
@@ -195,6 +216,70 @@ impl LinkRequest {
 
     pub(crate) const fn name_bytes(&self) -> [u8; LINK_NAME_MAX] {
         self.name
+    }
+}
+
+/// A region a link's supplier made for its consumer and delegated to it, as
+/// the consumer maps it.
+///
+/// The kernel binds a delegated mapping to the process that delegated it, so
+/// the consumer names the supplier's instance when it maps the grant; a
+/// grantor that did not delegate `grant` maps nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RegionGrant {
+    /// The kernel's handle for the consumer's mapping of the region.
+    pub grant: u64,
+    /// The supplier instance that delegated it.
+    pub grantor: ProcId,
+}
+
+impl RegionGrant {
+    /// Bytes of the wire form: the handle, then the grantor.
+    pub const WIRE_LEN: usize = 8 + PROC_ID_LEN;
+
+    /// The wire form.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u64(&mut out, 0, self.grant);
+        out[8..].copy_from_slice(&self.grantor.to_le_bytes());
+        out
+    }
+
+    /// Decode the wire form.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a wrong length, and
+    /// [`Errno::OutOfRange`] for the reserved handle `0` or the kernel's own
+    /// instance as grantor: neither names a region a supplier delegated.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() != Self::WIRE_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let grant = read_u64(bytes, 0);
+        let grantor = ProcId::from_bytes(&bytes[8..])?;
+        if grant == 0 || grantor.is_kernel() {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self { grant, grantor })
+    }
+}
+
+/// The one link of `role` among a node's `resources`: `None` when it holds
+/// none, or more than one and so no one supplier.
+#[must_use]
+pub fn sole_link<'r>(
+    resources: impl IntoIterator<Item = &'r HwResource>,
+    role: LinkRole,
+) -> Option<LinkRequest> {
+    let mut links = resources
+        .into_iter()
+        .filter_map(|resource| resource.link_request().ok())
+        .filter(|link| link.role() == role);
+    match (links.next(), links.next()) {
+        (Some(link), None) => Some(link),
+        _ => None,
     }
 }
 

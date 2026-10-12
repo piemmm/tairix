@@ -16,6 +16,7 @@ use tairix_abi::Errno;
 fn sink(format: SampleFormat, map: ChannelMap) -> SinkFormat {
     SinkFormat {
         format,
+        resolution: format.valid_bits(),
         rate: Rate::HZ_48000,
         channel_map: map,
     }
@@ -300,6 +301,105 @@ fn dither_is_applied_where_the_destination_is_narrower() {
         let without = i16::from_le_bytes([bare[frame * 2], bare[frame * 2 + 1]]);
         assert!((with - without).abs() <= 1, "frame {frame}");
     }
+}
+
+/// A device resolving fewer bits than its encoding carries hears its
+/// samples on that coarser grid, dithered: the bits below it are zero, and
+/// a constant level between two steps lands on both.
+#[test]
+fn a_sink_resolving_fewer_bits_is_dithered_onto_its_grid() {
+    let map = ChannelMap::MONO;
+    let matrix = identity(map);
+    let level = 0x0012_3480i32;
+    let source: Vec<u8> = (0..64).flat_map(|_| level.to_le_bytes()).collect();
+    let stream = StreamMix {
+        format: SampleFormat::S24In32,
+        matrix: &matrix,
+        gain: 1.0,
+        resampled: false,
+        samples: &source,
+    };
+    let narrow = SinkFormat {
+        resolution: 16,
+        ..sink(SampleFormat::S24In32, map)
+    };
+    let mut out = vec![0u8; 256];
+    let mut mixer = Mixer::new(narrow, 64, 11).expect("mixer");
+    mixer.mix([stream], 64, &mut out).expect("mixed");
+    let words: Vec<i32> = out
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| i32::from_le_bytes(*word))
+        .collect();
+    assert!(
+        words.iter().all(|word| word.trailing_zeros() >= 8),
+        "on the grid"
+    );
+    assert!(
+        words.contains(&0x0012_3400) && words.contains(&0x0012_3500),
+        "dithered"
+    );
+    mixer.set_dither(Dither::None);
+    mixer.mix([stream], 64, &mut out).expect("mixed");
+    assert!(
+        out.as_chunks::<4>()
+            .0
+            .iter()
+            .all(|word| i32::from_le_bytes(*word) == 0x0012_3500),
+        "half a step rounds away from zero"
+    );
+    mixer.set_resolution(24).expect("the encoding's own");
+    mixer.mix([stream], 64, &mut out).expect("mixed");
+    assert_eq!(
+        out, source,
+        "bit-exact again at the encoding's own resolution"
+    );
+}
+
+#[test]
+fn a_resolution_the_encoding_lacks_is_refused() {
+    let map = ChannelMap::MONO;
+    for resolution in [0, 17] {
+        let sink = SinkFormat {
+            resolution,
+            ..sink(SampleFormat::S16, map)
+        };
+        assert!(matches!(Mixer::new(sink, 8, 1), Err(Errno::OutOfRange)));
+    }
+    let mut mixer = Mixer::new(sink(SampleFormat::S16, map), 8, 1).expect("mixer");
+    assert_eq!(mixer.set_resolution(0), Err(Errno::OutOfRange));
+    assert_eq!(mixer.set_resolution(12), Ok(()));
+}
+
+/// A float sink has no grid: nothing is dithered and nothing requantised,
+/// whatever resolution it states.
+#[test]
+fn a_float_sink_is_never_dithered_or_requantised() {
+    let map = ChannelMap::MONO;
+    let matrix = identity(map);
+    let source: Vec<u8> = (0..8).flat_map(|_| 0.3f32.to_le_bytes()).collect();
+    let stream = StreamMix {
+        format: SampleFormat::F32,
+        matrix: &matrix,
+        gain: 1.0,
+        resampled: true,
+        samples: &source,
+    };
+    let float = SinkFormat {
+        resolution: 16,
+        ..sink(SampleFormat::F32, map)
+    };
+    let mut out = vec![0u8; source.len()];
+    Mixer::new(float, 8, 5)
+        .expect("mixer")
+        .mix([stream, stream], 8, &mut out)
+        .expect("mixed");
+    assert!(out
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|word| f32::from_le_bytes(*word) == 0.6));
 }
 
 /// A sum carries content below every contributor's own step, so two

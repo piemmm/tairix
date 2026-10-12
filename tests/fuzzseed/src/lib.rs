@@ -328,6 +328,7 @@ impl Prng {
 }
 
 pub mod meter;
+pub mod registry;
 
 /// The shared `proptest` stateful-model runner used by the models.
 ///

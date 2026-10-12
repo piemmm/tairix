@@ -1,12 +1,11 @@
-//! The server driven with a kernel that answers the grant questions by the
-//! kernel's own rule, over a codec that records what it was asked.
+//! The server answered through the shared fake kernel, over a codec that
+//! records what it was asked.
 
-extern crate std;
+extern crate alloc;
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::rc::Rc;
-use std::vec::Vec;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use tairix_abi::driver::audio::{GainRange, Rate, RateSupport};
 use tairix_abi::driver::codec::{
@@ -16,9 +15,10 @@ use tairix_abi::driver::codec::{
 use tairix_abi::hwlink::LinkRequest;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{DriverError, Errno, ProcId, PROC_ID_LEN};
-use tairix_drvrt::SupplierHost;
+use tairix_drvrt::testkit::{FakeKernel, Records};
+use tairix_drvrt::Supplier;
 
-use crate::{CodecServer, Record, Recorder};
+use crate::{CodecServer, Record};
 
 const fn instance(byte: u8) -> ProcId {
     ProcId::from_raw([byte; PROC_ID_LEN])
@@ -48,65 +48,6 @@ fn link(format: DaiFormat, index: u8) -> LinkRequest {
 
 fn rate() -> Rate {
     Rate::new(48_000).expect("a rate")
-}
-
-#[derive(Default)]
-struct Kernel {
-    callers: BTreeMap<u64, ProcId>,
-    next_ticket: u64,
-    holdings: Vec<(ProcId, HwResource)>,
-    ended: Vec<ProcId>,
-    watched: Vec<ProcId>,
-    replies: Vec<(u64, Vec<u8>)>,
-    records: Vec<Record>,
-}
-
-#[derive(Clone)]
-struct Host(Rc<RefCell<Kernel>>);
-
-impl SupplierHost for Host {
-    fn caller(&self, ticket: u64) -> Result<ProcId, Errno> {
-        self.0
-            .borrow()
-            .callers
-            .get(&ticket)
-            .copied()
-            .ok_or(Errno::NotFound)
-    }
-    fn caller_holds(&self, ticket: u64, record: &HwResource) -> Result<bool, Errno> {
-        let kernel = self.0.borrow();
-        let caller = kernel.callers.get(&ticket).ok_or(Errno::NotFound)?;
-        Ok(kernel
-            .holdings
-            .iter()
-            .any(|(holder, grant)| holder == caller && grant.covers(record)))
-    }
-    fn reply(&mut self, ticket: u64, frame: &[u8]) -> Result<(), Errno> {
-        self.0.borrow_mut().replies.push((ticket, frame.to_vec()));
-        Ok(())
-    }
-    fn watch(&mut self, peer: ProcId) -> Result<(), Errno> {
-        let mut kernel = self.0.borrow_mut();
-        if kernel.ended.contains(&peer) {
-            return Err(Errno::NotFound);
-        }
-        if !kernel.watched.contains(&peer) {
-            kernel.watched.push(peer);
-        }
-        Ok(())
-    }
-    fn unwatch(&mut self, peer: ProcId) {
-        self.0
-            .borrow_mut()
-            .watched
-            .retain(|watched| *watched != peer);
-    }
-}
-
-impl Recorder for Host {
-    fn record(&mut self, record: Record) {
-        self.0.borrow_mut().records.push(record);
-    }
 }
 
 /// What the codec was asked, in order.
@@ -159,29 +100,29 @@ impl Codec for Part {
 }
 
 struct Rig {
-    kernel: Rc<RefCell<Kernel>>,
+    kernel: FakeKernel,
+    records: Records<Record>,
     calls: Rc<RefCell<Vec<Call>>>,
-    server: CodecServer<Part, Host, Host>,
+    server: CodecServer<Part, FakeKernel, Records<Record>>,
 }
 
 impl Rig {
     fn new() -> Self {
-        let kernel = Rc::new(RefCell::new(Kernel::default()));
+        let kernel = FakeKernel::new();
         for (holder, index) in [(I2S, 0), (OTHER, 1)] {
-            kernel
-                .borrow_mut()
-                .holdings
-                .push((holder, HwResource::request(&link(DaiFormat::I2s, index))));
+            kernel.grant(holder, HwResource::request(&link(DaiFormat::I2s, index)));
         }
+        let records = Records::default();
         let calls = Rc::new(RefCell::new(Vec::new()));
         let server = CodecServer::new(
             Part(calls.clone()),
-            Host(kernel.clone()),
-            Host(kernel.clone()),
+            kernel.clone(),
+            records.clone(),
             endpoint(),
         );
         Self {
             kernel,
+            records,
             calls,
             server,
         }
@@ -194,19 +135,9 @@ impl Rig {
     }
 
     fn raw(&mut self, caller: ProcId, frame: &[u8]) -> Vec<u8> {
-        let ticket = {
-            let mut kernel = self.kernel.borrow_mut();
-            let ticket = kernel.next_ticket;
-            kernel.next_ticket += 1;
-            kernel.callers.insert(ticket, caller);
-            ticket
-        };
+        let ticket = self.kernel.call(caller);
         self.server.serve(ticket, frame);
-        let mut kernel = self.kernel.borrow_mut();
-        kernel.callers.remove(&ticket);
-        let (answered, reply) = kernel.replies.pop().expect("every call is answered");
-        assert_eq!(answered, ticket);
-        reply
+        self.kernel.answer(ticket).expect("every call is answered")
     }
 
     fn calls(&self) -> Vec<Call> {
@@ -229,7 +160,7 @@ fn any_attested_caller_learns_what_the_codec_accepts_without_taking_it() {
         decode_describe_reply(&rig.call(OTHER, &CodecRequest::Describe(link(DaiFormat::I2s, 1))))
             .expect("facts");
     assert!(facts.formats.contains(DaiFormat::I2s));
-    assert!(rig.kernel.borrow().watched.is_empty(), "nothing held");
+    assert!(rig.kernel.watched().is_empty(), "nothing held");
 }
 
 #[test]
@@ -237,8 +168,8 @@ fn configuring_takes_the_codec_in_the_attested_links_framing() {
     let mut rig = Rig::new();
     assert_eq!(decode_done_reply(&rig.call(I2S, &configure(0))), Ok(()));
     assert_eq!(rig.calls(), [Call::Configure(DaiFormat::I2s, 48_000, 32)]);
-    assert_eq!(rig.kernel.borrow().watched, [I2S]);
-    assert_eq!(rig.kernel.borrow().records, [Record::Held { holder: I2S }]);
+    assert_eq!(rig.kernel.watched(), [I2S]);
+    assert_eq!(rig.records.all(), [Record::Held { holder: I2S }]);
     assert_eq!(
         decode_gain_reply(&rig.call(
             I2S,
@@ -261,7 +192,7 @@ fn another_live_driver_is_refused_until_the_holder_ends() {
         decode_done_reply(&rig.call(OTHER, &configure(1))),
         Err(Errno::Busy)
     );
-    rig.kernel.borrow_mut().ended.push(I2S);
+    rig.kernel.end(I2S);
     rig.server.peer_exited(I2S);
     assert_eq!(
         rig.calls().last(),
@@ -275,12 +206,11 @@ fn another_live_driver_is_refused_until_the_holder_ends() {
 fn a_restarted_driver_takes_over_from_a_holder_whose_end_was_not_yet_served() {
     let mut rig = Rig::new();
     rig.call(I2S, &configure(0));
-    rig.kernel.borrow_mut().ended.push(I2S);
+    rig.kernel.end(I2S);
     assert_eq!(decode_done_reply(&rig.call(OTHER, &configure(1))), Ok(()));
     assert!(rig
-        .kernel
-        .borrow()
         .records
+        .all()
         .contains(&Record::Abandoned { holder: I2S }));
 }
 
@@ -314,10 +244,7 @@ fn an_unattested_link_another_endpoint_or_a_bad_frame_is_refused() {
 fn a_framing_the_codec_refuses_comes_back_as_not_supported() {
     let mut rig = Rig::new();
     let left = link(DaiFormat::LeftJustified, 2);
-    rig.kernel
-        .borrow_mut()
-        .holdings
-        .push((I2S, HwResource::request(&left)));
+    rig.kernel.grant(I2S, HwResource::request(&left));
     assert_eq!(
         decode_done_reply(&rig.call(
             I2S,

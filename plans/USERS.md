@@ -131,6 +131,14 @@ Compiled into the kernel (`lib/users/src/provision.rs`):
 | `sysinfod` | 11 | `services` | no-login | none | sysinfo capabilities only |
 | `seatmgr` | 12 | `services` | no-login | none | seat capabilities only |
 | `login` | 13 | `services` | no-login | none | incl. `CAP_SPAWN_AS_USER` |
+| `netstack` | 14 | `services` | no-login | none | network capabilities only |
+| `fontd` | 15 | `services` | no-login | none | the font store's read |
+| `greeter` | 16 | `services` | no-login | none | one seat's display and input |
+| `confd` | 17 | `services` | no-login | none | incl. `CAP_APPDATA_ADMIN` |
+| `timed` | 18 | `services` | no-login | none | incl. `CAP_TIME_SET` |
+| `audiod` | 19 | `services` | no-login | none | incl. `CAP_AUDIO_DEVICE` |
+| `discoveryd` | 20 | `services` | no-login | none | multicast DNS's sockets |
+| `soundd` | 21 | `services` | no-login | none | what any player holds |
 
 Seeded on disk (human data): the debug image's `root` (uid
 `FIRST_USER_UID` = 1000, primary group `wheel` gid `FIRST_USER_GID` =

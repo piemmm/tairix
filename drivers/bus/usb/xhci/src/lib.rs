@@ -39,7 +39,7 @@
 extern crate alloc;
 
 use tairix_abi::driver::pci::CLASS_USB_XHCI;
-use tairix_abi::{DriverBindKey, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
 use tairix_usb::XHCI_COMPATIBLE;
 
 pub mod bringup;
@@ -56,6 +56,21 @@ const BIND_PRIORITY: u16 = 10;
 /// exactly (`drivers/bus/usb/vl805`, priority 20), which brings its function
 /// up first and publishes the `usb,xhci` node this driver then binds.
 const CLASS_BIND_PRIORITY: u16 = 5;
+
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the register BAR, its DMA working set, the completion interrupt, the shared
+/// URB buffer and its restricted-sender endpoint, publishing each interface
+/// node, its diagnostics, and the real-time class its report pump runs in.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::MMIO_MAP,
+    CapabilityId::MEM_DMA,
+    CapabilityId::IRQ_BIND,
+    CapabilityId::SHM,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::HW_EMIT,
+    CapabilityId::LOG_EMIT,
+    CapabilityId::SCHED_REALTIME,
+];
 
 /// This driver's hardware bind table: the xHCI USB host controller, matched by
 /// the [`XHCI_COMPATIBLE`] `compatible` string a bus driver publishes it under

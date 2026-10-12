@@ -18,25 +18,27 @@ workspace = true
 # freestanding-only and an inert host stub elsewhere (`build.rs`).
 
 [dependencies]
-# The `dmaengine-v1` protocol and class traits, the hardware-tree records the
-# endpoint checks, the register seam and the DMA carve seam.
+# The `dmaengine-v1` class traits, the hardware-tree records the engines check,
+# the register seam and the DMA carve seam.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The write barrier between building a chain and starting the channel on it.
 tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
-# The supplier seam the endpoint asks the kernel about its callers through,
-# and in the driver process the grants the node was admitted with, its
-# register window and its carves.
-tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 
 [dev-dependencies]
+# The rule the device manager matched the node by, which picks the engine.
+tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
+# The endpoint the engines are served through, driven over them in the tests.
+tairix-dmaengine = { path = "../../../lib/dmaengine", version = "=0.0.0" }
+# The fake kernel the endpoint tests are answered through.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0", features = ["test-support"] }
 # The endpoint walk draws its steps through the shared seed seam, so a failing
 # run is reproducible from its logged seed. Test scaffolding only.
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 [target.'cfg(target_os = "none")'.dependencies]
-# The capability-set type the rt-backed host is built over.
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# Every decision the endpoint takes, recorded with a stable event id.
-tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-# `_start`, the wait set, the call endpoint and the shared-region calls.
+# The rule the device manager matched the node by, which picks the engine.
+tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
+# The node's bring-up and the endpoint's serve loop.
+tairix-dmaengine = { path = "../../../lib/dmaengine", version = "=0.0.0" }
+# `_start` and the driver's own node record.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

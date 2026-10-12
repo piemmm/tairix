@@ -7,7 +7,8 @@
 //! grant names it, and admitted to the audio service alone: nobody else may
 //! forge a stream's state into it. The service hands a closed stream's slot to
 //! the next stream, so a mailbox stays bound for the life of the process and
-//! is bound only the first time a grant names it.
+//! is bound only the first time a grant names it. Each stream reads its own
+//! mailbox, so one process may hold several streams at once.
 
 use alloc::vec::Vec;
 
@@ -28,13 +29,11 @@ const NOTIFY_CAPACITY: usize = 64;
 /// The wait-set token the blocking wait parks on its mailbox under.
 const NOTIFY_TOKEN: u64 = 1;
 
-/// The audio service's rendezvous, and the mailbox the current stream's
+/// The audio service's rendezvous, and the mailboxes its streams'
 /// notifications arrive in.
 pub struct RtAudio {
     /// The mailboxes this process has bound, each admitted to the service.
     bound: Vec<u64>,
-    /// The current stream's mailbox.
-    notify: Option<u64>,
     /// The wait-set the blocking wait parks on.
     parked: Option<u64>,
     /// The mailbox that wait-set watches.
@@ -53,7 +52,6 @@ impl RtAudio {
     pub const fn new() -> Self {
         Self {
             bound: Vec::new(),
-            notify: None,
             parked: None,
             watching: None,
         }
@@ -76,15 +74,16 @@ impl RtAudio {
             tairix_rt::port_admit(port, AUDIO_ENDPOINT)?;
             self.bound.push(port);
         }
-        self.notify = Some(port);
         Ok(())
     }
 
-    /// The mailbox the current stream's notifications arrive in, for a caller
-    /// that parks on a wait-set of its own.
-    #[must_use]
-    pub const fn notify_port(&self) -> Option<u64> {
-        self.notify
+    /// `mailbox`, refused unless this transport bound it for a stream.
+    fn bound(&self, mailbox: u64) -> Result<u64, Errno> {
+        if self.bound.contains(&mailbox) {
+            Ok(mailbox)
+        } else {
+            Err(Errno::NotConnected)
+        }
     }
 
     /// The wait-set the blocking wait parks on, watching `port`.
@@ -93,7 +92,7 @@ impl RtAudio {
             set
         } else {
             let created = tairix_rt::waitset_create();
-            let set = u64::try_from(created).map_err(|_| Errno::from_syscall(created))?;
+            let set = Errno::syscall_result(created)?;
             self.parked = Some(set);
             set
         };
@@ -123,10 +122,10 @@ impl AudioTransport for RtAudio {
         tairix_rt::ipc_call(AUDIO_ENDPOINT, request, reply).map_err(Errno::from_syscall)
     }
 
-    fn wait_notify(&mut self, out: &mut [u8]) -> Result<usize, Errno> {
-        let port = self.notify.ok_or(Errno::NotConnected)?;
+    fn wait_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<usize, Errno> {
+        let port = self.bound(mailbox)?;
         loop {
-            if let Some(len) = self.try_notify(out)? {
+            if let Some(len) = self.try_notify(port, out)? {
                 return Ok(len);
             }
             let set = self.wait_set(port)?;
@@ -138,8 +137,8 @@ impl AudioTransport for RtAudio {
         }
     }
 
-    fn try_notify(&mut self, out: &mut [u8]) -> Result<Option<usize>, Errno> {
-        let port = self.notify.ok_or(Errno::NotConnected)?;
+    fn try_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<Option<usize>, Errno> {
+        let port = self.bound(mailbox)?;
         let mut from = [0u8; ORIGIN_WIRE_LEN];
         match tairix_rt::ipc_recv(port, out, &mut from).map_err(Errno::from_syscall) {
             Ok(len) => Ok(Some(len)),
@@ -220,6 +219,13 @@ impl LiveStream {
     #[must_use]
     pub const fn geometry(&self) -> PcmGeometry {
         self.geometry
+    }
+
+    /// The mailbox this stream's notifications arrive in, for a caller that
+    /// parks on a wait-set of its own.
+    #[must_use]
+    pub const fn notify_port(&self) -> u64 {
+        self.client.grant().notify_endpoint
     }
 
     /// The shared ring, bound for one transfer.

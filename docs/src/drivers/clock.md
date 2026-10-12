@@ -30,16 +30,24 @@ serves.
 
 | Operation | Answer |
 |---|---|
-| `Describe(link)` | the clock's rate, zero while stopped, and whether another process holds it |
-| `Run { link, hz }` | the rate the clock now runs at, as near `hz` as the controller can make it |
-| `Release(link)` | the caller's hold given up; the last holder's release stops the clock |
+| `Describe(link)` | the clock's rate, zero while stopped, the highest rate it can run at, and whether another process holds it |
+| `Run { link, hz }` | an exact clock's rate, as near `hz` as the controller can make it |
+| `Floor { link, hz }` | a floored clock's rate, the lowest the controller makes at or above every floor stated |
+| `Release(link)` | the caller's hold given up |
 
-A clock is held by every process that runs it and runs at the rate the first
-set. Another may join it at that rate and is refused `Busy` at any other, so
-no consumer's stream is retimed under it; once it is held by one process
-alone, that process may retune it. A holder that ends has its holds dropped,
-and the clock stops with its last. A request naming a clock the controller
-does not serve is refused `NotSupported`.
+A controller states each clock's policy. An exact clock runs at the rate its
+first holder set: another may join it at that rate and is refused `Busy` at
+any other, so no consumer's stream is retimed under it, and only a sole holder
+may retune it. A floored clock — one several consumers share, or a gate that
+runs only at its parent's rate — runs at no less than the highest floor any
+holder states, and is refused `OutOfRange` a floor it cannot meet rather than
+run slower. Each policy refuses the other's request `NotSupported`. A holder
+that ends has its holds dropped; the last holder's release or end returns the
+clock unheld. A request naming a clock the controller does not serve is
+refused `NotSupported`.
+
+The endpoint and every rule above are written once, in `lib/clock`
+([`tairix-clock`](../lib/clock.md)); a driver supplies only its hardware.
 
 ## BCM2711 clock manager (`drivers/clock/bcm2711_cprman`)
 
@@ -67,3 +75,37 @@ the general-purpose ones.
   alone and the request refused.
 - **What it leaves alone.** A clock the firmware left running is described as
   it is and never stopped unasked.
+
+## BCM2711 DVP clock gates (`drivers/clock/bcm2711_dvp`)
+
+Binds `brcm,brcm2711-dvp` and serves its two gates, binding ids 0 and 1: the
+108 MHz clock each HDMI block's audio logic runs from, gated in the block's
+`MISC_CONFIG` register by a bit set to close it. A gate runs only at its
+parent's rate, read from the node's `fixed-clock` entry, so each is floored:
+an HDMI driver states a floor no higher than that rate and holds its gate open
+while its block is up. Opening or closing one gate leaves every other bit of
+the register as it was, and a gate the firmware left open is never closed
+unasked. The block's HDMI resets are not served: an HDMI block is brought up by
+programming it, and Linux's reset of it through this block does nothing.
+
+## Raspberry Pi firmware clocks (`drivers/clock/rpi_firmware`)
+
+Binds `raspberrypi,firmware-clocks`: the clocks the `VideoCore` firmware owns,
+which no register reaches, only a property exchange with the mailbox service.
+The service admits this node's driver alone, and only for the clocks it
+drives (`lib/vcmailbox`'s `LINKED_CLOCKS` and the ARM clock). The driver
+serves two roles:
+
+- **The ARM clock** is the machine's frequency mechanism
+  ([CPU frequency](../architecture/cpu-frequency.md)): on a thread of its own
+  the driver applies the kernel governor's targets.
+- **The display's clocks** — the core clock (binding id 4) the display engine
+  runs from, and the HDMI blocks' state-machine (13) and pixel-path (14)
+  clocks — are served over `clock-v1`, each floored. A clock runs at the rate
+  the firmware makes for the highest floor its holders state, never below the
+  least the firmware accepts, and returns to the rate it ran at before once
+  its last holder leaves; one the firmware had not started rests at the least
+  it accepts, since the interface cannot stop a clock. The firmware rounds, so
+  every reply carries its own answer. A clock the firmware reports no range
+  for is not served, and the ARM clock is never reachable through a link.
+

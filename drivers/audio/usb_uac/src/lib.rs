@@ -13,7 +13,7 @@
 //! interface, and it holds no controller register, DMA or interrupt.
 //!
 //! The `lib` target is the driver's identity — [`BIND_KEYS`] and
-//! [`REQUIRED_CAPS`], which the image builder authors its signed manifest
+//! [`REQUIRED_CAPABILITIES`], which the image builder authors its signed manifest
 //! from — and its host-testable model and engine; `src/main.rs` is the `Run`
 //! program.
 //!
@@ -55,7 +55,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[
 /// requests: map its interface's shared buffer and its streams' regions, call
 /// its interface's URB endpoint and bind its stream ports, bind the reserved
 /// device-channel endpoint, publish the device channel's node, and log.
-pub const REQUIRED_CAPS: &[CapabilityId] = &[
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::SHM,
     CapabilityId::IPC_ENDPOINT,
     CapabilityId::IPC_BIND_PRIVILEGED,

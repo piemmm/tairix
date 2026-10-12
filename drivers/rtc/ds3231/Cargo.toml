@@ -40,9 +40,10 @@ tairix-i2c = { path = "../../../lib/i2c", version = "=0.0.0", features = [
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# The user-space driver runtime: the endpoint grant this chip's transfer port
-# resolves to, and the client half of the I2C transfer wire.
+# The user-space driver runtime: the node's grants.
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# The target channel this chip is reached through.
+tairix-linkclient = { path = "../../../lib/linkclient", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, and the `call_create` / `call_recv` / `call_reply` wrappers.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

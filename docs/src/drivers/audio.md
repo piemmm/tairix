@@ -35,12 +35,12 @@ the driver that clocks them out.
 | Type | What it fixes |
 |---|---|
 | `SampleFormat` | the six encodings the stack converts between, and each one's silence byte |
-| `ChannelMap` | the interleave order, positions unique, `Mono` only alone |
+| `ChannelMap` | the interleave order over the 7.1 positions and 6.1's rear centre, positions unique, `Mono` only alone |
 | `Rate` | a sample rate inside the range a real converter runs at |
 | `RateSupport` | what a device can be clocked at: a discrete list, or a continuous range |
 | `Frames` | a monotone position from the start of a stream |
 | `GainRange` | a hardware gain control in hundredths of a decibel |
-| `AudioEndpointFacts` | everything the mixer needs to configure one sink or source |
+| `AudioEndpointFacts` | everything the mixer needs to configure one sink or source, including the bits of a sample it resolves where its encoding carries more |
 
 Two details are load-bearing rather than decorative. Unsigned eight-bit PCM's
 silence is `0x80`, not zero, so `SampleFormat::silence_byte` exists and a gap
@@ -48,6 +48,13 @@ filled without it would click. And `RateSupport` models both a crystal-driven
 codec's handful of discrete rates *and* a USB Audio Class 2 clock source's
 continuous range, because modelling only the first would force a continuous
 device to publish an invented list.
+
+An endpoint's `resolution` is ALSA's significant bits: where a converter
+resolves fewer bits than the encoding it takes carries — a 24-bit sample in a
+32-bit container — the facts say so, and the mixer quantises, dithered, to
+that grid rather than leaving the device to truncate. USB Audio states its
+format descriptor's bit resolution, HD Audio its converter's widest size, and
+the Pi's HDMI transmitters the widest sample their sink takes.
 
 There is no period or buffer *setting* in the facts — only the bounds the
 hardware imposes. The depth is derived from those bounds and the client's
@@ -152,7 +159,7 @@ period is under 400 KiB/s.
 
 Between doorbells a driver parks on its device's event sources: its interrupt
 line, the ports a bus driver reports the device's progress on, or the answer
-to the period wait it posted to a DMA controller (`tairix_audiochan::Wake`). When a period elapses it wakes the mixer, and the
+to the period wait it posted to a DMA controller (`tairix_abi::driver::DeviceWake`). When a period elapses it wakes the mixer, and the
 mixer — parked on that port in its wait set — issues the next `Service`. The
 device's own period events are the only timer in the stack.
 
@@ -378,9 +385,10 @@ planned into endpoints from that alone:
   0 dB, a mixer's other inputs shut. The endpoint's gain is the first
   adjustable amplifier from its converter outwards, and its mute the first
   mutable one; with no mute, its pins stop driving.
-* HDMI and DisplayPort pins are named for their monitor from the display's
-  ELD and are present while it is valid; configuring one sends the audio
-  infoframe.
+* HDMI and DisplayPort pins are named for their monitor and the link it is
+  on from the display's ELD, read whole and parsed by `lib/edid`
+  ([`tairix-edid`](../lib/edid.md)), and are present while it is valid;
+  configuring one sends the audio infoframe.
 
 **Codec commands wait on the response ring's interrupt.** A command parks on
 the controller's line until its answer lands; a stream's period that ends
@@ -449,8 +457,8 @@ so the codec's driver reads them from the attested link
   answers with what the part takes — 8 kHz to 384 kHz, 16-, 24- or 32-bit, I²S
   or left-justified as its pin is strapped — and no gain, and refuses a link
   asking it to drive the clocks or to invert one.
-* **`drivers/audio/pcm5122`** reaches its part over the I²C transfer endpoint
-  its node's grant names. It sets the part to follow the interface's clocks,
+* **`drivers/audio/pcm5122`** reaches its part over the I²C target channel
+  its node's link names. It sets the part to follow the interface's clocks,
   its PLL fed from the bit clock, programs the framing, the word length and
   the bit clock's polarity — the part has no frame clock polarity, so a link
   inverting that is refused — and serves the part's digital volume, 24 dB to

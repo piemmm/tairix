@@ -7,7 +7,7 @@ use tairix_abi::blkio::{
     BlkStatus, FaultDomain, FaultDomainState, RecoveryAction, RecoveryLadder, BLK_COMPLETION_LEN,
     BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
-use tairix_abi::hwtree::{ancestor_imposed_status_from_snapshot, HW_NODE_ROOT};
+use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource};
@@ -21,7 +21,7 @@ use tairix_drv_storage_usb_msd::recover::{serve_lun_with_domain, LunRecovery, Se
 use tairix_drv_storage_usb_msd::scsi::{
     CommandSet, LunBlock, LunState, ScsiDevice, ScsiTransport, DEVICE_TYPE_DIRECT_ACCESS, MAX_LUNS,
 };
-use tairix_drv_storage_usb_msd::serve::blk_block_for;
+use tairix_drv_storage_usb_msd::serve::{blk_block_for, publish_units};
 use tairix_drv_storage_usb_msd::uas::{Uas, UasPipes};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -117,21 +117,6 @@ const BLK_ENDPOINT_CAPACITY: usize = 4;
 /// standard start-of-day UNIT ATTENTION drain — so this is a fixed
 /// number of real round trips, never a hot spin.
 const READY_ATTEMPTS: usize = 8;
-
-/// The capability set the driver host re-checks up front; the kernel is
-/// the authority and re-checks every trap.
-///
-/// Built from the driver crate's one
-/// [`REQUIRED_CAPS`](tairix_drv_storage_usb_msd::REQUIRED_CAPS) list, which
-/// the image builder also authors the signed manifest from, so a capability
-/// the program requests can never be one the manifest forgot to ask for.
-fn driver_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    for &cap in tairix_drv_storage_usb_msd::REQUIRED_CAPS {
-        caps.insert(cap);
-    }
-    caps
-}
 
 /// The class-side URB transport: one synchronous, capability-checked
 /// `ipc_call` to the host-controller driver's per-interface endpoint. It
@@ -384,11 +369,13 @@ fn bring_up_lun<T: ScsiTransport>(
 
 /// Retract every published LUN node (device unplugged / fatal exit).
 fn retract_all(luns: &[Option<LunServe>]) {
-    for lun in luns.iter().flatten() {
-        // A device unplug or fatal exit is a surprise removal, never refused
-        // for being in use, so the flag set is empty.
-        let _ = tairix_rt::hw_remove_node(lun.node_id, tairix_abi::HwRemoveFlags::empty());
-    }
+    luns.iter().flatten().for_each(retract);
+}
+
+fn retract(lun: &LunServe) {
+    // A device unplug or fatal exit is a surprise removal, never refused for
+    // being in use, so the flag set is empty.
+    let _ = tairix_rt::hw_remove_node(lun.node_id, tairix_abi::HwRemoveFlags::empty());
 }
 
 /// Advance every published LUN's recovery grace window on a pure time tick
@@ -509,38 +496,17 @@ fn note_domain_edge(before: FaultDomainState, after: FaultDomainState, owner: u3
     }
 }
 
-/// Bounded read buffer for the best-effort ancestor-health snapshot read.
-///
-/// This is **not** a capacity limit on anything: it sizes the stack buffer the
-/// recovery-path tree read uses. A discovered tree that does not fit simply
-/// leaves ancestor attribution unavailable for that read — the leaf then
-/// answers on its own device health, which is always correct — so the read
-/// never grows an unbounded buffer on a driver's recovery path and never
-/// fails a request. Ample for the trees TAIRiX's Tier-1 targets discover.
-const TREE_SNAPSHOT_BUF: usize = 8192;
-
 /// The [`BlkStatus`] this driver's interior fault-domain ancestors currently
-/// impose on a LUN request, read from the live hardware-tree snapshot.
+/// impose on a LUN request, as the kernel folds it over the live tree.
 ///
 /// Called by [`serve_lun_with_domain`] **only on the recovery path** (a stall
-/// the device did not answer definitively), so a healthy transfer never reads
-/// the tree. It reads the current snapshot into a bounded stack buffer and
-/// folds the published health of this driver's ancestor chain
-/// ([`ancestor_imposed_status_from_snapshot`]), so a resetting controller/hub
-/// is attributed to the fault domain rather than to the disk.
-///
-/// It fails **safe**: no matched node ([`self_node`] is `None`), a refused
-/// read, or a snapshot larger than the buffer all yield [`BlkStatus::Ok`] (no
-/// ancestor imposes anything), so the leaf simply answers on its own health.
-fn ancestor_status(self_node: Option<u32>) -> BlkStatus {
-    let Some(node) = self_node else {
-        return BlkStatus::Ok;
-    };
-    let mut buf = [0u8; TREE_SNAPSHOT_BUF];
-    match tairix_rt::hw_tree_read(&mut buf) {
-        Ok(len) => ancestor_imposed_status_from_snapshot(&buf[..len], node),
-        Err(_) => BlkStatus::Ok,
-    }
+/// the device did not answer definitively), so a healthy transfer never asks,
+/// and a resetting controller or hub is attributed to the fault domain rather
+/// than to the disk. It fails **safe**: a refused answer — no matched node, or
+/// a node already gone — imposes nothing, so the leaf answers on its own
+/// health.
+fn ancestor_status() -> BlkStatus {
+    tairix_rt::hw_self_node().map_or(BlkStatus::Ok, |record| record.ancestor_status())
 }
 
 /// Map the transport the matched interface node carried: the URB call
@@ -552,7 +518,11 @@ fn ancestor_status(self_node: Option<u32>) -> BlkStatus {
 /// node refused here, before any slice is built over it.
 fn map_urb_transport() -> Result<(u64, &'static mut [u8], u8), i32> {
     // No MMIO/DMA grants to map, so no coherency shim is needed.
-    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+    let caps = tairix_drv_storage_usb_msd::REQUIRED_CAPABILITIES
+        .iter()
+        .copied()
+        .collect();
+    let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
         return Err(EXIT_NO_HOST);
     };
     let Some(endpoint) = host.endpoint_grant() else {
@@ -707,48 +677,45 @@ fn publish_luns<T: ScsiTransport>(
         return Err(EXIT_NO_SERVICE);
     };
     let mut luns: [Option<LunServe>; MAX_LUNS] = core::array::from_fn(|_| None);
-    let mut published = 0usize;
-    for lun in 0..lun_count {
-        let state = match bring_up_lun(scsi, lun) {
-            Ok(Some(state)) => state,
-            Ok(None) => continue,
-            Err(err) => {
-                log_hex_event(
-                    MSD_ERROR,
-                    Level::Warn,
-                    "usb-msd: LUN bring-up failed",
-                    "errno_hex",
-                    err as u64,
-                );
-                continue;
-            }
-        };
-        let Some(blk_endpoint) = bind_blk_endpoint(blk_block, lun) else {
-            return Err(EXIT_NO_SERVICE);
-        };
-        let Some((window, shm_id)) = create_window() else {
-            return Err(EXIT_NO_SERVICE);
-        };
-        let Some(node_id) = emit_lun_node(blk_endpoint, shm_id) else {
-            return Err(EXIT_NO_SERVICE);
-        };
-        log_hex_event(
-            MSD_LUN_READY,
-            Level::Info,
-            "usb-msd: LUN published as a storage node",
-            "blocks_hex",
-            state.geometry.block_count,
-        );
-        luns[usize::from(lun)] = Some(LunServe {
-            endpoint: blk_endpoint,
-            node_id,
-            state,
-            window,
-            health: BlkHealth::new(BlkDeviceClass::Removable),
-            ladder: RecoveryLadder::new(BlkDeviceClass::Removable),
-        });
-        published += 1;
-    }
+    let published = publish_units(
+        &mut luns,
+        lun_count,
+        |lun| -> Result<Option<LunServe>, i32> {
+            let state = match bring_up_lun(scsi, lun) {
+                Ok(Some(state)) => state,
+                Ok(None) => return Ok(None),
+                Err(err) => {
+                    log_hex_event(
+                        MSD_ERROR,
+                        Level::Warn,
+                        "usb-msd: LUN bring-up failed",
+                        "errno_hex",
+                        err as u64,
+                    );
+                    return Ok(None);
+                }
+            };
+            let blk_endpoint = bind_blk_endpoint(blk_block, lun).ok_or(EXIT_NO_SERVICE)?;
+            let (window, shm_id) = create_window().ok_or(EXIT_NO_SERVICE)?;
+            let node_id = emit_lun_node(blk_endpoint, shm_id).ok_or(EXIT_NO_SERVICE)?;
+            log_hex_event(
+                MSD_LUN_READY,
+                Level::Info,
+                "usb-msd: LUN published as a storage node",
+                "blocks_hex",
+                state.geometry.block_count,
+            );
+            Ok(Some(LunServe {
+                endpoint: blk_endpoint,
+                node_id,
+                state,
+                window,
+                health: BlkHealth::new(BlkDeviceClass::Removable),
+                ladder: RecoveryLadder::new(BlkDeviceClass::Removable),
+            }))
+        },
+        retract,
+    )?;
     if published == 0 {
         log_hex_event(
             MSD_ERROR,
@@ -804,6 +771,9 @@ where
         retract_all(&luns);
         return EXIT_NO_SERVICE;
     };
+    // Every unit is published, and a unit never appears later. A refused
+    // settle only leaves the device manager to wait out its bound for the node.
+    let _ = tairix_rt::hw_node_settle();
     log(
         &LogSink,
         &Event {
@@ -838,20 +808,6 @@ where
     // class's — the same the LUNs ride their own blips out under.
     let domain_owner = u32::try_from(urb_endpoint & 0xFFFF_FFFF).unwrap_or(u32::MAX);
     let mut domain = FaultDomain::new(domain_owner, BlkDeviceClass::Removable.budget().grace_ns);
-
-    // This driver's own place in the discovered hardware tree, learned once so
-    // it can attribute a stall to an interior ancestor (the USB controller, a
-    // hub) that is resetting rather than to the disk (`plans/FIX-IO.md` IO4).
-    // `None` (no matched node) simply disables ancestor attribution — the leaf
-    // then answers on its own health, which is the pre-IO4 behaviour.
-    let self_node = {
-        let ret = tairix_rt::hw_self_node();
-        if ret < 0 {
-            None
-        } else {
-            u32::try_from(ret).ok()
-        }
-    };
 
     // Event-driven service loop: park on the wait-set until a consumer's
     // request arrives, serve it (the data moves via blocking URB calls
@@ -906,15 +862,7 @@ where
         let Some(serve) = luns.get_mut(usize::from(lun)).and_then(Option::as_mut) else {
             continue;
         };
-        serve_ready_lun(
-            &mut scsi,
-            serve,
-            lun,
-            &mut domain,
-            domain_owner,
-            self_node,
-            now_ns,
-        );
+        serve_ready_lun(&mut scsi, serve, lun, &mut domain, domain_owner, now_ns);
         // A vanished URB endpoint means the HCD retracted the interface:
         // the device is gone. Retract the LUN nodes and exit cleanly so a
         // re-plug re-enumerates and reloads this driver.
@@ -945,7 +893,6 @@ fn serve_ready_lun<T: ScsiTransport>(
     lun: u8,
     domain: &mut FaultDomain,
     domain_owner: u32,
-    self_node: Option<u32>,
     now_ns: u64,
 ) {
     let mut request = [0u8; BLK_REQUEST_LEN];
@@ -983,11 +930,9 @@ fn serve_ready_lun<T: ScsiTransport>(
             },
             &mut recovery,
             now_ns,
-            // Consulted only on the recovery path (a stall the device did
-            // not answer definitively), so a healthy transfer never reads
-            // the tree: report what this LUN's interior fault-domain
-            // ancestors currently impose.
-            || ancestor_status(self_node),
+            // Consulted only on the recovery path, so a healthy transfer
+            // never asks.
+            ancestor_status,
         )
     };
     let _ = tairix_rt::call_reply(serve.endpoint, ticket, &reply[..len]);

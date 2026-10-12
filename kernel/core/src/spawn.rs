@@ -988,13 +988,14 @@ pub enum AdmitError {
 }
 
 /// The hardware-tree node a driver is loaded for, and the tree that must
-/// still hold it once the driver's grants are minted.
+/// still hold it once the driver's grants are minted and records whether the
+/// driver has settled it.
 #[derive(Clone, Copy)]
 pub struct DriverNode<'a> {
     /// The node's id.
     pub id: u32,
     /// The live tree the node was matched in.
-    pub tree: &'a dyn crate::hwtree::HwNodeLiveness,
+    pub tree: &'a dyn crate::hwtree::HwDriverTree,
 }
 
 #[cfg(test)]
@@ -1007,6 +1008,9 @@ impl DriverNode<'static> {
             fn is_live(&self, _: u32) -> bool {
                 true
             }
+        }
+        impl crate::hwtree::HwDriverTree for EveryNodeLive {
+            fn driver_admitted(&self, _: u32, _: bool) {}
         }
         Self {
             id,

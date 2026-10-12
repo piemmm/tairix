@@ -59,6 +59,7 @@ pub mod netbind;
 #[cfg(feature = "program")]
 pub mod netcfg;
 pub mod observe;
+pub mod presence;
 #[cfg(feature = "program")]
 pub mod service;
 pub mod store;
@@ -77,6 +78,7 @@ pub use netcfg::{
     deliver_interface_configs, deliver_network_settings, NetConfigState, NetIfConfigState,
     NetworkConfigSource, NetworkInterfaceConfigSource,
 };
+pub use presence::{BootSettle, Devices, Moves, Pending, Presence, SETTLE_BUDGET_NS};
 #[cfg(feature = "program")]
 pub use service::{run, HwTreeService, WAKE_SOURCES};
 pub use store::{fetch_catalogue, load_driver, unload_driver, CatalogueDriver, DriverStoreCall};

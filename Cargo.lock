@@ -934,6 +934,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-path",
  "zeroize",
 ]
 
@@ -1236,6 +1237,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-clock"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-cmdres"
 version = "0.0.0"
 dependencies = [
@@ -1248,10 +1260,8 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-log",
- "tairix-rt",
 ]
 
 [[package]]
@@ -1499,6 +1509,7 @@ dependencies = [
  "tairix-rng",
  "tairix-rt",
  "tairix-sandbox",
+ "tairix-soundtheme",
  "tairix-svg",
  "tairix-taskbar",
  "tairix-theme",
@@ -1536,6 +1547,7 @@ dependencies = [
  "tairix-netconfig",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-soundtheme",
  "tairix-sysconfig",
  "tairix-util",
 ]
@@ -1612,6 +1624,17 @@ name = "tairix-dma-barrier"
 version = "0.0.0"
 
 [[package]]
+name = "tairix-dmaengine"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-dns-sd"
 version = "0.0.0"
 dependencies = [
@@ -1636,7 +1659,6 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-linkclient",
  "tairix-rt",
@@ -1648,7 +1670,6 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-linkclient",
  "tairix-rng",
@@ -1661,9 +1682,9 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
- "tairix-caps",
  "tairix-dma-barrier",
  "tairix-drvrt",
+ "tairix-edid",
  "tairix-rt",
 ]
 
@@ -1673,7 +1694,6 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
- "tairix-caps",
  "tairix-codec",
  "tairix-drvrt",
  "tairix-rt",
@@ -1685,10 +1705,10 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
- "tairix-caps",
  "tairix-codec",
  "tairix-drvrt",
  "tairix-i2c",
+ "tairix-linkclient",
  "tairix-rt",
 ]
 
@@ -1698,7 +1718,6 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-log",
  "tairix-rt",
@@ -1711,7 +1730,6 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-rt",
  "tairix-virtio",
@@ -1722,11 +1740,19 @@ name = "tairix-drv-bus-i2c-bcm2835"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
- "tairix-log",
+ "tairix-i2cbus",
+ "tairix-linkclient",
  "tairix-rt",
- "tairix-util",
+]
+
+[[package]]
+name = "tairix-drv-bus-i2c-brcmstb"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-i2cbus",
+ "tairix-rt",
 ]
 
 [[package]]
@@ -1755,7 +1781,6 @@ name = "tairix-drv-bus-pcie-brcm"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-pci",
  "tairix-rt",
@@ -1781,7 +1806,6 @@ name = "tairix-drv-bus-usb-vl805"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-rt",
  "tairix-usb",
@@ -1801,20 +1825,59 @@ name = "tairix-drv-clock-bcm2711-cprman"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
- "tairix-drvrt",
+ "tairix-clock",
  "tairix-fuzzseed",
- "tairix-log",
  "tairix-rt",
 ]
 
 [[package]]
-name = "tairix-drv-cpufreq-rpi"
+name = "tairix-drv-clock-bcm2711-dvp"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
+ "tairix-clock",
+ "tairix-rt",
+]
+
+[[package]]
+name = "tairix-drv-clock-rpi-firmware"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-clock",
  "tairix-drvrt",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-vcmailbox",
+]
+
+[[package]]
+name = "tairix-drv-display-bcm2711-hdmi"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-audiochan",
+ "tairix-devmatch",
+ "tairix-drvrt",
+ "tairix-edid",
+ "tairix-encoder",
+ "tairix-linkclient",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-vcmailbox",
+]
+
+[[package]]
+name = "tairix-drv-display-bcm2711-hvs"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-display",
+ "tairix-drvrt",
+ "tairix-encoder",
+ "tairix-inline",
+ "tairix-linkclient",
+ "tairix-log",
  "tairix-rt",
  "tairix-vcmailbox",
 ]
@@ -1824,7 +1887,6 @@ name = "tairix-drv-display-framebuffer"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-display",
  "tairix-drvrt",
  "tairix-rt",
@@ -1833,26 +1895,6 @@ dependencies = [
 [[package]]
 name = "tairix-drv-display-gpu-virtio"
 version = "0.0.0"
-
-[[package]]
-name = "tairix-drv-display-rpi-fb"
-version = "0.0.0"
-dependencies = [
- "tairix-abi",
- "tairix-caps",
- "tairix-display",
- "tairix-drvrt",
- "tairix-rt",
- "tairix-vcmailbox",
-]
-
-[[package]]
-name = "tairix-drv-display-rpi-hvs"
-version = "0.0.0"
-dependencies = [
- "tairix-abi",
- "tairix-vcmailbox",
-]
 
 [[package]]
 name = "tairix-drv-display-vesa"
@@ -1866,11 +1908,11 @@ name = "tairix-drv-dma-bcm2835"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
+ "tairix-devmatch",
  "tairix-dma-barrier",
+ "tairix-dmaengine",
  "tairix-drvrt",
  "tairix-fuzzseed",
- "tairix-log",
  "tairix-rt",
 ]
 
@@ -1933,7 +1975,6 @@ name = "tairix-drv-input-usb-hid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-hid",
  "tairix-log",
@@ -1955,7 +1996,6 @@ name = "tairix-drv-input-virtio-kbd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-rt",
  "tairix-virtio",
@@ -1963,11 +2003,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-irq-brcmstb-l2"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-devmatch",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-drv-network-genet"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-net",
  "tairix-netchan",
@@ -1987,7 +2037,6 @@ name = "tairix-drv-network-virtio-net-driver"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-netchan",
  "tairix-rt",
@@ -2003,6 +2052,7 @@ dependencies = [
  "tairix-caps",
  "tairix-drvrt",
  "tairix-i2c",
+ "tairix-linkclient",
  "tairix-rt",
 ]
 
@@ -2034,6 +2084,7 @@ dependencies = [
  "tairix-caps",
  "tairix-drvrt",
  "tairix-i2c",
+ "tairix-linkclient",
  "tairix-rt",
 ]
 
@@ -2045,6 +2096,7 @@ dependencies = [
  "tairix-caps",
  "tairix-drvrt",
  "tairix-i2c",
+ "tairix-linkclient",
  "tairix-rt",
 ]
 
@@ -2099,7 +2151,6 @@ name = "tairix-drv-storage-raid-member"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-log",
  "tairix-raid",
@@ -2134,7 +2185,6 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-blkclient",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-fsprobe",
  "tairix-log",
@@ -2162,6 +2212,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-log",
  "tairix-rt",
 ]
 
@@ -2174,6 +2225,16 @@ dependencies = [
  "tairix-path",
  "tairix-rt",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-edid"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-edid",
+ "tairix-fuzzseed",
+ "tairix-inline",
 ]
 
 [[package]]
@@ -2202,6 +2263,17 @@ dependencies = [
  "tairix-rt",
  "tairix-util",
  "tairix-vt",
+]
+
+[[package]]
+name = "tairix-encoder"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-audiochan",
+ "tairix-drvrt",
+ "tairix-inline",
+ "tairix-log",
 ]
 
 [[package]]
@@ -2520,6 +2592,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-i2cbus"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
+ "tairix-log",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-icon"
 version = "0.0.0"
 dependencies = [
@@ -2560,6 +2643,7 @@ dependencies = [
  "tairix-enrolment",
  "tairix-log",
  "tairix-rt",
+ "tairix-soundtheme",
  "tairix-users",
  "tairix-util",
 ]
@@ -3049,6 +3133,7 @@ dependencies = [
  "tairix-log",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-soundtheme",
  "tairix-sysconfig",
  "tairix-termcap",
  "tairix-users",
@@ -3148,6 +3233,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-crypto",
  "tairix-drv-audio-bcm2711-pwm",
+ "tairix-drv-display-bcm2711-hvs",
  "tairix-drv-fs-arxfs",
  "tairix-drv-fs-fat32",
  "tairix-fdt",
@@ -3695,6 +3781,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-rt",
+ "tairix-soundtheme",
  "tairix-sysconfig",
  "tairix-theme",
  "tairix-useradmin",
@@ -3724,6 +3811,35 @@ dependencies = [
  "tairix-inline",
  "tairix-sound",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-soundd"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-audio",
+ "tairix-caps",
+ "tairix-hash",
+ "tairix-log",
+ "tairix-procinfo",
+ "tairix-reclaim",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-sound",
+ "tairix-soundtheme",
+]
+
+[[package]]
+name = "tairix-soundtheme"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-fuzzseed",
+ "tairix-path",
+ "tairix-rt",
 ]
 
 [[package]]
@@ -3806,6 +3922,7 @@ dependencies = [
  "tairix-raster",
  "tairix-rt",
  "tairix-sandbox",
+ "tairix-soundtheme",
  "tairix-theme",
  "tairix-window",
 ]
@@ -3854,6 +3971,8 @@ dependencies = [
  "tairix-help",
  "tairix-icon",
  "tairix-partition",
+ "tairix-sound",
+ "tairix-soundtheme",
  "tairix-theme",
  "tairix-wallpaper",
 ]
@@ -3975,6 +4094,7 @@ dependencies = [
  "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
+ "tairix-soundtheme",
  "tairix-theme",
  "tairix-users",
  "tairix-util",
@@ -4158,6 +4278,7 @@ dependencies = [
 name = "tairix-test-audio-wire"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-sound",
 ]
 
@@ -4168,6 +4289,7 @@ dependencies = [
  "tairix-abi",
  "tairix-audio",
  "tairix-rt",
+ "tairix-soundtheme",
  "tairix-test-audio-wire",
 ]
 
@@ -7878,6 +8000,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "tairix-abi",
+ "tairix-appconf",
  "tairix-appload",
  "tairix-appstore",
  "tairix-arch-api",
@@ -7900,18 +8023,24 @@ dependencies = [
  "tairix-drv-audio-usb-uac",
  "tairix-drv-audio-virtio-snd",
  "tairix-drv-bus-i2c-bcm2835",
+ "tairix-drv-bus-i2c-brcmstb",
  "tairix-drv-bus-pcie-brcm",
  "tairix-drv-bus-usb",
  "tairix-drv-bus-usb-vl805",
  "tairix-drv-clock-bcm2711-cprman",
- "tairix-drv-cpufreq-rpi",
+ "tairix-drv-clock-bcm2711-dvp",
+ "tairix-drv-clock-rpi-firmware",
+ "tairix-drv-display-bcm2711-hdmi",
+ "tairix-drv-display-bcm2711-hvs",
  "tairix-drv-display-framebuffer",
- "tairix-drv-display-rpi-fb",
  "tairix-drv-dma-bcm2835",
  "tairix-drv-input-usb-hid",
  "tairix-drv-input-virtio-input",
+ "tairix-drv-input-virtio-kbd",
+ "tairix-drv-irq-brcmstb-l2",
  "tairix-drv-network-genet",
  "tairix-drv-network-virtio-net",
+ "tairix-drv-network-virtio-net-driver",
  "tairix-drv-rtc-ds3231",
  "tairix-drv-rtc-goldfish",
  "tairix-drv-rtc-mc146818",
@@ -7952,6 +8081,9 @@ dependencies = [
  "tairix-reclaim",
  "tairix-sandbox",
  "tairix-settings",
+ "tairix-sound",
+ "tairix-soundd",
+ "tairix-soundtheme",
  "tairix-svg",
  "tairix-switchboard",
  "tairix-sysconfig",

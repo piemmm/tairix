@@ -21,7 +21,8 @@
 //!   audit output. Its ceiling is empty — powers come from capabilities,
 //!   and the boot floor holds none.
 //! * One account per system service (`devmgr`, `sysinfod`, `seatmgr`, `login`,
-//!   `netstack`, `fontd`, `greeter`, `confd`, `timed`, `audiod`, `discoveryd`),
+//!   `netstack`, `fontd`, `greeter`, `confd`, `timed`, `audiod`, `discoveryd`,
+//!   `soundd`),
 //!   each with its own uid in the
 //!   system range and primary group [`SERVICES_GROUP`] — never a shared service
 //!   user, so per-service log partitioning, IPC peer attestation, and
@@ -48,7 +49,7 @@ use tairix_caps::CapabilitySet;
 use crate::grants::{
     capability_set, AUDIOD_CEILING, CONFD_CEILING, DEVMGR_CEILING, DISCOVERYD_CEILING,
     FONTD_CEILING, GREETER_CEILING, LOGIN_CEILING, NETSTACK_CEILING, SEATMGR_CEILING,
-    SYSINFOD_CEILING, TIMED_CEILING,
+    SOUNDD_CEILING, SYSINFOD_CEILING, TIMED_CEILING,
 };
 use crate::groups::GroupRecord;
 use crate::password::StoredPassword;
@@ -80,8 +81,9 @@ pub const SERVICES_GID: Gid = Gid(101);
 /// Name of the device-manager service account.
 pub const DEVMGR_USERNAME: &str = "devmgr";
 
-/// The [`Uid`] of [`DEVMGR_USERNAME`].
-pub const DEVMGR_UID: Uid = Uid(10);
+/// The [`Uid`] of [`DEVMGR_USERNAME`], defined by the cue protocol because
+/// the cue authority admits a device's sounds by it.
+pub const DEVMGR_UID: Uid = Uid(tairix_abi::sound_cue::DEVMGR_UID);
 
 /// Name of the System Information broker service account.
 pub const SYSINFOD_USERNAME: &str = "sysinfod";
@@ -98,8 +100,9 @@ pub const SEATMGR_UID: Uid = Uid(12);
 /// Name of the login service account.
 pub const LOGIN_USERNAME: &str = "login";
 
-/// The [`Uid`] of [`LOGIN_USERNAME`].
-pub const LOGIN_UID: Uid = Uid(13);
+/// The [`Uid`] of [`LOGIN_USERNAME`], defined by the cue protocol because the
+/// cue authority admits a session's sounds by it.
+pub const LOGIN_UID: Uid = Uid(tairix_abi::sound_cue::LOGIN_UID);
 
 /// Name of the network-stack service account.
 pub const NETSTACK_USERNAME: &str = "netstack";
@@ -148,6 +151,14 @@ pub const DISCOVERYD_USERNAME: &str = "discoveryd";
 /// The [`Uid`] of [`DISCOVERYD_USERNAME`], which the stack and every client
 /// authenticate the service by.
 pub const DISCOVERYD_UID: Uid = Uid(tairix_abi::discovery_ipc::DISCOVERYD_UID);
+
+/// Name of the cue authority's service account — the one principal the audio
+/// service plays a notification for the machine or another session for.
+pub const SOUNDD_USERNAME: &str = "soundd";
+
+/// The [`Uid`] of [`SOUNDD_USERNAME`], which the audio service admits those
+/// tenancies by.
+pub const SOUNDD_UID: Uid = Uid(tairix_abi::sound_cue::SOUNDD_UID);
 
 /// One compiled-in account's specification: the single row both
 /// [`system_accounts`] and [`system_account_uid`] read, so the record
@@ -246,6 +257,13 @@ const SYSTEM_ACCOUNTS: &[SystemAccountSpec] = &[
         primary_gid: SERVICES_GID,
         display_name: "Discovery Service",
         ceiling: DISCOVERYD_CEILING,
+    },
+    SystemAccountSpec {
+        username: SOUNDD_USERNAME,
+        uid: SOUNDD_UID,
+        primary_gid: SERVICES_GID,
+        display_name: "Sound Service",
+        ceiling: SOUNDD_CEILING,
     },
 ];
 
@@ -394,6 +412,7 @@ mod tests {
                 ("timed", 18, 101),
                 ("audiod", 19, 101),
                 ("discoveryd", 20, 101),
+                ("soundd", 21, 101),
             ]
         );
         for record in &records {
@@ -455,6 +474,10 @@ mod tests {
         assert_eq!(
             by_name("discoveryd").capabilities(),
             capability_set(DISCOVERYD_CEILING)
+        );
+        assert_eq!(
+            by_name("soundd").capabilities(),
+            capability_set(SOUNDD_CEILING)
         );
     }
 

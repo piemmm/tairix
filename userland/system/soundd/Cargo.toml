@@ -1,0 +1,44 @@
+[package]
+name = "tairix-soundd"
+description = "TAIRiX cue authority: plays the desktop's sounds on others' behalf, deciding who may cue what from the caller's kernel-attested identity, decoding each sound in the parser sandbox, and bounding how many play (plans/SOUND.md SND21)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "dep:tairix-procinfo"]
+
+[[bin]]
+name = "tairix-soundd-run"
+path = "src/run.rs"
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0" }
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+tairix-sound = { path = "../../../lib/sound", version = "=0.0.0" }
+tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["rt"] }
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", optional = true, features = [
+    "program",
+] }
+
+[dev-dependencies]
+# The encoder the tests author their sounds with.
+tairix-sound = { path = "../../../lib/sound", version = "=0.0.0", features = ["encode"] }

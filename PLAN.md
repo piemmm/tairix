@@ -136,7 +136,7 @@ plan's ledger. A `blocked` row names its blocker.
 | HID | One report model and HID class driver for every transport (`plans/HID.md`) | in progress |
 | SUPPLIERS | Kernel-mediated links between hardware-tree nodes (`plans/SUPPLIERS.md`) | in progress |
 | GPIO | GPIO controllers and their line interrupts (`plans/GPIO.md`) | planned |
-| I2C | The shared-memory I2C protocol, its controllers, and HID over I2C (`plans/I2C.md`) | planned |
+| I2C | The shared-memory I2C protocol, its controllers, and HID over I2C (`plans/I2C.md`) | in progress |
 | ACPI | The ACPI namespace bus driver and its AML interpreter (`plans/ACPI.md`) | planned |
 | SOUND | The audio stack and the `dmaengine-v1` DMA-engine seam (`plans/SOUND.md`) | in progress |
 | FIX-DISPLAY-ACCELERATION | Hardware layer composition and `gpu_virtio` (`plans/FIX-DISPLAY-ACCELERATION.md`) | blocked: Stage A waits on the scanout-memory decision |
@@ -908,10 +908,37 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-11 — §3: `lib/encoder`.** A display encoder is driven by its own
+  driver while the engine scans out, and every encoder driver serves
+  `encoder-v1`, whose holder and phase rules know no device, so the endpoint
+  and its serve loop live once.
 - **2026-10-10 — §11: root encryption is the user's choice.** At the user's
   direction a root no longer has to be encrypted: the installer asks, with
   unencrypted preselected, so a machine boots without a passphrase unless its
   owner chose one.
+- **2026-10-10 — §3: `lib/soundtheme`.** The cue authority, the build's
+  asset contract and every program that asks for a sound share one event
+  vocabulary, theme catalog and settings registry, so they live once beside
+  neither the decoder nor the mixer.
+- **2026-10-11 — §3: `drivers/irq/`.** A device wired behind a second-level
+  interrupt controller reaches its line only through that controller's driver,
+  which is neither a bus nor any other class the tree names.
+- **2026-10-11 — §3: `lib/dmaengine`.** Both Broadcom DMA engines are served
+  through one endpoint whose rules know no controller, and every later DMA
+  controller driver serves the same protocol, so the endpoint and its serve
+  loop live once.
+- **2026-10-11 — §3: `lib/edid`.** Every display driver reads its sink's
+  EDID and the HD Audio driver its codec's ELD, untrusted device input in one
+  shared encoding, so one fail-closed, fuzzed parser serves them all.
+- **2026-10-11 — §3: `lib/i2cbus`.** Every I²C controller serves `i2c-v1`,
+  whose channel and reach rules know no controller, so the endpoint and its
+  bring-up live once.
+- **2026-10-11 — §3: `lib/clock`.** The clock manager, the DVP gates and the
+  firmware's clocks are each served over `clock-v1`, whose holder rules know
+  no controller, so the endpoint and its bring-up live once.
+- **2026-10-11 — §3: `drivers/cpufreq/` folded into `drivers/clock/`.** The
+  firmware-clocks node has one driver, which serves the display's clocks as
+  well as the ARM clock's frequency mechanism, so it is a clock controller.
 - **2026-10-10 — §3: `lib/player`.** Both players — `play` and `music.app` —
   decode a programme in the sandbox and write it gapless into one stream, so
   the engine lives once rather than once per player.

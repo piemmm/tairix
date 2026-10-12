@@ -22,6 +22,9 @@
 //! A notification is the exception, and its role is what says so: one that
 //! arrives ten minutes late is noise, so it is dropped rather than queued.
 //!
+//! The machine's own sounds are the other: a stream the machine plays for a
+//! transition it made is no session's, so no room withholds it.
+//!
 //! # An unclaimed room is anybody's
 //!
 //! A seat no presenter holds — a server playing an alert, a machine at its
@@ -60,6 +63,16 @@ impl From<DisplayLease> for Room {
     }
 }
 
+/// Whom a stream plays for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Principal {
+    /// The machine itself, announcing a transition it made.
+    Machine,
+    /// This login session, or [`None`] for a principal no login encloses — a
+    /// daemon.
+    Session(Option<ProcId>),
+}
+
 /// What a room does with a stream.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Admission {
@@ -72,18 +85,18 @@ pub enum Admission {
     Drop,
 }
 
-/// What `room` does with a `direction` stream of `role` whose owner lies
-/// within `session` ([`None`] for a principal no login encloses).
+/// What `room` does with a `direction` stream of `role` played for
+/// `principal`.
 #[must_use]
 pub fn admit(
     direction: StreamDirection,
     role: StreamRole,
-    session: Option<ProcId>,
+    principal: Principal,
     room: Room,
 ) -> Admission {
-    match room {
-        Room::Unclaimed => Admission::Mix,
-        Room::Session(holder) if session == Some(holder) => Admission::Mix,
+    match (principal, room) {
+        (Principal::Machine, _) | (_, Room::Unclaimed) => Admission::Mix,
+        (Principal::Session(Some(mine)), Room::Session(holder)) if mine == holder => Admission::Mix,
         // Captured audio is the owner's to keep, late or not.
         _ if direction == StreamDirection::Playback && role == StreamRole::Notification => {
             Admission::Drop
@@ -110,9 +123,8 @@ pub struct StreamRequest {
     pub role: StreamRole,
     /// The sink the client named, or [`None`] for the machine default.
     pub requested_device: Option<u32>,
-    /// The login session the stream's owner lies within, or [`None`] for a
-    /// principal no login encloses — a daemon.
-    pub session: Option<ProcId>,
+    /// Whom the stream plays for.
+    pub principal: Principal,
 }
 
 /// What the policy decided.
@@ -129,8 +141,8 @@ pub enum Routing {
         /// The sink it would land on when its session is next active.
         device_id: u32,
     },
-    /// Discard the stream's frames. Only a notification from an inactive
-    /// session, whose lateness would make it noise.
+    /// Discard the stream's frames. Only a notification from outside the
+    /// room, whose lateness would make it noise.
     Drop,
     /// Refuse the stream outright.
     Refuse(
@@ -157,7 +169,7 @@ pub fn route(request: &StreamRequest, sinks: &[SinkState]) -> Routing {
     match admit(
         StreamDirection::Playback,
         request.role,
-        request.session,
+        request.principal,
         sink.room,
     ) {
         Admission::Mix => Routing::Play { device_id },

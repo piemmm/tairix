@@ -20,11 +20,18 @@ const NAME_PROBE: usize = 64;
 /// The field naming the channels' speaker positions.
 const CHANNEL_MASK: &[u8] = b"WAVEFORMATEXTENSIBLE_CHANNEL_MASK";
 
+/// Fields carrying a picture as base64, the specified one and its legacy
+/// forms: a payload, never text to keep as a tag.
+const PICTURES: [&[u8]; 3] = [b"METADATA_BLOCK_PICTURE", b"COVERART", b"COVERARTMIME"];
+
 /// What a comment block states beside its tags.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Comments {
     /// The speaker positions its channels hold, as a WAVE speaker mask.
     pub(crate) channel_mask: Option<u32>,
+    /// Bytes the block took, from the region's start: where what follows it
+    /// begins.
+    pub(crate) len: u64,
 }
 
 /// What a field's upper-cased name names.
@@ -112,11 +119,16 @@ pub(crate) fn read(
             comments.channel_mask = parsed;
             continue;
         }
+        if PICTURES.contains(&&*upper) {
+            fields.skip(rest)?;
+            continue;
+        }
         match kind(upper) {
             Some(kind) => keep(&mut fields, kind, value, rest, collector, &mut text)?,
             None => fields.skip(rest)?,
         }
     }
+    comments.len = fields.position();
     Ok(comments)
 }
 
@@ -195,7 +207,13 @@ mod tests {
             ],
         );
         let (comments, collector) = parse(&bytes, 4096);
-        assert_eq!(comments, Ok(Comments::default()));
+        assert_eq!(
+            comments,
+            Ok(Comments {
+                channel_mask: None,
+                len: bytes.len() as u64,
+            })
+        );
         let tags: Vec<(TagKind, std::string::String)> = collector
             .finish()
             .tags
@@ -235,6 +253,20 @@ mod tests {
             ],
         );
         assert_eq!(parse(&twice, 4096).0, Err(BAD));
+    }
+
+    /// A picture carried as base64 is a payload, not text: it is stepped over
+    /// rather than kept as a tag to spend the metadata budget on.
+    #[test]
+    fn a_picture_field_is_stepped_over_not_kept_as_text() {
+        let picture = [b"metadata_block_picture=".as_slice(), &[b'A'; 300]].concat();
+        let bytes = block(b"", &[&picture, b"COVERART=AAAA", b"TITLE=t"]);
+        let (comments, collector) = parse(&bytes, 4096);
+        assert!(comments.is_ok());
+        let metadata = collector.finish();
+        assert!(!metadata.omitted);
+        assert_eq!(metadata.tags.len(), 1);
+        assert_eq!(metadata.tags[0].kind, TagKind::Title);
     }
 
     /// A field past the budget is stepped over unread, and the tags after it

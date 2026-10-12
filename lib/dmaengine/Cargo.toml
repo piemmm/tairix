@@ -1,0 +1,31 @@
+[package]
+name = "tairix-dmaengine"
+description = "TAIRiX dmaengine-v1 controller side: the endpoint every DMA controller driver serves under its node's duty, written over the class traits and nothing of any one controller, and the freestanding bring-up and serve loop around it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `dmaengine-v1` frames, the class traits and the hardware-tree records.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The supplier seam the endpoint asks the kernel about its callers through,
+# and in the driver process the grants, the register window and the carves.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fake kernel the endpoint's tests are answered through.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0", features = ["test-support"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability set the rt-backed host is built over.
+tairix-caps = { path = "../caps", version = "=0.0.0" }
+# Every decision the endpoint takes, recorded with a stable event id.
+tairix-log = { path = "../log", version = "=0.0.0" }
+# Interrupt lines, the shared regions, the clock and this process's origin.
+tairix-rt = { path = "../rt", version = "=0.0.0" }

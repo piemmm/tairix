@@ -87,7 +87,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[
 /// - `SYSINFO_HW` reads the hardware-tree snapshot on the recovery path
 ///   only, to attribute a stalled transfer to a resetting hub or
 ///   controller rather than blaming the disk.
-pub const REQUIRED_CAPS: &[CapabilityId] = &[
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::SHM,
     CapabilityId::IPC_ENDPOINT,
     CapabilityId::IPC_BIND_PRIVILEGED,
@@ -98,7 +98,7 @@ pub const REQUIRED_CAPS: &[CapabilityId] = &[
 
 #[cfg(test)]
 mod caps_tests {
-    use super::{CapabilityId, REQUIRED_CAPS};
+    use super::{CapabilityId, REQUIRED_CAPABILITIES};
 
     /// The recovery path's hardware-tree read must stay granted.
     ///
@@ -110,7 +110,7 @@ mod caps_tests {
     /// ten-drive surprise removal.
     #[test]
     fn the_recovery_path_can_read_the_hardware_tree() {
-        assert!(REQUIRED_CAPS.contains(&CapabilityId::SYSINFO_HW));
+        assert!(REQUIRED_CAPABILITIES.contains(&CapabilityId::SYSINFO_HW));
     }
 
     /// A class driver touches no register and owns no line: the set must
@@ -123,7 +123,7 @@ mod caps_tests {
             CapabilityId::IRQ_BIND,
         ] {
             assert!(
-                !REQUIRED_CAPS.contains(&denied),
+                !REQUIRED_CAPABILITIES.contains(&denied),
                 "{denied:?} must not be requested"
             );
         }

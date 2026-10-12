@@ -713,17 +713,9 @@ as the `stage=` and `error=` fields of the unlock service's
 `EventId(4139)` line. A successful one logs `root-unlock: emmc2 link` on the
 same event with `mode`, `clock_hz`, `base_clock_hz`, `signal_mv`, `cmd23`,
 `dma`, and the stage and error of any speed or DMA fallback, at `Warn` when
-either fell back. The debug image also compiles in the kernel's
-`storage-trace` feature, which puts the whole bring-up on the UART as it
-happens, as `emmc2 trace:` lines on the same event:
-
-- the kernel's facts: the controller's interrupt, the firmware and supplies
-  it found, the node's DMA windows, the firmware's base clock, the staging
-  carves, and each timed wait;
-- the engine's `trace::Trace` records.
-
-Each line is flushed as it is written, so the last one a capture shows is
-where a stalled bring-up stopped.
+either fell back. The engine also reports each step it takes as a
+`trace::Trace` record; no kernel host records them, and the bring-up tests
+read them to check the steps.
 
 The controller-reset clears SD Bus Power and the register block gates every
 command on it, so bring-up powers the bus before the first command. The CSD

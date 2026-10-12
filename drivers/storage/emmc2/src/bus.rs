@@ -108,16 +108,6 @@ impl Rung {
             Self::DefaultSpeed => None,
         }
     }
-
-    /// A stable, terse name for the rung, for the operator-facing trace.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Uhs => "UHS-I",
-            Self::HighSpeed => "high speed",
-            Self::DefaultSpeed => "default speed",
-        }
-    }
 }
 
 /// The fastest mode `host` and a card offering `access_modes` both drive at

@@ -55,17 +55,20 @@ mod program {
         NETSTACK_ENDPOINT,
     };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
+    use tairix_abi::sound_cue::SoundEvent;
     use tairix_abi::waitset::WaitSetOp;
     use tairix_abi::OpenFlags;
-    use tairix_abi::{Errno, HwNode, HwTreeHeader};
+    use tairix_abi::{Errno, HwNode, HwTreeHeader, WAITSET_TIMEOUT_NONE};
     use tairix_devmgr::audiobind::{AudioBaselineSource, AudiodBind};
     use tairix_devmgr::{
         events, DriverStoreCall, HwTreeService, NetstackBind, NetworkConfigSource,
-        NetworkInterfaceConfigSource, WAKE_SOURCES,
+        NetworkInterfaceConfigSource, Presence, WAKE_SOURCES,
     };
     use tairix_log::{log, Event, Field, Level};
     use tairix_netconfig::InterfaceConfigPlan;
     use tairix_rt::LogSink;
+    use tairix_soundtheme::cue::RtCuePost;
+    use tairix_soundtheme::{Answer, PostedCues, CUE_ANSWER_DEADLINE_NS};
     use tairix_util::fmt::{format_hex_u64, format_u64, format_usize};
 
     /// Buffer the catalogue and each `Load` reply are received into, sized to
@@ -90,7 +93,14 @@ mod program {
     struct RtTreeService {
         /// The wait set holding [`WAKE_SOURCES`].
         set: u64,
+        /// Device sounds asked for and not yet answered.
+        cues: PostedCues,
+        cue_post: RtCuePost,
     }
+
+    /// The wait-set token a cue's answer wakes the service with, after every
+    /// one [`WAKE_SOURCES`] takes.
+    const TOKEN_CUE: u64 = WAKE_SOURCES.len() as u64 + 1;
 
     impl RtTreeService {
         /// A seam whose wait set holds every wake source, built before the
@@ -107,7 +117,43 @@ mod program {
                     return Err(Errno::from_syscall(added));
                 }
             }
-            Ok(Self { set })
+            Ok(Self {
+                set,
+                cues: PostedCues::new(),
+                cue_post: RtCuePost::new(set, TOKEN_CUE),
+            })
+        }
+    }
+
+    impl Presence for RtTreeService {
+        fn now_ns(&mut self) -> u64 {
+            tairix_rt::clock_get()
+        }
+
+        fn settled(&mut self) {
+            if tairix_rt::servicenotice::announce_ready().is_err() {
+                log(
+                    &LogSink,
+                    &Event {
+                        level: Level::Warn,
+                        id: events::READINESS_REFUSED,
+                        message:
+                            "the service manager did not record the device manager's readiness",
+                        fields: &[],
+                    },
+                );
+            }
+        }
+
+        fn cue(&mut self, event: SoundEvent) {
+            // A sound refused or unanswered is the authority's to record;
+            // the device has arrived or left either way.
+            let _ = self.cues.post(
+                &mut self.cue_post,
+                event,
+                Answer::Started,
+                CUE_ANSWER_DEADLINE_NS,
+            );
         }
     }
 
@@ -121,13 +167,24 @@ mod program {
             // elapses; the caller picks the deadline (unbounded once nothing
             // is outstanding). A negative return is a `-errno` the loop
             // fails closed on, `TimedOut` included — the loop reads that as
-            // "re-react".
-            let mut token = 0u64;
-            let waited = tairix_rt::waitset_wait(self.set, timeout_ns, &mut token);
-            if waited < 0 {
-                return Err(Errno::from_syscall(waited));
+            // "re-react". A cue's answer is collected and the park resumed,
+            // since it moves nothing the loop reacts to.
+            let deadline = (timeout_ns != WAITSET_TIMEOUT_NONE)
+                .then(|| tairix_rt::clock_get().saturating_add(timeout_ns));
+            loop {
+                let left = deadline.map_or(WAITSET_TIMEOUT_NONE, |at| {
+                    at.saturating_sub(tairix_rt::clock_get())
+                });
+                let mut token = 0u64;
+                let waited = tairix_rt::waitset_wait(self.set, left, &mut token);
+                if waited < 0 {
+                    return Err(Errno::from_syscall(waited));
+                }
+                if token != TOKEN_CUE {
+                    return Ok(());
+                }
+                self.cues.collect(&mut self.cue_post, |_, _| {});
             }
-            Ok(())
         }
 
         fn on_header(&mut self, header: &HwTreeHeader) {

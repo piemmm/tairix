@@ -1074,7 +1074,7 @@ mod tests {
         use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
 
         // The desktop's icon class masters ship under `/System/Graphics`,
-        // discovered from disk (`tairix_syshelp::GRAPHICS_FILES`). One
+        // discovered from disk (`tairix_syshelp::ASSET_FILES`). One
         // master of each class format is read back, so neither the vector
         // nor the raster arm can rot, and an accidentally empty walk cannot
         // pass this test silently.
@@ -1099,10 +1099,10 @@ mod tests {
             .expect("the plaintext /System mounts read-only");
 
         for file in ["folder.svg", "file.png"] {
-            let master = tairix_syshelp::GRAPHICS_FILES
+            let master = tairix_syshelp::ASSET_FILES
                 .iter()
                 .find(|asset| {
-                    asset.family == tairix_syshelp::GraphicsFamilyKind::Icon && asset.file == file
+                    asset.family == tairix_syshelp::AssetFamilyKind::Icon && asset.file == file
                 })
                 .expect("the icon master ships");
             let mut node = sys.root();

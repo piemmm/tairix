@@ -125,7 +125,7 @@ impl IconKind {
             Self::Sharing | Self::Caching => BadgeHue::Purple,
             Self::Language | Self::Dns => BadgeHue::Teal,
             Self::Power | Self::Startup => BadgeHue::Green,
-            Self::Sound => BadgeHue::Pink,
+            Self::Sound | Self::SoundDevices | Self::SoundEffects => BadgeHue::Pink,
             Self::Notifications => BadgeHue::Red,
             Self::Theme => BadgeHue::Orange,
             _ => return None,

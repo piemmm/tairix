@@ -81,6 +81,26 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-abi",
+        test: "fuzz_i2c",
+        description: "lib/abi i2c-v1 surface (I2C controller requests naming a target or bus link, their transactions, and their replies)",
+    },
+    Target {
+        package: "tairix-abi",
+        test: "fuzz_encoder",
+        description: "lib/abi encoder-v1 surface (encoder requests naming an encoder link, their timings, and the connector states replied)",
+    },
+    Target {
+        package: "tairix-edid",
+        test: "fuzz_edid",
+        description: "lib/edid sink descriptions (EDID base blocks and their CTA-861 and DisplayID extensions, block counts, HD Audio ELDs)",
+    },
+    Target {
+        package: "tairix-abi",
+        test: "fuzz_irqline",
+        description: "lib/abi irqline-v1 surface (interrupt-line waits naming a line link, their replies) and the driver's own node record",
+    },
+    Target {
+        package: "tairix-abi",
         test: "fuzz_codec",
         description: "lib/abi codec-v1 surface (codec requests naming a codec link, and their replies)",
     },
@@ -271,6 +291,12 @@ pub const TARGETS: &[Target] = &[
         test: "fuzz_wallpaper_settings",
         description:
             "pinboard settings store (closed key registry grammar, render round-trip, bounds)",
+    },
+    Target {
+        package: "tairix-soundtheme",
+        test: "fuzz_sound_settings",
+        description:
+            "sound settings document (closed key registry, both readings, render round-trip)",
     },
     Target {
         package: "tairix-kernel-ipc",
@@ -1141,6 +1167,14 @@ mod tests {
         let chosen = selected(&opts).expect("known target");
         assert_eq!(chosen.len(), 1);
         assert_eq!(chosen[0].package, "tairix-wallpaper");
+    }
+
+    #[test]
+    fn sound_settings_harness_is_registered() {
+        let opts = parse(&argv(&["--target", "fuzz_sound_settings"])).expect("flag parses");
+        let chosen = selected(&opts).expect("known target");
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].package, "tairix-soundtheme");
     }
 
     #[test]

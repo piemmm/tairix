@@ -45,7 +45,7 @@ use tairix_caps::CapabilitySet;
 use tairix_crypto::Ed25519PublicKey;
 use tairix_devmgr::DriverLoader;
 use tairix_drvhost::store::{scan_store, DriverStore};
-use tairix_kernel_core::{CooperativeYield, HwNodeLiveness, SYSTEM_VOLUME_STORE_PATH};
+use tairix_kernel_core::{CooperativeYield, HwDriverTree, SYSTEM_VOLUME_STORE_PATH};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_log::Sink;
@@ -125,7 +125,7 @@ pub fn create_driver_store_endpoint<S: Sink + ?Sized>(
 /// child the instant it appears. Resolving
 /// against a frozen snapshot would fail every runtime-emitted node closed and
 /// stall the recursive bus chain.
-pub trait HwNodeResolver: HwNodeLiveness {
+pub trait HwNodeResolver: HwDriverTree {
     /// The resource grants of the live non-root node `node_id`, or `None`
     /// when no live non-root node has that id (fail closed). The returned grants are owned so resolution holds no live-tree
     /// lock across the spawn.
@@ -772,10 +772,13 @@ mod tests {
     /// for the global live [`crate::hwtree_store::HW_TREE`] so a test drives
     /// the load gate with an explicit node set.
     struct SliceNodes<'a>(&'a [HwNode]);
-    impl HwNodeLiveness for SliceNodes<'_> {
+    impl tairix_kernel_core::HwNodeLiveness for SliceNodes<'_> {
         fn is_live(&self, node_id: u32) -> bool {
             self.0.iter().any(|node| node.id() == node_id)
         }
+    }
+    impl HwDriverTree for SliceNodes<'_> {
+        fn driver_admitted(&self, _node_id: u32, _publishes: bool) {}
     }
     impl HwNodeResolver for SliceNodes<'_> {
         fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>> {

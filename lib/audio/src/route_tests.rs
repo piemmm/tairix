@@ -8,7 +8,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    admit, duck_millibel, route, Admission, Roles, Room, Routing, SinkState, StreamRequest,
+    admit, duck_millibel, route, Admission, Principal, Roles, Room, Routing, SinkState,
+    StreamRequest,
 };
 use crate::volume::DUCK_MILLIBEL;
 use tairix_abi::audio::StreamRole;
@@ -53,7 +54,7 @@ fn request(role: StreamRole, session: Option<ProcId>) -> StreamRequest {
     StreamRequest {
         role,
         requested_device: None,
-        session,
+        principal: Principal::Session(session),
     }
 }
 
@@ -99,20 +100,30 @@ fn a_source_is_held_outside_the_room_and_never_dropped() {
             admit(
                 StreamDirection::Capture,
                 *role,
-                Some(ALICE),
+                Principal::Session(Some(ALICE)),
                 Room::Session(ALICE)
             ),
             Admission::Mix
         );
         for room in [Room::Session(BOB), Room::Withheld] {
             assert_eq!(
-                admit(StreamDirection::Capture, *role, Some(ALICE), room),
+                admit(
+                    StreamDirection::Capture,
+                    *role,
+                    Principal::Session(Some(ALICE)),
+                    room
+                ),
                 Admission::Hold,
                 "{role:?} into {room:?}"
             );
         }
         assert_eq!(
-            admit(StreamDirection::Capture, *role, None, Room::Unclaimed),
+            admit(
+                StreamDirection::Capture,
+                *role,
+                Principal::Session(None),
+                Room::Unclaimed
+            ),
             Admission::Mix
         );
     }
@@ -190,7 +201,7 @@ fn a_named_sink_is_used_and_arbitrated_on_its_own_room() {
     let request = StreamRequest {
         role: StreamRole::Media,
         requested_device: Some(20),
-        session: Some(BOB),
+        principal: Principal::Session(Some(BOB)),
     };
     // The default is Alice's, but the named sink is free.
     assert_eq!(
@@ -210,7 +221,7 @@ fn a_named_sink_that_does_not_exist_is_refused_rather_than_substituted() {
     let request = StreamRequest {
         role: StreamRole::Media,
         requested_device: Some(99),
-        session: Some(ALICE),
+        principal: Principal::Session(Some(ALICE)),
     };
     assert_eq!(
         route(&request, &sinks(Room::Unclaimed, Room::Unclaimed)),
@@ -235,24 +246,55 @@ fn a_machine_with_no_default_refuses_rather_than_guessing() {
     assert_eq!(route(&request, &[]), Routing::Refuse(Errno::DeviceOffline));
 }
 
+/// The machine's own sound announces a transition it made, so it plays
+/// whoever holds the room — withheld included, since the login screen and a
+/// session switch are exactly when such sounds are made.
+#[test]
+fn the_machines_own_sound_plays_in_every_room() {
+    for room in EVERY_ROOM {
+        assert_eq!(
+            route(
+                &StreamRequest {
+                    role: StreamRole::Notification,
+                    requested_device: None,
+                    principal: Principal::Machine,
+                },
+                &sinks(room, room)
+            ),
+            Routing::Play { device_id: 10 },
+            "{room:?}"
+        );
+    }
+}
+
 /// The whole cross-product, so no combination is decided by accident.
 #[test]
 fn the_policy_is_total_over_every_role_room_and_request() {
+    let principals = [
+        Principal::Machine,
+        Principal::Session(None),
+        Principal::Session(Some(ALICE)),
+        Principal::Session(Some(BOB)),
+    ];
     for role in EVERY_ROLE {
         for room in EVERY_ROOM {
-            for session in [None, Some(ALICE), Some(BOB)] {
+            for principal in principals {
                 for requested in [None, Some(10), Some(20), Some(99)] {
                     let request = StreamRequest {
                         role: *role,
                         requested_device: requested,
-                        session,
+                        principal,
                     };
                     let decided = route(&request, &sinks(room, room));
                     let device_id = requested.unwrap_or(10);
-                    let expected = match (requested, room, session) {
+                    let expected = match (requested, room, principal) {
                         (Some(99), _, _) => Routing::Refuse(Errno::NotFound),
-                        (_, Room::Unclaimed, _) => Routing::Play { device_id },
-                        (_, Room::Session(held), Some(mine)) if held == mine => {
+                        (_, _, Principal::Machine) | (_, Room::Unclaimed, _) => {
+                            Routing::Play { device_id }
+                        }
+                        (_, Room::Session(held), Principal::Session(Some(mine)))
+                            if held == mine =>
+                        {
                             Routing::Play { device_id }
                         }
                         _ if *role == StreamRole::Notification => Routing::Drop,
@@ -260,7 +302,7 @@ fn the_policy_is_total_over_every_role_room_and_request() {
                     };
                     assert_eq!(
                         decided, expected,
-                        "{role:?} from {session:?}, sink {room:?}, asking for {requested:?}"
+                        "{role:?} for {principal:?}, sink {room:?}, asking for {requested:?}"
                     );
                 }
             }

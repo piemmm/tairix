@@ -69,6 +69,10 @@ tairix-sysconfig = { path = "../../../lib/sysconfig", version = "=0.0.0" }
 # host the binary is an inert stub.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The cue client the session authority asks for the login and logout sounds
+# with, posted from the console's one wait-set so the sound authority never
+# holds up a session starting or ending.
+tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0", default-features = false, features = ["rt"] }
 # The production System Information transport (`IpcTransport`), enabled
 # through `tairix-procinfo`'s own `program` feature: the full-screen view's
 # status bars query `sysinfod` for the machine identity, memory figures,

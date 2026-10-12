@@ -71,9 +71,9 @@ tairix-conout = { path = "../../../lib/conout", version = "=0.0.0" }
 # primitive plugs into. Needs only `core`, so the freestanding boot binaries
 # here still link no global allocator.
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
-# The shared VideoCore firmware mailbox protocol:
-# the framebuffer boot console's display probe + surface allocation,
-# also spoken by drivers/display/rpi_hvs.
+# The shared VideoCore firmware mailbox protocol — the framebuffer boot
+# console's display probe and surface allocation — and the display engine's
+# wiring the walk states.
 tairix-vcmailbox = { path = "../../../lib/vcmailbox", version = "=0.0.0" }
 # The shared QEMU fw_cfg DMA client: the framebuffer
 # boot console's `virt`-board ramfb fallback programs the scan-out

@@ -152,6 +152,10 @@ pub const PORTSC_PEC: u32 = 1 << 18;
 /// stale change the next reset cannot be distinguished from.
 pub const PORTSC_PRC: u32 = 1 << 21;
 
+/// `PORTSC` Device Removable (read-only): set when the device on the port is
+/// built in rather than plugged in (§5.4.8).
+pub const PORTSC_DR: u32 = 1 << 30;
+
 /// `PORTSC` bits that are write-1-to-clear or reserved-preserve;
 /// masked off before a control write so a read-modify-write never
 /// clears a change bit by accident (§5.4.8).

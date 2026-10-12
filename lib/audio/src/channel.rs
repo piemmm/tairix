@@ -19,7 +19,9 @@
 //!
 //! The side pair is the conventional extension of BS.775 to 7.1, which the
 //! recommendation itself predates: sides prefer the rears' slot and otherwise
-//! fold like them.
+//! fold like them. A lone rear centre takes a surround pair at one over root
+//! two each, as BS.775's 3/1 does, and splits into a pair the same way, so it
+//! reaches each front at a half.
 //!
 //! Upmixing synthesises nothing. A sink channel no source position reaches is
 //! silent, because inventing a surround channel from a stereo recording is a
@@ -41,6 +43,11 @@ const FOLD: f32 = core::f32::consts::FRAC_1_SQRT_2;
 /// The coefficient a rear or side position enters a monophonic sink with:
 /// folded into the front pair, then folded again into the single channel.
 const FOLD_TO_MONO: f32 = FOLD * 0.5;
+
+/// The coefficient a rear centre enters each front with, split into the rear
+/// pair and each half folded forward; and a monophonic sink, its two halves
+/// summing again there.
+const REAR_CENTRE_FOLD: f32 = FOLD * FOLD;
 
 /// A source position's destination in a sink that carries it directly, or the
 /// substitutes it folds into when the sink does not.
@@ -110,6 +117,7 @@ const FAN_OUT: &[FanOut] = &[
         options: &[
             &[(ChannelPosition::RearLeft, 1.0)],
             &[(ChannelPosition::SideLeft, 1.0)],
+            &[(ChannelPosition::RearCentre, FOLD)],
             &[(ChannelPosition::FrontLeft, FOLD)],
             &[(ChannelPosition::Mono, FOLD_TO_MONO)],
         ],
@@ -119,6 +127,7 @@ const FAN_OUT: &[FanOut] = &[
         options: &[
             &[(ChannelPosition::RearRight, 1.0)],
             &[(ChannelPosition::SideRight, 1.0)],
+            &[(ChannelPosition::RearCentre, FOLD)],
             &[(ChannelPosition::FrontRight, FOLD)],
             &[(ChannelPosition::Mono, FOLD_TO_MONO)],
         ],
@@ -128,6 +137,7 @@ const FAN_OUT: &[FanOut] = &[
         options: &[
             &[(ChannelPosition::SideLeft, 1.0)],
             &[(ChannelPosition::RearLeft, 1.0)],
+            &[(ChannelPosition::RearCentre, FOLD)],
             &[(ChannelPosition::FrontLeft, FOLD)],
             &[(ChannelPosition::Mono, FOLD_TO_MONO)],
         ],
@@ -137,8 +147,28 @@ const FAN_OUT: &[FanOut] = &[
         options: &[
             &[(ChannelPosition::SideRight, 1.0)],
             &[(ChannelPosition::RearRight, 1.0)],
+            &[(ChannelPosition::RearCentre, FOLD)],
             &[(ChannelPosition::FrontRight, FOLD)],
             &[(ChannelPosition::Mono, FOLD_TO_MONO)],
+        ],
+    },
+    FanOut {
+        source: ChannelPosition::RearCentre,
+        options: &[
+            &[(ChannelPosition::RearCentre, 1.0)],
+            &[
+                (ChannelPosition::RearLeft, FOLD),
+                (ChannelPosition::RearRight, FOLD),
+            ],
+            &[
+                (ChannelPosition::SideLeft, FOLD),
+                (ChannelPosition::SideRight, FOLD),
+            ],
+            &[
+                (ChannelPosition::FrontLeft, REAR_CENTRE_FOLD),
+                (ChannelPosition::FrontRight, REAR_CENTRE_FOLD),
+            ],
+            &[(ChannelPosition::Mono, REAR_CENTRE_FOLD)],
         ],
     },
 ];

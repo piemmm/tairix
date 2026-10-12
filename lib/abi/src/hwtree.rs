@@ -93,17 +93,23 @@ pub const HW_VIRTUAL_BUS_COMPATIBLE: &[u8] = b"tairix,virtual-bus";
 /// Maximum number of [`HwMatchKey`]s a single node carries.
 pub const HW_NODE_MAX_MATCH_KEYS: usize = 4;
 
+/// The longest `reg-names` entry a register window carries: the width of the
+/// field it rides in.
+pub const WINDOW_NAME_MAX: usize = core::mem::size_of::<u64>();
+
 /// Maximum number of [`HwResource`]s a single node carries.
 ///
-/// Wide enough for a DMA controller with a window, a line per channel, its
-/// duty and its bus's DMA windows; an entry past it is dropped by discovery,
+/// Wide enough for the largest device described whole: an HDMI controller
+/// with ten register windows, six interrupt lines, four clocks, its reset, its
+/// DMA request line and its DDC bus. An entry past it is dropped by discovery,
 /// never truncated.
-pub const HW_NODE_MAX_RESOURCES: usize = 16;
+pub const HW_NODE_MAX_RESOURCES: usize = 32;
 
 /// Bytes the fixed [`HwNode`] header occupies on the wire, before the
 /// match-key and resource arrays: `id`, `parent`, `address`, `class`, the two
-/// array counts, the fault-domain health byte, and the served link roles.
-pub const HW_NODE_HEADER_LEN: usize = 4 + 4 + 4 + 2 + 1 + 1 + 1 + 1;
+/// array counts, the fault-domain health byte, the served link roles, and the
+/// presence flags.
+pub const HW_NODE_HEADER_LEN: usize = 4 + 4 + 4 + 2 + 1 + 1 + 1 + 1 + 1;
 
 /// Device class of a hardware-tree node.
 ///
@@ -427,36 +433,54 @@ impl HwMatchKey {
         out
     }
 
-    /// Decode from `bytes`.
+    /// Decode from `bytes`, refusing anything but the canonical encoding.
     ///
     /// # Errors
     ///
     /// [`Errno::BufferTooSmall`] if the slice is short,
-    /// [`Errno::OutOfRange`] for an unknown [`HwMatchKind`], or
+    /// [`Errno::OutOfRange`] for an unknown [`HwMatchKind`],
     /// [`Errno::LengthOutOfRange`] if `compatible_len` exceeds
-    /// [`HW_COMPATIBLE_MAX`].
+    /// [`HW_COMPATIBLE_MAX`], or [`Errno::BadMagic`] for a reserved byte, a
+    /// field the kind does not use, or a byte past the string that is not
+    /// zero: a key hiding bytes no comparison reads.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let kind = read_u16(bytes, 0);
-        if HwMatchKind::from_u16(kind).is_none() {
-            return Err(Errno::OutOfRange);
-        }
+        let raw_kind = read_u16(bytes, 0);
+        let kind = HwMatchKind::from_u16(raw_kind).ok_or(Errno::OutOfRange)?;
         let compatible_len = bytes[2];
         if usize::from(compatible_len) > HW_COMPATIBLE_MAX {
             return Err(Errno::LengthOutOfRange);
         }
         let mut compatible = [0u8; HW_COMPATIBLE_MAX];
         compatible.copy_from_slice(&bytes[12..12 + HW_COMPATIBLE_MAX]);
-        Ok(Self {
-            kind,
+        let key = Self {
+            kind: raw_kind,
             compatible_len,
             vendor: read_u16(bytes, 4),
             product: read_u16(bytes, 6),
             class: read_u32(bytes, 8),
             compatible,
-        })
+        };
+        let unused_numbers = match kind {
+            HwMatchKind::Compatible => key.vendor | key.product != 0 || key.class != 0,
+            HwMatchKind::Virtio => key.vendor | key.product != 0,
+            HwMatchKind::Pci | HwMatchKind::Usb => false,
+        };
+        let used_string = if kind == HwMatchKind::Compatible {
+            usize::from(compatible_len)
+        } else {
+            0
+        };
+        if bytes[3] != 0
+            || unused_numbers
+            || (kind != HwMatchKind::Compatible && compatible_len != 0)
+            || compatible[used_string..].iter().any(|&byte| byte != 0)
+        {
+            return Err(Errno::BadMagic);
+        }
+        Ok(key)
     }
 }
 
@@ -555,32 +579,12 @@ pub enum HwResourceKind {
     /// [`required_capability`](Self::required_capability) reports [`None`].
     /// Recovered through [`HwResource::link_address`].
     LinkAddress = 8,
-    /// A **child of an addressed, non-enumerable bus** the holder must
-    /// serve: `base` is the child's transfer-endpoint id, `len` is `1`, and
-    /// `xlate` is the child's address on the parent bus. Recovered through
-    /// [`HwResource::bus_child`].
-    ///
-    /// I²C, SPI chip-select, and 1-Wire share one shape: the bus carries no
-    /// enumeration protocol, so the children and their addresses are known
-    /// only from the platform's device tree, and probing for them is
-    /// forbidden and can be destructive. Discovery therefore splits the two
-    /// halves of a child's existence — the **duty** onto the bus node (this
-    /// kind) and the **authority** onto the child node (an ordinary
-    /// [`Endpoint`](Self::Endpoint) resource naming the same id). The bus
-    /// driver learns which addresses to serve and under which endpoint; the
-    /// chip driver learns only its own endpoint, so its endpoint *is* its
-    /// chip and it can never address a neighbour.
-    ///
-    /// A separate kind rather than an overloaded [`Endpoint`](Self::Endpoint)
-    /// because the two facts must arrive paired, and because `Endpoint` means
-    /// "may submit to", never "must serve".
-    BusChild = 9,
     /// A link supplier's **duty to serve its role's endpoint**: `base` is the
     /// endpoint id, whose block names the role, and `len` is `1`; a DMA
     /// controller's `xlate` holds the channels the tree left to this system,
     /// numbered from the node's own first channel, when `flags` bit 0 says
     /// the tree stated them. Recovered through [`HwResource::link_duty`].
-    LinkDuty = 10,
+    LinkDuty = 9,
     /// One link a consumer's description names: the **right to call** the
     /// supplier endpoint in `base` for the selector it carries. `xlate` holds
     /// the selector cells, the first in its low half; `len` the entry's name
@@ -590,7 +594,7 @@ pub enum HwResourceKind {
     ///
     /// It covers calling that endpoint and never binding it, so no consumer
     /// can serve the rendezvous every other consumer of its supplier calls.
-    LinkRequest = 11,
+    LinkRequest = 10,
     /// The node **masters DMA through a translation unit**: `base` is the
     /// unit's node id, `xlate` the first stream id the unit knows the device
     /// by, and `len` how many consecutive ids it uses. Recovered through
@@ -598,12 +602,12 @@ pub enum HwResourceKind {
     ///
     /// A fact, like [`LinkAddress`](Self::LinkAddress): the kernel alone acts
     /// on it, translating the device's DMA through its owner's domain.
-    IommuStream = 12,
+    IommuStream = 11,
     /// A **firmware reserved window** on a translation unit: stream `xlate`
     /// keeps an identity mapping of `[base, base + len)`, because firmware
     /// still masters it (a VT-d RMRR, an AMD-Vi IVMD unity range). Recovered
     /// through [`HwResource::iommu_reserved`].
-    IommuReserved = 13,
+    IommuReserved = 12,
     /// A **named fact** about the node: `base` is the [`HwProperty`] key,
     /// `xlate` its value, `len` `1`. Recovered through
     /// [`HwResource::property_value`].
@@ -611,7 +615,7 @@ pub enum HwResourceKind {
     /// The publisher states it about the device it describes, and holding one
     /// authorises nothing. A node's driver reads it; the kernel reads only
     /// those of the translation units it drives itself.
-    Property = 14,
+    Property = 13,
     /// The fabric **also delivers the node's DMA as these stream ids**:
     /// `base` is the unit's node id, `xlate` the first id, `len` how many. A
     /// bridge that takes ownership of the requests below it (a PCIe-to-PCI
@@ -620,13 +624,13 @@ pub enum HwResourceKind {
     ///
     /// A fact: the node's domain translates them too, but they name no
     /// function of the node's own, so nothing is made a bus master by one.
-    IommuAlias = 15,
+    IommuAlias = 14,
     /// The node's DMA **cannot be kept apart from that of every other node
     /// naming this group**: `base` is the unit's node id, `xlate` the group's
     /// id, `len` `1`. Recovered through [`HwResource::iommu_group`].
     ///
     /// A fact: the kernel lets one owner at a time carve through a group.
-    IommuGroup = 16,
+    IommuGroup = 15,
     /// The node's **interrupt messages are written to `[base, base + len)`**,
     /// an interrupt translation service's doorbell that a translation unit
     /// translates like any other write. Recovered through
@@ -634,7 +638,7 @@ pub enum HwResourceKind {
     ///
     /// A fact only discovery states: the kernel maps it, at its own address,
     /// into every domain translating the node's DMA, so its messages arrive.
-    MsiDoorbell = 17,
+    MsiDoorbell = 16,
 }
 
 /// What a [`HwResourceKind::Property`] states.
@@ -662,6 +666,19 @@ pub enum HwProperty {
     /// below. Built and read through [`HwResource::fixed_clock_rate`] and
     /// [`HwResource::fixed_clock`].
     FixedClockRate = 5,
+    /// The node is a bus: the speed its tree declares it runs at, in Hz — an
+    /// I²C controller's `clock-frequency`.
+    BusSpeed = 6,
+    /// The device shares its board with a 2.4 GHz radio its emissions must
+    /// keep clear of — an HDMI transmitter's TMDS harmonics: the tree's
+    /// `wifi-2.4ghz-coexistence`. The value is `1`.
+    RadioCoexistence = 7,
+    /// The device is the display engine that takes the screen over from the
+    /// firmware which lit it, so the kernel's framebuffer console must move
+    /// off the firmware's memory first: its driver may ask for that move
+    /// (`console_relocate`). The value is `1`; only discovery states it, a
+    /// driver never publishes it.
+    BootConsole = 8,
 }
 
 impl HwProperty {
@@ -673,12 +690,22 @@ impl HwProperty {
         Self::KernelDriven,
         Self::UsbSpeed,
         Self::FixedClockRate,
+        Self::BusSpeed,
+        Self::RadioCoexistence,
+        Self::BootConsole,
     ];
 
     /// Raw on-wire key.
     #[must_use]
     pub const fn as_u32(self) -> u32 {
         self as u32
+    }
+
+    /// Whether only discovery may state the key: on a node a driver published
+    /// it would claim authority only the kernel confers.
+    #[must_use]
+    pub const fn discovery_only(self) -> bool {
+        matches!(self, Self::KernelDriven | Self::BootConsole)
     }
 
     /// Inverse of [`Self::as_u32`]; `None` for an unknown key.
@@ -690,6 +717,9 @@ impl HwProperty {
             3 => Some(Self::KernelDriven),
             4 => Some(Self::UsbSpeed),
             5 => Some(Self::FixedClockRate),
+            6 => Some(Self::BusSpeed),
+            7 => Some(Self::RadioCoexistence),
+            8 => Some(Self::BootConsole),
             _ => None,
         }
     }
@@ -716,10 +746,11 @@ impl NodeEndpointBlock {
     /// Every block, so reserving them is one rule rather than a list to keep
     /// in step.
     pub const ALL: &'static [Self] = &[
-        BUS_CHILD_ENDPOINTS,
         crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS,
         crate::driver::clock::CLOCK_CONTROLLER_ENDPOINTS,
         crate::driver::codec::CODEC_ENDPOINTS,
+        crate::driver::irqline::INTERRUPT_LINE_ENDPOINTS,
+        crate::driver::i2c::I2C_CONTROLLER_ENDPOINTS,
     ];
 
     /// The block whose ids' two high bytes spell `tag`.
@@ -749,12 +780,6 @@ impl NodeEndpointBlock {
             .and_then(|offset| u32::try_from(offset).ok())
     }
 }
-
-/// The transfer endpoints of an addressed bus's children, indexed by the
-/// child's node id. Serving one takes the matching
-/// [`HwResourceKind::BusChild`] duty, which discovery gives only the driver
-/// bound to the child's parent bus.
-pub const BUS_CHILD_ENDPOINTS: NodeEndpointBlock = NodeEndpointBlock::tagged(*b"BC");
 
 /// CPU mapping policy for a linear framebuffer resource.
 ///
@@ -804,7 +829,6 @@ impl HwResourceKind {
         Self::Shared,
         Self::Framebuffer,
         Self::LinkAddress,
-        Self::BusChild,
         Self::LinkDuty,
         Self::LinkRequest,
         Self::IommuStream,
@@ -834,15 +858,14 @@ impl HwResourceKind {
             6 => Some(Self::Shared),
             7 => Some(Self::Framebuffer),
             8 => Some(Self::LinkAddress),
-            9 => Some(Self::BusChild),
-            10 => Some(Self::LinkDuty),
-            11 => Some(Self::LinkRequest),
-            12 => Some(Self::IommuStream),
-            13 => Some(Self::IommuReserved),
-            14 => Some(Self::Property),
-            15 => Some(Self::IommuAlias),
-            16 => Some(Self::IommuGroup),
-            17 => Some(Self::MsiDoorbell),
+            9 => Some(Self::LinkDuty),
+            10 => Some(Self::LinkRequest),
+            11 => Some(Self::IommuStream),
+            12 => Some(Self::IommuReserved),
+            13 => Some(Self::Property),
+            14 => Some(Self::IommuAlias),
+            15 => Some(Self::IommuGroup),
+            16 => Some(Self::MsiDoorbell),
             _ => None,
         }
     }
@@ -880,7 +903,7 @@ impl HwResourceKind {
             | Self::MsiDoorbell => return None,
             // A bus-child or DMA-controller duty authorises binding a
             // reserved id, which is a privileged bind.
-            Self::BusChild | Self::LinkDuty => CapabilityId::IPC_BIND_PRIVILEGED,
+            Self::LinkDuty => CapabilityId::IPC_BIND_PRIVILEGED,
         })
     }
 }
@@ -1180,6 +1203,38 @@ impl HwResource {
         Self::new(HwResourceKind::Mmio, base, len, 0)
     }
 
+    /// A memory-mapped register window carrying `name`, its entry in the
+    /// node's `reg-names`, or [`None`] for a name that is empty, longer than
+    /// [`WINDOW_NAME_MAX`] or holds a NUL.
+    ///
+    /// The name rides in [`translated_base`](Self::translated_base), which a
+    /// plain register window leaves unused and which coverage does not
+    /// compare, so a named window covers exactly what the unnamed one would.
+    #[must_use]
+    pub fn mmio_named(base: u64, len: u64, name: &[u8]) -> Option<Self> {
+        if name.is_empty() || name.len() > WINDOW_NAME_MAX || name.contains(&0) {
+            return None;
+        }
+        let mut packed = [0u8; WINDOW_NAME_MAX];
+        packed[..name.len()].copy_from_slice(name);
+        Some(Self::new_xlate(
+            HwResourceKind::Mmio,
+            base,
+            len,
+            0,
+            u64::from_le_bytes(packed),
+        ))
+    }
+
+    /// Whether `self` is the register window named `name`.
+    #[must_use]
+    pub fn is_window_named(&self, name: &[u8]) -> bool {
+        self.kind() == Some(HwResourceKind::Mmio)
+            && self.flags == 0
+            && Self::mmio_named(self.base, self.len, name)
+                .is_some_and(|named| named.xlate == self.xlate)
+    }
+
     /// A memory-mapped register window carrying a consumer-interpreted
     /// `tag` and an auxiliary datum `aux`.
     ///
@@ -1402,22 +1457,6 @@ impl HwResource {
             1,
             0,
         )
-    }
-
-    /// The duty to serve one child of an addressed, non-enumerable bus:
-    /// `endpoint` is the transfer endpoint the child's driver will call,
-    /// `address` the child's address on this bus
-    /// ([`HwResourceKind::BusChild`]).
-    #[must_use]
-    pub fn bus_child(endpoint: u64, address: u64) -> Self {
-        Self::new_xlate(HwResourceKind::BusChild, endpoint, 1, 0, address)
-    }
-
-    /// The `(endpoint, bus address)` pair a [`HwResourceKind::BusChild`]
-    /// resource carries, or [`None`] for any other kind.
-    #[must_use]
-    pub fn bus_child_pair(&self) -> Option<(u64, u64)> {
-        (self.kind() == Some(HwResourceKind::BusChild)).then_some((self.base, self.xlate))
     }
 
     /// A link supplier's duty to serve its role's endpoint
@@ -2087,21 +2126,6 @@ impl HwResource {
                 // reinterpret the parent's surface with a different shape.
                 self.xlate == child.xlate && self.base == child.base && self.len == child.len
             }
-            (HwResourceKind::BusChild, HwResourceKind::BusChild) => {
-                // A duty is granted whole: the endpoint id *and* the bus
-                // address must match, so a driver cannot re-point a child's
-                // endpoint at a different address on the same bus.
-                self.xlate == child.xlate
-                    && interval_contains(self.base, self.len, child.base, child.len)
-            }
-            (HwResourceKind::BusChild, HwResourceKind::Endpoint) => {
-                // Holding the duty to serve a child covers naming that
-                // child's endpoint id: it is what authorises the bus driver's
-                // bind, and what lets it forward the endpoint onto a node it
-                // publishes. Both records are flagless.
-                self.flags == child.flags
-                    && interval_contains(self.base, self.len, child.base, child.len)
-            }
             (HwResourceKind::Mmio, HwResourceKind::Framebuffer) => {
                 // An emitter holding a plain (flagless) window over the
                 // surface's memory may publish it as a geometry-carrying
@@ -2355,6 +2379,117 @@ impl MsiAllocation {
     }
 }
 
+/// A driver's own place in the hardware tree, as `hw_self_node` reports it:
+/// the node it was loaded for, the keys that node is matched by, and the
+/// status the published health of its fault-domain ancestors imposes on it.
+///
+/// The keys let a driver serving several bindings of one family tell which
+/// it is driving, by the same rule the device manager matched it with; the
+/// status lets a leaf attribute a stall to a resetting hub or controller
+/// rather than to its own device.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct HwSelfNode {
+    node: u32,
+    match_keys: [HwMatchKey; HW_NODE_MAX_MATCH_KEYS],
+    match_key_count: u8,
+    ancestor_status: BlkStatus,
+}
+
+impl HwSelfNode {
+    /// Encoded size on the wire: the `u32` node id, the key count, the
+    /// ancestors' status, two reserved bytes, and every key slot.
+    pub const WIRE_LEN: usize = 8 + HW_NODE_MAX_MATCH_KEYS * HwMatchKey::WIRE_LEN;
+
+    /// The record for `node`, matched by `keys`, on which its ancestors impose
+    /// `ancestor_status`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for more than [`HW_NODE_MAX_MATCH_KEYS`]
+    /// keys.
+    pub fn new(node: u32, keys: &[HwMatchKey], ancestor_status: BlkStatus) -> Result<Self, Errno> {
+        let match_key_count = u8::try_from(keys.len())
+            .ok()
+            .filter(|&count| usize::from(count) <= HW_NODE_MAX_MATCH_KEYS)
+            .ok_or(Errno::LengthOutOfRange)?;
+        let mut match_keys = [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS];
+        match_keys[..keys.len()].copy_from_slice(keys);
+        Ok(Self {
+            node,
+            match_keys,
+            match_key_count,
+            ancestor_status,
+        })
+    }
+
+    /// The node's id.
+    #[must_use]
+    pub const fn node(&self) -> u32 {
+        self.node
+    }
+
+    /// The keys the node is matched by, most specific first.
+    #[must_use]
+    pub fn match_keys(&self) -> &[HwMatchKey] {
+        &self.match_keys[..usize::from(self.match_key_count)]
+    }
+
+    /// The status the node's fault-domain ancestors impose on it:
+    /// [`BlkStatus::Ok`] while every one is healthy.
+    #[must_use]
+    pub const fn ancestor_status(&self) -> BlkStatus {
+        self.ancestor_status
+    }
+
+    /// Encode `self` little-endian: the node id at offset `0`, the key count
+    /// at `4`, the ancestors' status at `5`, the key slots from `8`, an unused
+    /// slot zeroed.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.node);
+        out[4] = self.match_key_count;
+        // Every status discriminant is below 256.
+        out[5] = self.ancestor_status.as_u32().to_le_bytes()[0];
+        let (slots, _) = out[8..].as_chunks_mut::<{ HwMatchKey::WIRE_LEN }>();
+        for (slot, key) in slots.iter_mut().zip(self.match_keys()) {
+            *slot = key.to_le_bytes();
+        }
+        out
+    }
+
+    /// Decode from `bytes`, refusing anything but the canonical encoding.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if the slice is short,
+    /// [`Errno::LengthOutOfRange`] for a key count past
+    /// [`HW_NODE_MAX_MATCH_KEYS`], [`Errno::BadMagic`] for a reserved byte or
+    /// an unused slot that is not zero, or a status's or key's own decoding
+    /// error.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        let bytes = bytes.get(..Self::WIRE_LEN).ok_or(Errno::BufferTooSmall)?;
+        let count = usize::from(bytes[4]);
+        if count > HW_NODE_MAX_MATCH_KEYS {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let ancestor_status = BlkStatus::from_u32(u32::from(bytes[5]))?;
+        if bytes[6..8].iter().any(|&byte| byte != 0) {
+            return Err(Errno::BadMagic);
+        }
+        let mut keys = [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS];
+        let (slots, _) = bytes[8..].as_chunks::<{ HwMatchKey::WIRE_LEN }>();
+        for (index, slot) in slots.iter().enumerate() {
+            if index < count {
+                keys[index] = HwMatchKey::from_bytes(slot)?;
+            } else if slot.iter().any(|&byte| byte != 0) {
+                return Err(Errno::BadMagic);
+            }
+        }
+        Self::new(read_u32(bytes, 0), &keys[..count], ancestor_status)
+    }
+}
+
 impl HwMatchKey {
     /// A zeroed slot, used to pad a node's fixed-size match-key array.
     const EMPTY: Self = Self {
@@ -2476,6 +2611,11 @@ pub struct HwNode {
     /// registry, so the device manager binds a consumer only once its
     /// supplier is serving rather than merely loaded.
     served: u8,
+    /// How the device came and whether its driver has finished bringing it
+    /// up: [`is_removable`](Self::is_removable), declared by the emitter, and
+    /// [`is_settled`](Self::is_settled) and
+    /// [`is_hot_arrival`](Self::is_hot_arrival), which only the kernel sets.
+    presence: u8,
     match_keys: [HwMatchKey; HW_NODE_MAX_MATCH_KEYS],
     resources: [HwResource; HW_NODE_MAX_RESOURCES],
 }
@@ -2484,6 +2624,18 @@ pub struct HwNode {
 const fn served_bit(role: LinkRole) -> u8 {
     1 << (role as u8 - 1)
 }
+
+/// The device sits on a port it can be plugged into and pulled from while the
+/// machine runs.
+const PRESENCE_REMOVABLE: u8 = 1 << 0;
+/// The driver now driving the node has published everything its device
+/// presented when it came up.
+const PRESENCE_SETTLED: u8 = 1 << 1;
+/// The node was published after its emitter had settled: the device arrived
+/// on a running machine rather than being found as it came up.
+const PRESENCE_HOT_ARRIVAL: u8 = 1 << 2;
+/// Every defined presence bit.
+const PRESENCE_DEFINED: u8 = PRESENCE_REMOVABLE | PRESENCE_SETTLED | PRESENCE_HOT_ARRIVAL;
 
 /// Every bit of [`HwNode`]'s served set that names a role.
 const SERVED_DEFINED: u8 = {
@@ -2515,6 +2667,7 @@ impl HwNode {
             resource_count: 0,
             fault_health: FaultDomainState::Healthy.as_u8(),
             served: 0,
+            presence: 0,
             match_keys: [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS],
             resources: [HwResource::EMPTY; HW_NODE_MAX_RESOURCES],
         }
@@ -2629,12 +2782,29 @@ impl HwNode {
         &self.resources[..usize::from(self.resource_count)]
     }
 
+    /// The value the node states for `key`, or [`None`] when it states none.
+    #[must_use]
+    pub fn property(&self, key: HwProperty) -> Option<u64> {
+        self.resources()
+            .iter()
+            .filter_map(|resource| resource.property_value().ok())
+            .find_map(|(held, value)| (held == key).then_some(value))
+    }
+
     /// Whether the node states [`HwProperty::KernelDriven`].
     #[must_use]
     pub fn is_kernel_driven(&self) -> bool {
-        self.resources()
-            .iter()
-            .any(|resource| matches!(resource.property_value(), Ok((HwProperty::KernelDriven, _))))
+        self.property(HwProperty::KernelDriven).is_some()
+    }
+
+    /// Whether the node states a property only discovery may state.
+    #[must_use]
+    pub fn states_discovery_only(&self) -> bool {
+        self.resources().iter().any(|resource| {
+            resource
+                .property_value()
+                .is_ok_and(|(key, _)| key.discovery_only())
+        })
     }
 
     /// The live recovery health of the fault domain this node owns
@@ -2675,6 +2845,60 @@ impl HwNode {
         }
     }
 
+    /// Whether the device sits on a port it can be plugged into and pulled
+    /// from while the machine runs: what its emitter knows of the bus.
+    #[must_use]
+    pub const fn is_removable(&self) -> bool {
+        self.presence & PRESENCE_REMOVABLE != 0
+    }
+
+    /// Declare whether the device sits on such a port.
+    pub fn set_removable(&mut self, removable: bool) {
+        self.set_presence(PRESENCE_REMOVABLE, removable);
+    }
+
+    /// Whether the driver now driving this node has published everything its
+    /// device presented when it came up, so whatever it publishes next
+    /// arrived on a running machine.
+    #[must_use]
+    pub const fn is_settled(&self) -> bool {
+        self.presence & PRESENCE_SETTLED != 0
+    }
+
+    /// Record whether the driver now driving this node has settled.
+    pub fn set_settled(&mut self, settled: bool) {
+        self.set_presence(PRESENCE_SETTLED, settled);
+    }
+
+    /// Whether this node was published after its emitter had settled: its
+    /// device arrived on a running machine rather than being found as the
+    /// emitter came up.
+    #[must_use]
+    pub const fn is_hot_arrival(&self) -> bool {
+        self.presence & PRESENCE_HOT_ARRIVAL != 0
+    }
+
+    /// Discard every reading the kernel keeps for a node it is publishing —
+    /// the served roles, the domain's health and whether a driver has
+    /// settled it — none of which an emitter may claim, and record whether
+    /// it arrives on a running machine.
+    ///
+    /// What the emitter describes, its removability among it, is kept.
+    pub fn admit_published(&mut self, hot_arrival: bool) {
+        self.served = 0;
+        self.fault_health = FaultDomainState::Healthy.as_u8();
+        self.presence &= PRESENCE_REMOVABLE;
+        self.set_presence(PRESENCE_HOT_ARRIVAL, hot_arrival);
+    }
+
+    fn set_presence(&mut self, bit: u8, set: bool) {
+        if set {
+            self.presence |= bit;
+        } else {
+            self.presence &= !bit;
+        }
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -2687,6 +2911,7 @@ impl HwNode {
         out[15] = self.resource_count;
         out[16] = self.fault_health;
         out[17] = self.served;
+        out[18] = self.presence;
         let mut off = HW_NODE_HEADER_LEN;
         for key in &self.match_keys {
             out[off..off + HwMatchKey::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
@@ -2729,6 +2954,7 @@ impl HwNode {
         // A bit naming no role is dropped: it can only ever read as "not
         // serving", the side that holds a consumer back.
         let served = bytes[17] & SERVED_DEFINED;
+        let presence = bytes[18] & PRESENCE_DEFINED;
         let mut match_keys = [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS];
         let mut off = HW_NODE_HEADER_LEN;
         for slot in &mut match_keys {
@@ -2749,6 +2975,7 @@ impl HwNode {
             resource_count,
             fault_health,
             served,
+            presence,
             match_keys,
             resources,
         })
@@ -2857,11 +3084,9 @@ pub fn fault_domain_owner(nodes: &[HwNode], node_id: u32) -> Option<u32> {
 }
 
 /// The handful of fields the fault-domain walk needs from one node, decoded
-/// once from whichever backing the walk runs over — a [`HwNode`] slice
-/// (in-memory) or the wire snapshot (`hw_tree_read`). Sharing this view lets
-/// the traversal itself be written **once** and reused by both, so the
-/// slice-based and snapshot-based fault-domain resolution can never drift
-/// apart.
+/// once from whichever backing the walk runs over — a [`HwNode`] slice or the
+/// kernel store's lookup by id — so the traversal is written once and the two
+/// can never drift apart.
 #[derive(Copy, Clone)]
 struct FaultNode {
     id: u32,
@@ -2887,8 +3112,7 @@ impl FaultNode {
 
 /// Resolve the nearest fault-domain owner of `node_id`, looking each node up
 /// by id through `lookup` — the single traversal behind both
-/// [`fault_domain_owner`] (a slice lookup) and the wire-snapshot ancestor
-/// fold ([`ancestor_imposed_status_from_snapshot`], a byte lookup).
+/// [`fault_domain_owner`] (a slice lookup) and the ancestor fold.
 ///
 /// It walks strictly upward to the nearest [`HwDeviceClass::Bus`] /
 /// [`HwDeviceClass::Root`] owner exactly as [`fault_domain_owner`] documents,
@@ -2915,7 +3139,7 @@ where
 /// Fold the imposed child status of every interior fault-domain ancestor of
 /// `node_id`, nearest first, looking nodes up through `lookup` — the single
 /// definition behind both [`ancestor_imposed_status`] (a slice lookup) and
-/// [`ancestor_imposed_status_from_snapshot`] (a byte lookup).
+/// [`ancestor_imposed_status_by`] (a lookup by id).
 ///
 /// Each owner in the chain contributes its published
 /// [`FaultDomainState::imposed_child_status`], combined through
@@ -3046,42 +3270,15 @@ pub fn ancestor_imposed_status(nodes: &[HwNode], node_id: u32) -> BlkStatus {
     })
 }
 
-/// [`ancestor_imposed_status`] over the **wire snapshot** a driver reads with
-/// `hw_tree_read`, rather than an in-memory [`HwNode`] slice.
-///
-/// A leaf block driver does not hold the tree as a slice — it reads the
-/// kernel's wire snapshot (a [`HwTreeHeader`] followed by
-/// [`HwTreeHeader::node_count`] records of [`HwNode::WIRE_LEN`] bytes) into a
-/// buffer. This computes the same interior-ancestor fold directly over those
-/// bytes, so the driver need not materialise the whole tree (no allocation on
-/// its recovery path). It shares the one traversal `fold_ancestor_status`
-/// defines — only the per-id lookup differs (a byte scan here, a slice scan in
-/// [`ancestor_imposed_status`]) — so the two can never diverge.
-///
-/// A malformed or truncated snapshot (a short header, a length whose byte span
-/// overflows, or a buffer shorter than the records it promises) imposes
-/// nothing and returns [`BlkStatus::Ok`]: the driver **degrades safe** to
-/// answering on the device's own health rather than fabricating a fault from a
-/// snapshot it cannot trust. This is the read side of the cross-process
-/// fault-domain signal (`plans/FIX-IO.md` IO4): a leaf attributes a
-/// controller/hub blip to the fault domain instead of to the disk.
+/// [`ancestor_imposed_status`] with each node looked up by id through
+/// `lookup`, the walk bounded by `bound` (the tree's node count): how the
+/// kernel's store folds the chain without copying its tree into a slice.
 #[must_use]
-pub fn ancestor_imposed_status_from_snapshot(blob: &[u8], node_id: u32) -> BlkStatus {
-    // A malformed or truncated snapshot is never partially interpreted: it
-    // imposes nothing, so the driver degrades safe to answering on the
-    // device's own health rather than fabricating a fault from bytes it
-    // cannot trust.
-    let Some(snapshot) = snapshot_nodes(blob) else {
-        return BlkStatus::Ok;
-    };
-    let count = snapshot.len();
-    let lookup = |id: u32| -> Option<FaultNode> {
-        snapshot
-            .clone()
-            .find(|node| node.id() == id)
-            .map(|node| FaultNode::of(&node))
-    };
-    fold_ancestor_status(node_id, count, &lookup)
+pub fn ancestor_imposed_status_by<F>(node_id: u32, bound: usize, lookup: F) -> BlkStatus
+where
+    F: Fn(u32) -> Option<HwNode>,
+{
+    fold_ancestor_status(node_id, bound, &|id| lookup(id).as_ref().map(FaultNode::of))
 }
 
 /// The nodes of a kernel hardware-tree snapshot, decoded lazily in wire order.
@@ -3170,6 +3367,75 @@ pub fn snapshot_nodes(blob: &[u8]) -> Option<HwTreeNodes<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compatible(text: &[u8]) -> HwMatchKey {
+        HwMatchKey::compatible(text).expect("fits")
+    }
+
+    #[test]
+    fn a_named_window_carries_its_name_and_covers_what_the_unnamed_one_would() {
+        let named = HwResource::mmio_named(0xFE90_0700, 0x300, b"hdmi").expect("fits");
+        assert!(named.is_window_named(b"hdmi"));
+        assert!(!named.is_window_named(b"hd"));
+        assert!(!HwResource::mmio(0xFE90_0700, 0x300).is_window_named(b"hdmi"));
+        assert_eq!(named.register_window_base(), Some(0xFE90_0700));
+        assert!(named.covers(&HwResource::mmio(0xFE90_0790, 4)));
+        assert!(!named.covers(&HwResource::mmio(0xFE90_09F0, 0x20)));
+        let full = HwResource::mmio_named(0, 1, b"metadata").expect("eight bytes fit");
+        assert!(full.is_window_named(b"metadata"));
+        assert_eq!(
+            HwResource::from_bytes(&full.to_le_bytes()).expect("round trip"),
+            full
+        );
+        for refused in [&b""[..], b"overlong!", b"nu\0l"] {
+            assert_eq!(HwResource::mmio_named(0, 1, refused), None);
+        }
+    }
+
+    #[test]
+    fn a_self_node_round_trips_its_id_and_keys_in_order() {
+        let keys = [
+            compatible(b"brcm,bcm2711-l2-intc"),
+            compatible(b"brcm,l2-intc"),
+        ];
+        let record = HwSelfNode::new(42, &keys, BlkStatus::Reset).expect("fits");
+        let decoded = HwSelfNode::from_bytes(&record.to_le_bytes()).expect("canonical");
+        assert_eq!(decoded, record);
+        assert_eq!(decoded.node(), 42);
+        assert_eq!(decoded.match_keys(), keys);
+        assert_eq!(decoded.ancestor_status(), BlkStatus::Reset);
+    }
+
+    #[test]
+    fn a_self_node_refuses_too_many_keys_and_any_non_canonical_byte() {
+        let key = compatible(b"brcm,bcm2711-hdmi0");
+        assert_eq!(
+            HwSelfNode::new(1, &[key; HW_NODE_MAX_MATCH_KEYS + 1], BlkStatus::Ok),
+            Err(Errno::LengthOutOfRange)
+        );
+        let bytes = HwSelfNode::new(1, &[key], BlkStatus::Ok)
+            .expect("fits")
+            .to_le_bytes();
+        assert_eq!(
+            HwSelfNode::from_bytes(&bytes[..HwSelfNode::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut count = bytes;
+        count[4] = u8::try_from(HW_NODE_MAX_MATCH_KEYS + 1).expect("small");
+        assert_eq!(HwSelfNode::from_bytes(&count), Err(Errno::LengthOutOfRange));
+        let mut reserved = bytes;
+        reserved[6] = 1;
+        assert_eq!(HwSelfNode::from_bytes(&reserved), Err(Errno::BadMagic));
+        let mut status = bytes;
+        status[5] = 0xFF;
+        assert!(
+            HwSelfNode::from_bytes(&status).is_err(),
+            "an unknown status"
+        );
+        let mut unused = bytes;
+        unused[8 + HwMatchKey::WIRE_LEN + 3] = 1;
+        assert_eq!(HwSelfNode::from_bytes(&unused), Err(Errno::BadMagic));
+    }
 
     #[test]
     fn version_and_root_sentinel_are_frozen() {
@@ -3312,6 +3578,29 @@ mod tests {
         assert!(node.is_kernel_driven());
         assert_eq!(
             HwNode::from_bytes(&node.to_le_bytes()).map(|n| n.is_kernel_driven()),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn only_the_kernel_s_own_facts_are_discovery_only() {
+        assert!(HwProperty::ALL
+            .iter()
+            .copied()
+            .filter(|key| key.discovery_only())
+            .eq([HwProperty::KernelDriven, HwProperty::BootConsole]));
+        let mut node = HwNode::new(9, HW_NODE_ROOT_ID, HwDeviceClass::Display);
+        node.push_resource(HwResource::property(HwProperty::RadioCoexistence, 1))
+            .unwrap();
+        assert!(!node.states_discovery_only());
+        assert_eq!(node.property(HwProperty::BootConsole), None);
+        node.push_resource(HwResource::property(HwProperty::BootConsole, 1))
+            .unwrap();
+        assert!(node.states_discovery_only());
+        assert_eq!(node.property(HwProperty::BootConsole), Some(1));
+        assert_eq!(node.property(HwProperty::RadioCoexistence), Some(1));
+        assert_eq!(
+            HwNode::from_bytes(&node.to_le_bytes()).map(|n| n.states_discovery_only()),
             Ok(true)
         );
     }
@@ -3572,6 +3861,35 @@ mod tests {
         let mut bytes = HwMatchKey::pci(1, 2, 3).to_le_bytes();
         put_u16(&mut bytes, 0, 99);
         assert_eq!(HwMatchKey::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    /// A key hiding bytes no comparison reads is refused, so every key a
+    /// decoder accepts re-encodes to the bytes it came from.
+    #[test]
+    fn match_key_decode_refuses_every_non_canonical_byte() {
+        let compatible = HwMatchKey::compatible(b"brcm,l2-intc").expect("fits");
+        let canonical = compatible.to_le_bytes();
+        assert_eq!(HwMatchKey::from_bytes(&canonical), Ok(compatible));
+        let dirty = |offset: usize, bytes: [u8; HwMatchKey::WIRE_LEN]| {
+            let mut dirty = bytes;
+            dirty[offset] = 0x9D;
+            HwMatchKey::from_bytes(&dirty)
+        };
+        // The reserved byte, a numeric field a string key does not use, and a
+        // byte past the string.
+        for offset in [3, 4, 8, 12 + b"brcm,l2-intc".len()] {
+            assert_eq!(
+                dirty(offset, canonical),
+                Err(Errno::BadMagic),
+                "offset {offset}"
+            );
+        }
+        let virtio = HwMatchKey::virtio(4).to_le_bytes();
+        for offset in [2, 6, 12] {
+            assert!(dirty(offset, virtio).is_err(), "offset {offset}");
+        }
+        let pci = HwMatchKey::pci(0x14E4, 0x2711, 0x000C_0330).to_le_bytes();
+        assert_eq!(dirty(12, pci), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -3876,44 +4194,11 @@ mod tests {
     }
 
     #[test]
-    fn a_bus_child_resource_pairs_an_endpoint_with_an_address() {
-        let endpoint = BUS_CHILD_ENDPOINTS.endpoint(7);
-        let duty = HwResource::bus_child(endpoint, 0x68);
-        assert_eq!(duty.kind(), Some(HwResourceKind::BusChild));
-        assert_eq!(duty.bus_child_pair(), Some((endpoint, 0x68)));
-        assert_eq!(
-            duty.required_capability(),
-            Ok(Some(CapabilityId::IPC_BIND_PRIVILEGED))
-        );
-        let wire = duty.to_le_bytes();
-        assert_eq!(HwResource::from_bytes(&wire), Ok(duty));
-        // Only a bus-child resource answers the pair.
-        assert_eq!(HwResource::endpoint(endpoint).bus_child_pair(), None);
-    }
-
-    #[test]
-    fn a_bus_child_duty_covers_its_own_endpoint_and_nothing_else() {
-        let endpoint = BUS_CHILD_ENDPOINTS.endpoint(7);
-        let duty = HwResource::bus_child(endpoint, 0x68);
-        // The duty authorises naming exactly its own child's endpoint.
-        assert!(duty.covers(&HwResource::endpoint(endpoint)));
-        assert!(!duty.covers(&HwResource::endpoint(endpoint + 1)));
-        assert!(duty.covers(&HwResource::bus_child(endpoint, 0x68)));
-        // A neighbour's address on the same endpoint id, and the reverse
-        // direction, both fail closed.
-        assert!(!duty.covers(&HwResource::bus_child(endpoint, 0x51)));
-        assert!(!HwResource::endpoint(endpoint).covers(&duty));
-        // A duty is not a window, a port range, or a shared region.
-        assert!(!duty.covers(&HwResource::mmio(endpoint, 1)));
-        assert!(!duty.covers(&HwResource::shared(endpoint)));
-        assert!(!HwResource::mmio(0, u64::MAX).covers(&duty));
-    }
-
-    #[test]
     fn every_node_endpoint_block_is_reserved_collision_free_and_disjoint() {
         use crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
-        assert_eq!(BUS_CHILD_ENDPOINTS.base, 0x4243_0000_0000_0000);
-        assert!(NodeEndpointBlock::ALL.contains(&BUS_CHILD_ENDPOINTS));
+        use crate::driver::i2c::I2C_CONTROLLER_ENDPOINTS;
+        assert_eq!(I2C_CONTROLLER_ENDPOINTS.base, 0x4943_0000_0000_0000);
+        assert!(NodeEndpointBlock::ALL.contains(&I2C_CONTROLLER_ENDPOINTS));
         assert!(NodeEndpointBlock::ALL.contains(&DMA_CONTROLLER_ENDPOINTS));
         for &block in NodeEndpointBlock::ALL {
             assert_eq!(block.endpoint(0), block.base);
@@ -3992,7 +4277,7 @@ mod tests {
         let mut wide = good;
         wide.len = 2;
         let mut foreign = good;
-        foreign.base = BUS_CHILD_ENDPOINTS.endpoint(12);
+        foreign.base = NodeEndpointBlock::tagged(*b"ZZ").endpoint(12);
         // The fuzz harness's first find: a duty carrying another kind's
         // capability id decoded, then re-encoded to different bytes.
         let mut capability = good;
@@ -4045,7 +4330,7 @@ mod tests {
         let mut ragged_name = good;
         ragged_name.len = u64::from_le_bytes(*b"rx\0tx\0\0\0");
         let mut foreign = good;
-        foreign.base = BUS_CHILD_ENDPOINTS.endpoint(12);
+        foreign.base = NodeEndpointBlock::tagged(*b"ZZ").endpoint(12);
         for bad in [
             capability,
             high_flag,
@@ -4613,8 +4898,8 @@ mod tests {
         assert_eq!(GrantedResource::WIRE_LEN, 40);
         // The fixed node header followed by the fixed match-key and resource
         // arrays.
-        assert_eq!(HW_NODE_HEADER_LEN, 18);
-        assert_eq!(HwNode::WIRE_LEN, 834);
+        assert_eq!(HW_NODE_HEADER_LEN, 19);
+        assert_eq!(HwNode::WIRE_LEN, 1347);
         assert_eq!(HwTreeHeader::WIRE_LEN, 16);
     }
 
@@ -4715,6 +5000,46 @@ mod tests {
         let mut bytes = fresh.to_le_bytes();
         bytes[17] = !SERVED_DEFINED;
         assert_eq!(HwNode::from_bytes(&bytes), Ok(fresh));
+    }
+
+    #[test]
+    fn presence_round_trips_and_an_undefined_bit_is_dropped() {
+        let fresh = sample_node();
+        assert!(!fresh.is_removable() && !fresh.is_settled() && !fresh.is_hot_arrival());
+        let mut node = fresh;
+        node.set_removable(true);
+        node.set_settled(true);
+        let decoded = HwNode::from_bytes(&node.to_le_bytes()).expect("decodes");
+        assert_eq!(decoded, node);
+        assert!(decoded.is_removable() && decoded.is_settled() && !decoded.is_hot_arrival());
+        node.set_settled(false);
+        node.set_removable(false);
+        assert_eq!(node, fresh);
+        let mut bytes = fresh.to_le_bytes();
+        bytes[18] = !PRESENCE_DEFINED;
+        assert_eq!(HwNode::from_bytes(&bytes), Ok(fresh));
+    }
+
+    #[test]
+    fn publishing_keeps_what_the_emitter_describes_and_nothing_the_kernel_keeps() {
+        // An emitter claiming a serving supplier, a faulted domain and a
+        // settled driver for a node it has only just published.
+        let mut claimed = sample_node();
+        claimed.set_removable(true);
+        claimed.set_serves(LinkRole::ALL[0], true);
+        claimed.set_fault_health(FaultDomainState::Offline);
+        claimed.set_settled(true);
+        for hot in [false, true] {
+            let mut node = claimed;
+            node.admit_published(hot);
+            assert!(node.is_removable(), "the emitter's own description stands");
+            assert!(LinkRole::ALL.iter().all(|&role| !node.serves(role)));
+            assert_eq!(node.fault_health(), FaultDomainState::Healthy);
+            assert!(!node.is_settled());
+            assert_eq!(node.is_hot_arrival(), hot);
+            assert_eq!(node.match_keys(), claimed.match_keys());
+            assert_eq!(node.resources(), claimed.resources());
+        }
     }
 
     #[test]
@@ -4976,10 +5301,9 @@ mod tests {
     }
 
     #[test]
-    fn the_snapshot_ancestor_fold_matches_the_slice_fold_for_every_health() {
-        // The byte-backed and slice-backed folds share one traversal, so they
+    fn the_lookup_ancestor_fold_matches_the_slice_fold_for_every_health() {
+        // The lookup-backed and slice-backed folds share one traversal, so they
         // must agree node-for-node under every ancestor health arrangement.
-        const CAP: usize = HwTreeHeader::WIRE_LEN + 6 * HwNode::WIRE_LEN;
         for (recovering, offline) in [
             (None, None),         // whole tree healthy
             (Some(1usize), None), // controller recovering
@@ -4995,13 +5319,12 @@ mod tests {
             if let Some(i) = offline {
                 nodes[i].set_fault_health(FaultDomainState::Offline);
             }
-            let mut blob = [0u8; CAP];
-            let len = encode_snapshot(&mut blob, 7, &nodes);
+            let lookup = |id: u32| nodes.iter().find(|node| node.id() == id).copied();
             for leaf in [3u32, 4, 5, 0, 999] {
                 assert_eq!(
-                    ancestor_imposed_status_from_snapshot(&blob[..len], leaf),
+                    ancestor_imposed_status_by(leaf, nodes.len(), lookup),
                     ancestor_imposed_status(&nodes, leaf),
-                    "snapshot and slice folds must agree for leaf {leaf}",
+                    "lookup and slice folds must agree for leaf {leaf}",
                 );
             }
         }
@@ -5080,25 +5403,6 @@ mod tests {
             survivors,
             nodes.len() - 1,
             "and every intact record behind it still is"
-        );
-    }
-
-    #[test]
-    fn the_snapshot_ancestor_fold_degrades_safe_on_a_malformed_blob() {
-        // A short header, and a header promising more records than the buffer
-        // holds, both impose nothing (degrade safe) rather than fabricating a
-        // fault from a snapshot that cannot be trusted.
-        assert_eq!(
-            ancestor_imposed_status_from_snapshot(&[0u8; 4], 3),
-            BlkStatus::Ok
-        );
-        let nodes = usb_shaped_tree();
-        let mut blob = [0u8; HwTreeHeader::WIRE_LEN + 6 * HwNode::WIRE_LEN];
-        let len = encode_snapshot(&mut blob, 1, &nodes);
-        // Truncate the final record: the header still promises 6 nodes.
-        assert_eq!(
-            ancestor_imposed_status_from_snapshot(&blob[..len - 1], 3),
-            BlkStatus::Ok
         );
     }
 

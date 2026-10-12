@@ -233,6 +233,11 @@ impl ConsoleRead for GatedConsoleRead {
         self.inner.read(buf)
     }
 
+    fn input_ready(&self) -> bool {
+        // A shut gate withholds input, so its reader would park.
+        self.gate.is_open() && self.inner.input_ready()
+    }
+
     fn poll_interval_ns(&self) -> Option<u64> {
         // A backing with no interrupt needs its re-poll whichever side of
         // the gate the caller is on: while the gate is shut the withheld
@@ -391,7 +396,7 @@ pub fn autoload_caps() -> CapabilitySet {
     // extra (the per-driver manifest intersection still binds, so no ambient
     // authority).
     caps.insert(CapabilityId::SYSINFO_HW);
-    // The `cpufreq` mechanism driver (`drivers/cpufreq/rpi`) takes the
+    // The frequency mechanism driver (`drivers/clock/rpi_firmware`) takes the
     // machine's one frequency-mechanism role and parks in the kernel applying
     // the governor's targets, both gated on `CAP_CPUFREQ`. The delegatable set
     // carries it so such a signed driver can be granted it; a driver that does
@@ -876,6 +881,10 @@ impl ConsoleRead for KthreadConsoleRead<'_> {
             }
         }
     }
+
+    fn input_ready(&self) -> bool {
+        self.inner.input_ready()
+    }
 }
 
 #[cfg(test)]
@@ -907,6 +916,10 @@ mod tests {
             buf[0] = b'x';
             Ok(1)
         }
+
+        fn input_ready(&self) -> bool {
+            true
+        }
     }
 
     #[test]
@@ -932,6 +945,23 @@ mod tests {
         assert_eq!(INNER.polls.load(core::sync::atomic::Ordering::Relaxed), 1);
     }
 
+    /// A shut gate hides pending input from a watcher as it does from a
+    /// reader, and an open one reports the device's own readiness.
+    #[test]
+    fn the_gate_hides_pending_input_until_it_opens() {
+        static INNER: CountingRead = CountingRead::new();
+        static GATE: Console0Gate = Console0Gate::new();
+        let gated = GatedConsoleRead::new(&INNER, &GATE);
+        assert!(!gated.input_ready());
+        GATE.open();
+        assert!(gated.input_ready());
+        assert_eq!(
+            INNER.polls.load(core::sync::atomic::Ordering::Relaxed),
+            0,
+            "the peek takes nothing"
+        );
+    }
+
     /// A backing with no interrupt behind it, like the riscv64 SBI console.
     struct PolledRead;
 
@@ -941,6 +971,10 @@ mod tests {
     impl ConsoleRead for PolledRead {
         fn read(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
             Ok(0)
+        }
+
+        fn input_ready(&self) -> bool {
+            false
         }
 
         fn poll_interval_ns(&self) -> Option<u64> {
@@ -1251,6 +1285,12 @@ mod tests {
             }
             buf[0] = b'k';
             Ok(1)
+        }
+
+        fn input_ready(&self) -> bool {
+            self.remaining_empty
+                .load(core::sync::atomic::Ordering::Relaxed)
+                == 0
         }
     }
 

@@ -909,7 +909,17 @@ pub struct HubDescriptor {
     /// `SuperSpeed` hub, which has no transaction translator: those bits are
     /// reserved there.
     pub tt_think_time: u8,
+    /// The downstream ports whose device is built in, one bit per 1-based
+    /// port (`DeviceRemovable`). A port past the 31st, or one the reply did
+    /// not reach, is never reported built in.
+    pub fixed_ports: u32,
 }
+
+/// Where a `SuperSpeed` hub descriptor's `DeviceRemovable` word sits.
+const SS_HUB_DEVICE_REMOVABLE: core::ops::Range<usize> = 10..12;
+
+/// Where a USB 2.0 hub descriptor's `DeviceRemovable` bitmap starts.
+const HUB_DEVICE_REMOVABLE: usize = 7;
 
 impl HubDescriptor {
     /// The descriptor type a hub of this speed serves — a `SuperSpeed` hub
@@ -938,11 +948,39 @@ impl HubDescriptor {
         } else {
             ((u16::from_le_bytes([low, high]) >> 5) & 0b11) as u8
         };
+        let fixed_ports = if superspeed {
+            answer
+                .get(SS_HUB_DEVICE_REMOVABLE)
+                .map_or(0, |word| u32::from(u16::from_le_bytes([word[0], word[1]])))
+        } else {
+            // One bit per port and a reserved bit 0, as many bytes as that
+            // takes; a hub with more ports than a word holds reports the rest
+            // removable.
+            let len = (usize::from(ports) + 1).div_ceil(8).min(4);
+            answer
+                .get(HUB_DEVICE_REMOVABLE..)
+                .unwrap_or_default()
+                .iter()
+                .take(len)
+                .enumerate()
+                .fold(0, |bits, (byte, &value)| {
+                    bits | u32::from(value) << (8 * byte)
+                })
+        };
+        // Bit 0 is reserved and a bit past the hub's last port names nothing.
+        let ports_mask = u32::MAX >> (31 - ports.min(31));
         Some(Self {
             ports,
             tt_think_time,
+            fixed_ports: fixed_ports & ports_mask & !1,
         })
     }
+}
+
+/// Whether the device on downstream `port` of a hub reporting `fixed_ports`
+/// built in can be unplugged.
+const fn port_removable(fixed_ports: u32, port: u8) -> bool {
+    port >= 32 || fixed_ports & (1 << port) == 0
 }
 
 /// Hub class request `SET_HUB_DEPTH` (USB 3.2 §10.16.2.7, Table 10-8):
@@ -1808,6 +1846,10 @@ pub struct DeviceIdentity {
     /// mass-storage interface: `None` for any other, for one naming none, or
     /// when its string could not be read whole and well-formed.
     pub serial_number: Option<SerialNumber>,
+    /// Whether the device can be unplugged while the machine runs, as its
+    /// port reports: a root port through `PORTSC`, a hub's port through the
+    /// hub's descriptor.
+    pub removable: bool,
 }
 
 impl DeviceIdentity {
@@ -2410,6 +2452,9 @@ struct HubState {
     speed: u8,
     /// Downstream port count from the hub class descriptor.
     num_ports: u8,
+    /// The downstream ports whose device is built in, from the same
+    /// descriptor ([`HubDescriptor::fixed_ports`]).
+    fixed_ports: u32,
     /// TT coordinates carried in this hub's own slot context (§6.2.2):
     /// the nearest high-speed ancestor's `(slot, port)` when this hub is
     /// full/low-speed behind one, else `(0, 0)`. A full/low-speed device
@@ -4640,6 +4685,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.stage = EnumStage::SetConfiguration;
         self.control(setup_set_configuration(first.configuration_value), &mut [])?;
 
+        let removable = self.attached_removable(base.root_port, hub_port, parent_hub);
         let mut installed = false;
         for (entry, rings_slot) in plan.iter().zip(rings.iter_mut()) {
             let (Some((target, iface)), Some(configured)) = (entry, rings_slot.take()) else {
@@ -4666,6 +4712,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
                 region,
                 descriptor,
                 serial_number,
+                removable,
                 config,
                 iface,
                 int_dci,
@@ -4831,6 +4878,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         region: DeviceRegion,
         descriptor: DeviceDescriptor,
         serial_number: Option<SerialNumber>,
+        removable: bool,
         config: Vec<u8>,
         interface: &InterfaceInfo,
         int_dci: u8,
@@ -4882,6 +4930,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
                 interface_number: interface.interface_number,
                 interface_class: interface.class24,
                 serial_number,
+                removable,
             },
             int_dci,
             int_payload: if int_dci == DCI_CONTROL {
@@ -5622,6 +5671,23 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         Ok(self.xhci.port_status(port)?.raw())
     }
 
+    /// Whether the device attached at `hub_port` of hub `parent_hub` — or,
+    /// with `hub_port` zero, at root port `root_port` — can be unplugged.
+    ///
+    /// A root port answers through its own register, a hub's port through the
+    /// hub's descriptor; an answer that cannot be read leaves the device what
+    /// USB devices are, unpluggable.
+    fn attached_removable(&mut self, root_port: u8, hub_port: u8, parent_hub: usize) -> bool {
+        if hub_port == 0 {
+            self.xhci
+                .port_status(root_port)
+                .map_or(true, PortStatus::removable)
+        } else {
+            self.hub(parent_hub)
+                .is_none_or(|hub| port_removable(hub.fixed_ports, hub_port))
+        }
+    }
+
     /// Read a configured hub's topology from its hub class descriptor (USB
     /// 2.0 §11.23.2.1): `bNbrPorts` and the TT Think Time in
     /// `wHubCharacteristics` bits 5:6. The caller must already have
@@ -5649,7 +5715,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// * [`DriverError::EndpointStalled`] if the hub refused the request
     ///   on every attempt (the control endpoint is already recovered).
     /// * [`DriverError::DeviceFault`] if the control transfer faults.
-    fn read_hub_topology(&mut self, superspeed: bool) -> Result<(u8, u8), DriverError> {
+    fn read_hub_topology(&mut self, superspeed: bool) -> Result<HubDescriptor, DriverError> {
         let (desc_type, request) = HubDescriptor::request(superspeed);
         let want = u16::try_from(request).map_err(|_| DriverError::LengthOutOfRange)?;
         let mut last = DriverError::BadMagic;
@@ -5671,7 +5737,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
                 Err(err) => return Err(err),
             };
             match HubDescriptor::decode(&desc[..transferred], superspeed) {
-                Some(hub) => return Ok((hub.ports, hub.tt_think_time)),
+                Some(hub) => return Ok(hub),
                 None => last = DriverError::BadMagic,
             }
         }
@@ -5691,7 +5757,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             .active_hub
             .and_then(|index| self.hub(index))
             .is_some_and(|hub| hub.speed == SPEED_SUPER);
-        Ok(self.read_hub_topology(superspeed)?.0)
+        Ok(self.read_hub_topology(superspeed)?.ports)
     }
 
     /// Set the **Hub** bit in the active slot's context (xHCI §6.2.2) so the
@@ -5708,13 +5774,14 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// * [`DriverError::BadMagic`] if the hub descriptor is forged.
     /// * [`DriverError::DeviceFault`] if the controller rejects the command.
     ///
-    /// Returns the hub's `(bNbrPorts, TT Think Time)` so the caller records
-    /// the topology it just programmed without a second descriptor read.
+    /// Returns the hub's descriptor so the caller records the topology it
+    /// just programmed without a second descriptor read.
     /// `superspeed` selects the hub descriptor the hub actually serves
     /// ([`Self::read_hub_topology`]); a `SuperSpeed` hub has no TT, so its
     /// slot's TT Think Time is programmed zero.
-    fn configure_hub_slot(&mut self, superspeed: bool) -> Result<(u8, u8), DriverError> {
-        let (num_ports, tt_think_time) = self.read_hub_topology(superspeed)?;
+    fn configure_hub_slot(&mut self, superspeed: bool) -> Result<HubDescriptor, DriverError> {
+        let hub = self.read_hub_topology(superspeed)?;
+        let (num_ports, tt_think_time) = (hub.ports, hub.tt_think_time);
         let (hub_slot, output_ctx) = self
             .cursor
             .as_ref()
@@ -5734,7 +5801,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             0,
             trb::control_slot(hub_slot),
         ))?;
-        Ok((num_ports, tt_think_time))
+        Ok(hub)
     }
 
     /// Assert `PORT_POWER` on the hub at `hub_index`'s downstream `port`
@@ -6181,7 +6248,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             Some(parent_index) => self.hub(parent_index).ok_or(DriverError::NotFound)?.depth + 1,
         };
         let superspeed = base.speed == SPEED_SUPER;
-        let (num_ports, _tt_think_time) = self.configure_hub_slot(superspeed)?;
+        let descriptor = self.configure_hub_slot(superspeed)?;
         // A `SuperSpeed` hub must be told its tier depth before it can
         // decode downstream route strings (USB 3.2 §10.16.2.7); without
         // it every transaction to a device behind the hub is misrouted.
@@ -6197,7 +6264,8 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             route_string: base.route_string,
             depth,
             speed: base.speed,
-            num_ports,
+            num_ports: descriptor.ports,
+            fixed_ports: descriptor.fixed_ports,
             tt_hub_slot: base.tt_hub_slot,
             tt_port: base.tt_port,
             output_ctx,
@@ -7438,6 +7506,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         };
         let mut node = HwNode::new(node_id, parent_id, device_class);
         node.set_address(identity.bus_position());
+        node.set_removable(identity.removable);
         node.push_match_key(HwMatchKey::usb(
             identity.vendor_id,
             identity.product_id,

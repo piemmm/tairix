@@ -849,7 +849,7 @@ what it wants first is recorded in `plans/VIEW.md`.**
   `unlock_service::autoload_caps()` and refuses a request that is not a
   subset (`drvhost`'s `CapabilityEscalation`), so the driver is simply never
   loaded. `CAP_CPUFREQ` shipped exactly that way: defined in `lib/abi`,
-  enforced at `cpufreq_bind`, requested by the `drivers/cpufreq/rpi` bundle,
+  enforced at `cpufreq_bind`, requested by the frequency driver's bundle,
   and delegatable by nobody — so the matched driver was refused at every boot
   and the board ran at whatever rate the boot floor had left. The refusal is
   logged (`id=7006`), but only a boot log read on real hardware shows it. This
@@ -861,13 +861,11 @@ what it wants first is recorded in `plans/VIEW.md`.**
   delegatable-resource list in `tairix_users::grants` that
   `autoload_caps()` composes with the unlock kthread's own `service_caps()`,
   plus an xtask test walking the bundles.
-- The blocker is that the bundles' requested sets are inline literals inside
-  each `build_*_bundle` function in `tools/xtask/src/commands/image_drivers.rs`,
-  so they are not addressable as data. Each driver crate must export its set
-  the way `drivers/cpufreq/rpi` now exports `REQUIRED_CAPABILITIES` — the same
-  single-source pattern `BIND_KEYS` already uses for the match table, and the
-  reason the manifest and the program can no longer disagree. Mechanical, but
-  it touches every driver crate.
+- Every driver crate exports its set as `REQUIRED_CAPABILITIES`, the one list
+  its bundle's manifest and its program both read (`tools/xtask`'s
+  `every_bundle_and_its_binary_request_the_drivers_one_declared_list` refuses
+  any other), so the sets are addressable as data. What remains is the
+  delegatable list in `tairix_users::grants` and the subset test over it.
 - Until it lands, adding a capability to a driver manifest means checking
   `autoload_caps()` by hand in the same change.
 

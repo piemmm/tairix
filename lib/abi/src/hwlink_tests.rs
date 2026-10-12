@@ -1,5 +1,8 @@
 use super::*;
-use crate::hwtree::{HwResource, HwResourceKind, BUS_CHILD_ENDPOINTS};
+use crate::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
+
+/// A block of node-indexed endpoints no role serves.
+const NO_ROLE: NodeEndpointBlock = NodeEndpointBlock::tagged(*b"ZZ");
 
 #[test]
 fn a_role_is_read_from_the_block_its_endpoint_lies_in() {
@@ -10,7 +13,7 @@ fn a_role_is_read_from_the_block_its_endpoint_lies_in() {
             assert_eq!(other.endpoints().contains(endpoint), other == role);
         }
     }
-    assert_eq!(LinkRole::of_endpoint(BUS_CHILD_ENDPOINTS.endpoint(7)), None);
+    assert_eq!(LinkRole::of_endpoint(NO_ROLE.endpoint(7)), None);
     assert_eq!(LinkRole::of_endpoint(0x5345_1001), None);
 }
 
@@ -26,7 +29,7 @@ fn only_a_dma_controller_states_channels() {
     let duty = LinkDuty::new(clock, None).expect("a clock duty");
     assert_eq!((duty.role(), duty.endpoint()), (LinkRole::Clock, clock));
     assert_eq!(
-        LinkDuty::new(BUS_CHILD_ENDPOINTS.endpoint(3), None),
+        LinkDuty::new(NO_ROLE.endpoint(3), None),
         Err(Errno::OutOfRange)
     );
 }
@@ -57,7 +60,7 @@ fn a_request_holds_its_selector_and_name_exactly_or_is_refused() {
         Err(Errno::OutOfRange)
     );
     assert_eq!(
-        LinkRequest::new(BUS_CHILD_ENDPOINTS.endpoint(9), 0, &[], b""),
+        LinkRequest::new(NO_ROLE.endpoint(9), 0, &[], b""),
         Err(Errno::OutOfRange)
     );
 }
@@ -77,4 +80,50 @@ fn every_role_round_trips_through_its_resource_records() {
         let back = HwResource::from_bytes(&record.to_le_bytes()).expect("decodes");
         assert_eq!(back.link_duty(), Ok(duty));
     }
+}
+
+#[test]
+fn a_region_grant_round_trips_and_refuses_what_names_no_delegated_region() {
+    use crate::hwlink::RegionGrant;
+    use crate::origin::{ProcId, PROC_ID_LEN};
+    let grant = RegionGrant {
+        grant: 0x6001,
+        grantor: ProcId::from_raw([0x5A; PROC_ID_LEN]),
+    };
+    let wire = grant.to_le_bytes();
+    assert_eq!(RegionGrant::from_bytes(&wire), Ok(grant));
+    assert_eq!(
+        RegionGrant::from_bytes(&wire[..RegionGrant::WIRE_LEN - 1]),
+        Err(Errno::LengthOutOfRange)
+    );
+    let mut no_handle = wire;
+    no_handle[..8].fill(0);
+    assert_eq!(RegionGrant::from_bytes(&no_handle), Err(Errno::OutOfRange));
+    let kernel = RegionGrant {
+        grant: 1,
+        grantor: ProcId::KERNEL,
+    };
+    assert_eq!(
+        RegionGrant::from_bytes(&kernel.to_le_bytes()),
+        Err(Errno::OutOfRange)
+    );
+}
+
+#[test]
+fn a_node_s_sole_link_of_a_role_is_found_and_two_name_no_one() {
+    let clock =
+        LinkRequest::new(LinkRole::Clock.endpoints().endpoint(2), 0, &[20], b"").expect("valid");
+    let target =
+        LinkRequest::new(LinkRole::I2c.endpoints().endpoint(3), 0, &[0x68], b"").expect("valid");
+    let bus =
+        LinkRequest::new(LinkRole::I2c.endpoints().endpoint(3), 0, &[], b"ddc").expect("valid");
+    let request = |link: &LinkRequest| HwResource::request(link);
+    let resources = [request(&clock), request(&target)];
+    assert_eq!(sole_link(&resources, LinkRole::I2c), Some(target));
+    assert_eq!(sole_link(&resources, LinkRole::Clock), Some(clock));
+    assert_eq!(sole_link(&resources, LinkRole::Dma), None);
+    assert_eq!(
+        sole_link(&[request(&target), request(&bus)], LinkRole::I2c),
+        None
+    );
 }

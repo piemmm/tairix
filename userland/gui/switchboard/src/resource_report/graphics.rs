@@ -241,11 +241,16 @@ fn device_block(
     if let Some(stats) = stats {
         facts.push(ReadingFact::text(
             "Scan-out",
-            format!(
-                "{}×{} · {}",
-                stats.mode.width_px,
-                stats.mode.height_px,
-                stats.mode.format.name()
+            stats.mode.map_or_else(
+                || String::from("No output connected"),
+                |mode| {
+                    format!(
+                        "{}×{} · {}",
+                        mode.width_px,
+                        mode.height_px,
+                        mode.format.name()
+                    )
+                },
             ),
         ));
         // The share of the *interval*, not of the service's lifetime: a

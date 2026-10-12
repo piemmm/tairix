@@ -5,25 +5,31 @@
 //!
 //! A driver's `Run` builds its driver host from the grants the kernel minted
 //! for it, brings its surface up ([`open_surface`] for a granted linear
-//! scan-out surface), and hands the resulting [`Display`] to [`serve`], which
-//! never returns while the service is healthy.
+//! scan-out surface), and hands the resulting [`Display`] to [`serve`] with
+//! the display's own event sources, which never returns while the service is
+//! healthy.
 //!
-//! [`serve`] parks on one wait-set holding the reserved [`DISPLAY_ENDPOINT`]
-//! and the kernel's [`NoticeTopic::DisplayLease`] announcement: a request is
-//! served through the [`DisplayServer`] engine, and a lease edge is handed to
-//! [`DisplayServer::lease_moved`], which releases a configuration whose lease
-//! ended and lights the display it left dark. An idle service therefore costs
-//! no CPU, and no presenter can leave the machine dark behind it.
+//! [`serve`] parks on one wait-set holding the reserved [`DISPLAY_ENDPOINT`],
+//! the kernel's [`NoticeTopic::DisplayLease`] announcement, and the display's
+//! event sources: a request is served through the [`DisplayServer`] engine; a
+//! lease edge is handed to [`DisplayServer::lease_moved`], which releases a
+//! configuration whose lease ended and lights the display it left dark; and a
+//! display event is handed to [`Display::service_events`], after which an
+//! output that moved is announced on [`NoticeTopic::DisplayOutput`] before
+//! another request is served (`plans/DISPLAY.md` D12). An idle service
+//! therefore costs no CPU, and no presenter can leave the machine dark behind
+//! it.
 
 use tairix_abi::display_ipc::{DISPLAY_ENDPOINT, DISPLAY_MAX_REQUEST};
-use tairix_abi::driver::display::Display;
-use tairix_abi::driver::sole_framebuffer;
+use tairix_abi::driver::display::{Display, DisplayMode};
+use tairix_abi::driver::{sole_framebuffer, DeviceWake};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_caps::CapabilitySet;
 use tairix_drvrt::{GrantSyscalls, RtDriverHost};
-use tairix_log::EventId;
+use tairix_log::{EventId, Field, FieldValue, Level};
+use tairix_rt::changenotice::ChangeNotice;
 use tairix_rt::LogSink;
 
 use crate::rt::RtShmMapper;
@@ -71,10 +77,34 @@ pub const FIRST_PRESENT: EventId = EventId(15_001);
 /// on this rendered text, so it is defined once beside the id.
 pub const FIRST_PRESENT_MESSAGE: &str = "first client frame presented to scan-out";
 
-const _: () = assert!(
-    FIRST_PRESENT.0 >= DISPLAY_SERVICE_RANGE_START && FIRST_PRESENT.0 < DISPLAY_SERVICE_RANGE_END,
-    "a display-service event lies in the display service's range"
-);
+/// The display's output moved, to the mode its `width` and `height` fields
+/// name, or to none when both are `0`.
+pub const OUTPUT_MOVED: EventId = EventId(15_002);
+
+/// The kernel refused an announcement of the display's output, so clients
+/// learn of the move only from the refusals of their stale frames.
+pub const OUTPUT_UNANNOUNCED: EventId = EventId(15_003);
+
+/// The display could not read what woke its event sources; its `error`
+/// field is the driver's refusal.
+pub const EVENTS_FAILED: EventId = EventId(15_004);
+
+const _: () = {
+    let mut index = 0;
+    let ids = [
+        FIRST_PRESENT,
+        OUTPUT_MOVED,
+        OUTPUT_UNANNOUNCED,
+        EVENTS_FAILED,
+    ];
+    while index < ids.len() {
+        assert!(
+            ids[index].0 >= DISPLAY_SERVICE_RANGE_START && ids[index].0 < DISPLAY_SERVICE_RANGE_END,
+            "a display-service event lies in the display service's range"
+        );
+        index += 1;
+    }
+};
 
 /// Outstanding calls the endpoint queues. A fail-closed memory bound: one
 /// session presents synchronously, so a small queue is ample.
@@ -85,6 +115,10 @@ const ENDPOINT_TOKEN: u64 = 1;
 
 /// Wait-set token of the lease announcement.
 const LEASE_TOKEN: u64 = 2;
+
+/// Wait-set token every one of the display's event sources carries: the
+/// display reads all of its causes on any one of them.
+const EVENT_TOKEN: u64 = 3;
 
 /// Map the one scan-out surface the kernel granted `host`.
 ///
@@ -106,9 +140,12 @@ pub fn open_surface<S: GrantSyscalls>(host: &RtDriverHost<S>) -> Result<Framebuf
     Framebuffer::open(host, config).map_err(|_| EXIT_BRINGUP_FAILED)
 }
 
-/// Serve the display endpoint over `display` for the life of the service,
-/// answering the reserved exit code the moment it cannot go on.
-pub fn serve(display: &mut dyn Display) -> i32 {
+/// Serve the display endpoint over `display`, whose output moves on `wakes`,
+/// for the life of the service, answering the reserved exit code the moment
+/// it cannot go on.
+///
+/// A display whose output never moves names no wake.
+pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
     // Unrestricted-sender: the engine gates every request — `Query`
     // included — on the caller's live seat lease, so an unentitled sender
     // is answered with a typed refusal.
@@ -135,11 +172,19 @@ pub fn serve(display: &mut dyn Display) -> i32 {
             LEASE_TOKEN,
         ),
     ];
-    for (kind, id, token) in members {
+    let events = wakes.iter().map(|wake| {
+        let (kind, id) = wake.member();
+        (kind, id, EVENT_TOKEN)
+    });
+    for (kind, id, token) in members.into_iter().chain(events) {
         if tairix_rt::waitset_ctl(wait_set, WaitSetOp::Add, kind, id, token) != 0 {
             return EXIT_WAIT_FAILED;
         }
     }
+    // Announced once the rendezvous is bound, which is the authority, and
+    // before the first request is served: a client of an earlier instance
+    // converges onto this one.
+    let mut output = Announced::resume(display.output());
 
     let mut server = DisplayServer::new(RtShmMapper, RtClock);
     let mut peer = RtPeerFacts;
@@ -157,6 +202,21 @@ pub fn serve(display: &mut dyn Display) -> i32 {
             }
             continue;
         }
+        if token == EVENT_TOKEN {
+            if let Err(err) = display.service_events() {
+                record(
+                    Level::Warn,
+                    EVENTS_FAILED,
+                    "display: its event sources could not be read",
+                    &[Field {
+                        key: "error",
+                        value: FieldValue::SignedInt(i64::from(err.as_i32())),
+                    }],
+                );
+            }
+            output.follow(display.output());
+            continue;
+        }
         let mut ticket = 0u64;
         // Non-blocking: the park point is the wait-set, and the call the wake
         // reported may have been cancelled by its poster's exit.
@@ -168,17 +228,81 @@ pub fn serve(display: &mut dyn Display) -> i32 {
         let _ = tairix_rt::call_reply(DISPLAY_ENDPOINT, ticket, &reply[..n]);
         if !first_present_logged && server.has_presented() {
             first_present_logged = true;
-            tairix_log::log(
-                &LogSink,
-                &tairix_log::Event {
-                    level: tairix_log::Level::Info,
-                    id: FIRST_PRESENT,
-                    message: FIRST_PRESENT_MESSAGE,
-                    fields: &[],
+            record(Level::Info, FIRST_PRESENT, FIRST_PRESENT_MESSAGE, &[]);
+        }
+    }
+}
+
+/// The output as last announced on [`NoticeTopic::DisplayOutput`], and the
+/// count of moves announced with it.
+struct Announced {
+    notice: ChangeNotice,
+    changes: u64,
+    output: Option<DisplayMode>,
+}
+
+impl Announced {
+    /// Take the topic up for `output`, announcing it at once.
+    fn resume(output: Option<DisplayMode>) -> Self {
+        let (notice, changes) = ChangeNotice::resume(NoticeTopic::DisplayOutput);
+        let mut announced = Self {
+            notice,
+            changes,
+            output,
+        };
+        announced.announce();
+        announced
+    }
+
+    /// Announce `output` if it is not the output last announced.
+    fn follow(&mut self, output: Option<DisplayMode>) {
+        if output == self.output {
+            return;
+        }
+        self.output = output;
+        self.changes = self.changes.wrapping_add(1);
+        let (width, height) = output.map_or((0, 0), |mode| (mode.width_px, mode.height_px));
+        record(
+            Level::Info,
+            OUTPUT_MOVED,
+            "display: the output moved",
+            &[
+                Field {
+                    key: "width",
+                    value: FieldValue::UnsignedInt(u64::from(width)),
                 },
+                Field {
+                    key: "height",
+                    value: FieldValue::UnsignedInt(u64::from(height)),
+                },
+            ],
+        );
+        self.announce();
+    }
+
+    fn announce(&mut self) {
+        if self.notice.announce(self.changes).is_err() {
+            record(
+                Level::Warn,
+                OUTPUT_UNANNOUNCED,
+                "display: the output could not be announced",
+                &[],
             );
         }
     }
+}
+
+/// Write one of the service's records.
+fn record(level: Level, id: EventId, message: &str, fields: &[Field<'_>]) {
+    tairix_log::log(
+        &LogSink,
+        &tairix_log::Event {
+            level,
+            id,
+            message,
+            fields,
+        },
+    );
 }
 
 /// The boot seat's lease as the kernel publishes it, or `None` for a read

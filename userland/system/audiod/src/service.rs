@@ -18,6 +18,11 @@
 //! a service-issued token checked against the attested pid, so a guessed id
 //! reaches nothing.
 //!
+//! A notification may be played for the machine, or for a session other than
+//! the caller's, only by the cue authority, which the kernel attests by its
+//! service account: it sounds the desktop's sounds on others' behalf and
+//! belongs to no session itself.
+//!
 //! A device's controls are the room's: a change is admitted from a caller
 //! whose session holds the room, from anyone while it is unclaimed, and from
 //! nobody while it is withheld, and each tenant's are kept apart
@@ -34,7 +39,8 @@ use tairix_abi::audio::{
     encode_clock_reply, encode_enumerate_reply, encode_open_reply, encode_state_reply,
     encode_streams_reply, notify_endpoint_for, AudioBaseline, AudioDeviceDescriptor, AudioGain,
     AudioNotify, AudioRequest, ControlAccess, DefaultChoice, OpenParams, StreamDescriptor,
-    StreamGrant, StreamReport, StreamState, AUDIO_MAX_REPLY, MAX_CLIENT_STREAM_SLOTS,
+    StreamGrant, StreamReport, StreamRole, StreamState, Tenancy, AUDIO_MAX_REPLY,
+    MAX_CLIENT_STREAM_SLOTS,
 };
 use tairix_abi::driver::audio::{ring_bounds, Frames, StreamDirection, MAX_DEVICE_ENDPOINTS};
 use tairix_abi::driver::audio_channel::AudioChannelNotify;
@@ -42,9 +48,12 @@ use tairix_abi::driver::audio_ring::PcmGeometry;
 use tairix_abi::origin::Origin;
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::seat::DisplayLease;
+use tairix_abi::sound_cue::from_cue_authority;
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, Errno};
-use tairix_audio::route::{self, Admission, Roles, Room, Routing, SinkState, StreamRequest};
+use tairix_audio::route::{
+    self, Admission, Principal, Roles, Room, Routing, SinkState, StreamRequest,
+};
 use tairix_audio::volume::{endpoint_level, stream_multiply, EndpointLevel, VolumeRequest};
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
 use tairix_util::fallible;
@@ -166,7 +175,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     /// What the room does with the `index`th stream.
     fn admission(&self, index: usize, room: Room) -> Admission {
         let stream = &self.streams[index];
-        route::admit(stream.direction, stream.role, stream.session, room)
+        route::admit(stream.direction, stream.role, stream.principal, room)
     }
 
     /// Hold or release the `index`th stream for the room, which was
@@ -837,7 +846,10 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             Room::Unclaimed | Room::Withheld => None,
         };
         controls.retain(|session| {
-            holder == Some(session) || streams.iter().any(|stream| stream.session == Some(session))
+            holder == Some(session)
+                || streams
+                    .iter()
+                    .any(|stream| stream.principal == Principal::Session(Some(session)))
         });
     }
 
@@ -965,14 +977,10 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                     self.keep_running(device, slot, sink);
                 }
             }
-            AudioChannelNotify::JackChanged { endpoint, jack } => {
-                let Some(slot) = self.endpoint_slot(device, endpoint) else {
-                    return;
-                };
-                if let Some(endpoint) = self.endpoint_mut(device, slot) {
-                    endpoint.facts.jack = jack;
+            AudioChannelNotify::JackChanged { endpoint, .. } => {
+                if let Some(slot) = self.endpoint_slot(device, endpoint) {
+                    self.reread_endpoint(device, slot, sink);
                 }
-                self.changed();
             }
             AudioChannelNotify::Faulted { endpoint, reason } => {
                 if self.endpoint_slot(device, endpoint).is_some() {
@@ -1022,6 +1030,101 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         if pumped.drained {
             self.finish_drain(device_index, slot);
         }
+    }
+
+    /// Release endpoint `slot` of the `device_index`th device once no stream
+    /// rides it.
+    fn release_idle_endpoint(&mut self, device_index: usize, slot: usize) {
+        if self
+            .streams
+            .iter()
+            .any(|stream| stream.on(device_index, slot))
+        {
+            return;
+        }
+        let Self {
+            devices, regions, ..
+        } = self;
+        if let Some(device) = devices.get_mut(device_index).and_then(Option::as_mut) {
+            device::release_endpoint(device, slot, regions);
+        }
+    }
+
+    /// Read endpoint `slot`'s facts again, as a changed connector asks. Its
+    /// streams play on while what it offers still admits the configuration
+    /// they run under; otherwise they hold their positions as lost and the
+    /// endpoint is released, for the next stream to program afresh.
+    fn reread_endpoint(&mut self, device_index: usize, slot: usize, sink: &dyn Sink) {
+        let Some(device) = self.devices.get_mut(device_index).and_then(Option::as_mut) else {
+            return;
+        };
+        let Some(index) = device.endpoints.get(slot).map(|endpoint| endpoint.index) else {
+            return;
+        };
+        let facts = match device
+            .channel
+            .endpoint_facts(index)
+            .and_then(|facts| facts.validate().map(|()| facts))
+        {
+            Ok(facts) if device.endpoints[slot].facts.direction == facts.direction => facts,
+            Ok(_) => {
+                self.lose_device(device_index, Errno::BadMagic, sink);
+                return;
+            }
+            Err(err) => {
+                self.lose_device(device_index, err, sink);
+                return;
+            }
+        };
+        let endpoint = &mut device.endpoints[slot];
+        let admitted = endpoint.active.as_mut().is_none_or(|active| {
+            device::admits(&facts, &active.grant) && active.follow(&facts).is_ok()
+        });
+        endpoint.control = facts.gain;
+        endpoint.facts = facts;
+        if !admitted {
+            self.lose_endpoint(device_index, slot, sink);
+        }
+        self.apply_level(device_index, slot, sink);
+        self.refresh_defaults(sink);
+        self.changed();
+    }
+
+    /// Endpoint `slot`'s facts no longer admit its streams' configuration:
+    /// they hold their positions as lost, and the endpoint is released.
+    fn lose_endpoint(&mut self, device_index: usize, slot: usize, sink: &dyn Sink) {
+        let Self {
+            notifier,
+            devices,
+            streams,
+            regions,
+            ..
+        } = self;
+        let Some(device) = devices.get_mut(device_index).and_then(Option::as_mut) else {
+            return;
+        };
+        for stream in streams.iter_mut().filter(|s| s.on(device_index, slot)) {
+            let at = stream.position;
+            stream.set_state(StreamState::DeviceLost, at, notifier);
+        }
+        let index = device.endpoints.get(slot).map_or(0, |e| e.index);
+        device::release_endpoint(device, slot, regions);
+        audit(
+            sink,
+            events::ENDPOINT_CHANGED,
+            Level::Warn,
+            "an endpoint's facts changed under its streams; they hold their positions",
+            &[
+                Field {
+                    key: "channel",
+                    value: FieldValue::UnsignedInt(device.channel_endpoint),
+                },
+                Field {
+                    key: "endpoint",
+                    value: FieldValue::UnsignedInt(u64::from(index)),
+                },
+            ],
+        );
     }
 
     /// Mark the `device_index`th device lost for `err`. Nothing reaches a
@@ -1202,6 +1305,25 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         params: &OpenParams,
         sink: &dyn Sink,
     ) -> Result<StreamGrant, Errno> {
+        let Some(principal) = principal_for(caller, params) else {
+            audit(
+                sink,
+                events::TENANCY_REFUSED,
+                Level::Warn,
+                "only the cue authority plays a notification for another",
+                &[
+                    Field {
+                        key: "uid",
+                        value: FieldValue::UnsignedInt(u64::from(caller.uid())),
+                    },
+                    Field {
+                        key: "pid",
+                        value: FieldValue::UnsignedInt(caller.pid()),
+                    },
+                ],
+            );
+            return Err(Errno::PermissionDenied);
+        };
         let capture = params.direction == StreamDirection::Capture;
         if capture && !caller.capabilities().holds_cap(CapabilityId::AUDIO_CAPTURE) {
             Self::audit_capture(
@@ -1212,7 +1334,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             );
             return Err(Errno::PermissionDenied);
         }
-        let resolved = self.resolve_target(caller, params);
+        let resolved = self.resolve_target(principal, params);
         let (device_index, slot) = match resolved {
             Ok(target) => target,
             Err(err) => {
@@ -1223,7 +1345,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 return Err(err);
             }
         };
-        let opened = self.build_stream(caller, params, device_index, slot);
+        let opened = self.build_stream(caller, principal, params, device_index, slot);
         match opened {
             Ok(grant) => {
                 if capture {
@@ -1300,7 +1422,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     /// named-or-default source for a capture.
     fn resolve_target(
         &mut self,
-        caller: &Origin,
+        principal: Principal,
         params: &OpenParams,
     ) -> Result<(usize, usize), Errno> {
         let device_id = match params.direction {
@@ -1309,7 +1431,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 let request = StreamRequest {
                     role: params.role,
                     requested_device: (params.device_id != 0).then_some(params.device_id),
-                    session: caller.login_session(),
+                    principal,
                 };
                 match route::route(&request, &sinks) {
                     Routing::Play { device_id } | Routing::Pause { device_id } => device_id,
@@ -1361,10 +1483,12 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     }
 
     /// Program the endpoint if it is not already, size the client's ring, and
-    /// record the stream.
+    /// record the stream. An endpoint programmed for a stream that then could
+    /// not be recorded is released again.
     fn build_stream(
         &mut self,
         caller: &Origin,
+        principal: Principal,
         params: &OpenParams,
         device_index: usize,
         slot: usize,
@@ -1388,6 +1512,31 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             params.latency_target_frames,
             seed,
         )?;
+        let recorded =
+            self.record_stream(caller, principal, params, device_index, slot, stream_slot);
+        if recorded.is_err() {
+            self.release_idle_endpoint(device_index, slot);
+        }
+        recorded
+    }
+
+    /// Size the client's ring on the programmed endpoint and record the
+    /// stream.
+    fn record_stream(
+        &mut self,
+        caller: &Origin,
+        principal: Principal,
+        params: &OpenParams,
+        device_index: usize,
+        slot: usize,
+        stream_slot: u64,
+    ) -> Result<StreamGrant, Errno> {
+        let pid = caller.pid();
+        let device = self
+            .devices
+            .get_mut(device_index)
+            .and_then(Option::as_mut)
+            .ok_or(Errno::NotFound)?;
         let clock_domain = device
             .endpoints
             .get(slot)
@@ -1418,9 +1567,8 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             granted_latency: Frames::new(u64::from(latency_frames)).duration(params.rate),
             clock_domain,
         };
-        let session = caller.login_session();
         let held =
-            route::admit(params.direction, params.role, session, self.room) != Admission::Mix;
+            route::admit(params.direction, params.role, principal, self.room) != Admission::Mix;
         let stream = Stream::open(
             active,
             &StreamOpen {
@@ -1434,7 +1582,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 endpoint: slot,
                 direction: params.direction,
                 role: params.role,
-                session,
+                principal,
                 held,
                 grant,
                 geometry,
@@ -1783,18 +1931,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             );
         }
         self.quiesce_endpoint(device_index, slot, sink);
-        if !self
-            .streams
-            .iter()
-            .any(|other| other.on(device_index, slot))
-        {
-            let Self {
-                devices, regions, ..
-            } = self;
-            if let Some(device) = devices.get_mut(device_index).and_then(Option::as_mut) {
-                device::release_endpoint(device, slot, regions);
-            }
-        }
+        self.release_idle_endpoint(device_index, slot);
         self.forget_tenancies();
         self.reap(device_index);
         Ok(())
@@ -1915,6 +2052,24 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 },
             ],
         );
+    }
+}
+
+/// Whom a stream `caller` opens with `params` plays for, or [`None`] when
+/// the tenancy it names is not the caller's to take.
+///
+/// A program's stream plays for its own login session. The machine's
+/// tenancy, and another session's, are the cue authority's alone, and only
+/// for a notification it plays.
+fn principal_for(caller: &Origin, params: &OpenParams) -> Option<Principal> {
+    let on_behalf = from_cue_authority(caller)
+        && params.direction == StreamDirection::Playback
+        && params.role == StreamRole::Notification;
+    match params.tenancy {
+        Tenancy::Caller => Some(Principal::Session(caller.login_session())),
+        Tenancy::Machine if on_behalf => Some(Principal::Machine),
+        Tenancy::Session(session) if on_behalf => Some(Principal::Session(Some(session))),
+        Tenancy::Machine | Tenancy::Session(_) => None,
     }
 }
 

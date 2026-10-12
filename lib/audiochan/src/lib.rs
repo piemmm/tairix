@@ -24,8 +24,10 @@
 //!   hardware-tree node carrying it, and park on a wait set over the call
 //!   endpoint and the device's event sources — its interrupt line, or the
 //!   ports a bus driver reports its progress on — for the life of the driver.
-//!   Compiled only for the bare-metal targets a driver binary is built for;
-//!   the host build carries the server and the dispatcher.
+//!   `Channel` is that channel without the loop, for a driver whose own
+//!   loop serves another protocol of the device beside it. Compiled only for
+//!   the bare-metal targets a driver binary is built for; the host build
+//!   carries the server and the dispatcher.
 //!
 //! # Nothing spins
 //!
@@ -60,7 +62,7 @@ mod mock_audio;
 #[cfg(target_os = "none")]
 mod serve;
 #[cfg(target_os = "none")]
-pub use serve::{fail, serve, Wake};
+pub use serve::{fail, serve, Channel};
 
 /// The reserved, fail-closed process exit codes an audio driver binary ends
 /// with when it cannot serve its device.

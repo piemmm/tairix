@@ -29,7 +29,8 @@ consumer is the *only* thing forcing the device logic out of `drivers/` into
 
 `lib/vcmailbox` is the **legitimate survivor**: its kernel consumer is the
 aarch64 **framebuffer boot console** (a genuine early-boot need), and its other
-consumer is `drivers/display/rpi_hvs`. That is a true two-consumer split where
+consumers are the Pi's drivers — the display engine (`drivers/display/bcm2711_hvs`)
+among them. That is a true two-consumer split where
 one consumer is a charter-legal non-driver. It stays in `lib/*`.
 
 ## 1. Decisions (binding for this plan)
@@ -81,7 +82,7 @@ Apply the §1 test to each crate:
   storage-only — virtio-blk + EMMC2 on aarch64, neither on PCIe), so its only
   honest consumer was `drivers/bus/pcie_brcm`. Folded in (its `lib` target).
 - **`lib/vcmailbox`** — **stays in `lib/*`** (legitimate two-consumer split:
-  aarch64 framebuffer boot console + `drivers/display/rpi_hvs`). Update its
+  aarch64 framebuffer boot console + the Pi's drivers). Update its
   README to state *why* it qualifies under the amended rule and the others do
   not.
 - **`lib/usb` / `lib/hid` / `lib/virtio*`** — re-check each against the amended

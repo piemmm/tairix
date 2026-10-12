@@ -69,10 +69,9 @@ fn paint_heard(
             theme,
         );
     }
-    let (title, subtitle) = match heard {
-        Some(row) => (String::from(row.title()), subtitle(row)),
-        None => (String::from("Nothing playing"), String::new()),
-    };
+    let (title, subtitle) = player
+        .heard_names()
+        .unwrap_or_else(|| (String::from("Nothing playing"), String::new()));
     if meets(layout.title()) {
         text(
             surface,
@@ -253,19 +252,6 @@ fn table_row(index: usize, entry: EntryId, row: &Row, heard: Option<EntryId>) ->
         TableCell::new(row.artist()),
         TableCell::numeric(length),
     ])
-}
-
-/// The artist and album line, or the file's own name where the tags give
-/// neither.
-fn subtitle(row: &Row) -> String {
-    let Some(known) = row.known() else {
-        return row.name.clone();
-    };
-    match (known.artist.as_deref(), known.album.as_deref()) {
-        (Some(artist), Some(album)) => format!("{artist} \u{2014} {album}"),
-        (Some(only), None) | (None, Some(only)) => String::from(only),
-        (None, None) => row.name.clone(),
-    }
 }
 
 /// What the status line says: a notice, a held stream, or the playlist's

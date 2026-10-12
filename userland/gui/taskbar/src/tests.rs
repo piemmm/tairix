@@ -191,8 +191,8 @@ use crate::layout::{local_rect, Hit};
 use crate::library::{folder_label, LibraryFocus, LibraryRow};
 use crate::menu::{EntryRow, MenuRequest, MenuSubject};
 use crate::notifications::{
-    IconId, NotificationArea, NotifySeverity, Producer, StatusKind, StatusSignal,
-    TransientNotification, NOTIFICATIONS_MAX, SOURCE_NOTIFICATIONS_MAX,
+    arrival_sound, IconId, NotificationArea, NotifySeverity, Producer, Raised, StatusKind,
+    StatusSignal, TransientNotification, NOTIFICATIONS_MAX, SOURCE_NOTIFICATIONS_MAX,
 };
 use crate::picker::{
     has_picker, slot_has_picker, PickerEntry, PICKER_CLOSE_GRACE_NS, PICKER_MIN_WINDOWS,
@@ -564,13 +564,13 @@ fn notifications_raise_upsert_and_clear() {
     let p = producer(7);
     assert_eq!(
         bar.raise_notification(note(p, 1, NotifySeverity::Info, "Started")),
-        Ok(true)
+        Ok(Raised::Shown)
     );
     assert_eq!(bar.notifications().notification_count(), 1);
     // Re-raising the same (producer, key) with new content updates in place.
     assert_eq!(
         bar.raise_notification(note(p, 1, NotifySeverity::Info, "Halfway")),
-        Ok(true)
+        Ok(Raised::Replaced)
     );
     assert_eq!(bar.notifications().notification_count(), 1);
     assert_eq!(
@@ -580,12 +580,27 @@ fn notifications_raise_upsert_and_clear() {
     // Re-raising byte-identical content reports no change.
     assert_eq!(
         bar.raise_notification(note(p, 1, NotifySeverity::Info, "Halfway")),
-        Ok(false)
+        Ok(Raised::Unchanged)
     );
     // Clearing is idempotent.
     assert!(bar.clear_notification(p.instance, 1));
     assert!(!bar.clear_notification(p.instance, 1));
     assert!(!bar.notifications().has_notifications());
+}
+
+#[test]
+fn a_newly_shown_notification_is_heard_by_its_severity() {
+    use tairix_abi::sound_cue::SoundEvent;
+    assert_eq!(
+        arrival_sound(NotifySeverity::Info),
+        SoundEvent::Notification
+    );
+    assert_eq!(
+        arrival_sound(NotifySeverity::Success),
+        SoundEvent::Notification
+    );
+    assert_eq!(arrival_sound(NotifySeverity::Warning), SoundEvent::Warning);
+    assert_eq!(arrival_sound(NotifySeverity::Critical), SoundEvent::Error);
 }
 
 /// A recycled pid is a different instance: it can neither replace nor clear
@@ -600,12 +615,12 @@ fn a_notification_answers_only_to_the_instance_that_raised_it() {
     };
     assert_eq!(
         bar.raise_notification(note(first, 1, NotifySeverity::Info, "mine")),
-        Ok(true)
+        Ok(Raised::Shown)
     );
     assert!(!bar.clear_notification(recycled.instance, 1));
     assert_eq!(
         bar.raise_notification(note(recycled, 1, NotifySeverity::Info, "theirs")),
-        Ok(true)
+        Ok(Raised::Shown)
     );
     let bodies: Vec<&str> = bar
         .notifications()
@@ -626,7 +641,7 @@ fn the_notification_area_refuses_a_raise_past_its_bounds() {
         let key = u32::try_from(key).expect("a small key");
         assert_eq!(
             bar.raise_notification(note(noisy, key, NotifySeverity::Info, "")),
-            Ok(true)
+            Ok(Raised::Shown)
         );
     }
     assert_eq!(
@@ -635,7 +650,7 @@ fn the_notification_area_refuses_a_raise_past_its_bounds() {
     );
     assert_eq!(
         bar.raise_notification(note(noisy, 0, NotifySeverity::Info, "update")),
-        Ok(true),
+        Ok(Raised::Replaced),
         "an update in place is not a new notice"
     );
     // Other sources still have room until the whole area is full.
@@ -649,7 +664,7 @@ fn the_notification_area_refuses_a_raise_past_its_bounds() {
             let key = u32::try_from(key).expect("a small key");
             assert_eq!(
                 bar.raise_notification(note(p, key, NotifySeverity::Info, "")),
-                Ok(true)
+                Ok(Raised::Shown)
             );
         }
         source += 1;
@@ -731,7 +746,7 @@ fn raising_and_dismissing_a_notification_latches_the_popover_and_the_bar() {
 
     assert_eq!(
         bar.raise_notification(note(p, 1, NotifySeverity::Info, "Started")),
-        Ok(true)
+        Ok(Raised::Shown)
     );
     assert_eq!(
         bar.take_repaint(),

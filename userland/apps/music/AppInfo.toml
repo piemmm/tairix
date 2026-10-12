@@ -23,8 +23,8 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EM
 # manager joins the one playlist rather than starting a second player over the
 # first. Absent means single.
 #
-# The formats the decoder reads completely; the others are claimed with the
-# decoders that read them (plans/SOUND.md).
-associations = ["audio/flac", "audio/wav", "audio/basic"]
+# Every format the decoder reads, each completely; Ogg's type covers Opus
+# files, whose own refines it.
+associations = ["audio/flac", "audio/mpeg", "audio/ogg", "audio/wav", "audio/basic"]
 library = "Multimedia"
 library-icon = "music.png"

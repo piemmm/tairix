@@ -68,8 +68,6 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::CapabilityId;
-    use tairix_caps::CapabilitySet;
     use tairix_drv_bus_usb_vl805::wiring::{build_xhci_node, reload_firmware_and_publish};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 
@@ -97,22 +95,6 @@ mod program {
     /// spawning supervisor decides whether to relaunch. A reserved value.
     const EXIT_PARK_FAILED: i32 = 83;
 
-    /// The capability set the driver host re-checks up front before issuing an
-    /// `ipc_call` (the mailbox) / `hw_emit_node` (the publish) trap, so a
-    /// missing grant fails fast without a round trip. It mirrors the authority
-    /// this driver needs — reloading the firmware over the `VideoCore` mailbox
-    /// (`CAP_MAILBOX`) and publishing the controller node (`CAP_HW_EMIT`) —
-    /// and deliberately **excludes** `CAP_MMIO_MAP` / `CAP_MEM_DMA`: this
-    /// driver forwards the BAR/DMA grants without ever mapping them
-    /// (least privilege). The kernel re-checks every trap
-    /// regardless.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MAILBOX);
-        caps.insert(CapabilityId::HW_EMIT);
-        caps
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -122,7 +104,11 @@ mod program {
         // Build the host from the grants the kernel minted for this driver. It
         // maps no DMA and no registers, so no architecture-specific cache shim
         // is supplied (`coherency = None`).
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = tairix_drv_bus_usb_vl805::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         // Build node B from the same delivered grants the host holds — the
@@ -137,6 +123,9 @@ mod program {
         if reload_firmware_and_publish(&host, node).is_err() {
             return EXIT_PUBLISH_FAILED;
         }
+        // The controller is the one child; a refused settle only leaves the
+        // device manager to wait out its bound for this node.
+        let _ = tairix_rt::hw_node_settle();
         // The controller node must stay published and this driver resident
         // for the life of the system: park off the run queue for good. A
         // failed park exits fail-loud rather than degrading into a yield

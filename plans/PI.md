@@ -26,7 +26,7 @@ say — the standing task direction supersedes that language. Changing a
 | **P6** | Spawn `init` into EL0 on the Pi | done |
 | **P7** | VideoCore mailbox and framebuffer, accepted on metal | done |
 | **P7b** | Framebuffer boot console: video first, UART fallback | done |
-| **P7c** | Display power: the firmware framebuffer's own display service, switched off through the firmware's blank request — host-proven; its metal run remains | in progress |
+| **P7c** | Display power: the native display engine brings its outputs down, so a sink sleeps — host-proven (`plans/SOUND.md` SND19m); its metal run is P17's | in progress |
 | **P8** | SD-card storage (EMMC2): UHS-I DDR50 / High Speed negotiation, ADMA2 and PIO; UHS-I DDR50 with ADMA2 accepted on metal | done |
 | **P9** | Bootable SD image (`tools/mkimage`) | done |
 | **P10** | USB-HID input and the desktop on the Pi | in progress |
@@ -36,6 +36,7 @@ say — the standing task direction supersedes that language. Changing a
 | **P14** | The clock manager (`drivers/clock/bcm2711_cprman`, `plans/SOUND.md` SND8c) — host-proven against a register model; its metal run is the PWM audio's first clock, with the PLLD rate it reads checked against the firmware's | in progress |
 | **P15** | The headphone jack (`drivers/audio/bcm2711_pwm`, `plans/SOUND.md` SND8e) — host-proven, its shaped noise measured; its metal run measures the analogue output | in progress |
 | **P16** | The I²S interface and its codecs (`drivers/audio/bcm2711_i2s`, `pcm5102a`, `pcm5122`, `plans/SOUND.md` SND8f, SND8g) — host-proven against register models and suppliers that decode every frame; its metal run plays through a HAT of each codec | in progress |
+| **P17** | The native display engine and HDMI audio on metal (`plans/SOUND.md` SND19q): a Pi 4B with an HDMI monitor on each port, hotplugged, the desktop on both, playing through each sink | planned |
 
 ---
 
@@ -144,14 +145,13 @@ under `qemu-system-aarch64 -M virt`.
 | Console UART | PL011 @ `0x0900_0000` (fixed const) | PL011 @ `0xFE20_1000` *or* mini-UART (AUX) @ `0xFE21_5040`, base discovered |
 | Interrupt controller | GICv2 @ GICD `0x0800_0000` / GICC `0x0801_0000` (fixed const) | GIC-400 @ GICD `0xFF84_1000` / GICC `0xFF84_2000`, base discovered |
 | RAM base | `0x4000_0000` | `0x0` (low 1 GiB; up to 8 GiB with the `>3GiB` window) |
-| Display | virtio-gpu / ramfb | VideoCore mailbox framebuffer → `drivers/display/rpi_hvs` (HVS) |
+| Display | virtio-gpu / ramfb | the firmware's mailbox framebuffer for the boot console, then the native display engine (`drivers/display/bcm2711_hvs`, `bcm2711_hdmi`) |
 | Storage | virtio-blk-mmio | EMMC2 SD host controller (`drivers/storage`) |
 | Input | virtio-keyboard-mmio | USB HID behind the VL805 xHCI (`drivers/bus/usb/{vl805,xhci}` → `drivers/input/usb_hid`) |
 | Image builder | `tools/mkimage` emits `images/tairix-aarch64-rpi.img` (P9) | flash + boot the emitted image on metal |
 
-`drivers/display/rpi_hvs` already exists (HVS layer compositor, mock-host
-tested) and consumes an `HvsConfig` the boot capability provides; it has
-no hardware vertical yet.
+The native display engine is `plans/SOUND.md` §Native HDMI on the Pi 4; it
+is host-proven against register models, and its metal run is P17.
 
 ---
 
@@ -1603,72 +1603,29 @@ riscv64, mirroring the aarch64 P-stage arc.
 
 ### P7 — VideoCore mailbox + framebuffer (metal)
 
-**Landed — the host-provable protocol half.** The BCM2711 mailbox
-property-channel client lives in the shared `lib/vcmailbox` crate
-(§2.2 — the P7b framebuffer boot console speaks the same protocol; doc:
-`docs/src/drivers/display.md`, "Firmware framebuffer discovery"):
+What it guarantees:
 
-- `FramebufferRequest::encode` frames the framebuffer request (set
-  physical/virtual size, depth 32, pixel order from the
-  `DisplayFormat`, allocate at page alignment, get pitch);
-  `decode_framebuffer_response` validates the in-place answer
-  fail-closed (header code, per-tag response bits/lengths, exact
-  geometry echoes, pitch/size consistency); `bus_to_arm_physical`
-  strips the 2-bit VC alias and rejects a zero, unaligned, or
-  out-of-aperture buffer. The decoded `FirmwareFramebuffer` yields the
-  `ScanoutConfig` (`ScanoutConfig::from_firmware`, plus the bus alias)
-  `RpiHvs::open` consumes; the crate also carries the display-size
-  query (`query_display_size`) the P7b boot console probes with.
-- The doorbell is behind the `MailboxTransport` seam: `MmioMailbox`
-  drives the register block over two capability-gated `RegisterWindow`s
-  with a budget-bounded poll (`DEFAULT_POLL_BUDGET`), failing closed
-  with `Timeout` — never an unbounded spin. A property completion naming
-  another buffer (a dead predecessor's, answered late) is drained and
-  counted rather than taken for this exchange's reply.
-- Host tests cover framing (framebuffer + display-size), every
-  fail-closed decode path, the alias↔aperture translation in both
-  directions (`bus_to_arm_physical` / `arm_physical_to_bus`), and the
-  doorbell transport in `lib/vcmailbox` (against its shared
-  `mock::MockFirmware`, exported behind the `mock-firmware` feature),
-  plus the wiring fail-closed paths and the full chain in `rpi_hvs`:
-  mock firmware → `wiring::open_with_transport` → `ScanoutConfig` →
-  `RpiHvs::open` → `present` into the discovered surface.
-- **No QEMU vertical, deliberately.** `virt` RAM begins at
-  `0x4000_0000` — outside the BCM2711 30-bit VideoCore aperture — so
-  the driver's (correct) aperture validation can never pass there, and
-  §0.4 forbids a Pi-board QEMU vertical. The emulation artefact is the
-  host-side full-chain test; the real scan-out is the metal item below.
-
-**Landed — the metal wiring.**
-
-- `FdtDiscovery` discovers the mailbox node (`brcm,bcm2835-mbox`) and
-  emits it into `tairix_abi::hwtree` through the generic Stage 4.HW
-  walk (`kernel/arch/aarch64::platform`): the doorbell window as a
-  capability-gated MMIO resource (base/length read from the tree, never
-  a `const`) plus the one per-device augmentation — a `HwResource::dma`
-  request for a one-page property-buffer carve bounded by the 30-bit
-  VideoCore aperture (the `lib/fdt` `raspi_like_arm` fixture carries
-  the node). The QEMU `virt` tree has no mailbox, so its hardware tree
-  simply omits the node (§18.4) and the `-M virt` verticals are
+- **One protocol client.** `lib/vcmailbox` frames the property channel's
+  requests — the framebuffer allocation, the display-size query, the
+  firmware's clocks, the display engine's takeover notice — and validates
+  every answer fail-closed: header code, per-tag response bits and lengths,
+  exact geometry echoes, pitch and size consistency, and the 30-bit
+  VideoCore aperture both ways (`bus_to_arm_physical`,
+  `arm_physical_to_bus`).
+- **A bounded doorbell.** `MmioMailbox` drives the register block over two
+  capability-gated `RegisterWindow`s with a budget-bounded poll, failing
+  closed with `Timeout`; a completion naming another buffer is drained and
+  counted, never taken for this exchange's reply. `DmaMailbox` parks on the
+  inbox interrupt instead.
+- **Discovered.** The walk emits the mailbox node (`brcm,bcm2835-mbox`) with
+  its doorbell window and a one-page property-buffer carve request bounded
+  by the aperture; the QEMU `virt` tree has none, so its verticals are
   untouched.
-- `drivers/display/rpi_hvs::wiring` is the driver-host bring-up seam:
-  `open_discovered` checks `CAP_MMIO_MAP`, maps the discovered doorbell
-  + the host's property-buffer carve, translates the carve to a bus
-  address (`arm_physical_to_bus`), rings `MmioMailbox`, and delegates
-  to `open_with_transport`, which assembles the full `HvsConfig`
-  (firmware scan-out + the host's `HvsRegions`: DLIST RAM, control
-  window, plane carves) and calls `RpiHvs::open`.
-
-**Accepted on metal.** A real Pi 4B drives the VideoCore mailbox exchange,
-maps the firmware framebuffer, and scans the HVS surface out to HDMI; the
-operator's photo + UART log is the recorded acceptance artefact.
-
-**Done when:** the mailbox property protocol has host unit tests
-(request/response framing, bus↔physical translation, fail-closed on a bad
-aperture) — done; `rpi_hvs` consumes a discovered `HvsConfig` — done
-(hardware-tree mailbox node + `wiring::open_discovered`); a metal bring-up
-scans the firmware framebuffer out to HDMI — done (operator metal
-acceptance).
+- **Host-proven** against the shared `mock::MockFirmware`, with no QEMU
+  vertical: `virt` RAM lies outside the 30-bit aperture, so the aperture
+  validation can never pass there.
+- **Accepted on metal**: a Pi 4B drives the exchange, maps the firmware
+  framebuffer and shows it on HDMI.
 
 ### P7b — Framebuffer boot console: video first, UART fallback
 
@@ -1741,30 +1698,15 @@ Pi 4 with the UART fallback proven by the detached-display boot — done
 (operator metal acceptance); everything host-provable is landed and
 tested — done.
 
-### P7c — Display power: the firmware framebuffer switched off
+### P7c — Display power
 
-The boot display's scan-out surface is the firmware's, and so is its output,
-so the screensaver's energy saving reaches the panel through the firmware.
-
-What it guarantees:
-
-- **Bound by discovery.** The aarch64 port publishes the boot display node
-  with the firmware framebuffer's own binding, `brcm,bcm2708-fb`
-  (`tairix_vcmailbox::FIRMWARE_FRAMEBUFFER_COMPATIBLE`), ahead of
-  `simple-framebuffer`, only when the surface came from the VideoCore
-  firmware. `drivers/display/rpi_fb` binds it at priority 20 over the generic
-  framebuffer service's 10, so a board without it still gets a display.
-- **The power switch.** `FirmwareDisplay` answers `Display::set_power` with
-  the firmware's blank request (tag `0x0004_0002`, `encode_blank_screen` /
-  `decode_blank_screen_response`, validated fail-closed like every property
-  answer) over the mailbox service (`CAP_MAILBOX`); its pixels take the
-  generic `tairix_display::Framebuffer` path under the one service loop
-  (`plans/DISPLAY.md` D9).
-- **Host-proven** against `mock::MockFirmware`, which models the blank state.
-
-What remains: the metal run — a Pi 4B whose desktop's display-off wait runs
-out blanks its HDMI output, and the first input lights it again, with the
-operator's photo and UART log as the acceptance artefact.
+The screensaver's energy saving reaches the panel through the native display
+engine: its `Display::set_power` brings every output down and back up in the
+order a mode set needs, so a sink loses its signal and sleeps
+(`plans/SOUND.md` SND19m). It is host-proven against the engine's register
+model. What remains is its metal run, part of P17's: a Pi 4B whose desktop's
+display-off wait runs out darkens both HDMI sinks, and the first input lights
+them again.
 
 ### P8 — SD-card storage (EMMC2)
 
@@ -1816,10 +1758,8 @@ host. Its design and test surface are `drivers/storage/emmc2/README.md` and
   over the data port. Auto-`CMD23` where the SCR offers it; R1 and post-write
   `CMD13` errors fail the transfer; `Sensitive` staging is zeroed.
 - The root-unlock bring-up logs the negotiated link (`root-unlock: emmc2
-  link`: mode, clock, base clock, signalling, `CMD23`, DMA, fallbacks). The
-  debug image also traces every step of it on the UART, each line flushed as
-  written (`storage-trace`), so a stalled bring-up shows the step it stopped
-  at.
+  link`: mode, clock, base clock, signalling, `CMD23`, DMA, fallbacks), or
+  the stage and error it failed at.
 
 **Metal acceptance.** A Pi 4B brings its card up at UHS-I DDR50, 50 MHz,
 1.8 V, with `CMD23` and ADMA2 and no fallback, and mounts `/System` over the
@@ -2164,8 +2104,8 @@ What the finished parts guarantee:
   `SYSCALL_HANDLER_WOULD_BLOCK` and `SYSCALL_HANDLER_NOT_FOUND` (5005 and
   5006, Debug), never the 5004 rejection.
 
-**Done when:** on real hardware the desktop composites through `rpi_hvs`,
-the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
+**Done when:** on real hardware the desktop composites through the native
+display engine (`bcm2711_hvs`), the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
 demo (photo + UART log) is the acceptance artefact. Headless `-M raspi4b`
 CI stays green throughout.
 
@@ -3012,6 +2952,28 @@ drivers. It is host-proven (`docs/src/drivers/audio.md`); the rest is metal.
 4. Either side's driver killed mid-stream leaves no tone sounding: the
    interface's channel stops with its process, and the codec is muted when
    its holder ends.
+
+**Done when:** the checklist above is recorded against a real Pi 4B.
+
+### P17 — The native display engine and HDMI audio on metal
+
+The image's display overlay enables the nodes the native display engine binds,
+and the port states its wiring (`plans/SOUND.md` §Native HDMI on the Pi 4). It
+is host-proven against register models of the HVS, the pixel valves, the HDMI
+blocks and their PHYs, the DDC controllers, the L2 controller, the DVP block
+and DMA4; QEMU models none of them, so the rest is metal.
+
+**Metal checklist**, with an HDMI monitor that has speakers on each port:
+
+1. The boot console shows on both monitors, and the desktop takes them over
+   without a flash of anything the firmware drew: each runs its sink's
+   preferred mode, the second scaled to its own with the aspect kept.
+2. A monitor unplugged and plugged back, on either port, comes back in its
+   mode while the other keeps running; a 4K sink on HDMI0 runs scrambled.
+3. Each sink plays the mixer's output — a 48 kHz tone and a 44.1 kHz file —
+   at its stated rates, and a sink declaring 5.1 is offered 5.1.
+4. The display-off wait running out darkens both sinks, and the first input
+   lights them again (P7c).
 
 **Done when:** the checklist above is recorded against a real Pi 4B.
 

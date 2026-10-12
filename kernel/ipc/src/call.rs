@@ -377,10 +377,10 @@ impl CallEndpoint {
     /// bind reaches the log through one event id.
     ///
     /// The kernel's `call_create` handler owns one authority this module
-    /// cannot see: a per-bus-child transfer endpoint is served only by the
-    /// driver holding that child's duty grant, which lives in the address-space
-    /// registry. It refuses such a bind before the endpoint exists and calls
-    /// this so the decision is auditable exactly like a capability refusal.
+    /// cannot see: a link supplier's endpoint is served only by the driver
+    /// holding its node's duty, which lives in the address-space registry. It
+    /// refuses such a bind before the endpoint exists and calls this so the
+    /// decision is auditable exactly like a capability refusal.
     pub fn record_create_denied<S: Sink + ?Sized>(id: EndpointId, audit: &S) {
         let mut id_buf = [0u8; 16];
         record(

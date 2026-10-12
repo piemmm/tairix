@@ -184,8 +184,8 @@ the screen":
 - The check reaches a display driver through its host:
   `DriverHost::seat_gate()` returns the `SeatGate` the kernel bound to
   the presenting client's lease (`SeatRegistry::present_gate`), and every
-  driver (`framebuffer`, `vesa`, `rpi_hvs` — both its software present
-  and its hardware `present_layers` flip) consults it **first**, before
+  driver (`framebuffer`, `vesa`, `gpu_virtio`, `bcm2711_hvs`) consults it
+  **first**, before
   any validation or surface access. The gate re-reads the registry's
   live lease on every call; it caches nothing.
 - A revoked client's present is refused with the distinct
@@ -420,6 +420,39 @@ session's first present — witnessed by the service's one-shot
 `FIRST_PRESENT` record — and a host-side QEMU screendump asserted to be
 dominated by the theme's desktop colour, so the composited frame
 demonstrably reached the scan-out surface.
+
+## The display follows its output (Stage D12)
+
+A display's output arrives, leaves, or runs another mode under a running
+seat: a monitor plugged in, unplugged, or swapped for another. The display
+service announces each move on `NoticeTopic::DisplayOutput` (a counted topic
+only its process may publish, readable by anyone, which says only *that* the
+output moved), and answers what it runs now through the lease-gated `Query`:
+a mode, or none.
+
+The desktop session parks on the announcement, and on a present refused
+`Stale` (frames no longer the output's) or `NotFound` (a restarted service
+holding none) it stops presenting until the next one, so a service that
+refused frames without announcing anything can make it wait but never spin.
+On the announcement it converges once:
+
+- **No output:** it gives its frames back and composes nothing. The seat, the
+  windows and the desktop record stay as they were.
+- **The mode its frames hold:** the whole output is owed to the display
+  again.
+- **Another mode:** it establishes frames for it and re-lays everything the
+  screen's size shapes — the bar, the backdrop and its icons, the windows, the
+  prompts, the pointer, the caches a screenful bounds — then publishes the
+  desktop record. A resolution trial is declined, and a screensaver is taken
+  down and started again over the new screen. The lock redraws itself over the
+  screen now drawn before the next composite, and while it cannot, nothing is
+  presented.
+
+A session that comes up or resumes with no output connected comes up
+dormant and follows the first output that arrives. The login screen follows
+the same way: frames established afresh on every announcement that names an
+output, and its screen rebuilt in place for a new mode, keeping the account
+chosen and anything typed.
 
 ## The display surface follows the live lease (Stage D8)
 

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
 
-use crate::{Document, Lookup};
+use crate::{ConfError, Document, Lookup};
 
 /// The most keys a registry holds: one bit of a [`Keys`] set each.
 pub const MOST_KEYS: usize = 64;
@@ -72,6 +72,73 @@ pub trait Registry: Clone + PartialEq + Default {
         }
         document
     }
+}
+
+/// Why a document read strictly was refused whole.
+///
+/// Only [`merge_admitting`] raises these; a document held in a store is read
+/// tolerantly, key by key, by [`Registry::load`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Refusal<K> {
+    /// The document is outside the format engine's own bounds or grammar.
+    Malformed(ConfError),
+    /// A line the grammar did not read as a setting, by its 1-based number.
+    Unparsed(usize),
+    /// A key outside the registry.
+    UnknownKey(String),
+    /// A value its key does not accept.
+    InvalidValue(K),
+    /// A key of the registry the reading does not admit.
+    OutsideGroup(K),
+}
+
+impl<K: fmt::Display> fmt::Display for Refusal<K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Malformed(err) => write!(f, "not a settings document ({err})"),
+            Self::Unparsed(line) => write!(f, "line {line}: not a setting"),
+            Self::UnknownKey(key) => write!(f, "unknown settings key `{key}`"),
+            Self::InvalidValue(key) => write!(f, "`{key}` is not a value that setting accepts"),
+            Self::OutsideGroup(key) => write!(f, "`{key}` is not a setting this request names"),
+        }
+    }
+}
+
+/// `base` with every setting of `text` taken over it, or why `text` is
+/// refused whole: never half-applied, because the merge runs on a copy.
+///
+/// A key `text` does not name keeps `base`'s value, so a sender renders only
+/// the keys it edits. `admits` decides which of the registry's keys this
+/// reading may change.
+///
+/// # Errors
+///
+/// The [`Refusal`] naming the first thing wrong.
+pub fn merge_admitting<R: Registry>(
+    base: &R,
+    text: &str,
+    admits: impl Fn(R::Key) -> bool,
+) -> Result<R, Refusal<R::Key>> {
+    let document = Document::parse(text).map_err(Refusal::Malformed)?;
+    if let Some(line) = document.unparsed().next() {
+        return Err(Refusal::Unparsed(line.line));
+    }
+    let mut record = base.clone();
+    for setting in document.settings() {
+        let key = R::KEYS
+            .iter()
+            .copied()
+            .find(|&key| R::name(key) == setting.key)
+            .ok_or_else(|| Refusal::UnknownKey(setting.key.into()))?;
+        if !admits(key) {
+            return Err(Refusal::OutsideGroup(key));
+        }
+        if !record.read(key, setting.value) {
+            return Err(Refusal::InvalidValue(key));
+        }
+    }
+    record.normalise();
+    Ok(record)
 }
 
 /// A registry edited live, setting by setting: what an editor changed is told

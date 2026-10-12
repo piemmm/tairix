@@ -90,6 +90,7 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::service_control::SERVICE_ACTIVATION_ENDPOINT
         || id == crate::service_control::SERVICE_NOTICE_ENDPOINT
         || id == crate::session_ipc::SESSION_ENDPOINT
+        || id == crate::sound_cue::SOUND_CUE_ENDPOINT
         || id == crate::raid_ipc::RAID_REGISTRY_ENDPOINT
         || id == crate::raid_admin::RAID_CONTROL_ENDPOINT
     {

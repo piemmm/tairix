@@ -3,11 +3,11 @@
 //! armed for a given window state without touching a real wait-set.
 //!
 //! The run loop parks on exactly one `waitset_wait` call per iteration,
-//! given the timeout until the next sample deadline. Three members are
-//! permanent for the life of the process — the termination signal, the
-//! session's command mailbox, and the machine's memory-pressure band — and a
-//! fourth, the open window's own event mailbox, is present only while a
-//! window is open, so a closed window's channel is never left idly armed.
+//! given the timeout until the next sample deadline. Most members are
+//! permanent for the life of the process; the open window's event mailbox is
+//! armed only while a window is open, and the sound authority's answer only
+//! while the machine's end sound is outstanding, so neither is left idly
+//! armed.
 
 use alloc::vec::Vec;
 
@@ -44,6 +44,9 @@ pub enum WaitToken {
     /// Permanent: what the notification area states about the network is
     /// read on this edge, never on a timer.
     Network,
+    /// The sound authority's answer to the machine's end sound (armed only
+    /// while one is outstanding).
+    Cue,
 }
 
 impl WaitToken {
@@ -59,6 +62,7 @@ impl WaitToken {
             Self::Artwork => 5,
             Self::Desktop => 6,
             Self::Network => 7,
+            Self::Cue => 8,
         }
     }
 
@@ -78,6 +82,7 @@ impl WaitToken {
             5 => Some(Self::Artwork),
             6 => Some(Self::Desktop),
             7 => Some(Self::Network),
+            8 => Some(Self::Cue),
             _ => None,
         }
     }
@@ -118,6 +123,7 @@ mod tests {
             WaitToken::Artwork,
             WaitToken::Desktop,
             WaitToken::Network,
+            WaitToken::Cue,
         ] {
             assert_eq!(WaitToken::from_u64(token.as_u64()), Some(token));
         }
@@ -126,7 +132,7 @@ mod tests {
     #[test]
     fn an_unknown_token_value_decodes_to_none() {
         assert_eq!(WaitToken::from_u64(0), None);
-        assert_eq!(WaitToken::from_u64(8), None);
+        assert_eq!(WaitToken::from_u64(9), None);
         assert_eq!(WaitToken::from_u64(u64::MAX), None);
     }
 

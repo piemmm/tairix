@@ -66,6 +66,16 @@ twenty-four bits whenever more than one stream contributed or a stream came
 through the resampler, because a sum carries content below every contributor's
 own step.
 
+The destination's step is the sink's **resolution**, not merely its
+encoding's. A device that resolves fewer bits than its encoding carries — a
+24-bit converter behind a 32-bit container, a 16-bit HDMI sink behind 24 —
+states it in its endpoint facts, and the mixer dithers at that step and rounds
+onto that grid (`SinkFormat::resolution`), so the bits the device ignores
+encode as zero rather than being truncated by the device, undithered. A sink
+replugged with another resolution moves a live mix onto its grid
+(`Mixer::set_resolution`) without reconfiguring the device. A float encoding
+has no grid and is never dithered.
+
 ## Untrusted samples
 
 A mixer reads frames a client wrote into a shared region, so those bytes cross
@@ -136,7 +146,10 @@ low-frequency channel from the downmix, so a sink without one drops it **by
 rule** rather than by accident, and that is the only position with no
 substitute. The side pair is the conventional extension of BS.775 to 7.1,
 which the recommendation predates: sides prefer the rears' slot and otherwise
-fold like them.
+fold like them. A lone rear centre — 6.1's, or the one surround of a
+four-channel layout — takes a surround pair at one over root two each, as
+BS.775 folds 3/2 into 3/1, and splits into whichever pair a sink has the same
+way, so it reaches each front at a half.
 
 Upmixing synthesises nothing. A sink channel no source position reaches is
 silent, because inventing a surround channel from a stereo recording is a
@@ -170,10 +183,13 @@ sound is *for* and nothing else; no process names appear anywhere.
 `DisplayLease` (`Room::from`): `Unclaimed` while no presenter holds the seat,
 `Session` for the login session its holder lies within, and `Withheld` while it
 changes hands. `admit` decides what the room does with a stream, for sinks and
-sources alike:
+sources alike, from whom the stream plays for (`Principal`): the machine, or a
+login session — none for a daemon:
 
 - An unclaimed room is anybody's, which is the headless case.
-- A stream whose login session holds the seat is mixed.
+- The machine's own sound plays in every room: it announces a transition the
+  machine made and carries no session's data, which is all a room withholds.
+- A stream played for the session holding the seat is mixed.
 - Any other is **held at a frame boundary and told so** (`Admission::Hold`),
   keeping its position, so a switch back resumes on the frame it stopped on. A
   departing user's music does not play into the arriving user's room, their
@@ -226,12 +242,14 @@ meanwhile replacing a waiting one of its kind for its device and going to the
 back, so the default chosen last is the one applied last.
 
 A program supplies that seam with `live` (feature `rt`): `RtAudio` is the
-service's rendezvous and the stream's notify mailbox — bound the first time a
-grant names it, and admitted to the audio service alone, so nobody else can
-forge a stream's state into it — and `LiveStream` is an open stream with its
+service's rendezvous and its streams' notify mailboxes — each bound the first
+time a grant names it, and admitted to the audio service alone, so nobody else
+can forge a stream's state into it — and `LiveStream` is an open stream with its
 shared ring, opened and attached in one step that closes the stream again if
-the ring cannot follow. A program parking on a wait-set of its own takes
-notifications with `take_notify`, which never parks.
+the ring cannot follow. Each stream reads its own mailbox, named by its grant,
+so one process may hold several at once. A program parking on a wait-set of its
+own adds `LiveStream::notify_port` and takes notifications with `take_notify`,
+which never parks.
 
 The service's notifications are best effort: one is dropped only when the
 mailbox is full, so a dropped one always leaves a full mailbox behind it, and

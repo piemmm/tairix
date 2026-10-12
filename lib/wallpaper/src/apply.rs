@@ -14,7 +14,9 @@
 use alloc::string::String;
 
 #[cfg(feature = "rt")]
-use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest, PINBOARD_ENDPOINT};
+use tairix_abi::pinboard_ipc::{
+    PinboardDocument, PinboardRequest, PINBOARD_ENDPOINT, PINBOARD_MAX_REQUEST,
+};
 #[cfg(feature = "rt")]
 use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
 
@@ -46,9 +48,12 @@ pub enum ApplyOutcome {
 #[cfg(feature = "rt")]
 #[must_use]
 pub fn apply(document: PinboardDocument) -> ApplyOutcome {
-    let request = PinboardRequest::Apply { document }.to_le_bytes();
+    let mut request = [0u8; PINBOARD_MAX_REQUEST];
+    let Ok(sent) = PinboardRequest::Apply { document }.encode(&mut request) else {
+        return ApplyOutcome::Refused(alloc::format!("{:?}", tairix_abi::Errno::LengthOutOfRange));
+    };
     let mut reply = [0u8; STATUS_REPLY_LEN];
-    let Ok(len) = tairix_rt::ipc_call(PINBOARD_ENDPOINT, &request, &mut reply) else {
+    let Ok(len) = tairix_rt::ipc_call(PINBOARD_ENDPOINT, &request[..sent], &mut reply) else {
         return ApplyOutcome::NoDesktop;
     };
     match decode_status_reply(&reply[..len.min(reply.len())]) {

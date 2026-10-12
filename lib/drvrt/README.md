@@ -35,6 +35,12 @@ grants and:
 - `GrantSyscalls` — the syscall seam, `unsafe` to implement because the host
   trusts the mappings it answers; production code uses `RtGrantSyscalls`,
   which forwards to `tairix_rt`.
+- `SupplierHost` / `RtSupplier` — what a link supplier asks the kernel about
+  the call it serves; `Supplier` and `Recorder<R>` — the supplier as its loop
+  drives it, and where its decisions go; `serve::Service` — the one loop
+  every supplier serves its endpoint from.
+- `testkit` (feature `test-support`) — `FakeKernel` and `Records`, the kernel
+  and record double every supplier's tests use.
 
 ## Design
 

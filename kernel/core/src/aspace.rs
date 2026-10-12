@@ -3027,6 +3027,15 @@ impl AddressSpaceRegistry {
         self.open_files.get(&task)?.by_fd.get(&fd).cloned()
     }
 
+    /// Whether `task`'s open table holds `fd`, which then shadows any
+    /// standard stream of that number.
+    #[must_use]
+    pub fn has_open_file(&self, task: ProcessId, fd: u32) -> bool {
+        self.open_files
+            .get(&task)
+            .is_some_and(|files| files.by_fd.contains_key(&fd))
+    }
+
     /// Whether `task`'s open descriptor `fd` is a readable stream end — a
     /// pipe read end, a pty master, or a pty slave, each opened for reading
     /// — the wait-set `Stream` member's add-time owner/descriptor check

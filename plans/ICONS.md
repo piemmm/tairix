@@ -213,7 +213,7 @@ ranks a specific declaration ahead of a generic one.
 
 ## 4. I3 — build-time discovery and planting
 
-`tools/syshelp` walks `lib/icon/assets/` and emits `GRAPHICS_FILES`
+`tools/syshelp` walks `lib/icon/assets/` and emits `ASSET_FILES`
 alongside the existing per-bundle `Help/` and `Resources/` tables. The
 image builder and the QEMU encrypted-root fixture both author `/System`
 through `tairix_syshelp::build_system_volume`, which counts and plants the

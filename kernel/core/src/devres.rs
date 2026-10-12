@@ -874,6 +874,23 @@ pub fn dma_constraint(resource: &HwResource) -> Result<DmaConstraint, Errno> {
     })
 }
 
+/// The DMA window among `resources` that starts at the bottom of memory and
+/// reaches furthest, or `None` when none starts there.
+///
+/// The frame allocator places a block below a ceiling and above no floor, so
+/// only such a window is certain to hold a block placed below its top.
+#[must_use]
+pub(crate) fn bottom_window(resources: &[HwResource]) -> Option<DmaConstraint> {
+    resources
+        .iter()
+        .filter_map(|resource| dma_constraint(resource).ok())
+        .filter(|window| !window.translated || window.addr_limit == window.max_len)
+        .max_by_key(|window| match window.addr_limit {
+            0 => u64::MAX,
+            limit => limit,
+        })
+}
+
 /// Resolve the **device-visible** base address a driver programs into its
 /// hardware from the CPU-physical base the carve produced, honouring the
 /// grant's inbound-viewport translation.
@@ -1174,6 +1191,38 @@ mod tests {
             dma_constraint(&HwResource::port(0x3F8, 8)),
             Err(Errno::OutOfRange)
         );
+    }
+
+    #[test]
+    fn the_bottom_window_is_the_widest_that_starts_at_the_bottom_of_memory() {
+        let coherence = tairix_abi::DmaCoherence::Unsnooped;
+        // A Pi 4 display engine: memory through [0, 1 GiB), the peripherals'
+        // aperture through [0xFC00_0000, 0xFF80_0000).
+        let memory = HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xC000_0000, coherence);
+        let peripherals =
+            HwResource::dma_translated(0xFF80_0000, 0x0380_0000, 0x7C00_0000, coherence);
+        let window = HwResource::mmio(0xFE40_0000, 0x8000);
+        assert_eq!(
+            bottom_window(&[window, peripherals, memory]),
+            dma_constraint(&memory).ok()
+        );
+        assert_eq!(
+            bottom_window(&[window, peripherals]),
+            None,
+            "a window above the bottom of memory cannot be trusted to hold a block"
+        );
+        let narrow = HwResource::dma(0x1000_0000, 0, coherence);
+        let unbounded = HwResource::dma(0, 0, coherence);
+        assert_eq!(
+            bottom_window(&[narrow, memory]),
+            dma_constraint(&memory).ok()
+        );
+        assert_eq!(
+            bottom_window(&[narrow, unbounded, memory]),
+            dma_constraint(&unbounded).ok(),
+            "a device that reaches everywhere reaches furthest"
+        );
+        assert_eq!(bottom_window(&[]), None);
     }
 
     #[test]

@@ -37,6 +37,19 @@ A seek or a skip works from where the listener is: a waiting jump's target,
 else the stream's own front segment — never a position the service reported
 before the command, so two presses of *next* move two entries on.
 
+## Chained files
+
+A chained file's links play in turn as one entry: when the decoder's link
+ends it asks for the next, which follows the last into the stream when it has
+its shape and waits for the stream to play out when it has another. Each link
+is reported as it opens (`Note::Opened` with its link), with what it says of
+itself (`take_link_metadata`), and `Status::link` names the link heard, whose
+frames the position counts from. An entry's extent is measured over its whole
+file: each link carries how far into the entry it begins, so a start lying in
+a later link is found there and a duration runs on across links. A seek moves
+within the link heard — reopening the file at that link where the decoder has
+moved on — and past its end goes on into the next.
+
 ## Loudness
 
 With `Settings::normalise` each track plays at the Replay Gain track gain its
@@ -70,4 +83,6 @@ seeks, pauses, the seat's hold, edits on every path (ahead of the decoder,
 waiting behind a full ring, already in the stream, being heard), a device
 change, a new playback after one ended, Replay Gain applied bit for bit against
 its own computation, a run of 100 000 entries that cannot be opened walked in
-one loop, and two rapid skips.
+one loop, two rapid skips, and chained files — links of one shape gapless,
+a link of another shape on a stream of its own, an extent across links, and a
+seek past a link's end.

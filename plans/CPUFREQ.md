@@ -153,10 +153,13 @@ or two after quantisation, which is all a rate decision needs — but nothing
 may assume granularity independence. What the design does rely on, and what
 holds exactly, is that a lazy read equals a commit at the same instant.
 
-### 3. The mechanism (`drivers/cpufreq/rpi/`)
+### 3. The mechanism (`drivers/clock/rpi_firmware/`)
 
 A user-space driver `devmgr` autoloads on a discovered
-`raspberrypi,firmware-clocks` node. **`CAP_CPUFREQ` must be in the autoload
+`raspberrypi,firmware-clocks` node. It is that node's one driver, so it also
+serves the display's firmware clocks over `clock-v1` (`plans/SOUND.md`
+SND19g); the mechanism runs on a thread of its own and touches only the ARM
+clock. **`CAP_CPUFREQ` must be in the autoload
 gate's delegatable set** (`unlock_service::autoload_caps`) or the matched
 driver is refused for capability escalation and never loads — the board then
 runs at whatever rate the boot floor left, with the refusal visible only as
@@ -184,8 +187,9 @@ and skip-setting-turbo. With the third word clear the firmware runs its turbo
 transition as part of the rate change and takes the part to its turbo
 operating point, so a request to *lower* the ARM clock is answered with the
 maximum — and answered successfully, since the applied rate it reports is that
-maximum. `clk-raspberrypi` sets the same word
-(`raspberrypi_firmware_prop.disable_turbo`). Framing the request with only its
+maximum. `clk-raspberrypi` declares the same word
+(`raspberrypi_firmware_prop.disable_turbo`) but its initialiser leaves it
+clear. Framing the request with only its
 first two words also under-declares the tag's value buffer, against the
 invariant `lib/vcmailbox`'s own `find_tag` documents (every tag is provisioned
 to `max(request, response)`).
@@ -268,8 +272,8 @@ nothing rather than a noisy figure.
   than one, which is an in-place change to `domain.rs` when such a port
   arrives — not staged, because nothing would hold the second binding.
 * **No `HwDeviceClass` variant and no driver class trait.** The driver binds by
-  `compatible` and serves no endpoint, so both would be surface with no
-  reader.
+  `compatible`; the one endpoint it serves is its node's `clock-v1`, for the
+  display's clocks, so a frequency class would be surface with no reader.
 * **The System Information API reports the measured frequency only**, not the
   governor's target. The measurement is the honest answer to "how fast is this
   core running"; a target would only tell a reader what was asked for. The

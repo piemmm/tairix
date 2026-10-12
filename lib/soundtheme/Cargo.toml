@@ -1,0 +1,42 @@
+[package]
+name = "tairix-soundtheme"
+description = "TAIRiX desktop sounds: which asset each sound event plays, the shipped theme catalog and its bounds, the sound settings registry, and the cue client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The event vocabulary and the cue wire protocol, which programs exchange
+# with the cue authority.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The `key = value` document engine the sound settings are a registry over.
+tairix-appconf = { path = "../appconf", version = "=0.0.0", optional = true }
+# The shared leaf-name rule a theme directory is held to.
+tairix-path = { path = "../path", version = "=0.0.0" }
+# Only the live cue transport.
+tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+
+[features]
+default = ["settings"]
+# The sound settings, the user's choices and the resolution over them, a
+# registry over `lib/appconf`. A program that only cues turns default features
+# off: it then links no document engine, and nothing it builds beside leans
+# on what that engine enables.
+settings = ["dep:tairix-appconf"]
+# The live cue transport; off, so the vocabulary, catalog and settings stay
+# host-testable with no runtime behind them.
+rt = ["dep:tairix-rt"]
+
+[[test]]
+name = "fuzz_sound_settings"
+required-features = ["settings"]
+
+[dev-dependencies]
+# The fuzz harness's per-run seed, budget and registry-document generator.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

@@ -57,7 +57,7 @@ pub const NO_TASK: TaskId = tairix_abi::process::NO_PID;
 /// Never drawn by [`choose_task_id`], so the boot path can admit the system's
 /// first process under the well-known number a user expects to find it at
 /// ([`crate::SchedulerPolicy::spawn_parked_as`]).
-pub const INIT_TASK_ID: TaskId = 1;
+pub const INIT_TASK_ID: TaskId = tairix_abi::process::INIT_PID;
 
 /// The first id a draw may yield. Everything below is reserved: PID 1's, and
 /// the identities the kernel's own services bind interrupts, endpoints and

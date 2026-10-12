@@ -45,8 +45,8 @@ pub trait AudioTransport {
     /// The transport's own [`Errno`] — a vanished endpoint, a refused send.
     fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno>;
 
-    /// Park on the stream's notify mailbox until the service wakes it, then
-    /// take the frame.
+    /// Park on `mailbox`, a stream's notify mailbox, until the service wakes
+    /// it, then take the frame.
     ///
     /// Blocking by contract: a caller that returns immediately with nothing
     /// turns the client's wait into the busy loop the charter forbids.
@@ -54,15 +54,15 @@ pub trait AudioTransport {
     /// # Errors
     ///
     /// The transport's own [`Errno`].
-    fn wait_notify(&mut self, out: &mut [u8]) -> Result<usize, Errno>;
+    fn wait_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<usize, Errno>;
 
-    /// Take the frame waiting on the stream's notify mailbox, or `None` when
-    /// none is; never parks.
+    /// Take the frame waiting on `mailbox`, a stream's notify mailbox, or
+    /// `None` when none is; never parks.
     ///
     /// # Errors
     ///
     /// The transport's own [`Errno`].
-    fn try_notify(&mut self, out: &mut [u8]) -> Result<Option<usize>, Errno>;
+    fn try_notify(&mut self, mailbox: u64, out: &mut [u8]) -> Result<Option<usize>, Errno>;
 }
 
 /// Every device of `direction` the caller may see, by ascending id.
@@ -589,9 +589,8 @@ impl StreamClient {
     /// Park until the service reports something about this stream, adopting
     /// any state change it carries.
     ///
-    /// A notification for another stream is returned as it arrived rather
-    /// than swallowed: a client with several streams demultiplexes on the
-    /// stream id it names.
+    /// One naming another stream — a closed one whose mailbox this stream
+    /// inherited — is returned as it arrived and adopts nothing.
     ///
     /// # Errors
     ///
@@ -602,7 +601,7 @@ impl StreamClient {
         transport: &mut T,
     ) -> Result<AudioNotify, Errno> {
         let mut frame = [0u8; AUDIO_NOTIFY_LEN];
-        let length = transport.wait_notify(&mut frame)?;
+        let length = transport.wait_notify(self.grant.notify_endpoint, &mut frame)?;
         let notify = decode_notify(&frame, length)?;
         self.adopt(notify);
         Ok(notify)
@@ -623,7 +622,7 @@ impl StreamClient {
         drain: &mut NotifyDrain,
     ) -> Result<Option<AudioNotify>, Errno> {
         let mut frame = [0u8; AUDIO_NOTIFY_LEN];
-        if let Some(length) = transport.try_notify(&mut frame)? {
+        if let Some(length) = transport.try_notify(self.grant.notify_endpoint, &mut frame)? {
             drain.took();
             let notify = decode_notify(&frame, length)?;
             self.adopt(notify);

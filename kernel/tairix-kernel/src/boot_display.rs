@@ -12,6 +12,13 @@
 //! canonical [`SIMPLE_FRAMEBUFFER_COMPATIBLE`] match key the display
 //! service's `BIND_KEYS` binds.
 //!
+//! Where the port knows a display engine that takes the screen over from the
+//! firmware, no boot display node is published: the engine's node states
+//! [`HwProperty::BootConsole`] instead ([`mark_boot_console`]), and its driver
+//! moves the console onto memory the kernel owns (`console_relocate`) before
+//! it tells the firmware the display is the ARM's, so nothing scans out or
+//! writes the firmware's surface once the firmware may take it back.
+//!
 //! The node rides the same boot-discovered tree the block and input
 //! probes buffer, so the pre-unlock autoload matches it exactly like any
 //! other discovered device: the signed store scan finds the display
@@ -25,7 +32,7 @@
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::hwtree::{FramebufferMemory, HwResource};
 use tairix_abi::{
-    HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID, SIMPLE_FRAMEBUFFER_COMPATIBLE,
+    HwDeviceClass, HwMatchKey, HwNode, HwProperty, HW_NODE_ROOT_ID, SIMPLE_FRAMEBUFFER_COMPATIBLE,
 };
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
 
@@ -54,23 +61,32 @@ pub struct BootScanout {
     pub format: DisplayFormat,
     /// CPU mapping policy required by the discovered surface backing.
     pub memory: FramebufferMemory,
-    /// A binding more specific than the generic model, when the port knows
-    /// what owns the surface: a driver for that owner outranks the generic
-    /// one, and reaches controls the surface itself lacks.
-    pub binding: Option<&'static [u8]>,
+}
+
+impl BootScanout {
+    /// The surface as the one [`HwResource::framebuffer`] grant request a
+    /// node carries, sized and validated from the discovered mode, or `None`
+    /// for a degenerate mode (zero extent, an under-sized stride, an
+    /// overflowing length) no correct, bounded grant can be minted for.
+    fn grant(&self) -> Option<HwResource> {
+        let mode = DisplayMode {
+            width_px: self.width_px,
+            height_px: self.height_px,
+            stride_bytes: self.stride_bytes,
+            format: self.format,
+        };
+        HwResource::framebuffer(self.base, &mode, self.memory).ok()
+    }
 }
 
 /// Emit the boot display node for `scanout` into `sink`.
 ///
-/// The node carries the port's own [`BootScanout::binding`], when it has one,
-/// ahead of the [`SIMPLE_FRAMEBUFFER_COMPATIBLE`] match key, and a
-/// single [`HwResource::framebuffer`] capability-grant request sized and
-/// validated from the discovered mode — the matched display service is
-/// granted exactly the surface window, nothing more (no ambient
-/// authority). A degenerate mode (zero extent, an under-sized stride, an
-/// overflowing length) is skipped fail-closed: a node the kernel cannot
-/// mint a correct, bounded grant for is left unpublished rather than
-/// half-described, and the boot proceeds with the display driverless.
+/// The node carries the [`SIMPLE_FRAMEBUFFER_COMPATIBLE`] match key and the
+/// surface's single grant request — the matched display service is granted
+/// exactly the surface window, nothing more (no ambient authority). A
+/// degenerate mode is skipped fail-closed: the node is left unpublished
+/// rather than half-described, and the boot proceeds with the display
+/// driverless.
 ///
 /// # Errors
 ///
@@ -80,16 +96,10 @@ pub fn observe_boot_display(
     scanout: &BootScanout,
     sink: &mut dyn HwNodeSink,
 ) -> Result<(), DiscoveryError> {
-    let mode = DisplayMode {
-        width_px: scanout.width_px,
-        height_px: scanout.height_px,
-        stride_bytes: scanout.stride_bytes,
-        format: scanout.format,
-    };
-    let Ok(resource) = HwResource::framebuffer(scanout.base, &mode, scanout.memory) else {
-        return Ok(());
-    };
-    let Ok(key) = HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE) else {
+    let (Some(resource), Ok(key)) = (
+        scanout.grant(),
+        HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE),
+    ) else {
         return Ok(());
     };
     let mut node = HwNode::new(
@@ -97,18 +107,21 @@ pub fn observe_boot_display(
         HW_NODE_ROOT_ID,
         HwDeviceClass::Display,
     );
-    if let Some(binding) = scanout.binding {
-        let Ok(specific) = HwMatchKey::compatible(binding) else {
-            return Ok(());
-        };
-        if node.push_match_key(specific).is_err() {
-            return Ok(());
-        }
-    }
     if node.push_match_key(key).is_err() || node.push_resource(resource).is_err() {
         return Ok(());
     }
     sink.emit(node)
+}
+
+/// State on `engine`, the node of the display engine that takes the screen
+/// over, that the boot console is its to move; answers whether it was stated.
+///
+/// An engine node with no room left states nothing, and its driver then
+/// sets its outputs up without the console.
+pub fn mark_boot_console(engine: &mut HwNode) -> bool {
+    engine
+        .push_resource(HwResource::property(HwProperty::BootConsole, 1))
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -140,7 +153,6 @@ mod tests {
             stride_bytes: 1024 * 4,
             format: DisplayFormat::Bgra8888,
             memory: FramebufferMemory::WriteCombine,
-            binding: None,
         }
     }
 
@@ -178,22 +190,20 @@ mod tests {
     }
 
     #[test]
-    fn a_port_binding_is_published_ahead_of_the_generic_model() {
-        let mut sink = CollectingSink::default();
-        let scanout = BootScanout {
-            binding: Some(b"vendor,owned-fb"),
-            ..ramfb_scanout()
-        };
-        observe_boot_display(&scanout, &mut sink).expect("sink never fills");
-        let keys: Vec<&[u8]> = sink.nodes[0]
-            .match_keys()
-            .iter()
-            .map(HwMatchKey::compatible_bytes)
-            .collect();
-        assert_eq!(
-            keys,
-            [&b"vendor,owned-fb"[..], SIMPLE_FRAMEBUFFER_COMPATIBLE],
-            "most specific first, and the generic driver still matches"
+    fn an_engine_taking_the_screen_over_is_told_the_console_and_granted_no_surface() {
+        let mut engine = HwNode::new(9, HW_NODE_ROOT_ID, HwDeviceClass::Other);
+        assert!(mark_boot_console(&mut engine));
+        assert_eq!(engine.property(HwProperty::BootConsole), Some(1));
+        assert!(
+            !engine
+                .resources()
+                .iter()
+                .any(|resource| resource.kind() == Some(HwResourceKind::Framebuffer)),
+            "the firmware's surface is never the engine's to reach"
+        );
+        assert!(
+            engine.match_keys().is_empty(),
+            "the engine keeps its own binding"
         );
     }
 

@@ -19,7 +19,7 @@ mod server;
 #[cfg(test)]
 mod server_tests;
 
-pub use server::{CodecServer, Record, Recorder};
+pub use server::{CodecServer, Record};
 
 #[cfg(target_os = "none")]
 mod serve;

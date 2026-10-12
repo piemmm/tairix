@@ -22,5 +22,15 @@ tairix-caps = { path = "../caps", version = "=0.0.0" }
 # crate is generic over the seam so its logic is host-tested without a kernel.
 tairix-rt = { path = "../rt", version = "=0.0.0" }
 
+[target.'cfg(target_os = "none")'.dependencies]
+# The records a supplier's serve loop writes its decisions as.
+tairix-log = { path = "../log", version = "=0.0.0" }
+
+[features]
+# Exposes `testkit`'s fake kernel to a link supplier's own tests, so every
+# supplier is tested against the one double of the kernel's rules rather than
+# a private copy of it.
+test-support = []
+
 [lints]
 workspace = true

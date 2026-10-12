@@ -4,13 +4,12 @@ use core::cell::Cell;
 use core::ptr::NonNull;
 
 use tairix_abi::driver::dma::{DmaHost, DmaReach, DmaSlab, PoolId, SlabCoherencyFn, SlabEnd};
-use tairix_abi::driver::i2c::I2cPort;
 use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::driver::virtio::VirtioHost;
 use tairix_abi::driver::CompletionSignal;
 use tairix_abi::hwtree::{HwProperty, HwResource, HwResourceKind};
-use tairix_abi::{i2c_ipc, mailbox_ipc};
+use tairix_abi::mailbox_ipc;
 use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
     RegisterWindow,
@@ -793,38 +792,6 @@ impl<S: GrantSyscalls> MailboxChannel for RtDriverHost<S> {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let n = (ret as usize).min(reply.len());
         mailbox_ipc::decode_reply(&reply[..n], message).map_err(ipc_driver_error)
-    }
-}
-
-impl<S: GrantSyscalls> I2cPort for RtDriverHost<S> {
-    /// Marshal one write-then-read transfer over the kernel's synchronous
-    /// call surface to the bus driver serving this chip's transfer endpoint
-    /// ([`i2c_ipc`]).
-    ///
-    /// The endpoint comes from this driver's own
-    /// [`Endpoint`](HwResourceKind::Endpoint) grant, which is its whole
-    /// authority on the bus: discovery paired that id with one child's
-    /// address on the bus node's duty list, so a driver holding it reaches
-    /// exactly its own part and the address never leaves the bus driver. A
-    /// driver with no endpoint grant fails closed rather than reaching for a
-    /// default id.
-    fn transfer(&self, write: &[u8], read: &mut [u8]) -> Result<(), DriverError> {
-        let endpoint = self.endpoint_grant().ok_or(DriverError::NotFound)?;
-        let mut request = [0u8; i2c_ipc::REQUEST_LEN];
-        i2c_ipc::encode_request(&mut request, write, read.len())
-            .map_err(|_| DriverError::LengthOutOfRange)?;
-        let mut reply = [0u8; i2c_ipc::REPLY_LEN];
-        let ret = self.syscalls.ipc_call(endpoint, &request, &mut reply);
-        if ret < 0 {
-            return Err(
-                Errno::try_from_syscall(ret).map_or(DriverError::DeviceFault, ipc_driver_error)
-            );
-        }
-        // `ret >= 0` checked above; clamped to the buffer so a truncation on
-        // a 32-bit target cannot drive an out-of-bounds slice.
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let n = (ret as usize).min(reply.len());
-        i2c_ipc::decode_reply(&reply[..n], read).map_err(ipc_driver_error)
     }
 }
 

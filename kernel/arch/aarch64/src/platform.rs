@@ -20,8 +20,10 @@
 //!   `VideoCore` mailbox's DMA property-buffer carve, the GENET MAC's DMA
 //!   reach read from its parent bus, the EMMC2 SD host's translated DMA
 //!   windows, the BCM2711 PCIe host bridge's
-//!   inbound aperture and outbound window, and the Broadcom DMA binding's
-//!   channel mask, which counts channels across the whole DMA block;
+//!   inbound aperture and outbound window, the Broadcom DMA binding's
+//!   channel mask, which counts channels across the whole DMA block, and the
+//!   display engine's fixed wiring — its pixel valves and the HDMI encoders
+//!   they feed — which the tree leaves implicit;
 //! * **`pcie_bringup`**, the pre-MMU read of those PCIe windows the
 //!   in-kernel USB bring-up needs before any hardware tree exists.
 //!
@@ -31,9 +33,11 @@
 //! through the reader, not as a tree node.
 
 use crate::fdt::{gic_intid_from_cells, Fdt};
+use tairix_abi::driver::encoder::ENCODER_ENDPOINTS;
+use tairix_abi::hwlink::{LinkDuty, LinkRequest};
 use tairix_abi::{DmaCoherence, HwNode, HwResource};
 use tairix_arch_api::fdtwalk::push_dma_windows;
-use tairix_arch_api::fdtwalk::FdtPlatform;
+use tairix_arch_api::fdtwalk::{emitted, FdtPlatform};
 use tairix_fdt::{
     bus_level, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window, read_cells,
     scan_translated, translated_reg, BusLevel, Node,
@@ -43,13 +47,19 @@ use tairix_fdt::{
 // the `vcmailbox` service driver's `BIND_KEYS` can never diverge. The
 // firmware's aperture is that crate's too: the mailbox node's DMA resource
 // declares it as the limit the property buffer is carved below.
-use tairix_vcmailbox::{APERTURE_LIMIT, MAILBOX_COMPATIBLE};
+use tairix_vcmailbox::{
+    APERTURE_LIMIT, DISPLAY_ENGINE_COMPATIBLE, ENGINE_OUTPUTS, MAILBOX_COMPATIBLE,
+};
 
 /// Length of the DMA-visible property-buffer carve the mailbox node
 /// requests: one page — the mapping granularity — which comfortably
 /// holds the 128-byte, 16-byte-aligned property message the firmware
-/// protocol exchanges (`drivers/display/rpi_hvs::mailbox`).
+/// protocol exchanges.
 const MAILBOX_DMA_BUFFER_LEN: u64 = 4096;
+
+/// The window the BCM2711 HDMI binding lists for its interrupt controller's
+/// registers, which are that controller's grant.
+const HDMI_INTERRUPT_WINDOW: &[u8] = b"intr2";
 
 /// `compatible` string of the BCM2711 `PCIe` root complex — the host
 /// bridge the Pi 4's USB-A ports sit behind (the VL805 xHCI controller,
@@ -105,6 +115,102 @@ const BRCM_DMA_PAGE: u64 = 0x1000;
 pub struct Aarch64Fdt {
     /// The GIC's phandle, when the tree gives it one.
     gic: Option<u32>,
+    /// Each display engine output the tree describes, in
+    /// [`ENGINE_OUTPUTS`]' order.
+    outputs: [Option<OutputWiring>; ENGINE_OUTPUTS.len()],
+}
+
+/// One display engine output, resolved against the tree.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct OutputWiring {
+    /// The pixel valve's translated register window.
+    window: (u64, u64),
+    /// The id the walk gives the encoder's node.
+    encoder: u32,
+}
+
+/// Each display engine output whose pixel valve the tree describes — a valve
+/// is never a node of its own, so its own status does not matter — and whose
+/// encoder the walk emits.
+fn engine_outputs(fdt: &Fdt<'_>) -> [Option<OutputWiring>; ENGINE_OUTPUTS.len()] {
+    let mut windows = [None; ENGINE_OUTPUTS.len()];
+    scan_translated(fdt, |node, levels, depth| {
+        for (window, output) in windows.iter_mut().zip(&ENGINE_OUTPUTS) {
+            if window.is_none() && node.is_compatible(output.valve) {
+                *window = translated_reg(node, depth, levels, 0);
+            }
+        }
+        None::<()>
+    });
+    let mut encoders = [None; ENGINE_OUTPUTS.len()];
+    for (id, node, _) in emitted(fdt) {
+        for (encoder, output) in encoders.iter_mut().zip(&ENGINE_OUTPUTS) {
+            if encoder.is_none() && node.is_compatible(output.encoder) {
+                *encoder = Some(id);
+            }
+        }
+    }
+    let mut outputs = [None; ENGINE_OUTPUTS.len()];
+    for ((output, window), encoder) in outputs.iter_mut().zip(windows).zip(encoders) {
+        *output = window
+            .zip(encoder)
+            .map(|(window, encoder)| OutputWiring { window, encoder });
+    }
+    outputs
+}
+
+/// Whether `node` is one of the encoders the display engine feeds.
+fn is_engine_encoder(node: &Node<'_>) -> bool {
+    ENGINE_OUTPUTS
+        .iter()
+        .any(|output| node.is_compatible(output.encoder))
+}
+
+/// The id the walk gives the display engine's node, when the tree enables
+/// one: the node the boot console moves to, since the engine takes the
+/// screen over from the firmware.
+#[must_use]
+pub fn display_engine(fdt: &Fdt<'_>) -> Option<u32> {
+    emitted(fdt)
+        .find_map(|(id, node, _)| node.is_compatible(DISPLAY_ENGINE_COMPATIBLE).then_some(id))
+}
+
+impl Aarch64Fdt {
+    /// The engine's outputs as its node carries them — each pixel valve's
+    /// window and a link to the encoder it feeds — and the windows its
+    /// scan-out reads memory through.
+    fn describe_engine(
+        &self,
+        depth: usize,
+        levels: &[BusLevel<'_>],
+        coherence: DmaCoherence,
+        hw: &mut HwNode,
+    ) {
+        for ((output, wiring), index) in ENGINE_OUTPUTS.iter().zip(self.outputs).zip(0u8..) {
+            let Some(OutputWiring {
+                window: (base, len),
+                encoder,
+            }) = wiring
+            else {
+                continue;
+            };
+            let endpoint = ENCODER_ENDPOINTS.endpoint(encoder);
+            let (Some(window), Ok(link)) = (
+                HwResource::mmio_named(base, len, output.window),
+                LinkRequest::new(endpoint, index, &[], output.link),
+            ) else {
+                continue;
+            };
+            // A node with no room left simply describes fewer outputs; the
+            // capacity bound is the ABI's.
+            if hw.push_resource(window).is_err()
+                || hw.push_resource(HwResource::request(&link)).is_err()
+            {
+                return;
+            }
+        }
+        push_dma_windows(depth, levels, coherence, hw);
+    }
 }
 
 impl FdtPlatform for Aarch64Fdt {
@@ -119,6 +225,7 @@ impl FdtPlatform for Aarch64Fdt {
     fn from_tree(fdt: &Fdt<'_>) -> Self {
         Self {
             gic: crate::gic::find_gic(fdt).and_then(|gic| gic.phandle),
+            outputs: engine_outputs(fdt),
         }
     }
 
@@ -183,6 +290,10 @@ impl FdtPlatform for Aarch64Fdt {
     // An Arm tree states `dma-coherent` on every master that snoops.
     const DEFAULT_DMA_COHERENCE: DmaCoherence = DmaCoherence::Unsnooped;
 
+    fn grants_window(&self, node: &Node<'_>, name: Option<&[u8]>) -> bool {
+        name != Some(HDMI_INTERRUPT_WINDOW) || !is_engine_encoder(node)
+    }
+
     fn augment(
         &self,
         node: &Node<'_>,
@@ -221,6 +332,14 @@ impl FdtPlatform for Aarch64Fdt {
         }
         if names_compatible(EMMC2_COMPATIBLE) {
             push_dma_windows(depth, levels, coherence, hw);
+        }
+        if names_compatible(DISPLAY_ENGINE_COMPATIBLE) {
+            self.describe_engine(depth, levels, coherence, hw);
+        }
+        if is_engine_encoder(node) {
+            if let Ok(duty) = LinkDuty::new(ENCODER_ENDPOINTS.endpoint(hw.id()), None) {
+                let _ = hw.push_resource(HwResource::duty(&duty));
+            }
         }
         // The BCM2711 PCIe host bridge additionally *requests* the
         // inbound-DMA aperture it grants devices behind it (`plans/PI.md`
@@ -383,7 +502,7 @@ fn parent_dma_aperture(depth: usize, levels: &[BusLevel<'_>]) -> Option<(u64, u6
 
 #[cfg(test)]
 mod tests {
-    use super::{pcie_bringup, FdtDiscovery, EMMC2_COMPATIBLE};
+    use super::{display_engine, pcie_bringup, FdtDiscovery, EMMC2_COMPATIBLE};
     use crate::fdt::{Fdt, GIC_PPI_INTID_BASE};
     use crate::gic::MIN_SPI_INTID;
     use std::vec::Vec;
@@ -1260,5 +1379,158 @@ mod tests {
         assert_eq!(channel_mask(&nodes, b"brcm,bcm2835-dma"), Some(0));
         let nodes = discover_all(&bcm_dma_tree(&[0, 0, 7]));
         assert_eq!(channel_mask(&nodes, b"brcm,bcm2835-dma"), None);
+    }
+
+    /// The display engine's corner of a Pi 4 tree, as the image's overlay
+    /// leaves it: the HVS and both HDMI blocks enabled, their pixel valves
+    /// still disabled, each block naming its interrupt controller's
+    /// registers among its own.
+    fn display_engine_tree(engine: &str) -> Vec<u8> {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 1);
+        b.prop_u32("interrupt-parent", 1);
+        b.begin_node("soc");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop(
+            "ranges",
+            &be_cells(&[0x7e00_0000, 0, 0xfe00_0000, 0x0180_0000]),
+        );
+        b.prop("dma-ranges", &be_cells(&[0xc000_0000, 0, 0, 0x4000_0000]));
+        b.begin_node("interrupt-controller@40041000");
+        b.prop_str("compatible", "arm,gic-400");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 3);
+        b.prop(
+            "reg",
+            &be_cells(&[0x7e04_1000, 0x1000, 0x7e04_2000, 0x2000]),
+        );
+        b.prop_u32("phandle", 1);
+        b.end_node();
+        b.begin_node("interrupt-controller@7ef00100");
+        b.prop_str("compatible", "brcm,bcm2711-l2-intc");
+        b.prop("reg", &be_cells(&[0x7ef0_0100, 0x30]));
+        b.prop("interrupts", &be_cells(&[0, 0x60, 1]));
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.prop_u32("phandle", 0x2c);
+        b.end_node();
+        b.begin_node("hvs@7e400000");
+        b.prop_str("compatible", "brcm,bcm2711-hvs");
+        b.prop("reg", &be_cells(&[0x7e40_0000, 0x8000]));
+        b.prop_str("reg-names", "hvs");
+        b.prop_str("status", engine);
+        b.end_node();
+        for (address, valve) in [
+            (0x7e20_a000u32, "brcm,bcm2711-pixelvalve2"),
+            (0x7e21_6000, "brcm,bcm2711-pixelvalve4"),
+        ] {
+            b.begin_node(&std::format!("pixelvalve@{address:x}"));
+            b.prop_str("compatible", valve);
+            b.prop("reg", &be_cells(&[address, 0x100]));
+            b.prop_str("status", "disabled");
+            b.end_node();
+        }
+        for (address, encoder) in [
+            (0x7ef0_0700u32, "brcm,bcm2711-hdmi0"),
+            (0x7ef0_5700, "brcm,bcm2711-hdmi1"),
+        ] {
+            b.begin_node(&std::format!("hdmi@{address:x}"));
+            b.prop_str("compatible", encoder);
+            b.prop("reg", &be_cells(&[address, 0x300, 0x7ef0_0100, 0x30]));
+            b.prop_strs("reg-names", &["hdmi", "intr2"]);
+            b.prop_u32("interrupt-parent", 0x2c);
+            b.prop("interrupts", &be_cells(&[0, 1, 2, 3, 4, 5]));
+            b.end_node();
+        }
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    fn link_requests(node: &HwNode) -> Vec<tairix_abi::hwlink::LinkRequest> {
+        node.resources()
+            .iter()
+            .filter_map(|r| r.link_request().ok())
+            .collect()
+    }
+
+    #[test]
+    fn the_engine_s_node_states_each_output_s_valve_and_the_encoder_it_feeds() {
+        use tairix_abi::driver::encoder::ENCODER_ENDPOINTS;
+        use tairix_abi::hwlink::LinkRole;
+        use tairix_vcmailbox::ENGINE_OUTPUTS;
+        let blob = display_engine_tree("okay");
+        let nodes = discover_all(&blob);
+        let engine = by_key(&nodes, b"brcm,bcm2711-hvs");
+        for (output, base) in ENGINE_OUTPUTS.iter().zip([0xfe20_a000u64, 0xfe21_6000]) {
+            let window = engine
+                .resources()
+                .iter()
+                .find(|r| r.is_window_named(output.window))
+                .expect("the valve's window");
+            assert_eq!(
+                (window.base(), window.length()),
+                (base, 0x100),
+                "translated"
+            );
+            let encoder = by_key(&nodes, output.encoder);
+            let link = link_requests(engine)
+                .into_iter()
+                .find(|link| link.name() == output.link)
+                .expect("the encoder's link");
+            assert_eq!(link.role(), LinkRole::Encoder);
+            assert_eq!(link.endpoint(), ENCODER_ENDPOINTS.endpoint(encoder.id()));
+            let duty = encoder
+                .resources()
+                .iter()
+                .find_map(|r| r.link_duty().ok())
+                .expect("the encoder serves its links");
+            assert_eq!(duty.endpoint(), ENCODER_ENDPOINTS.endpoint(encoder.id()));
+            assert!(
+                !encoder
+                    .resources()
+                    .iter()
+                    .any(|r| r.is_window_named(b"intr2")),
+                "the interrupt controller's registers are its own"
+            );
+            assert!(encoder
+                .resources()
+                .iter()
+                .any(|r| r.is_window_named(b"hdmi")));
+        }
+        assert!(
+            engine
+                .resources()
+                .iter()
+                .any(|r| r.dma_bus_address(0x1000, 0x1000) == Some(0xc000_1000)),
+            "its scan-out reaches memory through the bus's DMA window"
+        );
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(
+            display_engine(&fdt),
+            Some(engine.id()),
+            "the boot console moves to the engine"
+        );
+    }
+
+    #[test]
+    fn an_engine_the_tree_leaves_disabled_is_described_nowhere() {
+        let blob = display_engine_tree("disabled");
+        let nodes = discover_all(&blob);
+        assert!(!nodes.iter().any(|node| node
+            .match_keys()
+            .iter()
+            .any(|key| key.compatible_bytes() == b"brcm,bcm2711-hvs")));
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(display_engine(&fdt), None);
+        let encoder = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        assert!(!encoder
+            .resources()
+            .iter()
+            .any(|r| r.is_window_named(b"intr2")));
     }
 }

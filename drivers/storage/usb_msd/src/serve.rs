@@ -43,9 +43,82 @@ pub fn blk_block_for(urb_endpoint: u64) -> Option<u64> {
     Some(BLK_ENDPOINT_BASE | offset)
 }
 
+/// Publish one unit per number in `0..count` into `units`, slot `n` holding
+/// unit `n`, answering how many were published.
+///
+/// `publish` answers a unit, `None` for one skipped, or the failure that ends
+/// publication. On a failure every unit already published is retracted
+/// through `retract` before it is answered, so a driver that gives up leaves
+/// no node of a device it no longer serves. A number past the last slot is
+/// never published.
+///
+/// # Errors
+///
+/// `publish`'s failure.
+pub fn publish_units<U, E>(
+    units: &mut [Option<U>],
+    count: u8,
+    mut publish: impl FnMut(u8) -> Result<Option<U>, E>,
+    mut retract: impl FnMut(&U),
+) -> Result<usize, E> {
+    let mut published = 0;
+    for number in 0..count {
+        let slot = usize::from(number);
+        if slot >= units.len() {
+            break;
+        }
+        match publish(number) {
+            Ok(Some(unit)) => {
+                units[slot] = Some(unit);
+                published += 1;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                units.iter().flatten().for_each(&mut retract);
+                return Err(err);
+            }
+        }
+    }
+    Ok(published)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_publication_retracts_every_unit_already_published() {
+        // Regression: a refused endpoint, window or node partway through the
+        // units returned at once, leaving the earlier units' nodes in the tree
+        // for a driver that had exited.
+        let mut units = [None; MAX_LUNS];
+        let mut retracted = alloc::vec::Vec::new();
+        let outcome = publish_units(
+            &mut units,
+            4,
+            |number| match number {
+                1 => Ok(None),
+                3 => Err("no window"),
+                _ => Ok(Some(number)),
+            },
+            |unit| retracted.push(*unit),
+        );
+        assert_eq!(outcome, Err("no window"));
+        assert_eq!(retracted, [0, 2]);
+    }
+
+    #[test]
+    fn every_unit_publishes_into_its_own_slot_and_none_past_the_last() {
+        let mut units = [None; 2];
+        let outcome = publish_units(
+            &mut units,
+            3,
+            |number| Ok::<_, ()>(Some(number)),
+            |_| panic!("nothing to retract"),
+        );
+        assert_eq!(outcome, Ok(2));
+        assert_eq!(units, [Some(0), Some(1)]);
+    }
 
     #[test]
     fn blk_blocks_derived_from_distinct_grants_never_overlap() {

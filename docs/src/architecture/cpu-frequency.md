@@ -188,7 +188,7 @@ driver that exits, faults, or is killed frees the role for a replacement.
 
 | Target | Mechanism |
 |---|---|
-| `aarch64` (Raspberry Pi) | `drivers/cpufreq/rpi` — the `VideoCore` firmware ARM clock, plus a boot-time floor before the driver loads |
+| `aarch64` (Raspberry Pi) | `drivers/clock/rpi_firmware` — the `VideoCore` firmware ARM clock, plus a boot-time floor before the driver loads |
 | `aarch64` (QEMU `virt`) | none; the board exposes no frequency control |
 | `x86_64`, `riscv64`, `wasm32` | none |
 

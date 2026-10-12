@@ -19,11 +19,11 @@ use tairix_abi::driver::audio::{
 };
 use tairix_abi::driver::audio_channel::{ConfigureGrant, ConfigureParams};
 use tairix_abi::driver::audio_ring::PcmRing;
+use tairix_abi::driver::clock;
 use tairix_abi::driver::codec::SampleWidths;
-use tairix_abi::{DriverError, Errno, RegisterBlock};
+use tairix_abi::{DriverError, RegisterBlock};
 use tairix_audiochan::cyclic::{
-    sole_endpoint, CyclicPlayback, DmaPort, FrameCodec, CHANNELS, MAX_PERIOD_FRAMES,
-    MAX_RING_FRAMES,
+    sole_endpoint, CyclicPlayback, DmaPort, FrameCodec, MAX_PERIOD_FRAMES, MAX_RING_FRAMES,
 };
 use tairix_linkclient::{ClockClient, CodecClient, LinkCall};
 
@@ -50,6 +50,10 @@ pub struct Slots {
 impl FrameCodec for Slots {
     fn format(&self) -> SampleFormat {
         self.format
+    }
+
+    fn channels(&self) -> u8 {
+        ChannelMap::STEREO.channels()
     }
 
     fn encode(&mut self, _frame: &mut [u8]) {}
@@ -115,15 +119,6 @@ struct Up {
     transmit: bool,
     codec: bool,
     clock: bool,
-}
-
-/// The refusal a clock controller's reason stands for.
-fn clock_refusal(reason: Errno) -> DriverError {
-    match reason {
-        Errno::Busy => DriverError::Busy,
-        Errno::NotSupported => DriverError::Unsupported,
-        other => DriverError::from_errno(other),
-    }
 }
 
 /// The audio class over the block.
@@ -242,7 +237,7 @@ where
     fn run_clock(&mut self, rate: Rate, framing: &Framing) -> Result<(), DriverError> {
         let clock = self.clock.as_mut().ok_or(DriverError::NotFound)?;
         let wanted = u64::from(rate.hz()) * u64::from(framing.frame_bits());
-        let made = clock.run(wanted).map_err(clock_refusal)?;
+        let made = clock.run(wanted).map_err(clock::refusal)?;
         self.up.clock = true;
         let off = u128::from(made.abs_diff(wanted)) * 1_000_000;
         if off > u128::from(wanted) * u128::from(CLOCK_TOLERANCE_PPM) {
@@ -257,7 +252,7 @@ where
         }
         self.up.clock = false;
         match self.clock.as_mut() {
-            Some(clock) => clock.release().map_err(clock_refusal),
+            Some(clock) => clock.release().map_err(clock::refusal),
             None => Ok(()),
         }
     }
@@ -300,6 +295,7 @@ where
             direction: StreamDirection::Playback,
             jack: JackState::Unknown,
             formats: SampleFormats::EMPTY.with(self.offer.format),
+            resolution: None,
             channel_map: ChannelMap::STEREO,
             rates: self.offer.rates,
             min_period_frames: MIN_PERIOD_FRAMES,
@@ -316,7 +312,7 @@ where
         params: &ConfigureParams,
     ) -> Result<ConfigureGrant, DriverError> {
         sole_endpoint(endpoint)?;
-        if params.channel_map.channels() != CHANNELS {
+        if params.channel_map != ChannelMap::STEREO {
             return Err(DriverError::Unsupported);
         }
         if self.playback.is_running() {

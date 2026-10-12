@@ -10,9 +10,8 @@ use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::seat::SEAT_PRIMARY;
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::{DriverError, Errno, HwProperty, LOG_FIELD_VALUE_MAX};
-use tairix_caps::CapabilitySet;
 use tairix_drv_input_usb_hid::bringup::{bring_up, Bound, BringupError, HidLink};
-use tairix_drv_input_usb_hid::REQUIRED_CAPS;
+use tairix_drv_input_usb_hid::REQUIRED_CAPABILITIES;
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_hid::{pump_error_limit_reached, transport_error, Decoded, SeatSink};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -98,14 +97,6 @@ impl SeatSink for Seat {
     }
 }
 
-fn driver_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    for &cap in REQUIRED_CAPS {
-        caps.insert(cap);
-    }
-    caps
-}
-
 fn log_event(id: EventId, level: Level, message: &'static str, fields: &[Field<'_>]) {
     log(
         &LogSink,
@@ -133,7 +124,8 @@ fn log_hex(id: EventId, level: Level, message: &'static str, key: &'static str, 
 
 /// The interface's transport: its URB link and interface number.
 fn map_transport() -> Result<(Link, u8), i32> {
-    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+    let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
+    let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
         return Err(EXIT_NO_HOST);
     };
     let (Some(endpoint), Some(interface), Ok(shm)) = (

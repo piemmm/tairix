@@ -17,10 +17,19 @@
 //!
 //! # The protocol
 //!
-//! One request at a time: open, decode or seek, then any number of need and
-//! supply exchanges, then that request's one answer. The owner sends nothing
-//! else until the answer arrives, so every frame either way has exactly one
-//! reading.
+//! One request at a time: open, decode, seek or move to the next link, then
+//! any number of need and supply exchanges, then that request's one answer.
+//! The owner sends nothing else until the answer arrives, so every frame
+//! either way has exactly one reading.
+//!
+//! # Links
+//!
+//! A chained file is read a link at a time, as [`PcmSource`] reads it: an open
+//! names the link it opens, its answer states where that link begins, and once
+//! a link has ended the owner asks for the next. A replacement worker is
+//! opened at the link the stream was in, so it comes back to the same link and
+//! frame; the owner believes no link the worker reports unless its place
+//! follows from what was asked.
 //!
 //! # A request makes progress or is refused
 //!
@@ -39,8 +48,8 @@ use tairix_abi::driver::audio::{
 use tairix_collections::LruMap;
 use tairix_hash::{BuildSipHash13, HashSeed};
 use tairix_sound::{
-    CoverRange, Cue, DataLength, DecodeError, DecodeLimits, Encoding, InputError, Loop, LoopKind,
-    Metadata, PcmSource, SoundFormat, SoundInfo, SoundInput, Tag, TagKey, TagKind,
+    CoverRange, Cue, DataLength, DecodeError, DecodeLimits, Encoding, InputError, Link, Loop,
+    LoopKind, Metadata, PcmSource, SoundFormat, SoundInfo, SoundInput, Tag, TagKey, TagKind,
 };
 
 use crate::host::Unbelieved;
@@ -54,8 +63,9 @@ pub const PAGE_BYTES: usize = 4096;
 /// Pages the worker holds: the most of a file one request can read.
 ///
 /// A fixed containment bound on a worker that reads hostile files, taken from
-/// what the decoders state one decode reads at the limits — a FLAC stream's
-/// largest frame, at most — with the read-ahead behind it. Pages are held
+/// what the decoders state one decode reads at the limits — an Opus seek's
+/// pre-roll in packets of the mapping's largest, at most — with the
+/// read-ahead behind it. Pages are held
 /// only as a file needs them. An open whose metadata structure alone spans
 /// more is refused rather than asked for for ever.
 #[allow(
@@ -132,14 +142,21 @@ const TO_DECODE: u8 = 2;
 const TO_SEEK: u8 = 3;
 const TO_SUPPLY: u8 = 4;
 const TO_UNREADABLE: u8 = 5;
+const TO_NEXT_LINK: u8 = 6;
 
 const FROM_NEED: u8 = 1;
 const FROM_OPENED: u8 = 2;
 const FROM_BLOCK: u8 = 3;
 const FROM_SOUGHT: u8 = 4;
 const FROM_REFUSED: u8 = 5;
+const FROM_LAST_LINK: u8 = 6;
 
-const OPEN_LEN: usize = 1 + HashSeed::LEN + 8 + 1;
+/// A link's wire form: its place in the chain, and the byte it begins at.
+const LINK_LEN: usize = 4 + 8;
+
+const OPEN_LEN: usize = 1 + HashSeed::LEN + 8 + 1 + LINK_LEN;
+const NEXT_LINK_LEN: usize = 1;
+const LAST_LINK_LEN: usize = 1;
 const DECODE_LEN: usize = 1 + 4;
 const SEEK_LEN: usize = 1 + 8;
 const SUPPLY_HEADER_LEN: usize = 1 + 8;
@@ -160,6 +177,7 @@ const LOOP_LEN: usize = 8 + 8 + 1 + 4 + 4;
 /// An open's answer at the limits: a tag's wire form is smaller than its share
 /// of the metadata budget, and every marker at most a loop.
 const MAX_OPENED_LEN: usize = 1
+    + LINK_LEN
     + INFO_LEN
     + 4
     + LIMITS.max_metadata_bytes() as usize
@@ -326,10 +344,27 @@ decode_codes! {
     92 => OggPageLost,
     93 => OggBadPacket,
     94 => OggPacketTooLarge,
-    95 => OggNoFlacStream,
+    95 => OggNoCodec,
     96 => OggBadFlacMapping,
     97 => OggNoAudio,
-    98 => OggChained,
+    98 => OggBadLink,
+    99 => MpegNoSync,
+    100 => MpegFrameCrc,
+    101 => MpegFrameInvalid,
+    102 => MpegFrameMismatch,
+    103 => MpegTruncated,
+    104 => OggTooManyStreams,
+    105 => OggGranuleMismatch,
+    106 => VorbisBadIdentification,
+    107 => VorbisBadComment,
+    108 => VorbisBadSetup,
+    109 => VorbisSetupTooLarge,
+    110 => VorbisPacketInvalid,
+    111 => VorbisBadPacket,
+    112 => OpusBadIdentification,
+    113 => OpusBadComment,
+    114 => OpusUnsupportedVersion,
+    115 => OpusPacketInvalid,
 }
 
 /// What the worker is asked to do.
@@ -338,6 +373,7 @@ enum Request {
     Open,
     Decode { frames: u32 },
     Seek { frame: u64 },
+    NextLink,
 }
 
 /// The pages a need asks for: those the read that missed wants, then the
@@ -518,6 +554,8 @@ fn span(from: u64, to: u64) -> Option<core::ops::Range<usize>> {
 struct OpenFile {
     pages: Pages,
     format: Option<SoundFormat>,
+    /// The link the open names.
+    link: Link,
     source: Option<PcmSource>,
     /// Where a block's answer is built: its header, then as many of the
     /// widest frames the stream has as one block carries.
@@ -555,7 +593,13 @@ impl AudioDecodeService {
         self.pending = None;
     }
 
-    fn open(&mut self, seed: HashSeed, len: u64, format: Option<SoundFormat>) -> Answer {
+    fn open(
+        &mut self,
+        seed: HashSeed,
+        len: u64,
+        format: Option<SoundFormat>,
+        link: Link,
+    ) -> Answer {
         self.close();
         let Some(pages) = Pages::new(len, seed) else {
             return Answer::Refused(AudioRefusal::Decode(DecodeError::OutOfMemory));
@@ -563,6 +607,7 @@ impl AudioDecodeService {
         self.file = Some(OpenFile {
             pages,
             format,
+            link,
             source: None,
             block: Vec::new(),
         });
@@ -595,6 +640,7 @@ impl AudioDecodeService {
                     .map(|()| Answer::Sought(source.position())),
                 None => return Answer::Refused(AudioRefusal::NotOpen),
             },
+            Request::NextLink => Self::next_link(file),
         };
         match outcome {
             Ok(answer) => answer,
@@ -618,16 +664,37 @@ impl AudioDecodeService {
     }
 
     fn open_source(file: &mut OpenFile) -> Result<Answer, DecodeError> {
-        let source = match file.format {
-            Some(format) => PcmSource::open_as(format, &mut file.pages, &LIMITS)?,
-            None => PcmSource::open(&mut file.pages, &LIMITS)?,
+        let source = match (file.format, file.link) {
+            (Some(format), Link::FIRST) => PcmSource::open_as(format, &mut file.pages, &LIMITS)?,
+            (_, link) => PcmSource::open_link(&mut file.pages, &LIMITS, link)?,
         };
-        let block_len = BLOCK_HEADER_LEN + MAX_BLOCK_FRAMES as usize * source.info().frame_bytes();
-        if !tairix_util::fallible::grow_to(&mut file.block, block_len, 0u8) {
-            return Err(DecodeError::OutOfMemory);
-        }
+        Self::fit_block(file, &source)?;
         file.source = Some(source);
         Ok(Answer::Opened)
+    }
+
+    /// Size the block buffer for the frames `source` writes.
+    fn fit_block(file: &mut OpenFile, source: &PcmSource) -> Result<(), DecodeError> {
+        let block_len = BLOCK_HEADER_LEN + MAX_BLOCK_FRAMES as usize * source.info().frame_bytes();
+        if tairix_util::fallible::grow_to(&mut file.block, block_len, 0u8) {
+            Ok(())
+        } else {
+            Err(DecodeError::OutOfMemory)
+        }
+    }
+
+    fn next_link(file: &mut OpenFile) -> Result<Answer, DecodeError> {
+        let Some(mut source) = file.source.take() else {
+            return Ok(Answer::Refused(AudioRefusal::NotOpen));
+        };
+        let moved = source.next_link(&mut file.pages);
+        let answer = match moved {
+            Ok(true) => Self::fit_block(file, &source).map(|()| Answer::Opened),
+            Ok(false) => Ok(Answer::LastLink),
+            Err(err) => Err(err),
+        };
+        file.source = Some(source);
+        answer
     }
 
     fn decode(file: &mut OpenFile, frames: u32) -> Result<Answer, DecodeError> {
@@ -689,11 +756,12 @@ impl AudioDecodeService {
 
     fn serve(&mut self, frame: &[u8]) -> Answer {
         match Inbound::read(frame) {
-            Ok(Inbound::Open(seed, len, format)) => self.open(seed, len, format),
+            Ok(Inbound::Open(seed, len, format, link)) => self.open(seed, len, format, link),
             Ok(Inbound::Decode(frames)) if (1..=MAX_BLOCK_FRAMES).contains(&frames) => {
                 self.begin(Request::Decode { frames })
             }
             Ok(Inbound::Seek(frame)) => self.begin(Request::Seek { frame }),
+            Ok(Inbound::NextLink) => self.begin(Request::NextLink),
             Ok(Inbound::Supply(offset, bytes)) => self.supply(offset, bytes),
             Ok(Inbound::Unreadable(offset)) => self.unreadable(offset),
             Ok(Inbound::Decode(_)) | Err(_) => {
@@ -719,9 +787,11 @@ impl AudioDecodeService {
             Answer::Opened => {
                 let source = self.file.as_ref()?.source.as_ref()?;
                 out.u8(FROM_OPENED);
+                encode_link(&mut out, source.link());
                 encode_info(&mut out, source.info());
                 encode_metadata(&mut out, source.metadata());
             }
+            Answer::LastLink => out.u8(FROM_LAST_LINK),
             Answer::Sought(position) => {
                 out.u8(FROM_SOUGHT);
                 out.u64(position);
@@ -761,9 +831,10 @@ impl SessionService for AudioDecodeService {
 
 /// A frame from the owner, read.
 enum Inbound<'a> {
-    Open(HashSeed, u64, Option<SoundFormat>),
+    Open(HashSeed, u64, Option<SoundFormat>, Link),
     Decode(u32),
     Seek(u64),
+    NextLink,
     Supply(u64, &'a [u8]),
     Unreadable(u64),
 }
@@ -779,10 +850,16 @@ impl<'a> Inbound<'a> {
                     0 => None,
                     raw => Some(format_from_wire(raw).ok_or(WireError::Malformed)?),
                 };
-                Ok(Self::Open(seed, len, format))
+                let link = decode_link(&mut reader)?;
+                // A later link is a chain's, and only Ogg chains.
+                if link != Link::FIRST && format.is_some_and(|format| format != SoundFormat::Ogg) {
+                    return Err(WireError::Malformed);
+                }
+                Ok(Self::Open(seed, len, format, link))
             }
             (TO_DECODE, DECODE_LEN) => reader.u32().map(Self::Decode),
             (TO_SEEK, SEEK_LEN) => reader.u64().map(Self::Seek),
+            (TO_NEXT_LINK, NEXT_LINK_LEN) => Ok(Self::NextLink),
             (TO_SUPPLY, len) if len >= SUPPLY_HEADER_LEN => {
                 let offset = reader.u64()?;
                 Ok(Self::Supply(offset, reader.take(reader.remaining())?))
@@ -801,6 +878,7 @@ enum Answer {
     /// A block of this many bytes, built in the open file's block buffer.
     Block(usize),
     Sought(u64),
+    LastLink,
     Refused(AudioRefusal),
 }
 
@@ -810,6 +888,7 @@ const fn format_to_wire(format: SoundFormat) -> u8 {
         SoundFormat::Wav => 2,
         SoundFormat::Flac => 3,
         SoundFormat::Ogg => 4,
+        SoundFormat::Mpeg => 5,
     }
 }
 
@@ -819,6 +898,7 @@ const fn format_from_wire(raw: u8) -> Option<SoundFormat> {
         2 => Some(SoundFormat::Wav),
         3 => Some(SoundFormat::Flac),
         4 => Some(SoundFormat::Ogg),
+        5 => Some(SoundFormat::Mpeg),
         _ => None,
     }
 }
@@ -837,6 +917,11 @@ const fn encoding_to_wire(encoding: Encoding) -> (u8, u8) {
         Encoding::MsAdpcm => (10, 0),
         Encoding::ImaAdpcm => (11, 0),
         Encoding::Flac => (12, 0),
+        Encoding::MpegLayer1 => (13, 0),
+        Encoding::MpegLayer2 => (14, 0),
+        Encoding::MpegLayer3 => (15, 0),
+        Encoding::Vorbis => (16, 0),
+        Encoding::Opus => (17, 0),
     }
 }
 
@@ -846,7 +931,7 @@ fn encoding_from_wire(code: u8, bits: u8) -> Option<Encoding> {
         1 if sized(32) => Some(Encoding::Linear { bits }),
         2 if sized(32) => Some(Encoding::Fixed { bits }),
         3 if sized(64) => Some(Encoding::Float { bits }),
-        4..=12 if bits == 0 => Some(match code {
+        4..=17 if bits == 0 => Some(match code {
             4 => Encoding::MuLaw,
             5 => Encoding::ALaw,
             6 => Encoding::G721,
@@ -855,9 +940,33 @@ fn encoding_from_wire(code: u8, bits: u8) -> Option<Encoding> {
             9 => Encoding::G723Kbit40,
             10 => Encoding::MsAdpcm,
             11 => Encoding::ImaAdpcm,
-            _ => Encoding::Flac,
+            12 => Encoding::Flac,
+            13 => Encoding::MpegLayer1,
+            14 => Encoding::MpegLayer2,
+            15 => Encoding::MpegLayer3,
+            16 => Encoding::Vorbis,
+            _ => Encoding::Opus,
         }),
         _ => None,
+    }
+}
+
+fn encode_link(out: &mut Writer, link: Link) {
+    out.u32(link.index);
+    out.u64(link.offset);
+}
+
+/// A link as the wire states it: the first link begins at the file's start,
+/// and no later one does.
+fn decode_link(reader: &mut Reader<'_>) -> Result<Link, WireError> {
+    let link = Link {
+        index: reader.u32()?,
+        offset: reader.u64()?,
+    };
+    if (link.index == 0) == (link.offset == 0) {
+        Ok(link)
+    } else {
+        Err(WireError::Malformed)
     }
 }
 
@@ -1100,9 +1209,12 @@ pub enum DecodeEvent<'a> {
         /// How many there are.
         len: usize,
     },
-    /// The file is open: [`AudioDecodeClient::info`] and
-    /// [`AudioDecodeClient::metadata`] describe it.
+    /// The file is open, or a chain's next link is:
+    /// [`AudioDecodeClient::info`], [`AudioDecodeClient::metadata`] and
+    /// [`AudioDecodeClient::link`] describe it.
     Opened,
+    /// The file holds no link after the one ended.
+    LastLink,
     /// Interleaved frames from `position`, in the stream's sample format.
     Block {
         /// The first frame's place in the stream.
@@ -1178,6 +1290,7 @@ struct Stream {
     info: SoundInfo,
     metadata: Metadata,
     position: u64,
+    link: Link,
 }
 
 /// What the client is waiting for.
@@ -1194,7 +1307,9 @@ enum Awaiting {
     Seek {
         frame: u64,
     },
-    /// A replacement's open of the same file.
+    /// The next link of a chain.
+    NextLink,
+    /// A replacement's open of the same file, at the stream's link.
     Reopen,
     /// A replacement's seek back to the stream's position.
     Reposition,
@@ -1214,6 +1329,8 @@ enum Awaiting {
 pub struct AudioDecodeClient {
     len: u64,
     format: Option<SoundFormat>,
+    /// The link the outstanding open names.
+    asked: Link,
     stream: Option<Stream>,
     awaiting: Awaiting,
     need: Option<(u64, usize)>,
@@ -1242,6 +1359,7 @@ impl AudioDecodeClient {
         Self {
             len: 0,
             format: None,
+            asked: Link::FIRST,
             stream: None,
             awaiting: Awaiting::Closed,
             need: None,
@@ -1268,6 +1386,12 @@ impl AudioDecodeClient {
     #[must_use]
     pub fn position(&self) -> u64 {
         self.stream.as_ref().map_or(0, |stream| stream.position)
+    }
+
+    /// The link of a chained file being read, once open.
+    #[must_use]
+    pub fn link(&self) -> Option<Link> {
+        self.stream.as_ref().map(|stream| stream.link)
     }
 
     /// Whether a file is open and no request is outstanding.
@@ -1303,15 +1427,51 @@ impl AudioDecodeClient {
         format: Option<SoundFormat>,
         seed: HashSeed,
     ) -> Result<(), AudioDecodeError> {
+        self.open_link(len, format, seed, Link::FIRST)
+    }
+
+    /// Open a file of `len` bytes at the link `link` names, as
+    /// [`Self::open`] opens its first: where a listener goes back into a link
+    /// of a chain the decoder had already left.
+    ///
+    /// # Errors
+    ///
+    /// [`AudioDecodeError::OutOfTurn`] while a request is outstanding.
+    pub fn open_link(
+        &mut self,
+        len: u64,
+        format: Option<SoundFormat>,
+        seed: HashSeed,
+        link: Link,
+    ) -> Result<(), AudioDecodeError> {
         if !matches!(self.awaiting, Awaiting::Closed | Awaiting::Idle) || self.outgoing.is_some() {
             return Err(AudioDecodeError::OutOfTurn);
         }
         self.len = len;
         self.format = format;
+        self.asked = link;
         self.stream = None;
         self.failed_at = None;
-        self.send_open(seed)?;
+        self.send_open(seed, link)?;
         self.awaiting = Awaiting::Open;
+        Ok(())
+    }
+
+    /// Move to the next link of a chained file, once the one being read has
+    /// ended: [`DecodeEvent::Opened`] when there is one, its frames counted
+    /// from zero, and [`DecodeEvent::LastLink`] when there is not.
+    ///
+    /// # Errors
+    ///
+    /// [`AudioDecodeError::OutOfTurn`] unless open and idle.
+    pub fn next_link(&mut self) -> Result<(), AudioDecodeError> {
+        if !self.is_idle() {
+            return Err(AudioDecodeError::OutOfTurn);
+        }
+        let mut out = self.writer(NEXT_LINK_LEN)?;
+        out.u8(TO_NEXT_LINK);
+        self.request(out);
+        self.awaiting = Awaiting::NextLink;
         Ok(())
     }
 
@@ -1407,7 +1567,7 @@ impl AudioDecodeClient {
             return Err(AudioDecodeError::CannotResume);
         }
         self.failed_at = Some(at);
-        self.send_open(seed)?;
+        self.send_open(seed, self.link().unwrap_or(self.asked))?;
         self.awaiting = if self.stream.is_some() {
             Awaiting::Reopen
         } else {
@@ -1439,6 +1599,12 @@ impl AudioDecodeClient {
             }
             FROM_SOUGHT if frame.len() == SOUGHT_LEN => self.on_sought(&mut reader),
             FROM_REFUSED if frame.len() == REFUSED_LEN => self.on_refused(&mut reader),
+            FROM_LAST_LINK
+                if frame.len() == LAST_LINK_LEN && self.awaiting == Awaiting::NextLink =>
+            {
+                self.awaiting = Awaiting::Idle;
+                Ok(DecodeEvent::LastLink)
+            }
             _ => Err(AudioDecodeError::Unbelievable),
         }
     }
@@ -1468,10 +1634,26 @@ impl AudioDecodeClient {
         &mut self,
         reader: &mut Reader<'_>,
     ) -> Result<DecodeEvent<'a>, AudioDecodeError> {
-        let (info, metadata) = whole(reader, |reader| {
-            Ok((decode_info(reader)?, decode_metadata(reader)?))
+        let (link, info, metadata) = whole(reader, |reader| {
+            Ok((
+                decode_link(reader)?,
+                decode_info(reader)?,
+                decode_metadata(reader)?,
+            ))
         })?;
-        let honest = self.format.is_none_or(|format| format == info.format)
+        let follows = match (self.awaiting, self.stream.as_ref()) {
+            (Awaiting::Open, _) => link == self.asked,
+            (Awaiting::NextLink, Some(stream)) => {
+                stream.link.index.checked_add(1) == Some(link.index)
+                    && link.offset > stream.link.offset
+            }
+            (Awaiting::Reopen, Some(stream)) => link == stream.link,
+            _ => false,
+        };
+        let honest = follows
+            && link.offset < self.len
+            && (link == Link::FIRST || info.format == SoundFormat::Ogg)
+            && self.format.is_none_or(|format| format == info.format)
             && info.channels.channels() <= LIMITS.max_channels()
             && info
                 .data_length
@@ -1486,11 +1668,12 @@ impl AudioDecodeClient {
             return Err(AudioDecodeError::Unbelievable);
         }
         match self.awaiting {
-            Awaiting::Open => {
+            Awaiting::Open | Awaiting::NextLink => {
                 self.stream = Some(Stream {
                     info,
                     metadata,
                     position: 0,
+                    link,
                 });
                 self.awaiting = Awaiting::Idle;
                 Ok(DecodeEvent::Opened)
@@ -1611,7 +1794,7 @@ impl AudioDecodeClient {
                 self.close();
                 Ok(DecodeEvent::Refused(refusal))
             }
-            Awaiting::Decode { .. } | Awaiting::Seek { .. } => {
+            Awaiting::Decode { .. } | Awaiting::Seek { .. } | Awaiting::NextLink => {
                 self.awaiting = Awaiting::Idle;
                 Ok(DecodeEvent::Refused(refusal))
             }
@@ -1661,7 +1844,7 @@ impl AudioDecodeClient {
         Ok(Writer::reusing(buffer))
     }
 
-    fn send_open(&mut self, seed: HashSeed) -> Result<(), AudioDecodeError> {
+    fn send_open(&mut self, seed: HashSeed, link: Link) -> Result<(), AudioDecodeError> {
         let mut out = self.writer(OPEN_LEN)?;
         out.u8(TO_OPEN);
         let (k0, k1) = seed.words();
@@ -1669,6 +1852,7 @@ impl AudioDecodeClient {
         out.u64(k1);
         out.u64(self.len);
         out.u8(self.format.map_or(0, format_to_wire));
+        encode_link(&mut out, link);
         self.request(out);
         Ok(())
     }

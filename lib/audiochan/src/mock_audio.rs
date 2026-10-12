@@ -135,6 +135,7 @@ impl Audio for MockAudio {
             },
             jack: JackState::Present,
             formats: SampleFormats::EMPTY.with(SampleFormat::S16),
+            resolution: None,
             channel_map: ChannelMap::STEREO,
             rates: RateSupport::Discrete(
                 RateSet::new(&[Rate::new(MOCK_RATE_HZ).expect("in range")]).expect("ascending"),

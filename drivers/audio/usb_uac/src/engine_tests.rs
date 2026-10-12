@@ -877,6 +877,25 @@ fn a_version_two_headset_reads_its_rates_from_its_clock() {
     assert_eq!(capture.gain, None, "its feature unit offers mute alone");
 }
 
+/// A 24-bit sample in a four-byte subslot is a 32-bit sample whose low byte
+/// the device ignores, and its facts say so; a packed one is its own.
+#[test]
+fn a_resolution_narrower_than_its_subslot_is_stated() {
+    let mut descriptors = headset_v2();
+    let at = descriptors
+        .windows(6)
+        .position(|format| format == [6, 0x24, 0x02, 0x01, 0x03, 0x18])
+        .expect("the playback format");
+    descriptors[at + 4] = 4;
+    let audio = UsbAudio::open(&descriptors, 0, UsbSpeed::High, Mock::new(UsbSpeed::High))
+        .expect("the headset opens");
+    let playback = audio.endpoint_facts(0).expect("facts");
+    assert!(playback.formats.contains(SampleFormat::S32));
+    assert_eq!(playback.resolution, Some(24));
+    let packed = headset().endpoint_facts(0).expect("facts");
+    assert_eq!(packed.resolution, None);
+}
+
 #[test]
 fn configuring_a_version_two_rate_steers_the_selector_and_sets_the_clock() {
     let mut audio = headset();

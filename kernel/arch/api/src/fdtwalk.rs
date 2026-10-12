@@ -42,9 +42,10 @@
 use tairix_abi::driver::clock::CLOCK_CONTROLLER_ENDPOINTS;
 use tairix_abi::driver::codec::{ClockInversion, DaiFormat, DaiLink, CODEC_ENDPOINTS};
 use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
+use tairix_abi::driver::i2c::{I2cAddress, I2C_CONTROLLER_ENDPOINTS};
+use tairix_abi::driver::irqline::INTERRUPT_LINE_ENDPOINTS;
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole, LINK_NAME_MAX, LINK_SELECTOR_MAX_CELLS};
-use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
 use tairix_abi::{
     DmaCoherence, HwDeviceClass, HwMatchKey, HwNode, HwProperty, HwResource, IommuStreams,
     HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, HW_NODE_ROOT_ID,
@@ -109,6 +110,16 @@ pub trait FdtPlatform {
         _levels: &[BusLevel<'_>],
     ) -> Option<u64> {
         dma_channel_mask(node)
+    }
+
+    /// Whether `node` is granted its register window named `name`, the
+    /// window's `reg-names` entry where it has one.
+    ///
+    /// A binding may list another device's registers among a node's own; a
+    /// port refuses those, which are that device's grant. The default grants
+    /// every window.
+    fn grants_window(&self, _node: &Node<'_>, _name: Option<&[u8]>) -> bool {
+        true
     }
 
     /// Push any resource only this platform's tree can describe onto a node
@@ -181,25 +192,18 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
         let mut next_id = FIRST_EMITTED_ID;
         // The shared per-depth bus state plus this walk's own per-depth
         // facts: the hardware-tree id of the nearest *emitted* ancestor,
-        // which is the parent a child at depth + 1 names, and the
-        // bus-child bookkeeping of the node at that depth — how many
-        // duties its resource list took, and how many of its addressed
-        // children have been reached. A tree nested beyond the tracked
-        // depth is refused as malformed rather than silently
-        // under-enumerated.
+        // which is the parent a child at depth + 1 names, and the id of the
+        // node at that depth when it is an I²C controller its children link
+        // to. A tree nested beyond the tracked depth is refused as malformed
+        // rather than silently under-enumerated.
         let mut levels = [BusLevel::DEFAULT; MAX_WALK_DEPTH];
         let mut ancestors = [0u32; MAX_WALK_DEPTH];
-        let mut duties = [0usize; MAX_WALK_DEPTH];
-        let mut children_seen = [0usize; MAX_WALK_DEPTH];
+        let mut i2c_buses = [None; MAX_WALK_DEPTH];
         // The interrupt parent the children of the node at each depth inherit.
         let mut interrupt_parents = [None; MAX_WALK_DEPTH];
         let mut stated = StatedCoherence::new();
 
-        let mut nodes = self.fdt.operational_nodes();
-        while let Some(node) = nodes.next() {
-            // Cloned before anything else so the look-ahead below starts
-            // exactly where this node's subtree does.
-            let subtree = nodes.clone();
+        for node in self.fdt.operational_nodes() {
             let node = node.map_err(|_| DiscoveryError::MalformedSource)?;
             let depth = node.depth() as usize;
             if depth >= MAX_WALK_DEPTH {
@@ -213,8 +217,7 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
                 level.ranges = None;
                 levels[0] = level;
                 ancestors[0] = HW_NODE_ROOT_ID;
-                duties[0] = 0;
-                children_seen[0] = 0;
+                i2c_buses[0] = None;
                 interrupt_parents[0] =
                     children_interrupt_parent(&node, own_interrupt_parent(&node, None));
                 stated.reach(&node, 0);
@@ -226,7 +229,7 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
                 .reach(&node, depth)
                 .unwrap_or(P::DEFAULT_DMA_COHERENCE);
             let mut ancestor = ancestors[depth - 1];
-            let mut accepted = 0;
+            let mut i2c_bus = None;
             let placed = Placement {
                 depth,
                 parent: ancestor,
@@ -235,27 +238,23 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
                 coherence,
             };
             if let Some(mut emitted) = self.build_node(&node, &levels, placed) {
-                // A child of an addressed, non-enumerable bus carries the
-                // *authority* half of its existence: an endpoint grant
-                // naming the id its bus driver will serve it on. The index
-                // counts only *emitted* children, exactly as the duty
-                // look-ahead did, and a child past what the bus node could
-                // hold gets none — so the two halves can never disagree.
-                if is_bus_child(&node, depth, &levels) {
-                    let index = children_seen[depth - 1];
-                    children_seen[depth - 1] = index + 1;
-                    if index < duties[depth - 1] {
-                        let _ = emitted.push_resource(HwResource::endpoint(
-                            BUS_CHILD_ENDPOINTS.endpoint(next_id),
-                        ));
-                    }
+                if let Some(controller) = i2c_buses[depth - 1] {
+                    push_i2c_target_link(&node, controller, &mut emitted);
                 }
-                // The *duty* half: this node's own children, if it is such
-                // a bus. Their ids are the ones this walk is about to
-                // assign, so they are read ahead here — the emitted parent
-                // cannot be amended once the sink has it.
-                if declares_addressed_bus(&level) {
-                    accepted = push_bus_child_duties(subtree, depth, next_id, &mut emitted);
+                if node.property("wifi-2.4ghz-coexistence").is_some() {
+                    let _ = emitted
+                        .push_resource(HwResource::property(HwProperty::RadioCoexistence, 1));
+                }
+                if is_i2c_controller(&node, &level) {
+                    if let Some(hz) = declared_bus_speed(&node) {
+                        let _ =
+                            emitted.push_resource(HwResource::property(HwProperty::BusSpeed, hz));
+                    }
+                    let duty = LinkDuty::new(I2C_CONTROLLER_ENDPOINTS.endpoint(next_id), None);
+                    if duty.is_ok_and(|duty| emitted.push_resource(HwResource::duty(&duty)).is_ok())
+                    {
+                        i2c_bus = Some(next_id);
+                    }
                 }
                 sink.emit(emitted)?;
                 ancestor = next_id;
@@ -265,8 +264,7 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
             }
             levels[depth] = level;
             ancestors[depth] = ancestor;
-            duties[depth] = accepted;
-            children_seen[depth] = 0;
+            i2c_buses[depth] = i2c_bus;
             interrupt_parents[depth] = children_interrupt_parent(&node, interrupt_parent);
         }
 
@@ -324,12 +322,24 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
             }
         }
 
-        push_mmio_resources(node, depth, levels, &mut hw);
-        if interrupt_parent.is_some()
-            && interrupt_parent == self.platform.root_interrupt_controller()
-        {
-            push_irq_resources(&self.platform, node, &mut hw);
-        }
+        push_mmio_resources(&self.platform, node, depth, levels, &mut hw);
+        // The kernel's own controllers take only the lines the root controller
+        // grants; a line through a second-level controller is a driver's.
+        let root = self.platform.root_interrupt_controller();
+        let kernel_driven = self.platform.kernel_driven(node);
+        let lines = if kernel_driven || node.phandle().is_some_and(|own| Some(own) == root) {
+            Lines::RootOnly
+        } else {
+            Lines::Linked
+        };
+        push_interrupts(
+            &self.fdt,
+            &self.platform,
+            node,
+            interrupt_parent,
+            lines,
+            &mut hw,
+        );
 
         // A NIC's own hardware address, where its node carries one: the
         // standard ethernet-controller binding, so it is read for every node
@@ -366,7 +376,13 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
                 let _ = hw.push_resource(HwResource::duty(&duty));
             }
         }
+        if lines == Lines::Linked && node.property(INTERRUPT_CONTROLLER).is_some() {
+            if let Ok(duty) = LinkDuty::new(INTERRUPT_LINE_ENDPOINTS.endpoint(id), None) {
+                let _ = hw.push_resource(HwResource::duty(&duty));
+            }
+        }
         push_link_requests(&self.fdt, node, DMA_BINDING, &mut hw);
+        push_ddc_link(&self.fdt, node, &mut hw);
         push_link_requests(&self.fdt, node, CLOCK_BINDING, &mut hw);
         if node.property("#sound-dai-cells").is_some() {
             push_codec_links(&self.fdt, node, id, &mut hw);
@@ -1124,104 +1140,130 @@ fn is_emitted(node: &Node<'_>) -> bool {
 /// non-enumerable bus**: one address cell and no size cells, so a child's
 /// single `reg` cell is its address *on this bus* rather than a window in
 /// the parent's address space (Devicetree spec v0.4 §2.3.5).
-///
-/// I²C, SPI chip-select, and 1-Wire all spell themselves this way, so the
-/// walk recognises the convention rather than any board or bus name.
 fn declares_addressed_bus(level: &BusLevel<'_>) -> bool {
     level.addr_cells == 1 && level.size_cells == 0
 }
 
-/// Whether `node` is an addressed child of such a bus.
-///
-/// The `/cpus` container uses the same cell convention for CPU numbering
-/// (Devicetree spec v0.4 §3.7), so a CPU node is excluded: its `reg` is a
-/// hart/MPIDR identifier, not a device address on a transfer bus.
-fn is_bus_child(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>]) -> bool {
-    depth
-        .checked_sub(1)
-        .and_then(|parent| levels.get(parent))
-        .is_some_and(declares_addressed_bus)
-        && classify(node) != HwDeviceClass::Cpu
-        && bus_child_address(node).is_some()
+/// Whether `node`, whose own cells are `level`, is an I²C controller: an
+/// addressed bus carrying the specification's generic name for one, which
+/// tells it from an SPI or MDIO bus of the same cells (Devicetree spec v0.4
+/// §2.2.2).
+fn is_i2c_controller(node: &Node<'_>, level: &BusLevel<'_>) -> bool {
+    declares_addressed_bus(level) && tairix_fdt::name_stem(node.name()) == b"i2c"
 }
 
-/// The address an addressed bus child answers to: the first cell of its
+/// The speed a bus node's `clock-frequency` declares it runs at, one cell.
+fn declared_bus_speed(node: &Node<'_>) -> Option<u64> {
+    let frequency = node.property("clock-frequency")?.value();
+    (frequency.len() == CELL_BYTES)
+        .then(|| read_cells(frequency, 0, 1))
+        .flatten()
+        .filter(|&hz| hz != 0)
+}
+
+/// The address a target on an I²C bus answers to: the first cell of its
 /// `reg`, which its parent's `#address-cells = <1>` declares to be exactly
 /// one cell wide.
-fn bus_child_address(node: &Node<'_>) -> Option<u64> {
-    read_cells(node.property("reg")?.value(), 0, 1)
+fn i2c_target_address(node: &Node<'_>) -> Option<u32> {
+    read_cells(node.property("reg")?.value(), 0, 1).and_then(|cell| u32::try_from(cell).ok())
 }
 
-/// Push one [`HwResource::bus_child`] duty per addressed child of the bus
-/// node being built, and report how many its resource list could hold.
-///
-/// `subtree` is the walk's own iterator cloned just after the bus node, and
-/// `bus_id` the id the walk is assigning that node — so replaying
-/// [`is_emitted`] over the subtree in document order yields exactly the ids
-/// the walk will assign, and a child's duty here names the same endpoint its
-/// own node will later claim.
-///
-/// A child past the node's resource capacity is left without a duty (and so,
-/// by the caller's matching bound, without an endpoint): a bus whose tree
-/// declares more children than one node can carry serves the ones it can and
-/// leaves the rest unbound, rather than handing a chip driver authority no
-/// bus driver was told to serve.
-fn push_bus_child_duties(
-    subtree: OperationalNodes<'_>,
-    bus_depth: usize,
-    bus_id: u32,
-    hw: &mut HwNode,
-) -> usize {
-    let mut accepted = 0;
-    let mut next_id = bus_id;
-    for child in subtree {
-        let Ok(child) = child else { return accepted };
-        let depth = child.depth() as usize;
-        if depth <= bus_depth {
-            return accepted;
-        }
-        if !is_emitted(&child) {
-            continue;
-        }
-        let Some(id) = next_id.checked_add(1) else {
-            return accepted;
-        };
-        next_id = id;
-        if depth != bus_depth + 1 || classify(&child) == HwDeviceClass::Cpu {
-            continue;
-        }
-        let Some(address) = bus_child_address(&child) else {
-            continue;
-        };
-        if hw
-            .push_resource(HwResource::bus_child(
-                BUS_CHILD_ENDPOINTS.endpoint(id),
-                address,
-            ))
-            .is_err()
-        {
-            return accepted;
-        }
-        accepted += 1;
+/// Link `node`, a target on the bus of the I²C controller `controller`, to
+/// it by the address it answers to; a node naming a reserved address gets no
+/// link, since no controller could serve it.
+fn push_i2c_target_link(node: &Node<'_>, controller: u32, hw: &mut HwNode) {
+    let Some(address) =
+        i2c_target_address(node).filter(|&cell| I2cAddress::from_cell(cell).is_ok())
+    else {
+        return;
+    };
+    let endpoint = I2C_CONTROLLER_ENDPOINTS.endpoint(controller);
+    if let Ok(link) = LinkRequest::new(endpoint, 0, &[address], b"") {
+        let _ = hw.push_resource(HwResource::request(&link));
     }
-    accepted
+}
+
+/// The `ddc` property: the I²C bus a display port reads its sink's EDID
+/// over, wired to that port alone.
+const DDC: &str = "ddc";
+
+/// Whether the I²C controller `controller` has a usable target below it. A
+/// bus that does is not wired to one consumer, so no link may reach all of
+/// it; a tree that cannot be read is taken to have one.
+fn has_i2c_target(fdt: &Fdt<'_>, controller: &Node<'_>) -> bool {
+    let mut below = false;
+    for node in fdt.nodes_in_use() {
+        let Ok((node, usable)) = node else {
+            return true;
+        };
+        if node.offset() == controller.offset() {
+            below = true;
+        } else if below {
+            if node.depth() <= controller.depth() {
+                return false;
+            }
+            if usable && node.depth() == controller.depth() + 1 && node.property("reg").is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Link `node` to the whole bus its `ddc` phandle names, when that names an
+/// emitted I²C controller with no target of its own.
+fn push_ddc_link(fdt: &Fdt<'_>, node: &Node<'_>, hw: &mut HwNode) {
+    let Some(phandle) = node
+        .property(DDC)
+        .filter(|ddc| ddc.value().len() == CELL_BYTES)
+        .and_then(|ddc| ddc.read_be_u32(0).ok())
+    else {
+        return;
+    };
+    let Some(Provider::Emitted(id, controller)) = provider(fdt, phandle) else {
+        return;
+    };
+    if !is_i2c_controller(&controller, &bus_level(&controller)) || has_i2c_target(fdt, &controller)
+    {
+        return;
+    }
+    let endpoint = I2C_CONTROLLER_ENDPOINTS.endpoint(id);
+    if let Ok(link) = LinkRequest::new(endpoint, 0, &[], DDC.as_bytes()) {
+        let _ = hw.push_resource(HwResource::request(&link));
+    }
 }
 
 /// Decode each `reg` entry with the parent's cell counts, translate it
-/// through the ancestor buses' `ranges`, and push it as an MMIO resource.
+/// through the ancestor buses' `ranges`, and push it as an MMIO resource
+/// carrying its `reg-names` entry.
 ///
 /// Entries that cannot be decoded (out-of-range cell counts, a length that
 /// is not a whole number of entries) or translated (an ancestor bus without
 /// usable `ranges`) are dropped — the tree never carries an invented or
 /// untranslated window. Entries past the node's resource capacity are
-/// dropped likewise (an ABI bound).
-fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
+/// dropped likewise (an ABI bound), as is a window the port does not grant
+/// the node. A name a window cannot carry leaves it unnamed.
+fn push_mmio_resources(
+    platform: &impl FdtPlatform,
+    node: &Node<'_>,
+    depth: usize,
+    levels: &[BusLevel<'_>],
+    hw: &mut HwNode,
+) {
     let Some(entries) = reg_entry_count(node, depth, levels) else {
         return;
     };
+    let mut names = node.property("reg-names").map(|p| p.iter_strings());
     for index in 0..entries {
+        let name = names.as_mut().and_then(Iterator::next);
+        if !platform.grants_window(node, name) {
+            continue;
+        }
         if let Some((base, len)) = translated_reg(node, depth, levels, index) {
-            if hw.push_resource(HwResource::mmio(base, len)).is_err() {
+            let window = name
+                .and_then(|name| HwResource::mmio_named(base, len, name))
+                .unwrap_or_else(|| HwResource::mmio(base, len));
+            if hw.push_resource(window).is_err() {
                 return;
             }
         }
@@ -1257,6 +1299,210 @@ fn push_irq_resources<P: FdtPlatform>(platform: &P, node: &Node<'_>, hw: &mut Hw
                 return;
             }
         }
+    }
+}
+
+/// The property marking a node as an interrupt controller.
+const INTERRUPT_CONTROLLER: &str = "interrupt-controller";
+
+/// Which of a node's interrupts the walk describes.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Lines {
+    /// Only the lines the root controller grants: the kernel's own
+    /// controllers, whose further interrupts it handles itself.
+    RootOnly,
+    /// Those, and a link for each line through a second-level controller.
+    Linked,
+}
+
+/// What an interrupt specifier's parent is.
+#[derive(Copy, Clone)]
+enum InterruptParent {
+    /// The platform's root controller: the line is a grant.
+    Root,
+    /// A second-level controller the walk emits, by the id it gives it.
+    Controller(u32),
+    /// A parent no consumer may use, or one that is no controller.
+    Absent,
+}
+
+/// What `phandle` names as an interrupt parent, and the cells its specifiers
+/// take: [`None`] where no node carries it or it states no single cell count.
+fn interrupt_parent<P: FdtPlatform>(
+    fdt: &Fdt<'_>,
+    platform: &P,
+    phandle: u32,
+) -> Option<(InterruptParent, u32)> {
+    if Some(phandle) == platform.root_interrupt_controller() {
+        let cells = u32::try_from(platform.interrupt_cells()).ok()?;
+        return Some((InterruptParent::Root, cells));
+    }
+    let (id, node) = match provider(fdt, phandle)? {
+        Provider::Emitted(id, node) => (Some(id), node),
+        Provider::Unusable(node) | Provider::Undescribed(node) => (None, node),
+    };
+    let cells = node.property("#interrupt-cells")?;
+    if cells.value().len() != CELL_BYTES {
+        return None;
+    }
+    let count = cells.read_be_u32(0).ok()?;
+    let parent = match id {
+        Some(id) if node.property(INTERRUPT_CONTROLLER).is_some() => {
+            InterruptParent::Controller(id)
+        }
+        _ => InterruptParent::Absent,
+    };
+    Some((parent, count))
+}
+
+/// Push a node's interrupts: a line the root controller raises as a grant at
+/// its position, and, where `lines` allows, a line a second-level controller
+/// raises as an [`LinkRole::InterruptLine`] link to that controller, the
+/// specifier its selector and the `interrupt-names` entry its name.
+///
+/// `interrupts-extended` names each specifier's parent and wins over
+/// `interrupts`, whose specifiers all go to the node's effective `parent`. A
+/// specifier wider than a link carries, or whose parent cannot be framed, is
+/// dropped as [`push_irq_resources`] drops one; a parent no consumer may use
+/// links nothing.
+fn push_interrupts<P: FdtPlatform>(
+    fdt: &Fdt<'_>,
+    platform: &P,
+    node: &Node<'_>,
+    parent: Option<u32>,
+    lines: Lines,
+    hw: &mut HwNode,
+) {
+    let mut names = node.property("interrupt-names").map(|p| p.iter_strings());
+    let mut next_name = || {
+        names
+            .as_mut()
+            .and_then(Iterator::next)
+            .filter(|name| name.len() <= LINK_NAME_MAX)
+            .unwrap_or_default()
+    };
+    if let Some(extended) = node.property("interrupts-extended") {
+        let mut last: Option<(u32, (InterruptParent, u32))> = None;
+        let resolve = |phandle: u32| {
+            if let Some((_, known)) = last.filter(|&(seen, _)| seen == phandle) {
+                return Some(known);
+            }
+            let resolved = interrupt_parent(fdt, platform, phandle)?;
+            last = Some((phandle, resolved));
+            Some(resolved)
+        };
+        for (position, entry) in (0..=u8::MAX).zip(phandle_args(extended.value(), resolve)) {
+            let Ok((parent, specifier)) = entry else {
+                return;
+            };
+            let name = next_name();
+            let pushed = match parent {
+                InterruptParent::Root => push_root_line(platform, specifier.cells(), position, hw),
+                InterruptParent::Controller(id) if lines == Lines::Linked => {
+                    push_line_link(id, position, specifier.cells(), name, hw)
+                }
+                InterruptParent::Controller(_) | InterruptParent::Absent => true,
+            };
+            if !pushed {
+                return;
+            }
+        }
+        return;
+    }
+    let Some(parent) = parent else {
+        return;
+    };
+    if Some(parent) == platform.root_interrupt_controller() {
+        push_irq_resources(platform, node, hw);
+        return;
+    }
+    if lines == Lines::RootOnly {
+        return;
+    }
+    let (Some((InterruptParent::Controller(id), cells)), Some(interrupts)) = (
+        interrupt_parent(fdt, platform, parent),
+        node.property("interrupts"),
+    ) else {
+        return;
+    };
+    let Some(specifier_len) = usize::try_from(cells)
+        .ok()
+        .and_then(|cells| cells.checked_mul(CELL_BYTES))
+        .filter(|&len| len != 0)
+    else {
+        return;
+    };
+    let value = interrupts.value();
+    if value.is_empty() || value.len() % specifier_len != 0 {
+        return;
+    }
+    for (position, specifier) in (0..=u8::MAX).zip(value.chunks_exact(specifier_len)) {
+        let cells = specifier
+            .as_chunks::<CELL_BYTES>()
+            .0
+            .iter()
+            .map(|&cell| u32::from_be_bytes(cell));
+        let name = next_name();
+        if !push_line_link(id, position, cells, name, hw) {
+            return;
+        }
+    }
+}
+
+/// Push the grant for a root-controller specifier of `cells` at `position`,
+/// answering whether the node had room; a specifier the port cannot represent
+/// is skipped.
+fn push_root_line<P: FdtPlatform>(
+    platform: &P,
+    cells: impl ExactSizeIterator<Item = u32>,
+    position: u8,
+    hw: &mut HwNode,
+) -> bool {
+    const MOST_CELLS: usize = 4;
+    let count = cells.len();
+    if count > MOST_CELLS {
+        return true;
+    }
+    let mut bytes = [0u8; MOST_CELLS * CELL_BYTES];
+    for (slot, cell) in bytes.as_chunks_mut::<CELL_BYTES>().0.iter_mut().zip(cells) {
+        *slot = cell.to_be_bytes();
+    }
+    let specifier = &bytes[..count * CELL_BYTES];
+    let Some(line) = platform.interrupt_line(specifier) else {
+        return true;
+    };
+    let (line, position) = (u64::from(line), u32::from(position));
+    let irq = if platform.edge_triggered(specifier) {
+        HwResource::edge_irq_at(line, position)
+    } else {
+        HwResource::irq_at(line, position)
+    };
+    hw.push_resource(irq).is_ok()
+}
+
+/// Push a link to the line of second-level controller `id` the specifier
+/// `cells` names, at `position` in the node's list and called `name`,
+/// answering whether the node had room; a specifier wider than a link carries
+/// is skipped.
+fn push_line_link(
+    id: u32,
+    position: u8,
+    cells: impl ExactSizeIterator<Item = u32>,
+    name: &[u8],
+    hw: &mut HwNode,
+) -> bool {
+    let count = cells.len();
+    if count > LINK_SELECTOR_MAX_CELLS {
+        return true;
+    }
+    let mut selector = [0u32; LINK_SELECTOR_MAX_CELLS];
+    for (slot, cell) in selector.iter_mut().zip(cells) {
+        *slot = cell;
+    }
+    let endpoint = INTERRUPT_LINE_ENDPOINTS.endpoint(id);
+    match LinkRequest::new(endpoint, position, &selector[..count], name) {
+        Ok(request) => hw.push_resource(HwResource::request(&request)).is_ok(),
+        Err(_) => true,
     }
 }
 
@@ -1343,10 +1589,11 @@ mod tests {
     use tairix_abi::driver::clock::CLOCK_CONTROLLER_ENDPOINTS;
     use tairix_abi::driver::codec::{ClockInversion, DaiFormat, DaiLink, CODEC_ENDPOINTS};
     use tairix_abi::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS;
-    use tairix_abi::hwlink::{LinkDuty, LinkRequest};
-    use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
+    use tairix_abi::driver::i2c::I2C_CONTROLLER_ENDPOINTS;
+    use tairix_abi::driver::irqline::INTERRUPT_LINE_ENDPOINTS;
+    use tairix_abi::hwlink::{LinkDuty, LinkRequest, LinkRole};
     use tairix_abi::{
-        DmaCoherence, HwDeviceClass, HwNode, HwResource, HwResourceKind, IommuStreams,
+        DmaCoherence, HwDeviceClass, HwMatchKey, HwNode, HwResource, HwResourceKind, IommuStreams,
         HW_NODE_MAX_RESOURCES,
     };
     use tairix_fdt::write::FdtWriter;
@@ -1478,19 +1725,32 @@ mod tests {
             .unwrap_or_else(|| panic!("a node matching {compatible:?}"))
     }
 
-    fn duties(node: &HwNode) -> Vec<(u64, u64)> {
+    /// The `I2c` duty `node` carries, by the endpoint it names.
+    fn i2c_duty(node: &HwNode) -> Option<u64> {
         node.resources()
             .iter()
-            .filter_map(HwResource::bus_child_pair)
+            .filter_map(|r| r.link_duty().ok())
+            .find(|duty| duty.role() == LinkRole::I2c)
+            .map(|duty| duty.endpoint())
+    }
+
+    /// The `I2c` links `node` carries.
+    fn i2c_links(node: &HwNode) -> Vec<LinkRequest> {
+        node.resources()
+            .iter()
+            .filter_map(|r| r.link_request().ok())
+            .filter(|link| link.role() == LinkRole::I2c)
             .collect()
     }
 
-    fn endpoints(node: &HwNode) -> Vec<u64> {
-        node.resources()
-            .iter()
-            .filter(|r| r.kind() == Some(HwResourceKind::Endpoint))
-            .map(HwResource::base)
-            .collect()
+    fn target_link(bus: &HwNode, address: u32) -> LinkRequest {
+        LinkRequest::new(
+            I2C_CONTROLLER_ENDPOINTS.endpoint(bus.id()),
+            0,
+            &[address],
+            b"",
+        )
+        .expect("valid")
     }
 
     /// A tree with one memory-mapped I²C controller carrying two addressed
@@ -1524,6 +1784,7 @@ mod tests {
             .concat(),
         );
         b.prop("interrupts", &53u32.to_be_bytes());
+        b.prop_u32("clock-frequency", 400_000);
         b.prop_u32("#address-cells", 1);
         b.prop_u32("#size-cells", 0);
         b.begin_node("rtc@68");
@@ -1596,47 +1857,66 @@ mod tests {
     }
 
     #[test]
-    fn a_bus_child_gets_the_endpoint_its_parent_was_given_the_duty_for() {
+    fn an_i2c_controller_serves_its_bus_and_each_target_links_to_it_by_its_address() {
         let nodes = discover(&i2c_tree(0));
         let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
         let ds3231 = by_key(&nodes, b"maxim,ds3231");
         let pcf = by_key(&nodes, b"nxp,pcf85063a");
-
-        // The duty half names each child's endpoint *and* its bus address.
         assert_eq!(
-            duties(bus),
-            std::vec![
-                (BUS_CHILD_ENDPOINTS.endpoint(ds3231.id()), 0x68),
-                (BUS_CHILD_ENDPOINTS.endpoint(pcf.id()), 0x51),
-            ]
+            i2c_duty(bus),
+            Some(I2C_CONTROLLER_ENDPOINTS.endpoint(bus.id()))
         );
-        // The authority half names only the endpoint: a chip driver never
-        // learns a bus address, so it cannot address a neighbour.
-        assert_eq!(
-            endpoints(ds3231),
-            std::vec![BUS_CHILD_ENDPOINTS.endpoint(ds3231.id())]
-        );
-        assert_eq!(
-            endpoints(pcf),
-            std::vec![BUS_CHILD_ENDPOINTS.endpoint(pcf.id())]
-        );
-        assert!(duties(ds3231).is_empty());
-        // The two halves agree, and the two children never share an id.
-        assert_ne!(ds3231.id(), pcf.id());
+        assert_eq!(i2c_links(ds3231), std::vec![target_link(bus, 0x68)]);
+        assert_eq!(i2c_links(pcf), std::vec![target_link(bus, 0x51)]);
+        assert_eq!(i2c_duty(ds3231), None);
+        assert!(i2c_links(bus).is_empty());
     }
 
     #[test]
-    fn a_bus_child_gets_no_memory_window_from_its_bus_address() {
+    fn an_i2c_controller_states_the_speed_its_node_declares() {
+        let nodes = discover(&i2c_tree(0));
+        let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
+        assert!(bus.resources().contains(&HwResource::property(
+            tairix_abi::HwProperty::BusSpeed,
+            400_000
+        )));
+    }
+
+    #[test]
+    fn a_transmitter_sharing_the_radio_band_says_so_and_no_other_node_does() {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("hdmi@7ef00700");
+        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop("wifi-2.4ghz-coexistence", &[]);
+        b.end_node();
+        b.begin_node("hdmi@7ef05700");
+        b.prop_str("compatible", "brcm,bcm2711-hdmi1");
+        b.end_node();
+        b.end_node();
+        let nodes = discover(&b.build());
+        let coexists = HwResource::property(tairix_abi::HwProperty::RadioCoexistence, 1);
+        assert!(by_key(&nodes, b"brcm,bcm2711-hdmi0")
+            .resources()
+            .contains(&coexists));
+        assert!(!by_key(&nodes, b"brcm,bcm2711-hdmi1")
+            .resources()
+            .contains(&coexists));
+    }
+
+    #[test]
+    fn an_i2c_target_carries_nothing_but_its_link() {
         let nodes = discover(&i2c_tree(0));
         for compatible in [&b"maxim,ds3231"[..], b"nxp,pcf85063a"] {
             let child = by_key(&nodes, compatible);
-            assert!(
-                child
-                    .resources()
-                    .iter()
-                    .all(|r| r.kind() == Some(HwResourceKind::Endpoint)),
-                "{compatible:?} must carry nothing but its endpoint"
+            assert_eq!(
+                child.resources().len(),
+                1,
+                "{compatible:?} carries its link alone"
             );
+            assert_eq!(i2c_links(child).len(), 1);
         }
         // The bus itself still gets its own window and line.
         let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
@@ -1650,40 +1930,191 @@ mod tests {
             .any(|r| r.kind() == Some(HwResourceKind::Irq) && r.base() == 53));
     }
 
+    /// A tree whose root controller is phandle [`ROOT_INTC`] and whose L2
+    /// controller, phandle 2, sits on the root controller's line 96; `aon`
+    /// states whether the L2 controller is usable.
+    fn second_level_tree(aon: &str, consumer: impl FnOnce(&mut FdtWriter)) -> Vec<u8> {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop_u32("interrupt-parent", ROOT_INTC);
+        b.begin_node("gic@ff841000");
+        b.prop_str("compatible", "arm,gic-400");
+        b.prop_u32("phandle", ROOT_INTC);
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.end_node();
+        b.begin_node("interrupt-controller@fef00100");
+        b.prop_str("compatible", "brcm,bcm2711-l2-intc");
+        b.prop_u32("phandle", 2);
+        b.prop_cells("reg", &[0xFEF0_0100, 0x30]);
+        b.prop("interrupts", &96u32.to_be_bytes());
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.prop_str("status", aon);
+        b.end_node();
+        b.begin_node("hdmi@fef00700");
+        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop_cells("reg", &[0xFEF0_0700, 0x300]);
+        consumer(&mut b);
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    fn lines(node: &HwNode) -> Vec<LinkRequest> {
+        node.resources()
+            .iter()
+            .filter_map(|r| r.link_request().ok())
+            .filter(|link| link.role() == LinkRole::InterruptLine)
+            .collect()
+    }
+
     #[test]
-    fn a_child_whose_duty_did_not_fit_is_left_without_authority() {
-        // The bus already spends two resource slots on its window and line,
-        // so past that the node cannot hold every duty.
+    fn a_line_through_a_second_level_controller_is_a_link_to_it() {
+        let nodes = discover(&second_level_tree("okay", |b| {
+            b.prop_u32("interrupt-parent", 2);
+            b.prop_cells("interrupts", &[0, 4, 5]);
+            b.prop("interrupt-names", b"cec-tx\0hpd-connected\0hpd-gone\0");
+        }));
+        let l2 = by_key(&nodes, b"brcm,bcm2711-l2-intc");
+        let hdmi = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        let endpoint = INTERRUPT_LINE_ENDPOINTS.endpoint(l2.id());
+        let links = lines(hdmi);
+        assert_eq!(links.len(), 3);
+        for (position, (link, cell)) in links.iter().zip([0, 4, 5]).enumerate() {
+            assert_eq!(link.endpoint(), endpoint);
+            assert_eq!(usize::from(link.index()), position);
+            assert_eq!(link.selector(), [cell]);
+        }
+        assert_eq!(links[0].name(), b"cec-tx");
+        assert!(
+            links[1].name().is_empty(),
+            "a name past eight bytes is dropped"
+        );
+        assert_eq!(links[2].name(), b"hpd-gone");
+        assert!(!hdmi
+            .resources()
+            .iter()
+            .any(|r| r.kind() == Some(HwResourceKind::Irq)));
+        // The controller serves its lines and keeps its own root line.
+        let duty = l2.resources().iter().find_map(|r| r.link_duty().ok());
+        assert_eq!(duty.map(|duty| duty.endpoint()), Some(endpoint));
+        assert!(l2
+            .resources()
+            .iter()
+            .any(|r| r.kind() == Some(HwResourceKind::Irq) && r.base() == 96));
+    }
+
+    #[test]
+    fn interrupts_extended_names_each_specifiers_parent() {
+        let nodes = discover(&second_level_tree("okay", |b| {
+            b.prop_cells("interrupts-extended", &[ROOT_INTC, 41, 2, 10]);
+            // `interrupts-extended` wins over this.
+            b.prop("interrupts", &7u32.to_be_bytes());
+        }));
+        let hdmi = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        let irqs: Vec<&HwResource> = hdmi
+            .resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+            .collect();
+        assert_eq!(irqs.len(), 1);
+        assert_eq!(
+            (irqs[0].base(), irqs[0].interrupt_position()),
+            (41, Some(0))
+        );
+        let links = lines(hdmi);
+        assert_eq!(links.len(), 1);
+        assert_eq!((links[0].index(), links[0].selector()), (1, &[10][..]));
+    }
+
+    #[test]
+    fn a_line_through_a_controller_no_consumer_may_use_links_nothing() {
+        let nodes = discover(&second_level_tree("disabled", |b| {
+            b.prop_u32("interrupt-parent", 2);
+            b.prop_cells("interrupts", &[4]);
+        }));
+        let hdmi = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        assert!(lines(hdmi).is_empty());
+        assert!(!nodes.iter().any(|node| node
+            .match_keys()
+            .contains(&HwMatchKey::compatible(b"brcm,bcm2711-l2-intc").expect("fits"))));
+    }
+
+    #[test]
+    fn the_root_controller_serves_no_lines() {
+        let nodes = discover(&second_level_tree("okay", |_| {}));
+        let gic = by_key(&nodes, b"arm,gic-400");
+        assert!(gic.resources().iter().all(|r| r.link_duty().is_err()));
+    }
+
+    #[test]
+    fn each_window_carries_its_reg_names_entry_and_a_name_too_long_is_dropped() {
+        let window = |base: u64| [&base.to_be_bytes()[..], &0x100u64.to_be_bytes()[..]].concat();
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("hdmi@fef00700");
+        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop(
+            "reg",
+            &[
+                window(0xFEF0_0700),
+                window(0xFEF0_0300),
+                window(0xFEF0_0F00),
+            ]
+            .concat(),
+        );
+        b.prop("reg-names", b"hdmi\0dvp\0phy-and-more\0");
+        b.end_node();
+        b.begin_node("unnamed@fe00b000");
+        b.prop_str("compatible", "test,unnamed");
+        b.prop("reg", &window(0xFE00_B000));
+        b.end_node();
+        b.end_node();
+        let nodes = discover(&b.build());
+        let hdmi = by_key(&nodes, b"brcm,bcm2711-hdmi0");
+        let windows: Vec<&HwResource> = hdmi
+            .resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Mmio))
+            .collect();
+        assert_eq!(windows.len(), 3);
+        assert!(windows[0].is_window_named(b"hdmi"));
+        assert!(windows[1].is_window_named(b"dvp"));
+        assert_eq!(*windows[2], HwResource::mmio(0xFEF0_0F00, 0x100));
+        let unnamed = by_key(&nodes, b"test,unnamed");
+        assert!(unnamed
+            .resources()
+            .contains(&HwResource::mmio(0xFE00_B000, 0x100)));
+    }
+
+    #[test]
+    fn every_target_of_a_crowded_bus_links_to_it() {
+        // More targets than one node holds resources: each carries its own
+        // link, so none depends on room in the controller's node.
         let extra = u32::try_from(HW_NODE_MAX_RESOURCES).expect("small");
         let nodes = discover(&i2c_tree(extra));
         let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
-        let granted = duties(bus);
-        assert_eq!(granted.len(), HW_NODE_MAX_RESOURCES - 2);
-
-        // Every child the bus was told to serve holds exactly the matching
-        // endpoint, and every child past the bound holds none — the halves
-        // never disagree.
-        let served: Vec<u64> = granted.iter().map(|(endpoint, _)| *endpoint).collect();
-        let mut children: Vec<&HwNode> = nodes.iter().filter(|n| n.id() > bus.id()).collect();
-        children.sort_by_key(|n| n.id());
-        assert!(children.len() > served.len());
-        for (index, child) in children.iter().enumerate() {
-            let expected: Vec<u64> = if index < served.len() {
-                std::vec![BUS_CHILD_ENDPOINTS.endpoint(child.id())]
-            } else {
-                Vec::new()
-            };
-            assert_eq!(endpoints(child), expected, "child {index}");
-        }
-        for (endpoint, child) in served.iter().zip(children.iter()) {
-            assert_eq!(*endpoint, BUS_CHILD_ENDPOINTS.endpoint(child.id()));
+        let targets: Vec<&HwNode> = nodes.iter().filter(|n| n.id() > bus.id()).collect();
+        assert_eq!(targets.len(), HW_NODE_MAX_RESOURCES + 2);
+        for target in targets {
+            let links = i2c_links(target);
+            assert_eq!(links.len(), 1);
+            assert_eq!(
+                links[0].endpoint(),
+                I2C_CONTROLLER_ENDPOINTS.endpoint(bus.id())
+            );
         }
     }
 
     #[test]
-    fn a_cpu_node_is_not_a_bus_child() {
+    fn the_cpus_container_is_no_i2c_bus() {
         // `/cpus` spells itself with the same cell counts an addressed bus
-        // does, so a CPU must not be handed a transfer endpoint.
+        // does, so a CPU must not be linked as a target.
         let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
@@ -1699,9 +2130,129 @@ mod tests {
         b.end_node();
         b.end_node();
         let nodes = discover(&b.build());
-        let cpu = by_key(&nodes, b"arm,cortex-a72");
-        assert!(endpoints(cpu).is_empty());
-        assert!(nodes.iter().all(|n| duties(n).is_empty()));
+        assert!(i2c_links(by_key(&nodes, b"arm,cortex-a72")).is_empty());
+        assert!(nodes.iter().all(|n| i2c_duty(n).is_none()));
+    }
+
+    #[test]
+    fn an_spi_bus_of_the_same_cells_is_no_i2c_bus() {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("spi@fe204000");
+        b.prop_str("compatible", "brcm,bcm2835-spi");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 0);
+        b.begin_node("flash@0");
+        b.prop_str("compatible", "jedec,spi-nor");
+        b.prop("reg", &0u32.to_be_bytes());
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        let nodes = discover(&b.build());
+        assert_eq!(i2c_duty(by_key(&nodes, b"brcm,bcm2835-spi")), None);
+        assert!(i2c_links(by_key(&nodes, b"jedec,spi-nor")).is_empty());
+    }
+
+    #[test]
+    fn a_target_at_a_reserved_address_gets_no_link() {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.begin_node("i2c@fe804000");
+        b.prop_str("compatible", "brcm,bcm2835-i2c");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 0);
+        b.begin_node("general-call@0");
+        b.prop_str("compatible", "vendor,odd");
+        b.prop("reg", &0u32.to_be_bytes());
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        let nodes = discover(&b.build());
+        assert!(i2c_links(by_key(&nodes, b"vendor,odd")).is_empty());
+    }
+
+    #[test]
+    fn a_ddc_phandle_links_a_port_to_the_whole_bus_it_names() {
+        let mut b = FdtWriter::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("i2c@7ef04500");
+        b.prop_str("compatible", "brcm,bcm2711-hdmi-i2c");
+        b.prop_u32("phandle", 0x30);
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 0);
+        b.end_node();
+        b.begin_node("serial@7e201000");
+        b.prop_str("compatible", "arm,pl011");
+        b.prop_u32("phandle", 0x31);
+        b.end_node();
+        b.begin_node("hdmi@7ef00700");
+        b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+        b.prop_u32("ddc", 0x30);
+        b.end_node();
+        b.begin_node("hdmi@7ef05700");
+        b.prop_str("compatible", "brcm,bcm2711-hdmi1");
+        b.prop_u32("ddc", 0x31);
+        b.end_node();
+        b.end_node();
+        let nodes = discover(&b.build());
+        let ddc = by_key(&nodes, b"brcm,bcm2711-hdmi-i2c");
+        let expected =
+            LinkRequest::new(I2C_CONTROLLER_ENDPOINTS.endpoint(ddc.id()), 0, &[], b"ddc")
+                .expect("valid");
+        assert_eq!(
+            i2c_links(by_key(&nodes, b"brcm,bcm2711-hdmi0")),
+            std::vec![expected]
+        );
+        assert!(
+            i2c_links(by_key(&nodes, b"brcm,bcm2711-hdmi1")).is_empty(),
+            "a phandle naming no I2C controller links nothing"
+        );
+        assert_eq!(i2c_duty(ddc), Some(expected.endpoint()));
+    }
+
+    #[test]
+    fn a_ddc_phandle_naming_a_bus_with_targets_of_its_own_links_nothing() {
+        let tree = |target_status: &str| {
+            let mut b = FdtWriter::new();
+            b.begin_node("");
+            b.prop_u32("#address-cells", 1);
+            b.prop_u32("#size-cells", 1);
+            b.begin_node("i2c@7e804000");
+            b.prop_str("compatible", "brcm,bcm2835-i2c");
+            b.prop_u32("phandle", 0x30);
+            b.prop_u32("#address-cells", 1);
+            b.prop_u32("#size-cells", 0);
+            b.begin_node("rtc@68");
+            b.prop_str("compatible", "maxim,ds3231");
+            b.prop_u32("reg", 0x68);
+            b.prop_str("status", target_status);
+            b.end_node();
+            b.end_node();
+            b.begin_node("hdmi@7ef00700");
+            b.prop_str("compatible", "brcm,bcm2711-hdmi0");
+            b.prop_u32("ddc", 0x30);
+            b.end_node();
+            b.end_node();
+            discover(&b.build())
+        };
+        let shared = tree("okay");
+        assert!(
+            i2c_links(by_key(&shared, b"brcm,bcm2711-hdmi0")).is_empty(),
+            "the port would reach the clock on the same bus"
+        );
+        assert_eq!(i2c_links(by_key(&shared, b"maxim,ds3231")).len(), 1);
+        let dedicated = tree("disabled");
+        assert_eq!(
+            i2c_links(by_key(&dedicated, b"brcm,bcm2711-hdmi0")).len(),
+            1,
+            "a target nobody may use shares nothing"
+        );
     }
 
     #[test]
@@ -1723,14 +2274,11 @@ mod tests {
         b.end_node();
         b.end_node();
         let nodes = discover(&b.build());
-        assert!(endpoints(by_key(&nodes, b"maxim,ds3231")).is_empty());
+        assert!(i2c_links(by_key(&nodes, b"maxim,ds3231")).is_empty());
     }
 
     #[test]
-    fn an_unbindable_sibling_does_not_shift_the_ids_the_duties_name() {
-        // The look-ahead must splice out exactly what the walk does: a
-        // child with no representable match key consumes no id, and one
-        // nested deeper consumes one without being a duty of this bus.
+    fn a_node_nested_below_a_target_links_to_no_grandparent_bus() {
         let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop_u32("#address-cells", 2);
@@ -1757,25 +2305,15 @@ mod tests {
         b.end_node();
         let nodes = discover(&b.build());
         let bus = by_key(&nodes, b"brcm,bcm2835-i2c");
-        let mux = by_key(&nodes, b"vendor,mux");
-        let ds3231 = by_key(&nodes, b"maxim,ds3231");
         assert_eq!(
-            duties(bus),
-            std::vec![
-                (BUS_CHILD_ENDPOINTS.endpoint(mux.id()), 0x70),
-                (BUS_CHILD_ENDPOINTS.endpoint(ds3231.id()), 0x68),
-            ]
+            i2c_links(by_key(&nodes, b"vendor,mux")),
+            std::vec![target_link(bus, 0x70)]
         );
         assert_eq!(
-            endpoints(mux),
-            std::vec![BUS_CHILD_ENDPOINTS.endpoint(mux.id())]
+            i2c_links(by_key(&nodes, b"maxim,ds3231")),
+            std::vec![target_link(bus, 0x68)]
         );
-        assert_eq!(
-            endpoints(ds3231),
-            std::vec![BUS_CHILD_ENDPOINTS.endpoint(ds3231.id())]
-        );
-        // The nested grandchild is not this bus's child and gets nothing.
-        assert!(endpoints(by_key(&nodes, b"vendor,nested")).is_empty());
+        assert!(i2c_links(by_key(&nodes, b"vendor,nested")).is_empty());
     }
 
     #[test]
@@ -1800,7 +2338,7 @@ mod tests {
         b.end_node();
         let nodes = discover(&b.build());
         let uart = by_key(&nodes, b"arm,pl011");
-        assert!(endpoints(uart).is_empty());
+        assert!(i2c_links(uart).is_empty());
         assert!(uart
             .resources()
             .iter()
@@ -2599,10 +3137,8 @@ mod tests {
         );
     }
 
-    /// Silence the unused-import warning `Node` would otherwise raise while
-    /// still proving the address decode reads exactly one cell.
     #[test]
-    fn a_bus_child_address_is_one_cell_wide() {
+    fn an_i2c_target_address_is_one_cell_wide() {
         let mut b = FdtWriter::new();
         b.begin_node("");
         b.prop("reg", &[0x00, 0x00, 0x00, 0x68, 0xDE, 0xAD, 0xBE, 0xEF]);
@@ -2610,7 +3146,7 @@ mod tests {
         let blob = b.build();
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let root: Node<'_> = fdt.nodes().next().expect("a node").expect("well formed");
-        assert_eq!(super::bus_child_address(&root), Some(0x68));
+        assert_eq!(super::i2c_target_address(&root), Some(0x68));
     }
 
     const SMMU: u32 = 0x40;
@@ -2863,14 +3399,12 @@ mod tests {
             std::vec![IommuStreams::new(unit, 0x10, 1).expect("valid")]
         );
         let codec = by_key(&nodes, b"test,codec");
+        let i2c = by_key(&nodes, b"test,i2c");
         assert_eq!(
-            duties(by_key(&nodes, b"test,i2c")),
-            std::vec![(BUS_CHILD_ENDPOINTS.endpoint(codec.id()), 0x1A)]
+            i2c_duty(i2c),
+            Some(I2C_CONTROLLER_ENDPOINTS.endpoint(i2c.id()))
         );
-        assert_eq!(
-            endpoints(codec),
-            std::vec![BUS_CHILD_ENDPOINTS.endpoint(codec.id())]
-        );
+        assert_eq!(i2c_links(codec), std::vec![target_link(i2c, 0x1A)]);
         // The numbering a later pass reads the tree by is the walk's own.
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let numbered: Vec<u32> = super::emitted(&fdt).map(|(id, _, _)| id).collect();

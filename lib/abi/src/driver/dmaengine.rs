@@ -25,10 +25,11 @@
 
 use core::num::NonZeroU32;
 
-use crate::hwlink::{LinkRequest, LinkRole};
+use crate::hwlink::{LinkRequest, LinkRole, RegionGrant};
 use crate::hwtree::{HwResource, NodeEndpointBlock};
-use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
-use crate::origin::ProcId;
+use crate::le::{
+    exact_len, put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64,
+};
 use crate::time::Duration64;
 use crate::{DriverError, Errno};
 
@@ -134,11 +135,7 @@ mod open_reply {
 }
 
 mod prepare_reply {
-    use crate::origin::PROC_ID_LEN;
-
-    pub const GRANT: usize = 0;
-    pub const GRANTOR: usize = 8;
-    pub const LEN: usize = GRANTOR + PROC_ID_LEN;
+    pub const LEN: usize = crate::hwlink::RegionGrant::WIRE_LEN;
 }
 
 mod position_reply {
@@ -370,11 +367,8 @@ impl DmaEngineRequest {
 /// The body of a frame whose header is `header` bytes and whose body must be
 /// exactly `len`.
 fn exact_body(bytes: &[u8], header: usize, len: usize) -> Result<&[u8], Errno> {
-    match bytes.len().cmp(&(header + len)) {
-        core::cmp::Ordering::Less => Err(Errno::BufferTooSmall),
-        core::cmp::Ordering::Greater => Err(Errno::LengthOutOfRange),
-        core::cmp::Ordering::Equal => Ok(&bytes[header..]),
-    }
+    exact_len(bytes, header + len)?;
+    Ok(&bytes[header..])
 }
 
 /// A channel byte followed by reserved bytes up to `reserved_end`.
@@ -501,32 +495,18 @@ pub fn decode_open_reply(bytes: &[u8]) -> Result<u8, Errno> {
     decode_channel_body(body, open_reply::LEN)
 }
 
-/// The buffer a [`DmaEngineOp::Prepare`] carved, as its caller maps it.
-///
-/// The kernel binds a delegated mapping to the process that delegated it, so
-/// the caller names the controller's instance when it maps the grant; a
-/// grantor that did not delegate `grant` maps nothing.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct DmaBufferGrant {
-    /// The kernel's handle for the caller's mapping of the buffer.
-    pub grant: u64,
-    /// The controller instance that delegated it.
-    pub grantor: ProcId,
-}
-
 /// Encode the reply to [`DmaEngineOp::Prepare`].
 ///
 /// # Errors
 ///
 /// [`Errno::OutOfRange`] for the reserved handle `0` or the kernel's own
 /// instance as grantor, or [`Errno::BufferTooSmall`].
-pub fn encode_prepare_reply(out: &mut [u8], buffer: &DmaBufferGrant) -> Result<usize, Errno> {
+pub fn encode_prepare_reply(out: &mut [u8], buffer: &RegionGrant) -> Result<usize, Errno> {
     if buffer.grant == 0 || buffer.grantor.is_kernel() {
         return Err(Errno::OutOfRange);
     }
     let (body, len) = success_frame(out, DmaEngineOp::Prepare)?;
-    put_u64(body, prepare_reply::GRANT, buffer.grant);
-    body[prepare_reply::GRANTOR..].copy_from_slice(&buffer.grantor.to_le_bytes());
+    body.copy_from_slice(&buffer.to_le_bytes());
     Ok(len)
 }
 
@@ -536,14 +516,8 @@ pub fn encode_prepare_reply(out: &mut [u8], buffer: &DmaBufferGrant) -> Result<u
 ///
 /// The refusal the reply carries, [`Errno::OutOfRange`] for the reserved
 /// handle `0` or the kernel's own instance as grantor, or a framing error.
-pub fn decode_prepare_reply(bytes: &[u8]) -> Result<DmaBufferGrant, Errno> {
-    let body = success_body(bytes, DmaEngineOp::Prepare)?;
-    let grant = read_u64(body, prepare_reply::GRANT);
-    let grantor = ProcId::from_bytes(&body[prepare_reply::GRANTOR..])?;
-    if grant == 0 || grantor.is_kernel() {
-        return Err(Errno::OutOfRange);
-    }
-    Ok(DmaBufferGrant { grant, grantor })
+pub fn decode_prepare_reply(bytes: &[u8]) -> Result<RegionGrant, Errno> {
+    RegionGrant::from_bytes(success_body(bytes, DmaEngineOp::Prepare)?)
 }
 
 /// Encode the reply to [`DmaEngineOp::Position`]: the memory-side offset.

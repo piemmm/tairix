@@ -120,6 +120,15 @@ pub const CAPTURE_GRANTED: EventId = EventId(10_027);
 /// a failed re-authentication (cause never disclosed to the caller, only
 /// audited) or a run the supervisor could not start or collect.
 pub const CAPTURE_REFUSED: EventId = EventId(10_028);
+/// A round chose its login: graphical, or text and why a graphical one was
+/// not offered.
+pub const ROUND_CHOSEN: EventId = EventId(10_029);
+/// An untouched text prompt gave way to the graphical login that became
+/// available while it waited.
+pub const TEXT_ROUND_SUPERSEDED: EventId = EventId(10_030);
+/// The text prompt could not watch for a graphical login becoming available,
+/// so only the next round will offer one.
+pub const TEXT_ROUND_UNWATCHED: EventId = EventId(10_031);
 
 #[cfg(test)]
 mod tests {
@@ -127,13 +136,14 @@ mod tests {
         AUTH_FAILED, CAPTURE_GRANTED, CAPTURE_REFUSED, CONSOLE_ERROR, ELEVATE_GRANTED,
         ELEVATE_REFUSED, ELEVATE_UNAVAILABLE, GREETER_DEGRADED, GREETER_FAILED,
         LAUNCH_ENDED_ABNORMALLY, LAUNCH_GRANTED, LAUNCH_REFUSED, LOCKED_OUT, LOGIN_RANGE_END,
-        LOGIN_RANGE_START, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED, SESSION_AUTH_REFUSED,
-        SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT, SESSION_ENDPOINT_UNAVAILABLE,
-        SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED, SESSION_RESUMED, SESSION_STARTED,
+        LOGIN_RANGE_START, ROUND_CHOSEN, SESSION_ACCOUNTS_SENT, SESSION_AUTH_GRANTED,
+        SESSION_AUTH_REFUSED, SESSION_BACKGROUNDED, SESSION_ENDED, SESSION_ENDED_ON_EXIT,
+        SESSION_ENDPOINT_UNAVAILABLE, SESSION_LAUNCH_FAILED, SESSION_REQUEST_REFUSED,
+        SESSION_RESUMED, SESSION_STARTED, TEXT_ROUND_SUPERSEDED, TEXT_ROUND_UNWATCHED,
         VERIFY_GRANTED, VERIFY_REFUSED,
     };
 
-    const ALL: [u32; 26] = [
+    const ALL: [u32; 29] = [
         SESSION_STARTED.0,
         AUTH_FAILED.0,
         LOCKED_OUT.0,
@@ -160,6 +170,9 @@ mod tests {
         LAUNCH_ENDED_ABNORMALLY.0,
         CAPTURE_GRANTED.0,
         CAPTURE_REFUSED.0,
+        ROUND_CHOSEN.0,
+        TEXT_ROUND_SUPERSEDED.0,
+        TEXT_ROUND_UNWATCHED.0,
     ];
 
     #[test]

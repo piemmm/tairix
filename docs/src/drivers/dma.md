@@ -94,8 +94,10 @@ carries; a grantor that did not delegate the grant maps nothing.
 `DmaEngine` and `DmaChannel` are the class traits a controller driver
 implements: the channels its register window describes, the request-line
 binding it serves, and per channel the chain, start, stop, position and the
-events its interrupt raised. The endpoint is written once over them and holds
-every rule the protocol makes:
+events its interrupt raised. The endpoint is written once over them, in
+[`tairix-dmaengine`](../lib/dmaengine.md) with the bring-up and serve loop
+every controller driver hands its engine to, and holds every rule the protocol
+makes:
 
 - A channel belongs to the process instance that opened it; any other caller
   is refused. A line whose holder has ended is reclaimed by its next holder,
@@ -104,8 +106,14 @@ every rule the protocol makes:
 - A request line counts only once `call_peer_holds` attests the caller holds
   it, and a FIFO only once it attests a register window covering the whole
   peripheral-side access; the FIFO is then translated only through the
-  window covering the controller's own registers, and one it does not reach
-  is refused. A held region another window reaches is memory, not a FIFO.
+  narrowest window covering the controller's own registers, and one it does
+  not reach is refused. A held region another window reaches is memory, not a
+  FIFO.
+- The engines reach memory through the first window other than that
+  aperture, even one spanning the registers too: the Pi 4's `/scb` maps all 16
+  GiB one to one beside the aperture DMA4 reaches peripherals through, at
+  `0x4_7c000000`. A node whose only window covers the registers names no
+  separate way to memory, and its driver ends saying so.
 - Every buffer is carved by the endpoint, after every check has passed.
 - A posted `Wait` is answered at the first boundary past the position it
   names. Boundaries are counted by which period the channel has reached, so
@@ -133,8 +141,13 @@ event id.
 
 ## `drivers/dma/bcm2835`
 
-The Broadcom legacy engines (`brcm,bcm2835-dma`). The node's register window
-holds one `0x100` block per channel; the tree's `brcm,dma-channel-mask`
+The Broadcom engines: the legacy engines (`brcm,bcm2835-dma`) and the
+BCM2711's DMA4 engines (`brcm,bcm2711-dma`). Both read the one request-cell
+binding below and lay out the same cyclic chain of 32-byte blocks; the driver
+learns which engines its node holds from the bind key the node matched
+(`hw_self_node` and `tairix_devmatch::matched_bind_key`), and each engine
+encodes the blocks and drives the registers its own way. Either node's
+register window holds one `0x100` block per channel; the tree's `brcm,dma-channel-mask`
 says which of them this system may use, and the driver touches no other.
 Channel `n`'s interrupt is the node's `n`-th, so lines a binding shares
 (channels 7/8 and 9/10 on the Pi 4) are bound once and serve both.
@@ -162,6 +175,27 @@ reset whose register write fails is reported as not issued.
 The fault bits a `Wait` reports are `CS.ERROR` (bit 8) with `DEBUG`'s three
 error flags (bits 2:0).
 
+### DMA4
+
+A DMA4 channel addresses 40 bits; its interface reaches 36, which the driver
+narrows its carves to. A block is `TI`, the source's low word, the source's
+information word, the destination's low word, its information word, the
+length, the next block, and a reserved word. An information word carries the
+address's top byte, the burst length, the increment (set on the memory side
+alone) and the access size, 128 bits on a side the cell makes wide. A control
+block is named — in `CB` and in a block's next field — by its address shifted
+right by five. `TI` carries the interrupt on a period's last block, the request
+map, the write-response wait unless the cell waives it, and the destination's
+request (memory to device) or the source's with the read-response wait
+(device to memory). `CS` runs with `ACTIVE`, the AXI protection and the cell's
+priorities. A block moves at most a gibibyte.
+
+A stop pauses a loaded channel by clearing `ACTIVE`, lets its outstanding
+transactions finish within a bounded budget, then resets it: `CS` back to the
+protection alone and the reset bit of `DEBUG`. The fault bits a `Wait` reports
+are `CS.ERROR` (bit 10) with `DEBUG`'s write, FIFO, read and block-fetch error
+flags (bits 3:0).
+
 ## Kernel mechanisms
 
 - **The endpoint is the duty holder's alone**, as every link supplier's is.
@@ -188,8 +222,8 @@ error flags (bits 2:0).
 
 ## Status
 
-The protocol, the class traits, the endpoint and `drivers/dma/bcm2835` exist,
-host-proven against a register-level model of the engines. QEMU models no
-cyclic DREQ-paced chain, so the driver's metal acceptance is the first
-consumer's transfer on a Pi 4 (`plans/SOUND.md` SND8). DMA4
-(`brcm,bcm2711-dma`) arrives with SND19.
+The protocol, the class traits, the endpoint (`lib/dmaengine`) and
+`drivers/dma/bcm2835` with both engines exist, host-proven against a
+register-level model of each. QEMU models no cyclic DREQ-paced chain, so the
+legacy engines' metal acceptance is the first consumer's transfer on a Pi 4
+(`plans/SOUND.md` SND8), and DMA4's is HDMI audio (SND19q).

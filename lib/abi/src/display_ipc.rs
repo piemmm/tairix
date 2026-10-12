@@ -31,7 +31,7 @@
 //! and `SetPower` answer with the shared status frame
 //! ([`crate::reply::encode_status_reply`] /
 //! [`crate::reply::decode_status_reply`]); `Query` answers with the
-//! [`DISPLAY_MODE_REPLY_LEN`]-byte mode reply ([`encode_mode_reply`] /
+//! [`DISPLAY_MODE_REPLY_LEN`]-byte output reply ([`encode_mode_reply`] /
 //! [`decode_mode_reply`]); `QueryStats` with the
 //! [`DISPLAY_STATS_REPLY_LEN`]-byte statistics reply ([`encode_stats_reply`] /
 //! [`decode_stats_reply`]). Every decode fails closed: an unknown magic,
@@ -82,14 +82,16 @@ pub const DISPLAY_MAX_REQUEST: usize = DisplayRequest::WIRE_LEN;
 /// for no seat and carries its own authority.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DisplayRequest {
-    /// Report the active mode of `seat_id`'s display.
+    /// Report the output of `seat_id`'s display: the mode it runs, or none
+    /// while nothing is connected.
     Query {
-        /// The seat whose display mode is requested.
+        /// The seat whose display output is requested.
         seat_id: u64,
     },
     /// Adopt the caller's shared frame region for `seat_id`: map the
-    /// granted region once and validate the frame layout against the
-    /// active mode. Replaces any earlier configuration by the same lease.
+    /// granted region once and validate the frame layout against the mode
+    /// the output runs. Replaces any earlier configuration by the same lease;
+    /// a geometry that is not the output's mode is refused [`Errno::Stale`].
     Configure {
         /// The seat the frames will be presented on.
         seat_id: u64,
@@ -263,25 +265,15 @@ impl DisplayRequest {
                 if frame_count == 0 || frame_count > DISPLAY_MAX_FRAMES {
                     return Err(Errno::LengthOutOfRange);
                 }
-                let width_px = read_u32(bytes, 28);
-                let height_px = read_u32(bytes, 32);
-                let stride_bytes = read_u32(bytes, 36);
-                let format = DisplayFormat::from_u8(bytes[40])?;
-                if width_px == 0 || height_px == 0 {
-                    return Err(Errno::LengthOutOfRange);
-                }
-                let min_stride = u64::from(width_px) * u64::from(format.bytes_per_pixel());
-                if u64::from(stride_bytes) < min_stride {
-                    return Err(Errno::LengthOutOfRange);
-                }
+                let mode = read_mode(bytes, 28, DisplayFormat::from_u8(bytes[40])?)?;
                 Ok(Self::Configure {
                     seat_id,
                     shm_handle,
                     frame_count,
-                    width_px,
-                    height_px,
-                    stride_bytes,
-                    format,
+                    width_px: mode.width_px,
+                    height_px: mode.height_px,
+                    stride_bytes: mode.stride_bytes,
+                    format: mode.format,
                 })
             }
             OP_QUERY_STATS => {
@@ -342,6 +334,23 @@ fn read_rect(bytes: &[u8], at: usize) -> DamageRect {
     }
 }
 
+/// The width, height and stride at `at`, in `format`, refused
+/// [`Errno::LengthOutOfRange`] unless they describe a drawable surface: no
+/// zero extent, and a stride that holds one scanline.
+fn read_mode(bytes: &[u8], at: usize, format: DisplayFormat) -> Result<DisplayMode, Errno> {
+    let mode = DisplayMode {
+        width_px: read_u32(bytes, at),
+        height_px: read_u32(bytes, at + 4),
+        stride_bytes: read_u32(bytes, at + 8),
+        format,
+    };
+    let scanline = u64::from(mode.width_px) * u64::from(format.bytes_per_pixel());
+    if mode.width_px == 0 || mode.height_px == 0 || u64::from(mode.stride_bytes) < scanline {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(mode)
+}
+
 /// Refuse a request whose reserved tail (from `from` to the end of the
 /// fixed frame) carries any non-zero byte — wire corruption or a smuggled
 /// field, never silently ignored.
@@ -355,26 +364,35 @@ fn reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
     Ok(())
 }
 
-/// Reply length, in bytes, of a successful `Query`: the status word
-/// followed by the mode record — width (4), height (4), stride (4),
-/// format (1), and a reserved tail (3) that must be zero.
+/// Reply length, in bytes, of a `Query`: the status word followed by the
+/// output record — width (4), height (4), stride (4), format (1), whether an
+/// output runs that mode (1), and a reserved tail (2) that must be zero. With
+/// no output the whole record is zero.
 pub const DISPLAY_MODE_REPLY_LEN: usize = 20;
 
-/// Encode a `Query` outcome: the [`DISPLAY_MODE_REPLY_LEN`]-byte mode
+/// The byte of a `Query` reply that is `1` when an output runs the mode the
+/// reply carries and `0` when there is none.
+const QUERY_OUTPUT_AT: usize = 17;
+
+/// Encode a `Query` outcome: the [`DISPLAY_MODE_REPLY_LEN`]-byte output
 /// reply on success, the shared status frame (a negative [`Errno`]
 /// discriminant, zero-padded to the same length) on refusal. Padding the
 /// refusal keeps the reply length constant, so a client can always issue
 /// one fixed-size receive.
 #[must_use]
-pub fn encode_mode_reply(result: Result<DisplayMode, Errno>) -> [u8; DISPLAY_MODE_REPLY_LEN] {
+pub fn encode_mode_reply(
+    result: Result<Option<DisplayMode>, Errno>,
+) -> [u8; DISPLAY_MODE_REPLY_LEN] {
     let mut out = [0u8; DISPLAY_MODE_REPLY_LEN];
     match result {
-        Ok(mode) => {
+        Ok(Some(mode)) => {
             put_u32(&mut out, 4, mode.width_px);
             put_u32(&mut out, 8, mode.height_px);
             put_u32(&mut out, 12, mode.stride_bytes);
             out[16] = mode.format.as_u8();
+            out[QUERY_OUTPUT_AT] = 1;
         }
+        Ok(None) => {}
         Err(err) => {
             out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
         }
@@ -382,43 +400,36 @@ pub fn encode_mode_reply(result: Result<DisplayMode, Errno>) -> [u8; DISPLAY_MOD
     out
 }
 
-/// Decode a `Query` reply frame.
+/// Decode a `Query` reply frame: the mode the output runs, or [`None`]
+/// while there is no output.
 ///
 /// # Errors
 ///
 /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a whole reply.
 /// * [`Errno::OutOfRange`] — a corrupt status word or an unknown pixel
 ///   format (fail closed on a malformed frame).
-/// * [`Errno::BadMagic`] — a dirty reserved tail.
+/// * [`Errno::BadMagic`] — a dirty reserved tail, an output byte other than
+///   `0` or `1`, or a mode carried beside a cleared one.
 /// * [`Errno::LengthOutOfRange`] — a mode with a zero extent or a stride
 ///   too small for one scanline (a nonsensical mode is refused, never
 ///   handed to a renderer).
 /// * The decoded [`Errno`] itself, when the service refused the query.
-pub fn decode_mode_reply(bytes: &[u8]) -> Result<DisplayMode, Errno> {
+pub fn decode_mode_reply(bytes: &[u8]) -> Result<Option<DisplayMode>, Errno> {
     if bytes.len() < DISPLAY_MODE_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
     }
     crate::reply::decode_status_reply(&bytes[..4])?;
-    let width_px = read_u32(bytes, 4);
-    let height_px = read_u32(bytes, 8);
-    let stride_bytes = read_u32(bytes, 12);
-    let format = DisplayFormat::from_u8(bytes[16])?;
-    if bytes[17..DISPLAY_MODE_REPLY_LEN].iter().any(|&b| b != 0) {
+    if bytes[QUERY_OUTPUT_AT + 1..DISPLAY_MODE_REPLY_LEN]
+        .iter()
+        .any(|&b| b != 0)
+    {
         return Err(Errno::BadMagic);
     }
-    if width_px == 0 || height_px == 0 {
-        return Err(Errno::LengthOutOfRange);
+    match bytes[QUERY_OUTPUT_AT] {
+        0 if bytes[4..QUERY_OUTPUT_AT].iter().all(|&b| b == 0) => Ok(None),
+        1 => read_mode(bytes, 4, DisplayFormat::from_u8(bytes[16])?).map(Some),
+        _ => Err(Errno::BadMagic),
     }
-    let min_stride = u64::from(width_px) * u64::from(format.bytes_per_pixel());
-    if u64::from(stride_bytes) < min_stride {
-        return Err(Errno::LengthOutOfRange);
-    }
-    Ok(DisplayMode {
-        width_px,
-        height_px,
-        stride_bytes,
-        format,
-    })
 }
 
 /// A display device's own graphics statistics, as
@@ -447,8 +458,8 @@ pub struct DisplayStats {
     pub idle_ns: u64,
     /// What the driver reports about the device itself.
     pub device: DisplayDeviceReport,
-    /// The mode being scanned out.
-    pub mode: DisplayMode,
+    /// The mode being scanned out, or [`None`] while there is no output.
+    pub mode: Option<DisplayMode>,
 }
 
 /// Set in a statistics reply when the device has a hardware compositor, so
@@ -457,9 +468,13 @@ const STATS_FLAG_ACCELERATED: u16 = 1 << 0;
 /// Set when that compositor can scale a whole layer by a constant opacity
 /// ([`AccelCaps::per_layer_opacity`]).
 const STATS_FLAG_PER_LAYER_OPACITY: u16 = 1 << 1;
+/// Set when an output is connected, so the mode block carries the mode it
+/// runs; clear, the block is zero.
+const STATS_FLAG_OUTPUT: u16 = 1 << 2;
 /// Every flag bit this ABI defines; any other set bit fails the decode
 /// closed rather than being ignored.
-const STATS_FLAGS_KNOWN: u16 = STATS_FLAG_ACCELERATED | STATS_FLAG_PER_LAYER_OPACITY;
+const STATS_FLAGS_KNOWN: u16 =
+    STATS_FLAG_ACCELERATED | STATS_FLAG_PER_LAYER_OPACITY | STATS_FLAG_OUTPUT;
 
 impl DisplayStats {
     /// Encoded size on the wire, and the size of one packed
@@ -477,7 +492,7 @@ impl DisplayStats {
     const ACCEL_AT: usize = 40;
     /// Byte offset of the mode block.
     const MODE_AT: usize = 52;
-    /// Byte offset of the capability flags.
+    /// Byte offset of the flags word.
     const FLAGS_AT: usize = 66;
 
     /// Encode `self` little-endian.
@@ -494,16 +509,19 @@ impl DisplayStats {
             put_u32(&mut out, Self::ACCEL_AT + 4, caps.max_width_px);
             put_u32(&mut out, Self::ACCEL_AT + 8, caps.max_height_px);
         }
+        if let Some(mode) = self.mode {
+            flags |= STATS_FLAG_OUTPUT;
+            put_u32(&mut out, Self::MODE_AT, mode.width_px);
+            put_u32(&mut out, Self::MODE_AT + 4, mode.height_px);
+            put_u32(&mut out, Self::MODE_AT + 8, mode.stride_bytes);
+            out[Self::MODE_AT + 12] = mode.format.as_u8();
+        }
         put_u16(&mut out, Self::FLAGS_AT, flags);
         put_u64(&mut out, 0, self.busy_ns);
         put_u64(&mut out, 8, self.idle_ns);
         put_u64(&mut out, 16, self.device.mem_resident_bytes);
         put_u64(&mut out, 24, self.device.mem_total_bytes);
         put_u64(&mut out, 32, self.seat_id);
-        put_u32(&mut out, Self::MODE_AT, self.mode.width_px);
-        put_u32(&mut out, Self::MODE_AT + 4, self.mode.height_px);
-        put_u32(&mut out, Self::MODE_AT + 8, self.mode.stride_bytes);
-        out[Self::MODE_AT + 12] = self.mode.format.as_u8();
         out
     }
 
@@ -523,8 +541,8 @@ impl DisplayStats {
     /// * [`Errno::BadMagic`] — an unknown flag bit or a dirty reserved field.
     /// * [`Errno::LengthOutOfRange`] — a nonsensical mode (zero extent, or a
     ///   stride too small for one scanline), resident bytes above the memory
-    ///   the device owns, or an accelerated-capability block that contradicts
-    ///   its flag.
+    ///   the device owns, or an accelerated-capability or mode block that
+    ///   contradicts its flag.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
@@ -566,20 +584,18 @@ impl DisplayStats {
             }
             None
         };
-        let format = DisplayFormat::from_u8(bytes[Self::MODE_AT + 12])?;
-        let mode = DisplayMode {
-            width_px: read_u32(bytes, Self::MODE_AT),
-            height_px: read_u32(bytes, Self::MODE_AT + 4),
-            stride_bytes: read_u32(bytes, Self::MODE_AT + 8),
-            format,
+        let mode = if flags & STATS_FLAG_OUTPUT != 0 {
+            let format = DisplayFormat::from_u8(bytes[Self::MODE_AT + 12])?;
+            Some(read_mode(bytes, Self::MODE_AT, format)?)
+        } else {
+            if bytes[Self::MODE_AT..=Self::MODE_AT + 12]
+                .iter()
+                .any(|&b| b != 0)
+            {
+                return Err(Errno::LengthOutOfRange);
+            }
+            None
         };
-        if mode.width_px == 0
-            || mode.height_px == 0
-            || u64::from(mode.stride_bytes)
-                < u64::from(mode.width_px) * u64::from(format.bytes_per_pixel())
-        {
-            return Err(Errno::LengthOutOfRange);
-        }
         Ok(Self {
             seat_id: read_u64(bytes, 32),
             busy_ns: read_u64(bytes, 0),
@@ -930,7 +946,11 @@ mod tests {
             stride_bytes: 7680,
             format: DisplayFormat::Rgba8888,
         };
-        assert_eq!(decode_mode_reply(&encode_mode_reply(Ok(mode))), Ok(mode));
+        assert_eq!(
+            decode_mode_reply(&encode_mode_reply(Ok(Some(mode)))),
+            Ok(Some(mode))
+        );
+        assert_eq!(decode_mode_reply(&encode_mode_reply(Ok(None))), Ok(None));
         assert_eq!(
             decode_mode_reply(&encode_mode_reply(Err(Errno::SeatNotOwner))),
             Err(Errno::SeatNotOwner)
@@ -949,7 +969,7 @@ mod tests {
             stride_bytes: 2560,
             format: DisplayFormat::Bgra8888,
         };
-        let good = encode_mode_reply(Ok(mode));
+        let good = encode_mode_reply(Ok(Some(mode)));
 
         assert_eq!(
             decode_mode_reply(&good[..DISPLAY_MODE_REPLY_LEN - 1]),
@@ -967,6 +987,14 @@ mod tests {
         let mut dirty = good;
         dirty[19] = 1;
         assert_eq!(decode_mode_reply(&dirty), Err(Errno::BadMagic));
+        // An output byte that is neither answer, and a mode carried beside
+        // the answer that there is no output.
+        let mut neither = good;
+        neither[17] = 2;
+        assert_eq!(decode_mode_reply(&neither), Err(Errno::BadMagic));
+        let mut absent_with_mode = good;
+        absent_with_mode[17] = 0;
+        assert_eq!(decode_mode_reply(&absent_with_mode), Err(Errno::BadMagic));
         // A nonsensical mode: zero extents or an undersized stride.
         let mut zero_width = good;
         zero_width[4..8].copy_from_slice(&0u32.to_le_bytes());
@@ -1006,7 +1034,7 @@ mod tests {
                     per_layer_opacity: true,
                 }),
             },
-            mode: stats_mode(),
+            mode: Some(stats_mode()),
         }
     }
 
@@ -1040,11 +1068,23 @@ mod tests {
             busy_ns: 0,
             idle_ns: 0,
             device: DisplayDeviceReport::SOFTWARE,
-            mode: stats_mode(),
+            mode: Some(stats_mode()),
         };
         let decoded = decode_stats_reply(&encode_stats_reply(Ok(software)));
         assert_eq!(decoded, Ok(software));
         assert!(decoded.expect("decoded").device.accel.is_none());
+    }
+
+    #[test]
+    fn stats_reply_round_trips_a_device_with_no_output() {
+        let unplugged = DisplayStats {
+            mode: None,
+            ..accelerated_stats()
+        };
+        assert_eq!(
+            decode_stats_reply(&encode_stats_reply(Ok(unplugged))),
+            Ok(unplugged)
+        );
     }
 
     #[test]
@@ -1106,5 +1146,19 @@ mod tests {
             decode_stats_reply(&thin_stride),
             Err(Errno::LengthOutOfRange)
         );
+        // A mode block beside a flag saying no output is connected, and the
+        // flag with no mode beside it, whose zero format byte names none.
+        let mut stray_mode = good;
+        stray_mode[STATS_BODY_AT + 66] &= !(1 << 2);
+        assert_eq!(
+            decode_stats_reply(&stray_mode),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut unplugged = encode_stats_reply(Ok(DisplayStats {
+            mode: None,
+            ..accelerated_stats()
+        }));
+        unplugged[STATS_BODY_AT + 66] |= 1 << 2;
+        assert_eq!(decode_stats_reply(&unplugged), Err(Errno::OutOfRange));
     }
 }

@@ -31,8 +31,8 @@ impl Panel {
 }
 
 impl Display for Panel {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(DisplayMode {
+    fn output(&self) -> Option<DisplayMode> {
+        Some(DisplayMode {
             width_px: 4,
             height_px: 4,
             stride_bytes: 16,

@@ -17,8 +17,8 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::blkio::FaultDomainState;
-use tairix_abi::hwtree::HwResourceKind;
+use tairix_abi::blkio::{BlkStatus, FaultDomainState};
+use tairix_abi::hwtree::{ancestor_imposed_status_by, HwResourceKind};
 use tairix_abi::{Errno, HwNode};
 
 /// Whether a hardware-tree node is still in the live tree.
@@ -28,6 +28,18 @@ use tairix_abi::{Errno, HwNode};
 pub trait HwNodeLiveness: Sync {
     /// Whether the live tree holds a node with id `node_id`.
     fn is_live(&self, node_id: u32) -> bool;
+}
+
+/// The tree a driver is admitted against: whether its node still lives, and
+/// the record of whether the driver now driving it has settled.
+pub trait HwDriverTree: HwNodeLiveness {
+    /// Record that a new driver drives `node_id`, admitted before it can run.
+    ///
+    /// One that cannot publish children (`publishes` false) has nothing to
+    /// settle and is settled at once; one that can is unsettled until it
+    /// says otherwise, so a child an earlier instance's settling would have
+    /// marked as arriving on a running machine is not misread as one.
+    fn driver_admitted(&self, node_id: u32, publishes: bool);
 }
 
 /// The kernel-held discovered hardware tree the hardware-tree syscalls
@@ -199,6 +211,25 @@ pub trait HwTreeSource: HwNodeLiveness {
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`].
     fn node(&self, node_id: u32) -> Result<Option<HwNode>, Errno>;
 
+    /// The status the published health of live node `node_id`'s fault-domain
+    /// ancestors imposes on it, folded where the tree is held so the caller
+    /// copies none of it.
+    ///
+    /// The default walks up through [`Self::node`], bounded by the tree's node
+    /// count; a store holding its nodes in one place folds them under one
+    /// guard instead.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`].
+    fn ancestor_status(&self, node_id: u32) -> Result<BlkStatus, Errno> {
+        let mut count = 0usize;
+        self.for_each_node(&mut |_| count += 1)?;
+        Ok(ancestor_imposed_status_by(node_id, count, |id| {
+            self.node(id).ok().flatten()
+        }))
+    }
+
     /// Visit every live node in id order, so a caller reading the whole tree
     /// takes no snapshot of it. The visitor runs with the store held, so it
     /// must not call back into the tree.
@@ -207,6 +238,21 @@ pub trait HwTreeSource: HwNodeLiveness {
     ///
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`].
     fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno>;
+
+    /// Mark the live node `node_id` settled — its driver has published every
+    /// child its device presented when it came up — and wake every parked
+    /// `hw_tree_wait` caller when that changes.
+    ///
+    /// This is the store side of the `hw_node_settle` syscall, whose handler
+    /// has already resolved `node_id` to the caller's own matched node. A
+    /// child published from here on is marked as arriving on a running
+    /// machine ([`HwNode::is_hot_arrival`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`];
+    /// [`Errno::NotFound`] if no live non-root node has id `node_id`.
+    fn settle(&self, node_id: u32) -> Result<(), Errno>;
 }
 
 /// The CPU-side range each DMA window in `tree` reaches, once each: the
@@ -280,6 +326,10 @@ impl HwTreeSource for NullHwTreeSource {
     fn for_each_node(&self, _visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn settle(&self, _node_id: u32) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// The shared [`NullHwTreeSource`] instance the syscall handler defaults to
@@ -327,6 +377,9 @@ mod tests {
         fn for_each_node(&self, visit: &mut dyn FnMut(&HwNode)) -> Result<(), Errno> {
             self.0.iter().for_each(visit);
             Ok(())
+        }
+        fn settle(&self, _: u32) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
         }
     }
 

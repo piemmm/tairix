@@ -53,12 +53,24 @@ pub mod name;
 pub mod plan;
 
 use tairix_abi::raid_ipc::RAID_ARRAY_COMPATIBLE;
-use tairix_abi::{DriverBindKey, HwMatchKey};
+use tairix_abi::{CapabilityId, DriverBindKey, HwMatchKey};
 
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match on the block-service node ranks like the other exact-compatible
 /// drivers.
 const BIND_PRIORITY: u16 = 10;
+
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the data window and block endpoint its block driver forwarded, the kernel
+/// attach of each volume, publishing an array member's node, and its
+/// diagnostics. No MMIO, DMA or interrupt authority.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::SHM,
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::FS_MOUNT,
+    CapabilityId::HW_EMIT,
+    CapabilityId::LOG_EMIT,
+];
 
 /// This driver's hardware bind table: every block-service storage node
 /// whose volumes this policy driver owns — the per-LUN node the USB

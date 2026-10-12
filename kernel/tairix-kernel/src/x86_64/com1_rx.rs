@@ -226,6 +226,12 @@ impl ConsoleRead for Com1ConsoleRead {
         rearm_com1_rx_if_masked();
         Ok(read)
     }
+
+    fn input_ready(&self) -> bool {
+        // The queue the interrupt fills, or a byte still in the FIFO this
+        // reader's own drain would take.
+        COM1_INPUT.input_ready() || serial::console_rx_pending()
+    }
 }
 
 /// The single `'static` [`Com1ConsoleRead`] the console list installs as

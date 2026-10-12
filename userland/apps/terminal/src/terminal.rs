@@ -109,6 +109,12 @@ impl<S: ShellSource> Terminal<S> {
         self.parser.feed(&mut self.grid, bytes);
     }
 
+    /// Whether the shell rang the bell since this was last asked: one sound
+    /// however many times it rang.
+    pub fn take_bell(&mut self) -> bool {
+        self.parser.take_bell()
+    }
+
     /// Blank the screen and return the cursor home, leaving the shell
     /// untouched.
     ///

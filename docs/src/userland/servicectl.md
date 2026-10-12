@@ -97,15 +97,28 @@ service the administrator has not spoken about; re-enabling something empties
 its entry rather than pinning the old default.
 
 PID 1 boots on the vendor layer alone and adopts the administrator's the moment
-that document becomes readable — on a bounded doubling one-shot ladder, since
-nothing announces the unlock — stopping anything it disables and recording
+the writable root is mounted, however late the unlock — the `Mounts` notice
+says when — stopping anything it disables and recording
 `SERVICE_ENROLMENT_REVOKED`. A disabled service therefore does run for the few
 seconds before the unlock, every boot. Closing that window would need the
 document readable pre-unlock, which the volume layout forbids; deferring the
-whole enrolled tier until the ladder resolves would deny a never-unlocking
-machine — a recovery session — its clock for the ladder's whole length, which is
-worse. Nothing is *granted* by the document being unreadable, so this is a
-narrowing that arrives late, not a fail-open.
+whole enrolled tier until the unlock would deny a never-unlocking machine — a
+recovery session — its clock, which is worse. Nothing is *granted* by the
+document being unreadable, so this is a narrowing that arrives late, not a
+fail-open.
+
+**Nothing is written over a record that has not been read.** Until the
+document is adopted every `enable` and `disable` is refused (`NoData`, "the
+enrolment record has not been read yet") and nothing is written, since a
+change made then would replace the record with one built over nothing. A root
+holding no document is the empty record; a document that is there but will not
+read keeps the refusal standing, is reported on PID 1's `stderr`, and is read
+again on the next change to the mounts.
+
+**The boot floor is outside the enrolment.** `enable` and `disable` reach only
+the enrolled tier; naming a boot-floor service is refused ("it is part of the
+boot floor, which no enrolment changes"), and the administrator's record never
+stops one.
 
 **The decision reaches the disk before anything else changes.** PID 1 writes
 the override document first, and only then starts or stops the service and
@@ -122,17 +135,18 @@ mean either a second dispatch loop or polling between the two — the
 cooperative dispatch the charter forbids.
 
 Instead the single loop parks on a **wait-set** carrying both control
-endpoints, any-child readiness, and a timeout folded from the engine's own
-soonest armed deadline (`Init::next_deadline`) and the bounded one-shot ladder
-it waits for the override document on. One park, four wake reasons:
+endpoints, any-child readiness, the `Mounts` notice, and a timeout from the
+engine's own soonest armed deadline (`Init::next_deadline`). Its main wake
+reasons:
 
 - a child exited → reap it, and either relaunch its console's session or hand
   it to the engine;
 - the control endpoint is ready → decode one request, drive the engine, reply;
 - the enrolment endpoint is ready → the same, for the durable half, persisting
   the record before it answers;
-- the park lapsed → try the override document if its rung is due, then run
-  every deadline that is now due (`Init::expire_due`).
+- the mounts changed → adopt the override document once the writable root
+  answers;
+- the park lapsed → run every deadline that is now due (`Init::expire_due`).
 
 So a control request is answered while the login session sits blocked on its
 console, rather than waiting for some unrelated process to exit, and an idle

@@ -11,8 +11,10 @@ play — reproduzir ficheiros de som
 Reproduz cada ficheiro à vez numa saída. Cada ficheiro é descodificado num
 processo isolado sem qualquer autoridade, pelo que um ficheiro hostil pode, no
 máximo, terminar a sua própria descodificação: é deixado de fora com o motivo
-indicado e o resto da lista é reproduzido. São lidos ficheiros AU, WAV e FLAC, este
-último nativo ou em Ogg.
+indicado e o resto da lista é reproduzido. São lidos ficheiros AU, WAV, FLAC,
+Vorbis, Opus e áudio MPEG (MP1, MP2 e MP3), FLAC nativo ou em Ogg, e Vorbis e
+Opus em Ogg; os fluxos
+encadeados de um ficheiro Ogg são reproduzidos um após o outro.
 
 Ficheiros consecutivos com a mesma frequência, o mesmo formato de amostra e a
 mesma disposição de canais tocam sem intervalo, num só fluxo. Um ficheiro de

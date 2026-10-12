@@ -87,6 +87,19 @@ A stop may be scheduled before the stream starts: a start keeps a stop that
 lies ahead of it, so a client can name a segment's end before the device
 moves.
 
+## A changing connector
+
+On binding a device `audiod` names a device-wide notify port with `Watch`, so
+a jack change reaches it whether or not a stream plays there, and on each one
+it reads that endpoint's facts again. Its streams play on while the new facts
+still admit the configuration they run under — the format, the channel layout
+and the rate — mixed onto the grid of the resolution the new sink states.
+Otherwise the endpoint is lost to them alone: each holds its
+position as `DeviceLost`, the endpoint's region is released for the next
+stream to configure afresh, and the loss is recorded (`ENDPOINT_CHANGED`).
+Facts that cannot be read, or that turn the endpoint's direction around, lose
+the device.
+
 ## Following the seat
 
 A seat's speakers and microphones serve the room its display lease describes.
@@ -100,6 +113,10 @@ the services owning the seat's devices — and on every edge recomputes the room
 | held by a presenter in a login session no stream is in (the login screen) | `Session` | nobody's |
 | being handed between presenters | `Withheld` | nobody's |
 | with its text console, or never held | `Unclaimed` | anybody's — the headless case |
+
+Whatever the room, a sound the machine plays for a transition of its own
+(`route::Principal::Machine`) moves: it carries no session's data, which is
+all a room withholds.
 
 Before the room changes, every clocking source hands what it has captured to
 the streams the old room admitted. Then a stream outside the room is **held at
@@ -163,6 +180,13 @@ first announcement always reaches its subscribers.
   would hold is not a boundary.
 * **Capture demands `CAP_AUDIO_CAPTURE`**, read from the caller's attested
   capability summary at stream open and never from anything the caller said.
+* **Playing for the machine or another session is the cue authority's
+  alone.** A stream's tenancy (`audio-v1`) other than the caller's own is
+  admitted only from `soundd`'s attested service account, and only for a
+  notification it plays; anyone else is refused and recorded
+  (`TENANCY_REFUSED`). The machine's own sound plays whoever holds the room;
+  another session's only while that session holds it, so `audiod` is the one
+  check and `soundd`, which cannot see the seat, does not try.
 * **Adopting or retiring a driver's channel, and delivering the baseline,
   demand `CAP_DRV_LOAD`.** The authority to put a driver on the machine is
   exactly the authority to tell the mixer about one, so no third capability

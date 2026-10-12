@@ -17,6 +17,7 @@ fn open_params() -> OpenParams {
         channel_map: ChannelMap::STEREO,
         role: StreamRole::Media,
         latency_target_frames: 960,
+        tenancy: Tenancy::Caller,
     }
 }
 
@@ -295,9 +296,9 @@ fn open_fails_closed_on_every_malformed_field() {
     let body = HEADER_LEN;
 
     for dirty in [
-        body + open::RESERVED0,
-        body + open::RESERVED1,
-        body + open::RESERVED1 + 2,
+        body + open::RESERVED,
+        body + open::RESERVED + 1,
+        body + open::RESERVED + 2,
     ] {
         let mut corrupt = frame;
         corrupt[dirty] = 1;
@@ -308,7 +309,12 @@ fn open_fails_closed_on_every_malformed_field() {
         );
     }
 
-    for (offset, value) in [(open::DIRECTION, 9u8), (open::FORMAT, 99), (open::ROLE, 42)] {
+    for (offset, value) in [
+        (open::DIRECTION, 9u8),
+        (open::FORMAT, 99),
+        (open::ROLE, 42),
+        (open::TENANCY, 3),
+    ] {
         let mut corrupt = frame;
         corrupt[body + offset] = value;
         assert_eq!(
@@ -340,6 +346,39 @@ fn open_fails_closed_on_every_malformed_field() {
     assert_eq!(
         AudioRequest::decode(&no_channels[..len]),
         Err(Errno::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn every_tenancy_round_trips_and_a_session_field_beside_none_is_refused() {
+    let session = ProcId::from_raw([0x5E; PROC_ID_LEN]);
+    for tenancy in [Tenancy::Caller, Tenancy::Machine, Tenancy::Session(session)] {
+        let request = AudioRequest::Open(OpenParams {
+            tenancy,
+            ..open_params()
+        });
+        let (frame, len) = encoded(request);
+        assert_eq!(AudioRequest::decode(&frame[..len]), Ok(request));
+    }
+    let body = HEADER_LEN;
+    for kind in [tenancy::CALLER, tenancy::MACHINE] {
+        let (mut frame, len) = encoded(AudioRequest::Open(open_params()));
+        frame[body + open::TENANCY] = kind;
+        frame[body + open::LEN - 1] = 1;
+        assert_eq!(
+            AudioRequest::decode(&frame[..len]),
+            Err(Errno::BadMagic),
+            "a session beside tenancy {kind} is a dirty field"
+        );
+    }
+    let (frame, len) = encoded(AudioRequest::Open(OpenParams {
+        tenancy: Tenancy::Session(ProcId::KERNEL),
+        ..open_params()
+    }));
+    assert_eq!(
+        AudioRequest::decode(&frame[..len]),
+        Err(Errno::OutOfRange),
+        "no login session is the zero identity"
     );
 }
 

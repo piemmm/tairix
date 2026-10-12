@@ -93,6 +93,10 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"
 # capability-empty worker this binary re-enters itself as, never in the
 # process that holds this service's authority.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+# The cue client the machine's end sound is asked for with before the power
+# goes, posted from the one wait-set so a slow sound authority only bounds
+# the wait.
+tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0", default-features = false, features = ["rt"] }
 
 # The screen's and the panel's tests draw and hit-test for real — a wheel
 # event resolved against real window geometry, theme metrics, and font

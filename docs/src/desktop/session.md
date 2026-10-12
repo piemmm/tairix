@@ -648,6 +648,14 @@ notices are dropped by its pid. The area holds at most
 source, so no program can grow the session without limit or crowd every other
 source out; a raise past either is refused `LimitExceeded`.
 
+A notice newly shown makes its severity's sound
+(`tairix_taskbar::arrival_sound`, through [`soundd`](../userland/soundd.md)):
+`Notification` for information and success, `Warning`, and `Error` for a
+critical one. A notice that replaces one already shown, one raised again
+unchanged, a refused raise and a clear are all silent. The cue is posted and
+its answer collected on the serve loop's own wait-set, so the producer is
+answered without waiting for the sound.
+
 The session remembers which sources have notified since it started, at most
 `NOTIFY_SOURCES_MAX` of them, and answers them through `QueryNotifySources` to
 its own Settings application alone: which programs a user runs is theirs to
@@ -676,6 +684,38 @@ it settles; one changed elsewhere is remembered when the change is seen,
 through the latest-wins publisher. An application's apply may not name the
 `audio.*` keys (`merge_applied`): what the user set is the session's own
 reading of the service, never a program's to plant.
+
+**The session keeps its user's sound choices** — whether the desktop makes
+sounds, the theme, each event's switch, level and file — in its own *private*
+app-data scope (`tairix_soundtheme::UserChoices`), which no other program reads: a file
+is stored there by its path, and a path the user chose is theirs. Only what the
+user set is kept, so the machine's sound document decides the rest. A store
+that cannot be read leaves the machine's choices in force and is read again on
+a growing one-shot deadline; no change is made over choices it was not read
+for. The choices are handed to the cue authority while this session holds the
+seat (`effects::Effects`), at bring-up, on taking the seat back after a switch,
+whenever they change, and whenever a new authority announces itself through the
+`CueAuthority` notice. Each chosen file is opened as the user, checked to be a
+regular file within `MAX_SOUND_BYTES`, delegated read-only to the authority's
+instance and closed on the session's sound-choices worker; the delegation names
+the path, so a push the authority never took leaves nothing to leak when it is
+made again. A file that cannot be handed over is stated and its theme's sound
+plays meanwhile. The push itself is posted from the serve loop with a deadline
+(`POLICY_ANSWER_DEADLINE_NS`) and collected with the session's cues on the one
+wake their answers share, so nothing waits on the authority. A push the
+authority had no room for, or did not answer in time, is tried again on a
+growing one-shot deadline, from a quarter of a second up to eight; any other
+refusal waits for the next change. An answer to a push made before the
+authority last forgot this session's choices — a new instance, the seat lost
+and taken again — is not taken for one made since, and a retry stands only
+while a push is owed, so no deadline outlives its work.
+
+The Settings application's Sound Effects pane reads and changes the choices
+through the [pinboard rendezvous](./pinboard.md)'s sound requests. A file is
+chosen in the session's own trusted picker, for the session itself
+(`picker::Requester::Sound`): the picker concludes the pick on its own and the
+session records the path, so the path never reaches the pane or the cue
+authority, and the pane's call is answered once the picker closes.
 
 ## Resolving taskbar responses
 
@@ -1389,15 +1429,18 @@ off-CPU timed park), step, repeat — bounded by the fade's own span. A
 refused present stops the dim where it got to; the seat is handed on
 cleared regardless, so the screen still ends black.
 
-`SeatPresentation` fixes where the two fades sit in a user switch. Going
-out: `fade_out`, then `suspend`, then `release_seat` — the dim runs only
-after the authority *accepted* the step-aside (a refusal must leave the
-screen exactly as the user left it) and while the seat and frame ring are
+`SeatDeparture` and `SeatReturn` fix where the two fades sit in a user
+switch. Going out: `fade_out`, then `suspend`, then `release_seat` — the dim
+runs only after the authority *accepted* the step-aside (a refusal must leave
+the screen exactly as the user left it) and while the seat and frame ring are
 still up, so nothing is cut off mid-frame. Coming back: `acquire_seat`,
-`query_mode`, `reconfigure`, `fade_in`, `repaint_all` — the arrival is begun
-before the repaint, so the frame it presents is the first of the fade and a
-resumed session appears out of black exactly as a fresh one does instead of
-returning to a black screen or snapping on.
+`query_output`, `reconfigure`, `publish_desktop`, `fade_in`, `repaint_all` —
+the arrival is begun before the repaint, so the frame it presents is the
+first of the fade and a resumed session appears out of black exactly as a
+fresh one does instead of returning to a black screen or snapping on. With no
+output connected, or one that moves before frames reach it, the session comes
+back foreground and dormant, its desktop record published, and follows the
+next announcement of the output.
 
 ### The one-shot visible witness
 
@@ -1739,6 +1782,11 @@ load-bearing:
   composite — beneath only the screensaver, when one is up — so an
   application that opens or raises a window behind the lock cannot surface
   over it.
+- **It covers the screen drawn now.** The screen can change size under a
+  locked session — a resume onto another account's mode, an output arriving
+  or leaving — so `keep_topmost` first redraws the lock over a screen that is
+  not the one it covers. While a lock is `uncovered` (it could not be
+  redrawn) the session presents nothing at all.
 
 The lock holds no authority to authenticate anybody. It offers the typed
 password to the per-console **elevation broker** — the login supervisor that

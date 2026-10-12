@@ -23,6 +23,7 @@ use tairix_controls::DisclosureSet;
 use tairix_icon::IconKind;
 
 use crate::accounts::ACCOUNT_FACTS;
+use crate::effects::EFFECTS_FACTS;
 use crate::facts::{ABOUT_FACTS, CLOCK_FACTS};
 use crate::form::{Action, Composition, Setting};
 use crate::machine::MachineSetting;
@@ -128,6 +129,8 @@ pub enum Pane {
     Bluetooth,
     /// Output and input levels and devices.
     Sound,
+    /// The desktop's own sounds: their theme, and each event's.
+    SoundEffects,
     /// Which sources may notify, and how loudly.
     Notifications,
     /// Key layout, repeat and shortcuts.
@@ -820,14 +823,24 @@ pub const CATEGORIES: &[CategoryRow] = &[
         label: "Sound",
         icon: IconKind::Sound,
         group: Group::Attention,
-        panes: &[PaneRow {
-            pane: Pane::Sound,
-            name: "sound",
-            title: "Sound",
-            icon: None,
-            backing: PaneBacking::Composed(PaneContent::Form(Composition::Sound)),
-            settings: &SOUND_FACTS,
-        }],
+        panes: &[
+            PaneRow {
+                pane: Pane::Sound,
+                name: "sound",
+                title: "Output & Input",
+                icon: Some(IconKind::SoundDevices),
+                backing: PaneBacking::Composed(PaneContent::Form(Composition::Sound)),
+                settings: &SOUND_FACTS,
+            },
+            PaneRow {
+                pane: Pane::SoundEffects,
+                name: "sound-effects",
+                title: "Sound Effects",
+                icon: Some(IconKind::SoundEffects),
+                backing: PaneBacking::Composed(PaneContent::Form(Composition::SoundEffects)),
+                settings: &EFFECTS_FACTS,
+            },
+        ],
     },
     CategoryRow {
         category: Category::Networking,

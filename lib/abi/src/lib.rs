@@ -41,7 +41,6 @@ pub(crate) mod hex;
 pub mod home;
 pub mod hwlink;
 pub mod hwtree;
-pub mod i2c_ipc;
 pub mod input;
 pub mod ipc;
 pub mod latency;
@@ -71,6 +70,7 @@ pub mod seat;
 pub mod service;
 pub mod service_control;
 pub mod session_ipc;
+pub mod sound_cue;
 pub mod stdinfo;
 pub mod switchboard_ipc;
 pub mod syscall;
@@ -135,10 +135,11 @@ pub use fs::{
 };
 pub use hwtree::{
     snapshot_nodes, DmaCoherence, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty,
-    HwRemoveFlags, HwResource, HwResourceKind, HwTreeHeader, HwTreeNodes, IommuGroup,
+    HwRemoveFlags, HwResource, HwResourceKind, HwSelfNode, HwTreeHeader, HwTreeNodes, IommuGroup,
     IommuReservedWindow, IommuStreams, MsiAllocation, ReservedAccess, HWTREE_VERSION_V1,
     HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
     HW_NODE_ROOT, HW_NODE_ROOT_ID, HW_VIRTUAL_BUS_COMPATIBLE, SIMPLE_FRAMEBUFFER_COMPATIBLE,
+    WINDOW_NAME_MAX,
 };
 pub use input::{
     KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,
@@ -221,8 +222,8 @@ pub use stdinfo::{
     STDINFO_VERSION_V1,
 };
 pub use syscall::{
-    IrqHandle, SyscallNumber, WaitFlags, FD_GRANT_PENDING_MAX, GRANT_EXTENT_INHERIT,
-    RESOURCE_REF_MAX, SYSCALL_TABLE_HASH_LEN, WAIT_PID_ANY,
+    IrqHandle, SyscallNumber, WaitFlags, CALL_DEADLINE_NONE, FD_GRANT_PENDING_MAX,
+    GRANT_EXTENT_INHERIT, RESOURCE_REF_MAX, SYSCALL_TABLE_HASH_LEN, WAIT_PID_ANY,
 };
 pub use syscalls::{
     encoded_table, i32_from_register, i32_register_is_canonical, i64_from_register, spec_for,

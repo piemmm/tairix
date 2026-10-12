@@ -278,7 +278,6 @@ external = "1"
         let reach =
             reach(&ctx.workspace_root, super::super::KERNEL_PACKAGE, &features).expect("reach");
         for (package, feature) in [
-            ("tairix-kernel", "storage-trace"),
             ("tairix-kernel-core", "watchdog-diagnostics"),
             ("tairix-sync", "lock-diagnostics"),
             ("tairix-kalloc", "lock-diagnostics"),

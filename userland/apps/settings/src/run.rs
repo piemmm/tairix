@@ -52,6 +52,11 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::net_ipc::{NetServerAddr, MAX_RESOLVER_SERVERS};
     use tairix_abi::pinboard_ipc::PinboardDocument;
+    use tairix_abi::pinboard_ipc::{
+        decode_sound_reading, decode_sound_themes, PinboardRequest, PINBOARD_ENDPOINT,
+        PINBOARD_MAX_REPLY, PINBOARD_MAX_REQUEST,
+    };
+    use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
     use tairix_abi::window_ipc::{PreviewOutcome, PreviewSubject, WindowEvent};
@@ -76,6 +81,7 @@ mod program {
         RunMode, Shell, ShellOutcome, VolumeReading, MOST_OUTSTANDING, WINDOW_GROUND, WIN_HEIGHT,
         WIN_WIDTH,
     };
+    use tairix_settings::{EffectsAsk, EffectsAsks, EffectsReading, EffectsTrip};
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_users::{Salt, SALT_LEN};
@@ -148,6 +154,10 @@ mod program {
     /// The wait-set token both audio notices are watched under: a device, a
     /// control or a recording moved, whoever moved it.
     const AUDIO_NOTICE_TOKEN: u64 = app::FIRST_APP_TOKEN + 9;
+
+    /// The wait-set token of the sound-choices desk's wake: a round trip to
+    /// the desktop session about the user's sounds has come back.
+    const EFFECTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 10;
 
     /// The desktop settings in effect for the launching user, so every
     /// composed row opens on what the desktop is actually drawn with.
@@ -316,6 +326,86 @@ mod program {
             captures,
             recording: live_captures(),
         })
+    }
+
+    /// One round trip to the desktop session about the user's sound choices.
+    enum EffectsJob {
+        /// Read them, and the themes to choose among.
+        Read,
+        /// Ask for a change, or for a sound's file to be chosen.
+        Ask(EffectsTrip),
+    }
+
+    /// What a sound-choices round trip came to.
+    enum EffectsDone {
+        /// What the session said the choices are, boxed so a queue slot holds
+        /// what every answer costs rather than what the largest does.
+        Read(Result<alloc::boxed::Box<EffectsReading>, Errno>),
+        /// Whether the session made the change.
+        Asked(Result<(), Errno>),
+    }
+
+    /// Every sound-choices round trip, each answered in turn; a pick waits for
+    /// the user, so the queue holds what the reader asks meanwhile.
+    type EffectsDesk = tairix_rt::work::Worker<
+        (),
+        EffectsJob,
+        EffectsDone,
+        tairix_util::defer::JobQueue<EffectsJob, EffectsDone>,
+    >;
+
+    /// Sound-choices round trips one window holds at once: a pick waiting on
+    /// the user, and the changes and reads asked meanwhile. A containment
+    /// bound, not a capacity: one past it is refused and said.
+    const EFFECTS_JOBS: usize = 8;
+
+    fn serve_effects((): &mut (), job: &mut EffectsJob) -> EffectsDone {
+        match job {
+            EffectsJob::Read => EffectsDone::Read(read_effects().map(alloc::boxed::Box::new)),
+            EffectsJob::Ask(ask) => EffectsDone::Asked(ask_effects(ask)),
+        }
+    }
+
+    /// One call on the desktop session's pinboard rendezvous, answering the
+    /// reply's length.
+    fn pinboard_call(request: &PinboardRequest, reply: &mut [u8]) -> Result<usize, Errno> {
+        let mut frame = [0u8; PINBOARD_MAX_REQUEST];
+        let len = request.encode(&mut frame)?;
+        tairix_rt::ipc_call(PINBOARD_ENDPOINT, &frame[..len], reply).map_err(Errno::from_syscall)
+    }
+
+    /// The user's sound choices as the session says they are in effect, and
+    /// every theme it names, page by page.
+    fn read_effects() -> Result<EffectsReading, Errno> {
+        let mut reply = [0u8; PINBOARD_MAX_REPLY];
+        let len = pinboard_call(&PinboardRequest::SoundRead, &mut reply)?;
+        let reading = decode_sound_reading(reply.get(..len).ok_or(Errno::LengthOutOfRange)?)?;
+        let mut themes = Vec::new();
+        let mut page = [0u8; PINBOARD_MAX_REPLY];
+        loop {
+            let from = u16::try_from(themes.len()).map_err(|_| Errno::LengthOutOfRange)?;
+            let len = pinboard_call(&PinboardRequest::SoundThemes { from }, &mut page)?;
+            let named = decode_sound_themes(page.get(..len).ok_or(Errno::LengthOutOfRange)?)?;
+            themes.extend(named.names().map(alloc::string::String::from));
+            if named.is_last() {
+                break;
+            }
+        }
+        EffectsReading::of(&reading, themes)
+    }
+
+    /// Ask the session for `trip`, answering whether it was made.
+    fn ask_effects(trip: &EffectsTrip) -> Result<(), Errno> {
+        let request = match trip {
+            EffectsTrip::Apply(text) => PinboardRequest::SoundApply {
+                document: PinboardDocument::new(text)?,
+            },
+            EffectsTrip::Pick(event) => PinboardRequest::SoundPick { event: *event },
+            EffectsTrip::UseTheme(event) => PinboardRequest::SoundUseTheme { event: *event },
+        };
+        let mut reply = [0u8; STATUS_REPLY_LEN];
+        let len = pinboard_call(&request, &mut reply)?;
+        decode_status_reply(reply.get(..len).ok_or(Errno::LengthOutOfRange)?)
     }
 
     /// The network readings' body.
@@ -1320,6 +1410,8 @@ mod program {
             /// What to change.
             control: DeviceControl,
         },
+        /// The reader changed a sound choice: ask the desktop session.
+        Effects(EffectsAsk),
         /// A picture a pane asked for is in the shared region, or was refused.
         Rendered {
             /// What was asked for.
@@ -1360,6 +1452,7 @@ mod program {
             ShellOutcome::Sound {
                 device_id, control, ..
             } => Acted::Sound { device_id, control },
+            ShellOutcome::Effects(ask) => Acted::Effects(ask),
         };
         match event {
             WindowEvent::CloseRequested { .. } => Acted::Quit,
@@ -1660,6 +1753,8 @@ mod program {
         desktop: DesktopDesk<'a>,
         /// The audio service's controls and readings the Sound pane needs.
         sound: SoundRead<'a>,
+        /// The session's round trips the Sound Effects pane needs.
+        effects: EffectsRead<'a>,
     }
 
     impl<'a> Desks<'a> {
@@ -1695,7 +1790,112 @@ mod program {
                     asked: false,
                     moved: &workers.sound_moved,
                 },
+                effects: EffectsRead {
+                    worker: &workers.effects,
+                    asked: false,
+                    asks: EffectsAsks::new(),
+                },
             }
+        }
+    }
+
+    /// The sound-choices desk's client half: one ask at a time, the newest
+    /// value of each setting carried together meanwhile.
+    struct EffectsRead<'a> {
+        worker: &'a EffectsDesk,
+        /// A reading the pane wants has been asked for.
+        asked: bool,
+        asks: EffectsAsks,
+    }
+
+    impl EffectsRead<'_> {
+        /// Ask for a fresh reading if the pane wants one, answering whether
+        /// anything on screen changed.
+        fn request(&mut self, shell: &mut Shell) -> bool {
+            if !shell.effects_wanted() || self.asked {
+                return false;
+            }
+            self.asked = true;
+            self.submit(shell, EffectsJob::Read)
+        }
+
+        /// Ask the session for `ask`, answering whether anything on screen
+        /// changed at once.
+        fn ask(&mut self, shell: &mut Shell, ask: EffectsAsk) -> bool {
+            self.asks.ask(ask);
+            self.start(shell)
+        }
+
+        /// Start the ask waiting, if none is in flight.
+        fn start(&mut self, shell: &mut Shell) -> bool {
+            match self.asks.next_trip() {
+                Some(trip) => self.submit(shell, EffectsJob::Ask(trip)),
+                None => false,
+            }
+        }
+
+        fn submit(&mut self, shell: &mut Shell, job: EffectsJob) -> bool {
+            match self.worker.submit(job) {
+                Ok(true) => self.settle(shell),
+                Ok(false) => false,
+                Err(job) => {
+                    app::report(
+                        APP_NAME,
+                        "too many sound requests are waiting on the desktop; this one is dropped",
+                    );
+                    match job {
+                        EffectsJob::Read => self.asked = false,
+                        EffectsJob::Ask(_) => self.asks.landed(),
+                    }
+                    false
+                }
+            }
+        }
+
+        /// Adopt every landed answer, reading the choices again after a change
+        /// so the pane shows what the session holds; answering whether any
+        /// landed.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let mut landed = false;
+            let mut changed = false;
+            let Self {
+                worker,
+                asked,
+                asks,
+            } = self;
+            worker.collect_landed(|done| {
+                landed = true;
+                match done {
+                    EffectsDone::Read(reading) => {
+                        *asked = false;
+                        if let Err(err) = &reading {
+                            app::report(
+                                APP_NAME,
+                                format_args!(
+                                    "the desktop would not say what its sounds are ({err})"
+                                ),
+                            );
+                        }
+                        shell.adopt_effects(reading.ok().map(|reading| *reading));
+                    }
+                    EffectsDone::Asked(result) => {
+                        if let Err(err) = result {
+                            app::report(
+                                APP_NAME,
+                                format_args!("the desktop would not change its sounds ({err})"),
+                            );
+                        }
+                        asks.landed();
+                        changed = true;
+                    }
+                }
+            });
+            if changed {
+                shell.effects_moved();
+                landed |= self.request(shell);
+                landed |= self.start(shell);
+            }
+            landed
         }
     }
 
@@ -1785,6 +1985,7 @@ mod program {
         }
         landed |= desks.desktop.settle(shell);
         landed |= desks.sound.settle(shell);
+        landed |= desks.effects.settle(shell);
         if !landed {
             return true;
         }
@@ -1892,6 +2093,7 @@ mod program {
             Acted::Sound { device_id, control } => {
                 Carried::answered_if(desks.sound.ask(shell, *device_id, *control))
             }
+            Acted::Effects(ask) => Carried::answered_if(desks.effects.ask(shell, ask.clone())),
             Acted::LockScreen => {
                 // Submitted, not awaited: the desktop puts its own lock up
                 // from its own loop, and its answer arrives on the wake the
@@ -1954,6 +2156,7 @@ mod program {
             desks.accounts.request(shell),
             desks.desktop.request_sources(shell),
             desks.sound.request(shell),
+            desks.effects.request(shell),
         ];
         landed.contains(&true)
     }
@@ -2169,6 +2372,7 @@ mod program {
         sound: Arc<SoundDesk>,
         /// Set when the audio service announces a change, for the sound desk.
         sound_moved: Cell<bool>,
+        effects: Arc<EffectsDesk>,
     }
 
     impl Workers {
@@ -2203,6 +2407,18 @@ mod program {
                     APP_NAME,
                     app::EXIT_NO_EVENTS,
                     "no room for the desktop's requests",
+                ));
+            };
+            let Ok(effects) = EffectsDesk::queued(
+                serve_effects,
+                (),
+                tairix_rt::sync::WorkerWake::create(),
+                EFFECTS_JOBS,
+            ) else {
+                return Err(app::fail(
+                    APP_NAME,
+                    app::EXIT_NO_EVENTS,
+                    "no room for the desktop's sound requests",
                 ));
             };
             Ok(Self {
@@ -2241,12 +2457,13 @@ mod program {
                     "sound",
                 ),
                 sound_moved: Cell::new(false),
+                effects: started(effects, "sound-choices"),
             })
         }
 
         /// Each desk's wake, the token it is watched under, and how a refused
         /// watch is stated.
-        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 9] {
+        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 10] {
             [
                 (self.applier.wake(), APPLY_TOKEN, "apply wake refused"),
                 (self.mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
@@ -2277,6 +2494,11 @@ mod program {
                     "desktop-request wake refused",
                 ),
                 (self.sound.wake(), SOUND_TOKEN, "sound wake refused"),
+                (
+                    self.effects.wake(),
+                    EFFECTS_TOKEN,
+                    "sound-choices wake refused",
+                ),
             ]
         }
 

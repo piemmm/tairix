@@ -21,6 +21,7 @@ use tairix_abi::driver::audio_ring::PcmRing;
 use tairix_abi::driver::dma::{DmaHost, DmaSlab};
 use tairix_abi::time::{MonotonicClock, Time64};
 use tairix_abi::{Delay, DriverError};
+use tairix_edid::{Connection, Eld, ELD_MAX_LEN};
 
 use crate::codec::{Function, Verbs, Widget};
 use crate::controller::{Controller, Flow, StreamSetup, Wait, DMA_ALIGN};
@@ -66,10 +67,6 @@ const DIGITAL_ENABLE: u8 = 1;
 
 /// `GET_DIP_SIZE`'s request for the ELD buffer's size.
 const ELD_SIZE: u8 = 0x08;
-
-/// Bytes of an ELD read: the header, the baseline block's fixed part, and
-/// the longest monitor name.
-const ELD_READ: u8 = 36;
 
 /// `SET_DIP_TRANSMIT`: send the infoframe best effort, always.
 const DIP_ALWAYS: u8 = 0xC0;
@@ -523,17 +520,21 @@ impl<'h, R: Registers, W: Wait, D: Delay> Hda<'h, R, W, D> {
         function: usize,
         pin: &Widget,
     ) -> Result<Option<AudioName>, DriverError> {
-        let size = self.send(function, Verb::short(pin.nid, GET_DIP_SIZE, ELD_SIZE))? & 0xFF;
-        let length = u8::try_from(size).unwrap_or(0).min(ELD_READ);
-        let mut eld = [0u8; ELD_READ as usize];
-        for at in 0..length {
+        let size = self.send(function, Verb::short(pin.nid, GET_DIP_SIZE, ELD_SIZE))?;
+        let length = usize::try_from(size)
+            .unwrap_or(ELD_MAX_LEN)
+            .min(ELD_MAX_LEN);
+        let mut eld = [0u8; ELD_MAX_LEN];
+        for (at, byte) in (0..=u8::MAX).zip(&mut eld[..length]) {
             let answer = self.send(function, Verb::short(pin.nid, GET_ELD_DATA, at))?;
             if answer & (1 << 31) == 0 {
                 return Ok(None);
             }
-            eld[usize::from(at)] = (answer & 0xFF) as u8;
+            *byte = answer.to_le_bytes()[0];
         }
-        Ok(monitor(&eld[..usize::from(length)], pin.pin.display_port()))
+        Ok(Eld::parse(&eld[..length])
+            .ok()
+            .and_then(|eld| monitor(&eld)))
     }
 
     fn endpoint(&self, endpoint: u16) -> Result<&Endpoint, DriverError> {
@@ -868,6 +869,7 @@ impl<R: Registers, W: Wait, D: Delay> Audio for Hda<'_, R, W, D> {
             },
             jack: found.jack,
             formats: found.formats(),
+            resolution: found.pcm.resolution(),
             channel_map: found.channel_map,
             rates: RateSupport::Discrete(found.pcm.rates()?),
             min_period_frames: PERIOD_STEP,
@@ -1220,17 +1222,16 @@ fn watched(pin: &Widget) -> bool {
         && !pin.config.fixed()
 }
 
-/// The monitor an ELD names, as the endpoint's name.
-fn monitor(eld: &[u8], display_port: bool) -> Option<AudioName> {
-    let length = usize::from(*eld.get(4)? & 0x1F);
-    let name = core::str::from_utf8(eld.get(20..20 + length)?).ok()?.trim();
-    if name.is_empty() {
-        return None;
-    }
-    let connector = if display_port { "DisplayPort" } else { "HDMI" };
+/// The monitor an ELD names, as the endpoint's name, by the link it states.
+fn monitor(eld: &Eld) -> Option<AudioName> {
+    let name = eld.name.as_ref()?;
+    let connector = match eld.connection {
+        Connection::Hdmi => "HDMI",
+        Connection::DisplayPort => "DisplayPort",
+    };
     let mut text = alloc::string::String::from(connector);
     text.push_str(": ");
-    text.push_str(name);
+    text.push_str(name.as_str());
     AudioName::new(&text).ok()
 }
 

@@ -2,10 +2,11 @@
 
 use tairix_abi::driver::dmaengine::{
     decode_done_reply, decode_open_reply, decode_position_reply, decode_prepare_reply,
-    decode_wait_reply, CyclicParams, DmaBufferGrant, DmaEngineRequest, WaitReport,
-    DMA_ENGINE_MAX_REPLY, DMA_ENGINE_MAX_REQUEST,
+    decode_wait_reply, CyclicParams, DmaEngineRequest, WaitReport, DMA_ENGINE_MAX_REPLY,
+    DMA_ENGINE_MAX_REQUEST,
 };
 use tairix_abi::hwlink::LinkRequest;
+use tairix_abi::hwlink::RegionGrant;
 use tairix_abi::Errno;
 
 use crate::LinkCall;
@@ -61,7 +62,7 @@ impl<C: LinkCall> DmaClient<C> {
     /// # Errors
     ///
     /// The controller's or the transport's refusal.
-    pub fn prepare(&mut self, params: &CyclicParams) -> Result<DmaBufferGrant, Errno> {
+    pub fn prepare(&mut self, params: &CyclicParams) -> Result<RegionGrant, Errno> {
         let request = DmaEngineRequest::Prepare {
             channel: self.channel,
             params: *params,

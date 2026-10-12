@@ -34,6 +34,9 @@ impl FrameCodec for Marker {
     fn format(&self) -> SampleFormat {
         SampleFormat::S32
     }
+    fn channels(&self) -> u8 {
+        2
+    }
     fn encode(&mut self, frame: &mut [u8]) {
         for word in frame.as_chunks_mut::<4>().0 {
             *word = i32::from_le_bytes(*word).wrapping_add(1).to_le_bytes();
@@ -360,12 +363,24 @@ fn a_parking_channel_clocks_until_its_boundary_or_until_halted() {
 }
 
 #[test]
-fn a_frame_is_whole_fifo_words_of_two_channels() {
-    assert_eq!(frame_bytes(SampleFormat::S32), Ok(8));
-    assert_eq!(frame_bytes(SampleFormat::S24In32), Ok(8));
-    assert_eq!(frame_bytes(SampleFormat::S16), Ok(4), "two samples a word");
+fn a_frame_is_whole_fifo_words_of_its_channels() {
+    assert_eq!(frame_bytes(SampleFormat::S32, 2), Ok(8));
+    assert_eq!(frame_bytes(SampleFormat::S24In32, 8), Ok(32));
+    assert_eq!(
+        frame_bytes(SampleFormat::S16, 2),
+        Ok(4),
+        "two samples a word"
+    );
+    assert_eq!(
+        frame_bytes(SampleFormat::S16, 3),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        frame_bytes(SampleFormat::S32, 0),
+        Err(DriverError::Unsupported)
+    );
     for format in [SampleFormat::U8, SampleFormat::S24] {
-        assert_eq!(frame_bytes(format), Err(DriverError::Unsupported));
+        assert_eq!(frame_bytes(format, 2), Err(DriverError::Unsupported));
     }
 }
 
@@ -375,6 +390,9 @@ struct Packed;
 impl FrameCodec for Packed {
     fn format(&self) -> SampleFormat {
         SampleFormat::S16
+    }
+    fn channels(&self) -> u8 {
+        2
     }
     fn encode(&mut self, _frame: &mut [u8]) {}
     fn silence(&mut self, frame: &mut [u8]) {

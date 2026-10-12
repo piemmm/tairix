@@ -189,6 +189,7 @@ pub mod desktop;
 pub mod device;
 pub mod drag;
 pub mod drain;
+pub mod effects;
 pub mod elevate;
 pub mod fade;
 pub mod frames;
@@ -202,6 +203,7 @@ pub mod library;
 pub mod lock;
 pub mod menu;
 pub mod notify;
+pub mod output;
 pub mod pace;
 pub mod picker;
 pub mod pinboard;
@@ -289,8 +291,8 @@ pub use lock::{LockOutcome, LockedDrain, ScreenLock};
 pub use notify::{is_settings_surface, producer_of, NotifySources};
 pub use pace::FramePacer;
 pub use picker::{
-    PickAccess, PickEnd, PickStep, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_SHOWN,
-    PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR, SAVE_TITLE,
+    OwnPick, PickAccess, PickEnd, PickStep, PickerSlot, Requester, SessionPicker, PICKER_ORIGIN,
+    PICKER_SHOWN, PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR, SAVE_TITLE,
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
@@ -303,8 +305,8 @@ pub use saver::{SaverIdentity, SaverSetup, Screensaver, Waking, PREVIEW_STEADY_N
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
-    load_pinboard, publish_pinboard, serve_pinboard_apply, AskedSettings, InputPolicy,
-    LoadedPinboard, PinboardApplied, PinboardApplyRefusal,
+    load_pinboard, publish_pinboard, serve_pinboard, AskedSettings, InputPolicy, LoadedPinboard,
+    PinboardApplied, PinboardCall, PinboardRefusal, SoundCall,
 };
 pub use shell::{
     DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, DESKTOP_RESTYLED,
@@ -317,7 +319,8 @@ pub use switchboard::{
     SwitchboardRefusal, SwitchboardServe, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED,
 };
 pub use switchuser::{
-    ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,
+    ResumeFailure, SeatDeparture, SeatReturn, SessionAuthority, SwitchRefusal, SwitchUser,
+    WakeRefusal,
 };
 pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;

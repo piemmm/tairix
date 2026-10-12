@@ -50,12 +50,12 @@ driver sends, from the driver of the device the tag concerns:
 
 | Tag | Caller is the driver of | Value words |
 |---|---|---|
-| blank screen | the firmware framebuffer (`brcm,bcm2708-fb`) | off or on |
+| notify display done | the display engine (`brcm,bcm2711-hvs`) | none |
 | notify xHCI reset | the VL805 (PCI `1106:3483`, xHCI) | its own address |
 | get RTC register | the PMIC clock (`raspberrypi,rpi-rtc`) | time or backup volts, an empty slot |
 | set RTC register | the PMIC clock | time, any value |
-| get clock / max / min rate | the firmware clocks (`raspberrypi,firmware-clocks`) | ARM, an empty slot |
-| set clock rate | the firmware clocks | ARM, any rate, skip turbo |
+| get clock / max / min rate | the firmware clocks (`raspberrypi,firmware-clocks`) | the ARM, core, HDMI state-machine or HDMI pixel-path clock, an empty slot |
+| set clock rate | the firmware clocks | one of those clocks, any rate, skip turbo |
 
 Each key is defined once in `lib/vcmailbox`, and each driver's bind table is
 built from it, so the device a caller is loaded for is exactly the one its

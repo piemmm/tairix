@@ -1249,6 +1249,7 @@ mod tests {
                 "servicectl",
                 "settings",
                 "sleep",
+                "soundd",
                 "ss",
                 "stat",
                 "stress",
@@ -1309,6 +1310,7 @@ mod tests {
                 "login",
                 "netstack",
                 "seatmgr",
+                "soundd",
                 "switchboard",
                 "sysinfod",
                 "timed"

@@ -86,7 +86,10 @@ mod program {
     use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::notify_ipc::{NotifyRequest, NOTIFY_ENDPOINT, NOTIFY_MAX_REQUEST};
-    use tairix_abi::pinboard_ipc::{PINBOARD_ENDPOINT, PINBOARD_MAX_REQUEST};
+    use tairix_abi::pinboard_ipc::{
+        encode_sound_reading, encode_sound_themes, PINBOARD_ENDPOINT, PINBOARD_MAX_REPLY,
+        PINBOARD_MAX_REQUEST, SOUND_THEMES_PAGE,
+    };
     use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::seat::ReleaseSurface;
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -94,6 +97,7 @@ mod program {
         session_wake_endpoint, SessionRequest, SessionVerdict, SessionWake, SESSION_ENDPOINT,
         SESSION_MAX_REQUEST, SESSION_VERDICT_LEN, SESSION_WAKE_LEN,
     };
+    use tairix_abi::sound_cue::SoundEvent;
     use tairix_abi::switchboard_ipc::{
         command_endpoint_for, CommandSection, SwitchboardCommand, SEAT_REPORT_OWNERS_MAX,
         SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST, SWITCHBOARD_PUBLISH_REPLY_LEN,
@@ -103,9 +107,9 @@ mod program {
         PreviewOutcome, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
-        CapabilityId, DriverError, Errno, FdWire, Notice, NoticeTopic, Origin, ProcId, WaitFlags,
-        WaitSetOp, WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, STDIN,
-        WAITSET_TIMEOUT_NONE, WAIT_PID_ANY,
+        CapabilityId, Errno, FdWire, Notice, NoticeTopic, Origin, ProcId, WaitFlags, WaitSetOp,
+        WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, STDIN, WAITSET_TIMEOUT_NONE,
+        WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
     use tairix_audio::live::{live_captures, RtAudio};
@@ -116,7 +120,11 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_controls::damage;
+    use tairix_desktop_session::effects::{
+        load_choices, store_choices, Effects, EffectsWork, LoadedChoices, ReadAsk,
+    };
     use tairix_desktop_session::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
+    use tairix_desktop_session::output::{Follow, Refusal};
     use tairix_desktop_session::pinboard::{self, PinboardCommand};
     use tairix_desktop_session::saver::raytrace::{
         keep as keep_picture, run_tracing_thread, DeskLink, DeskLock, Engine as TraceEngine,
@@ -124,7 +132,9 @@ mod program {
         Unkept,
     };
     use tairix_desktop_session::sound::{SoundAnswer, SoundJob, SoundSession};
-    use tairix_desktop_session::switchuser::{SeatPresentation, SessionAuthority, SwitchUser};
+    use tairix_desktop_session::switchuser::{
+        SeatDeparture, SeatReturn, SessionAuthority, SwitchUser,
+    };
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info, drain_away,
@@ -132,7 +142,7 @@ mod program {
         launch_argv, load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report,
         open_entry, open_tray, parse, publish_pinboard, reap_launched, relay_power,
         resize_drag_event, resolve_launch, resolve_window_identities, seat_held, serve_park_ns,
-        serve_pinboard_apply, serve_switchboard_request, size_state_name, tool_move_event,
+        serve_pinboard, serve_switchboard_request, size_state_name, tool_move_event,
         window_control_alternate_event, window_control_event, Acquisition, AidPolicy, Answer,
         AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
         AskedSettings, BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop,
@@ -142,20 +152,20 @@ mod program {
         HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
         KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
         LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch, OwedReport,
-        OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied,
-        PinboardApplyRefusal, Prepared, PresentedOwners, PreviewBudget, PreviewDone, PreviewJob,
-        PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, ResizedRecord, ResolutionAsk,
-        ResolutionPrompt, Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
-        Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock,
-        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
-        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, Trial, TrialEnd, TrialOutcome,
-        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, APP_ATTACH,
-        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
-        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESIZED,
-        DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
-        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
-        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, PinboardApplied,
+        PinboardCall, PinboardRefusal, Prepared, PresentedOwners, PreviewBudget, PreviewDone,
+        PreviewJob, PreviewRequest, PreviewRun, PreviewTarget, PromptOutcome, Requester,
+        ResizedRecord, ResolutionAsk, ResolutionPrompt, Routed, SaverIdentity, SaverSetup,
+        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
+        SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
+        ShellWindowHost, SizedRecord, SoundCall, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, Trial, TrialEnd, TrialOutcome, WallpaperDesk, WallpaperJob,
+        WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
+        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+        DATETIME_RUN_PATH, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
+        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
+        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
@@ -167,7 +177,7 @@ mod program {
         preview_source, resolution_ask, ScreensaverPreview, ScreensaverServe,
     };
     use tairix_display::{
-        DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper, SwitchedOff,
+        DisplayClient, DisplayTransport, FramesRefused, RemoteDisplay, RtShmMapper, SwitchedOff,
     };
     use tairix_greeter::{Verdict, Verifier};
     use tairix_icon::{ArtworkDesk, ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
@@ -180,6 +190,7 @@ mod program {
     use tairix_procinfo::IpcTransport;
     use tairix_raytrace::Detail;
     use tairix_rt::io::{self, Stderr, Write};
+    use tairix_rt::shm::SharedRegion;
     use tairix_rt::work::Worker;
     use tairix_rt::ServedCall;
     use tairix_sandbox::imagerender::{
@@ -188,6 +199,7 @@ mod program {
     };
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
+    use tairix_soundtheme::{SoundSettings, UserChoices};
     use tairix_taskbar::{
         MenuRequest, MenuSubject, SoundAction, TaskId, TaskbarConfig, TaskbarResponse,
     };
@@ -366,6 +378,26 @@ mod program {
     /// The wait-set token of the `AudioCapture` notice the recording
     /// indicator is drawn from.
     const AUDIO_CAPTURE_TOKEN: u64 = 15;
+
+    /// The wait-set token of the sound authority's answer to a notification's
+    /// arrival sound.
+    const CUE_TOKEN: u64 = 16;
+
+    /// The wait-set token of the `DisplayOutput` notice: the output the
+    /// session draws on moved (`plans/DISPLAY.md` D12).
+    const DISPLAY_OUTPUT_TOKEN: u64 = 17;
+
+    /// The wait-set token of the sound-choices worker's wake: a store, a push
+    /// or a pane's read of the user's sound choices has come back.
+    const EFFECTS_TOKEN: u64 = 18;
+
+    /// The wait-set token of the `CueAuthority` notice: the cue authority
+    /// started, and holds none of this session's choices.
+    const CUE_AUTHORITY_TOKEN: u64 = 19;
+
+    /// The frame ring the session presents through: its own frames, owned by
+    /// the ring and unmapped with it.
+    type Ring = RemoteDisplay<SharedRegion, RtDisplayTransport>;
 
     /// Queued-wake capacity of the mailbox. The authority sends one wake per
     /// switch and the loop drains it on the very next turn, so a handful of
@@ -1013,7 +1045,7 @@ mod program {
     fn fade_to_black(
         fade: &mut ScreenFade,
         compositor: &mut Compositor,
-        display: &mut Option<RemoteDisplay<'_, RtDisplayTransport>>,
+        display: &mut Option<Ring>,
     ) {
         let Some(display) = display.as_mut() else {
             return;
@@ -1032,13 +1064,18 @@ mod program {
     /// refusal onto the session's exit codes. The service refuses a caller
     /// whose lease is no longer live (`SeatRevoked` from the kernel's
     /// per-request check; a stale owner surfaces as a permission refusal),
-    /// so a lost seat is observed here exactly as on a drain. Any refusal
-    /// ends the session, so the shell's disposable-UI caches are wiped
-    /// before the exit code is returned.
+    /// so a lost seat is observed here exactly as on a drain, and ends the
+    /// session with the shell's disposable-UI caches wiped first.
     ///
-    /// A background session owns no frame ring, presents nothing, and
-    /// answers `Ok`: it has given the screen to somebody else, which is not
-    /// a failure.
+    /// Frames that no longer describe the output — it moved, or a restarted
+    /// service holds no configuration for them — are not a failure. They are
+    /// `suspended` instead, and presented nothing more, until the service's
+    /// next announcement of the output, which both send: the session converges
+    /// on that, and a service that refused frames without announcing anything
+    /// can make the session wait but never spin.
+    ///
+    /// A background or dormant session owns no frame ring, presents nothing,
+    /// and answers `Ok`: having no screen to draw on is not a failure.
     ///
     /// A frame that did reach the display is where the desktop's one-shot
     /// reveal witness is announced, so the record can only follow pixels
@@ -1049,23 +1086,34 @@ mod program {
     fn present<S: tairix_browse::DirectorySource, F: FnMut() -> S>(
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        display: &mut Option<RemoteDisplay<'_, RtDisplayTransport>>,
+        display: &mut Option<Ring>,
         fade: &mut ScreenFade,
         windows: &mut SessionWindows,
         menu: &mut MenuChain,
         picker: &mut SessionPicker<S, F>,
         apps: &mut AppBarService,
+        suspended: &mut Option<bool>,
     ) -> Result<(), i32> {
         let Some(display) = display.as_mut() else {
             return Ok(());
         };
-        match compositor.present(display) {
+        if suspended.is_some() {
+            return Ok(());
+        }
+        let refused = match compositor.present(display) {
             Ok(()) => {
                 fade.presented(&LOG_SINK);
                 report_surfaces_shown(shell, compositor, fade, windows, menu, picker, apps);
+                return Ok(());
+            }
+            Err(refused) => refused,
+        };
+        match Refusal::of(refused) {
+            Refusal::Follow { forgotten } => {
+                *suspended = Some(forgotten);
                 Ok(())
             }
-            Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => {
+            Refusal::SeatLost => {
                 shell.teardown(compositor);
                 Err(app::fail(
                     APP_NAME,
@@ -1073,7 +1121,7 @@ mod program {
                     "seat lease lost; tearing the session down",
                 ))
             }
-            Err(_) => {
+            Refusal::Failed => {
                 shell.teardown(compositor);
                 Err(app::fail(
                     APP_NAME,
@@ -1205,7 +1253,7 @@ mod program {
         policy: &tairix_wallpaper::NotifyPolicy,
         ticket: u64,
         request: &[u8],
-    ) -> Result<(), Errno> {
+    ) -> Result<Option<SoundEvent>, Errno> {
         let origin = tairix_rt::peer_origin(NOTIFY_ENDPOINT, ticket)?;
         let request = NotifyRequest::from_bytes(request)?;
         shell.serve_notify(compositor, &origin, request, policy)
@@ -1557,28 +1605,14 @@ mod program {
         preparers
     }
 
-    /// The shared frame region the display service scans out of, kept so a
-    /// session that steps aside can give it back and a resumed one can be
-    /// handed a region shaped for the mode now in force.
-    struct FrameRegion {
-        base: usize,
-        total: usize,
-    }
-
-    impl FrameRegion {
-        /// One frame's bytes, which is what the desktop's cache budgets are
-        /// derived from.
-        const fn frame_len(&self) -> usize {
-            self.total / FRAME_COUNT as usize
-        }
-
-        /// Give the mapping back to the kernel.
-        ///
-        /// The caller must already have dropped the [`RemoteDisplay`] that
-        /// borrowed it, so no ring can name these bytes afterwards.
-        fn unmap(self) {
-            let _ = tairix_rt::shm_unmap(self.base as u64, self.total);
-        }
+    /// One frame's bytes in `mode`, checked, so a hostile or corrupt mode can
+    /// never size a short region; what the desktop's cache budgets are
+    /// derived from too.
+    fn frame_len(mode: &DisplayMode) -> Option<usize> {
+        u64::from(mode.stride_bytes)
+            .checked_mul(u64::from(mode.height_px))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .filter(|bytes| *bytes != 0)
     }
 
     /// The taskbar layout for an output of this mode.
@@ -1615,7 +1649,8 @@ mod program {
         shell.present_desktop(compositor, desktop);
     }
 
-    /// Everything a change to the desktop's size re-lays.
+    /// Everything a change to the screen re-lays: the desktop's own surfaces,
+    /// the windows on it, and what stands over them.
     struct Resize<'a, S: DirectorySource, C, T> {
         compositor: &'a mut Compositor,
         shell: &'a mut DesktopShell,
@@ -1625,6 +1660,15 @@ mod program {
         windows: &'a mut SessionWindows,
         menu: &'a mut MenuChain,
         pointer: &'a mut DeviceInputSource<C, T>,
+        prompts: (
+            &'a mut ConfirmPrompt,
+            &'a mut ElevatePrompt,
+            &'a mut ResolutionPrompt,
+        ),
+        saver: &'a mut Screensaver,
+        idle: &'a mut IdleClock,
+        /// The machine's memory, which the frosted backdrops' share is of.
+        memory_bytes: usize,
     }
 
     /// Say that the desktop could not be drawn at `size`, so the one before it
@@ -1647,11 +1691,10 @@ mod program {
         Refused,
     }
 
-    /// Draw the desktop at `size` on its output: the screen re-laid, the
-    /// windows fitted onto it, any menu or tip taken down, the pointer held on
-    /// it, and every application told. The caller delivers what the windows
-    /// are owed. Never called while the screen is locked or a screensaver is
-    /// up, whose surfaces cover the size they were drawn at.
+    /// Draw the desktop at `size` on its output and re-lay the screen for it.
+    /// The caller delivers what the windows are owed. Never called while the
+    /// screen is locked or a screensaver is up, whose surfaces cover the size
+    /// they were drawn at.
     fn resize_desktop<S: DirectorySource, C, T>(
         size: (u32, u32),
         parts: &mut Resize<'_, S, C, T>,
@@ -1661,10 +1704,54 @@ mod program {
             report_undrawable(size);
             return Resized::Refused;
         }
-        let screen = parts.compositor.screen_rect();
-        if screen == before {
+        if parts.compositor.screen_rect() == before {
             return Resized::Unchanged;
         }
+        relay_screen(parts);
+        Resized::Changed
+    }
+
+    /// Draw the desktop on an output running `mode`, at the resolution the
+    /// settings name where it offers it, and re-lay the screen for it. A
+    /// resolution trial open over the output that is gone is declined.
+    ///
+    /// Answers `false`, changing nothing, for a mode the compositor cannot
+    /// draw. The caller delivers what the windows are owed.
+    fn adopt_output<S: DirectorySource, C, T>(
+        mode: DisplayMode,
+        parts: &mut Resize<'_, S, C, T>,
+    ) -> bool {
+        if !parts.compositor.set_mode(mode) {
+            return false;
+        }
+        // The caches a screenful bounds are held to the screen now drawn.
+        if let Some(fb_bytes) = frame_len(&mode) {
+            parts
+                .compositor
+                .rescale_caches(fb_bytes, parts.memory_bytes);
+            parts.shell.rescale_caches(fb_bytes);
+        }
+        let _ = parts.prompts.2.abandon(parts.shell, parts.compositor);
+        let size = parts
+            .desktop
+            .settings()
+            .resolution
+            .on((mode.width_px, mode.height_px));
+        if !parts.compositor.set_desktop_size(size.0, size.1) {
+            report_undrawable(size);
+        }
+        relay_screen(parts);
+        true
+    }
+
+    /// Re-lay everything drawn to the screen's size over the screen the
+    /// compositor draws now: the bar, the backdrop and its icons, the windows
+    /// fitted onto it, the prompts placed on it again, any menu or tip and the
+    /// screensaver taken down — the screensaver due again at once, over the
+    /// new screen — the pointer held on it, and every application told. The
+    /// lock covers the new screen itself before the next composite.
+    fn relay_screen<S: DirectorySource, C, T>(parts: &mut Resize<'_, S, C, T>) {
+        let screen = parts.compositor.screen_rect();
         lay_out_screen(
             parts.compositor,
             parts.shell,
@@ -1680,12 +1767,19 @@ mod program {
         if parts.shell.dismiss_tooltip() {
             let _ = parts.shell.present_tooltip(parts.compositor);
         }
+        let (confirm, elevate, resolution) = &mut parts.prompts;
+        confirm.repaint(parts.shell, parts.compositor);
+        elevate.repaint(parts.shell, parts.compositor);
+        resolution.repaint(parts.shell, parts.compositor);
+        if parts.saver.dismiss(parts.compositor, None) == Ok(true) {
+            parts.wallpapers.forget_slides();
+            parts.idle.saver_withdrawn();
+        }
         if let Ok(at) = parts.pointer.set_screen(screen, parts.compositor.scale()) {
             parts.shell.track_pointer(at, parts.compositor);
         }
         publish_desktop(parts.compositor);
         parts.shell.note_resized();
-        Resized::Changed
     }
 
     /// A pinboard call asking for a resolution other than the one drawn: the
@@ -1701,7 +1795,6 @@ mod program {
     /// convergence that follows.
     fn begin_trial<S: DirectorySource, C, T>(
         ask: TrialAsk,
-        prompt: &mut ResolutionPrompt,
         parts: &mut Resize<'_, S, C, T>,
     ) -> Option<TrialPlacements> {
         let TrialAsk { size, trial } = ask;
@@ -1714,7 +1807,11 @@ mod program {
             before,
             after: parts.compositor.placements(),
         };
-        match prompt.ask(trial, tairix_rt::clock_get(), parts.shell, parts.compositor) {
+        match parts
+            .prompts
+            .2
+            .ask(trial, tairix_rt::clock_get(), parts.shell, parts.compositor)
+        {
             Ok(()) => log_info(TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, &[]),
             Err(trial) => {
                 io::write_stderr_line(
@@ -1774,7 +1871,7 @@ mod program {
                         }
                     }
                     Err(refusal) => {
-                        let refusal = PinboardApplyRefusal::Undecodable(refusal);
+                        let refusal = PinboardRefusal::Undecodable(refusal);
                         app::report(APP_NAME, format_args!("{}", refusal.reason()));
                         reply_pinboard(trial.ticket, Err(refusal.errno()));
                         log_info(
@@ -1788,72 +1885,23 @@ mod program {
         }
     }
 
-    /// Create the shared frame region for `mode`, grant it to the display
-    /// service, configure the service over it, and answer the ring the
-    /// session presents through together with the region to give back.
-    ///
-    /// The one place frames are established: the first bring-up and every
-    /// resume come here, so neither can size, grant, or configure a region
-    /// the other would not. A refusal after the region exists unmaps it
-    /// before returning, so a failed attempt leaves nothing mapped.
-    fn establish_frames(
-        mode: &DisplayMode,
-    ) -> Result<(RemoteDisplay<'static, RtDisplayTransport>, FrameRegion), (i32, &'static str)>
-    {
-        let mut client = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY);
-        // The region holds FRAME_COUNT frames back to back, each shaped
-        // exactly as the queried mode; the arithmetic is checked so a
-        // hostile or corrupt mode can never size a short region.
-        let Some(frame_len) = u64::from(mode.stride_bytes)
-            .checked_mul(u64::from(mode.height_px))
-            .and_then(|bytes| usize::try_from(bytes).ok())
-        else {
-            return Err((EXIT_BAD_MODE, "frame geometry overflows"));
-        };
-        let Some(total) = frame_len.checked_mul(FRAME_COUNT as usize) else {
-            return Err((EXIT_BAD_MODE, "frame geometry overflows"));
-        };
-        if frame_len == 0 {
-            return Err((EXIT_BAD_MODE, "queried mode is zero-sized"));
+    /// Establish frames for `mode` the one way every presenter does
+    /// (`tairix_display::establish_frames`).
+    fn establish_frames(mode: &DisplayMode) -> Result<Ring, FramesRefused> {
+        tairix_display::establish_frames(
+            DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY),
+            mode,
+            FRAME_COUNT,
+        )
+    }
+
+    /// The exit code a bring-up whose frames were refused ends with.
+    const fn refused_exit(refused: FramesRefused) -> i32 {
+        match refused {
+            FramesRefused::Geometry => EXIT_BAD_MODE,
+            FramesRefused::Region | FramesRefused::Grant => EXIT_NO_FRAMES,
+            FramesRefused::Configure(_) => EXIT_NO_DISPLAY,
         }
-        let mut region_id: u64 = 0;
-        let base = tairix_rt::shm_create(total, &mut region_id);
-        if base < 0 {
-            return Err((EXIT_NO_FRAMES, "shared frame region refused"));
-        }
-        let Ok(base) = usize::try_from(base) else {
-            return Err((
-                EXIT_NO_FRAMES,
-                "frame region base outside the address width",
-            ));
-        };
-        let region = FrameRegion { base, total };
-        let grant = tairix_rt::shm_grant(region_id, DISPLAY_ENDPOINT);
-        if grant < 1 {
-            region.unmap();
-            return Err((EXIT_NO_FRAMES, "frame region grant refused"));
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        if client.configure(grant as u64, FRAME_COUNT, mode).is_err() {
-            region.unmap();
-            return Err((EXIT_NO_DISPLAY, "display service refused the configure"));
-        }
-        // SAFETY: the kernel mapped exactly `total` zeroed bytes read/write
-        // into this process at `base` (`shm_create` maps the length it was
-        // asked for), and nothing aliases them. The mapping outlives every
-        // use of this slice: the only `shm_unmap` is `FrameRegion::unmap`,
-        // whose contract is that the `RemoteDisplay` borrowing these bytes
-        // has already been dropped, which is why the borrow may be `'static`
-        // here. The display service maps the same frames read-only for its
-        // blit, and the protocol serialises access: this session is parked
-        // in its present call while the service reads, so the two never race
-        // on the presented bytes.
-        let frames = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, total) };
-        let Ok(display) = RemoteDisplay::new(client, *mode, frames, FRAME_COUNT) else {
-            region.unmap();
-            return Err((EXIT_BAD_MODE, "queried mode rejected by the frame ring"));
-        };
-        Ok((display, region))
     }
 
     /// The step-aside request over the reserved session rendezvous.
@@ -1874,41 +1922,27 @@ mod program {
         }
     }
 
-    /// The session's ownership of the screen, as the switch drives it: the
-    /// frame ring and its region, the compositor and the surfaces laid out
-    /// over the mode, the screen fade the hand-over is dressed with, and the
-    /// wait-set the seat member belongs to.
-    struct SessionScreen<'a, S: DirectorySource> {
-        display: &'a mut Option<RemoteDisplay<'static, RtDisplayTransport>>,
-        region: &'a mut Option<FrameRegion>,
+    /// The session giving its screen up, as the switch drives it: the frame
+    /// ring, the compositor the fade is drawn through, and the wait-set the
+    /// seat member belongs to.
+    struct SessionDeparture<'a> {
+        display: &'a mut Option<Ring>,
         compositor: &'a mut Compositor,
-        shell: &'a mut DesktopShell,
-        desktop: &'a mut Desktop<S>,
-        pinboard: &'a mut PinboardPanel,
-        wallpapers: &'a Wallpapers,
-        windows: &'a mut SessionWindows,
         fade: &'a mut ScreenFade,
         set: u64,
     }
 
-    impl<S: DirectorySource> SeatPresentation for SessionScreen<'_, S> {
+    impl SeatDeparture for SessionDeparture<'_> {
         fn fade_out(&mut self) {
             fade_to_black(self.fade, self.compositor, self.display);
         }
 
-        fn fade_in(&mut self) {
-            self.fade.arrive(tairix_rt::clock_get(), self.compositor);
-        }
-
         fn suspend(&mut self) {
-            // The ring goes before the region it borrows, and the seat's
-            // wait-set member goes with them: a parked session must not be
-            // woken by the next account's typing, and ignoring such a wake
-            // instead would spin on a member that stays ready.
+            // The ring goes with its frames, and the seat's wait-set member
+            // goes with them: a parked session must not be woken by the next
+            // account's typing, and ignoring such a wake instead would spin on
+            // a member that stays ready.
             *self.display = None;
-            if let Some(region) = self.region.take() {
-                region.unmap();
-            }
             let _ = tairix_rt::waitset_ctl(
                 self.set,
                 WaitSetOp::Del,
@@ -1925,7 +1959,19 @@ mod program {
             // gap either.
             let _ = tairix_rt::display_release(SEAT_PRIMARY, ReleaseSurface::Handover);
         }
+    }
 
+    /// The session taking its screen back, as the switch drives it: the
+    /// frame ring, the fade, the wait-set the seat member joins, and
+    /// everything the screen re-lays.
+    struct SessionReturn<'a, 'p, S: DirectorySource, C, T> {
+        display: &'a mut Option<Ring>,
+        fade: &'a mut ScreenFade,
+        set: u64,
+        parts: Resize<'p, S, C, T>,
+    }
+
+    impl<S: DirectorySource, C, T> SeatReturn for SessionReturn<'_, '_, S, C, T> {
         fn acquire_seat(&mut self) -> Result<(), Errno> {
             let taken = tairix_rt::display_acquire(SEAT_PRIMARY);
             if taken < 1 {
@@ -1945,54 +1991,156 @@ mod program {
             Ok(())
         }
 
-        fn query_mode(&mut self) -> Result<DisplayMode, Errno> {
+        fn query_output(&mut self) -> Result<Option<DisplayMode>, Errno> {
             DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query()
         }
 
         fn reconfigure(&mut self, mode: DisplayMode) -> Result<(), Errno> {
-            let (ring, region) = establish_frames(&mode).map_err(|_| Errno::DeviceFault)?;
-            *self.display = Some(ring);
-            *self.region = Some(region);
+            *self.display = match establish_frames(&mode) {
+                Ok(ring) => Some(ring),
+                Err(FramesRefused::Configure(Errno::Stale)) => return Err(Errno::Stale),
+                Err(_) => return Err(Errno::DeviceFault),
+            };
             // The compositor adopts the mode before anything is laid out
-            // against it: the bar and the icons are placed on the extent it
-            // reports. A mode it cannot take leaves it untouched, and the
+            // against it; a mode it cannot take leaves it untouched, and the
             // session ends rather than showing a screen it cannot draw.
-            if !self.compositor.set_mode(mode) {
-                return Err(Errno::NotSupported);
+            if adopt_output(mode, &mut self.parts) {
+                Ok(())
+            } else {
+                Err(Errno::NotSupported)
             }
-            // The resolution the user chose, where this output offers it, is
-            // drawn before the first frame rather than corrected after it.
-            let size = self
-                .desktop
-                .settings()
-                .resolution
-                .on((mode.width_px, mode.height_px));
-            if !self.compositor.set_desktop_size(size.0, size.1) {
-                report_undrawable(size);
-            }
-            lay_out_screen(
-                self.compositor,
-                self.shell,
-                self.desktop,
-                self.pinboard,
-                self.wallpapers,
-            );
-            let work_area = self.shell.work_area(self.compositor);
-            self.windows.refit(self.compositor, work_area);
-            Ok(())
         }
 
         fn publish_desktop(&mut self) {
-            publish_desktop(self.compositor);
+            publish_desktop(self.parts.compositor);
+        }
+
+        fn fade_in(&mut self) {
+            self.fade
+                .arrive(tairix_rt::clock_get(), self.parts.compositor);
         }
 
         fn repaint_all(&mut self, _mode: DisplayMode) -> Result<(), Errno> {
             let Some(display) = self.display.as_mut() else {
                 return Err(Errno::NotConnected);
             };
-            self.compositor
+            self.parts
+                .compositor
                 .present(display)
                 .map_err(|_| Errno::DeviceFault)
+        }
+    }
+
+    /// What following the output came to.
+    enum Followed {
+        /// Nothing the windows are owed: the output is gone, the frames
+        /// still serve it, or new ones could not be had.
+        Settled,
+        /// The screen was re-laid for the output's new mode; the windows are
+        /// owed what changed.
+        Moved(DisplayMode),
+    }
+
+    /// Converge on the display's output once (`plans/DISPLAY.md` D12).
+    ///
+    /// `forgotten` says the service refused the frames as unknown since the
+    /// last look. With no output the frames are given back and nothing is
+    /// composed; with the mode the frames hold, the whole output is owed to
+    /// the display again; with any other, frames are established for it and
+    /// the screen re-laid. A refusal leaves the session dormant with its
+    /// reason stated, and the next announcement tries again.
+    ///
+    /// # Errors
+    ///
+    /// The exit code a lost seat ends the session with.
+    fn follow_output<S: DirectorySource, C, T>(
+        forgotten: bool,
+        display: &mut Option<Ring>,
+        parts: &mut Resize<'_, S, C, T>,
+    ) -> Result<Followed, i32> {
+        let output = match DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query() {
+            Ok(output) => output,
+            Err(Errno::SeatRevoked | Errno::SeatNotOwner | Errno::PermissionDenied) => {
+                parts.shell.teardown(parts.compositor);
+                return Err(app::fail(
+                    APP_NAME,
+                    EXIT_SEAT_LOST,
+                    "seat lease lost; tearing the session down",
+                ));
+            }
+            Err(err) => {
+                app::report(
+                    APP_NAME,
+                    format_args!("the display output could not be read ({err:?})"),
+                );
+                return Ok(Followed::Settled);
+            }
+        };
+        let held = display.as_ref().and_then(Display::output);
+        match Follow::of(output, held, forgotten) {
+            Follow::Release => {
+                if display.take().is_some() {
+                    io::write_stderr_line("desktop: no display output is connected");
+                }
+                Ok(Followed::Settled)
+            }
+            Follow::Repaint => {
+                parts.compositor.owe_output();
+                Ok(Followed::Settled)
+            }
+            Follow::Reconfigure(mode) => {
+                *display = None;
+                match establish_frames(&mode) {
+                    Ok(ring) => *display = Some(ring),
+                    // It moved again, and that announcement brings the
+                    // session onto where it went.
+                    Err(FramesRefused::Configure(Errno::Stale)) => return Ok(Followed::Settled),
+                    Err(refused) => {
+                        app::report(APP_NAME, refused.reason());
+                        return Ok(Followed::Settled);
+                    }
+                }
+                if !adopt_output(mode, parts) {
+                    *display = None;
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "the display's new mode {}x{} cannot be drawn",
+                            mode.width_px, mode.height_px
+                        ),
+                    );
+                    return Ok(Followed::Settled);
+                }
+                Ok(Followed::Moved(mode))
+            }
+        }
+    }
+
+    /// The output the session comes up on: the one connected now, or the
+    /// first to arrive, parked for on `set`, which already holds the output's
+    /// announcement so none is missed between a read and the park.
+    fn first_output(set: u64) -> Result<DisplayMode, (i32, &'static str)> {
+        let mut client = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY);
+        let mut told = false;
+        loop {
+            match client.query() {
+                Ok(Some(mode)) => return Ok(mode),
+                Ok(None) => {}
+                Err(_) => {
+                    return Err((
+                        EXIT_NO_DISPLAY,
+                        "display service unreachable or refused the output query",
+                    ));
+                }
+            }
+            if !told {
+                told = true;
+                io::write_stderr_line("desktop: no display output is connected; waiting for one");
+            }
+            let mut token = 0u64;
+            if tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token) != 0 {
+                return Err((EXIT_WAIT_FAILED, "display output wait failed"));
+            }
         }
     }
 
@@ -2032,24 +2180,61 @@ mod program {
         }
         let mut switch = SwitchUser::new(bound.then_some(wake), self_origin.console());
 
-        // --- Display bring-up: query → shared frames → grant → configure.
-        let Ok(mode) = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query() else {
-            return app::fail(
-                APP_NAME,
-                EXIT_NO_DISPLAY,
-                "display service unreachable or refused the mode query",
-            );
+        // The wait-set comes first, holding the output's announcement before
+        // the output is read, so a move between the read and the join cannot
+        // be missed. Made before any listing is asked for, so every watch a
+        // listing arms joins the set the moment it is taken.
+        let set = tairix_rt::waitset_create();
+        if set < 0 {
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "wait-set refused");
+        }
+        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
+        let set = set as u64;
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::DisplayOutput.as_u32()),
+            DISPLAY_OUTPUT_TOKEN,
+        ) != 0
+        {
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "display output wait refused");
+        }
+
+        // --- Display bring-up: the output → shared frames → grant →
+        // configure. A configure refused as stale means the output moved
+        // after it was read, and its announcement is what is waited for.
+        let mut moved = false;
+        let (ring, mode) = loop {
+            if moved {
+                let mut token = 0u64;
+                if tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token) != 0 {
+                    return app::fail(APP_NAME, EXIT_WAIT_FAILED, "display output wait failed");
+                }
+            }
+            let mode = match first_output(set) {
+                Ok(mode) => mode,
+                Err((code, reason)) => return app::fail(APP_NAME, code, reason),
+            };
+            match establish_frames(&mode) {
+                Ok(ring) => break (ring, mode),
+                Err(FramesRefused::Configure(Errno::Stale)) => moved = true,
+                Err(refused) => {
+                    return app::fail(APP_NAME, refused_exit(refused), refused.reason());
+                }
+            }
         };
-        let (display, region) = match establish_frames(&mode) {
-            Ok(established) => established,
-            Err((code, reason)) => return app::fail(APP_NAME, code, reason),
+        let Some(frame_len) = frame_len(&mode) else {
+            return app::fail(APP_NAME, EXIT_BAD_MODE, "queried mode is zero-sized");
         };
-        let frame_len = region.frame_len();
-        // Held as options so a resume can drop the ring, give the region
-        // back, and build both again for the mode then in force — there is
-        // no second bring-up path.
-        let mut display = Some(display);
-        let mut region = Some(region);
+        // Held as an option so a step-aside, or an output that went away, can
+        // give the frames back and a resume or a new output build them again
+        // for the mode then in force — there is no second bring-up path.
+        let mut display = Some(ring);
+        // Set while the service refuses the frames, until its next
+        // announcement of the output: whether it holds no configuration for
+        // them at all.
+        let mut suspended: Option<bool> = None;
 
         // --- Desktop bring-up: the shell, the compositor over the active
         // theme's desktop colour, and the two live seat input sources with
@@ -2094,6 +2279,7 @@ mod program {
         // retained.
         let memory_total =
             tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
+        let memory_bytes = usize::try_from(memory_total).unwrap_or(usize::MAX);
         let chrome = chrome_cache(
             SEAT_PRIMARY,
             frame_len,
@@ -2103,7 +2289,7 @@ mod program {
         let frost = frost_cache(
             SEAT_PRIMARY,
             frame_len,
-            usize::try_from(memory_total).unwrap_or(usize::MAX),
+            memory_bytes,
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );
@@ -2167,14 +2353,9 @@ mod program {
                  the serve loop",
             );
         }
-        // Made before any listing is asked for, so every watch a listing arms
-        // joins the set the moment it is taken.
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "wait-set refused");
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
-        let set = set as u64;
+        // Every call this session posts to the cue authority — a notification's
+        // cue, the push of its user's choices — is answered on one wake.
+        let mut cue_posts = tairix_soundtheme::PostedCues::new();
         let listings =
             alloc::sync::Arc::new(Listings::new(alloc::sync::Arc::clone(&worker_wake), set));
         let wallpapers =
@@ -2259,6 +2440,36 @@ mod program {
         }
         let _sound_guard = tairix_rt::work::WorkerGuard::new(&sound_worker);
         let mut sound = SoundSession::new();
+        // The user's sound choices leave the loop too: their store, the files
+        // they name and the cue authority are each another wait away.
+        let effects_worker = match Worker::queued(
+            serve_effects,
+            (),
+            tairix_rt::sync::WorkerWake::create(),
+            EFFECTS_JOBS,
+        ) {
+            Ok(worker) => alloc::sync::Arc::new(worker),
+            Err(_) => {
+                return app::fail(
+                    APP_NAME,
+                    EXIT_WAIT_FAILED,
+                    "no memory for the sound-choices worker",
+                );
+            }
+        };
+        if let Err(reason) = Worker::start(&effects_worker) {
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "no sound-choices thread ({reason:?}); that work runs on the serve loop"
+                ),
+            );
+        }
+        let _effects_guard = tairix_rt::work::WorkerGuard::new(&effects_worker);
+        let mut effects = Effects::new();
+        // This session took the seat before it got here.
+        effects.seat(true);
+        let sound_themes = list_sound_themes();
         // The shipped wallpaper store, walked once: `/System` is read-only,
         // so this is the catalog for the life of the boot and the query that
         // answers it never reaches a directory again. Bring-up, not a frame:
@@ -2475,6 +2686,7 @@ mod program {
             &mut menu,
             &mut picker,
             &mut apps.service,
+            &mut suspended,
         ) {
             return code;
         }
@@ -2557,7 +2769,7 @@ mod program {
             &empty,
             &empty,
             PINBOARD_MAX_REQUEST,
-            STATUS_REPLY_LEN,
+            PINBOARD_MAX_REPLY,
             PINBOARD_CAPACITY,
         ) != 0
         {
@@ -2678,12 +2890,29 @@ mod program {
                 return app::fail(APP_NAME, EXIT_WAIT_FAILED, "sound wake wait refused");
             }
         }
+        if let Some(read) = effects_worker.wake().read_end() {
+            if tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                EFFECTS_TOKEN,
+            ) != 0
+            {
+                return app::fail(
+                    APP_NAME,
+                    EXIT_WAIT_FAILED,
+                    "sound-choices wake wait refused",
+                );
+            }
+        }
         // A member reports a generation that moves after it joins, so each
         // is read once after joining and nothing published in between is
         // missed.
         for (topic, token) in [
             (NoticeTopic::AudioDevices, AUDIO_DEVICES_TOKEN),
             (NoticeTopic::AudioCapture, AUDIO_CAPTURE_TOKEN),
+            (NoticeTopic::CueAuthority, CUE_AUTHORITY_TOKEN),
         ] {
             if tairix_rt::waitset_ctl(
                 set,
@@ -2697,6 +2926,8 @@ mod program {
             }
         }
         shell.set_sound(&mut compositor, sound.captures(live_captures()));
+        effects.authority_is(cue_authority());
+        pump_effects(&mut effects, &effects_worker, tairix_rt::clock_get());
         sound.refresh();
         pump_sound(
             &mut sound,
@@ -3038,6 +3269,10 @@ mod program {
                             windows: &mut windows,
                             menu: &mut menu,
                             pointer: &mut pointer,
+                            prompts: (&mut confirm, &mut elevate, &mut resolution),
+                            saver: &mut saver,
+                            idle: &mut idle,
+                            memory_bytes,
                         },
                     );
                     if resized == Resized::Changed {
@@ -3078,6 +3313,10 @@ mod program {
             // work.
             // Applied in turn rather than nested: nine levels of nesting said
             // nothing the order does not.
+            if let Some(own) = picker.take_own() {
+                conclude_own_pick(own, &mut effects, &effects_worker);
+            }
+            post_push(&mut effects, &mut cue_posts, set);
             let timeout_ns = {
                 let now_ns = tairix_rt::clock_get();
                 // A thumbnail slice is owed *now*: the wait still reports a
@@ -3107,6 +3346,7 @@ mod program {
                 park = pointer.park_deadline_ns(now_ns, park);
                 park = idle.park_deadline_ns(now_ns, park);
                 park = saver.park_deadline_ns(now_ns, park);
+                park = effects.park_deadline_ns(now_ns, park);
                 serve_park_ns(&switch, departure.as_ref(), now_ns, park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
@@ -3201,7 +3441,7 @@ mod program {
                     }
                 }
                 saver.keep_topmost(&mut compositor);
-                lock.keep_topmost(&mut compositor, saver.window());
+                lock.keep_topmost(&shell, &mut compositor, saver.window());
                 if let Some(source) = saver.due_slide(now_ns).and_then(|index| {
                     slide_source(&wallpaper_catalog, index, compositor.screen_rect())
                 }) {
@@ -3231,6 +3471,7 @@ mod program {
                         &mut menu,
                         &mut picker,
                         &mut apps.service,
+                        &mut suspended,
                     ) {
                         return code;
                     }
@@ -3244,6 +3485,8 @@ mod program {
                 );
                 frame_stats.maybe_publish(&compositor, now_ns, &mut frame_sink);
                 tairix_rt::cachereport::publish_if_due();
+                effects.seat(!switch.is_background());
+                pump_effects(&mut effects, &effects_worker, now_ns);
                 continue;
             }
             // Dispatch on the woken member's token and handle only that
@@ -3429,7 +3672,17 @@ mod program {
                         ticket,
                         &request[..len],
                     );
-                    let reply = encode_status_reply(result);
+                    if let Ok(Some(event)) = result {
+                        // Refused or silent, the answer is the authority's
+                        // to record; the notification is shown either way.
+                        let _ = cue_posts.post(
+                            &mut tairix_soundtheme::cue::RtCuePost::new(set, CUE_TOKEN),
+                            event,
+                            tairix_soundtheme::Answer::Started,
+                            tairix_soundtheme::CUE_ANSWER_DEADLINE_NS,
+                        );
+                    }
+                    let reply = encode_status_reply(result.map(drop));
                     let _ = tairix_rt::call_reply(NOTIFY_ENDPOINT, ticket, &reply);
                 }
             } else if token == SWITCHBOARD_TOKEN {
@@ -3514,25 +3767,50 @@ mod program {
                 if let Ok(Some(ServedCall { ticket, len })) =
                     tairix_rt::call_recv_ready(PINBOARD_ENDPOINT, &mut request)
                 {
-                    let asked = serve_pinboard(
-                        &publisher,
-                        &mut pinboard,
-                        &wallpapers,
-                        &mut desktop,
-                        &mut shell,
-                        &mut compositor,
-                        (
-                            self_origin.uid(),
-                            resolution.is_open() || publisher.keeping(),
-                            lock.is_locked() || saver.is_shown(),
-                        ),
+                    // Merged over what is on its way to the store, so an apply
+                    // arriving before the last one has landed does not undo it.
+                    let attested = attest_pinboard(
+                        self_origin.uid(),
+                        &publisher.base(desktop.settings()),
                         ticket,
                         &request[..len],
                     );
+                    let asked = match attested {
+                        Err(err) => {
+                            reply_pinboard(ticket, Err(err));
+                            None
+                        }
+                        Ok(PinboardCall::Sound(call)) => {
+                            serve_sound_call(
+                                &call,
+                                ticket,
+                                &mut effects,
+                                &effects_worker,
+                                &sound_themes,
+                                &mut picker,
+                                &mut shell,
+                                &mut compositor,
+                            );
+                            None
+                        }
+                        Ok(PinboardCall::Apply(applied)) => apply_pinboard(
+                            applied,
+                            &publisher,
+                            &mut pinboard,
+                            &wallpapers,
+                            &mut desktop,
+                            &mut shell,
+                            &mut compositor,
+                            (
+                                resolution.is_open() || publisher.keeping(),
+                                lock.is_locked() || saver.is_shown(),
+                            ),
+                            ticket,
+                        ),
+                    };
                     if let Some(ask) = asked {
                         let placements = begin_trial(
                             ask,
-                            &mut resolution,
                             &mut Resize {
                                 compositor: &mut compositor,
                                 shell: &mut shell,
@@ -3542,6 +3820,10 @@ mod program {
                                 windows: &mut windows,
                                 menu: &mut menu,
                                 pointer: &mut pointer,
+                                prompts: (&mut confirm, &mut elevate, &mut resolution),
+                                saver: &mut saver,
+                                idle: &mut idle,
+                                memory_bytes,
                             },
                         );
                         // A trial that could not be put to the user is
@@ -3852,8 +4134,70 @@ mod program {
                     &mut shell,
                     &mut compositor,
                 );
+            } else if token == EFFECTS_TOKEN || token == CUE_AUTHORITY_TOKEN {
+                if token == EFFECTS_TOKEN {
+                    effects_worker.wake().drain();
+                } else {
+                    effects.authority_is(cue_authority());
+                }
+                effects.seat(!switch.is_background());
+                pump_effects(&mut effects, &effects_worker, tairix_rt::clock_get());
             } else if token == AUDIO_CAPTURE_TOKEN {
                 shell.set_sound(&mut compositor, sound.captures(live_captures()));
+            } else if token == DISPLAY_OUTPUT_TOKEN {
+                // A background session holds no frames, and reads the output
+                // afresh when it comes back.
+                let forgotten = suspended.take().unwrap_or(false);
+                if !switch.is_background() {
+                    let followed = follow_output(
+                        forgotten,
+                        &mut display,
+                        &mut Resize {
+                            compositor: &mut compositor,
+                            shell: &mut shell,
+                            desktop: &mut desktop,
+                            pinboard: &mut pinboard,
+                            wallpapers: &wallpapers,
+                            windows: &mut windows,
+                            menu: &mut menu,
+                            pointer: &mut pointer,
+                            prompts: (&mut confirm, &mut elevate, &mut resolution),
+                            saver: &mut saver,
+                            idle: &mut idle,
+                            memory_bytes,
+                        },
+                    );
+                    match followed {
+                        Err(code) => return code,
+                        Ok(Followed::Settled) => {}
+                        Ok(Followed::Moved(mode)) => {
+                            sized_for = Some((
+                                desktop.settings().resolution,
+                                (mode.width_px, mode.height_px),
+                            ));
+                            deliver_owed_events(
+                                &mut server,
+                                &mut sink,
+                                &mut shell,
+                                &mut compositor,
+                                &mut windows,
+                                &mut picker,
+                                &mut apps.service,
+                                &mut menu,
+                            );
+                        }
+                    }
+                }
+            } else if token == CUE_TOKEN {
+                let pushed = cue_posts.collect(
+                    &mut tairix_soundtheme::cue::RtCuePost::new(set, CUE_TOKEN),
+                    |_, _| {},
+                );
+                if let Some(result) = pushed {
+                    let now = tairix_rt::clock_get();
+                    refused_push(effects.pushed(now, result));
+                    pump_effects(&mut effects, &effects_worker, now);
+                }
             } else if token == CHILD_TOKEN {
                 // Reap every exited child in one wake and act on each: a child
                 // whose asynchronous load was refused exits with a reserved
@@ -3950,61 +4294,67 @@ mod program {
                 };
                 match switch.classify(&message[..len], &origin) {
                     Ok(SessionWake::Foreground) => {
-                        let mut screen = SessionScreen {
+                        // A refusal of the frames given up belongs to the
+                        // screen this session left; the resume reads the
+                        // output afresh.
+                        suspended = None;
+                        let resumed = switch.resume(&mut SessionReturn {
                             display: &mut display,
-                            region: &mut region,
-                            compositor: &mut compositor,
-                            shell: &mut shell,
-                            desktop: &mut desktop,
-                            pinboard: &mut pinboard,
-                            wallpapers: &wallpapers,
-                            windows: &mut windows,
                             fade: &mut fade,
                             set,
+                            parts: Resize {
+                                compositor: &mut compositor,
+                                shell: &mut shell,
+                                desktop: &mut desktop,
+                                pinboard: &mut pinboard,
+                                wallpapers: &wallpapers,
+                                windows: &mut windows,
+                                menu: &mut menu,
+                                pointer: &mut pointer,
+                                prompts: (&mut confirm, &mut elevate, &mut resolution),
+                                saver: &mut saver,
+                                idle: &mut idle,
+                                memory_bytes,
+                            },
+                        });
+                        let output = match resumed {
+                            Ok(output) => output,
+                            Err(failure) => {
+                                app::report(
+                                    APP_NAME,
+                                    format_args!("{} ({:?})", failure.reason(), failure.errno()),
+                                );
+                                shell.teardown(&mut compositor);
+                                return EXIT_RESUME_FAILED;
+                            }
                         };
-                        if let Err(failure) = switch.resume(&mut screen) {
-                            app::report(
-                                APP_NAME,
-                                format_args!("{} ({:?})", failure.reason(), failure.errno()),
-                            );
-                            shell.teardown(&mut compositor);
-                            return EXIT_RESUME_FAILED;
-                        }
-                        // The pointer is clamped to the screen, so it is
-                        // rebuilt for the screen now drawn rather than left
-                        // on the one this session came up with.
-                        let screen_rect = compositor.screen_rect();
-                        let (channel, touch) = pointer.into_channels();
-                        let Ok(rebuilt) = DeviceInputSource::new(channel, touch, screen_rect)
-                        else {
-                            shell.teardown(&mut compositor);
-                            return app::fail(
-                                APP_NAME,
-                                EXIT_RESUME_FAILED,
-                                "the resumed mode has no pointer surface",
-                            );
-                        };
-                        pointer = rebuilt;
-                        // Keep the user's pointer and touch policy, and restart
-                        // idleness so the screen does not blank or lock at once.
-                        drive_pointer(&mut pointer, &input_policy);
+                        // The cue authority dropped this session's sound
+                        // choices with its hold, so taking the seat back owes
+                        // them anew.
+                        effects.seat(false);
+                        effects.seat(true);
+                        pump_effects(&mut effects, &effects_worker, tairix_rt::clock_get());
+                        // Idleness starts again, so the screen does not blank
+                        // or lock at once.
                         idle.input(tairix_rt::clock_get());
-                        // The windows the resume fitted to the screen are
-                        // owed their new extents.
-                        sized_for = Some((
-                            desktop.settings().resolution,
-                            (compositor.mode().width_px, compositor.mode().height_px),
-                        ));
-                        deliver_owed_events(
-                            &mut server,
-                            &mut sink,
-                            &mut shell,
-                            &mut compositor,
-                            &mut windows,
-                            &mut picker,
-                            &mut apps.service,
-                            &mut menu,
-                        );
+                        if let Some(mode) = output {
+                            // The windows the resume fitted to the screen are
+                            // owed their new extents.
+                            sized_for = Some((
+                                desktop.settings().resolution,
+                                (mode.width_px, mode.height_px),
+                            ));
+                            deliver_owed_events(
+                                &mut server,
+                                &mut sink,
+                                &mut shell,
+                                &mut compositor,
+                                &mut windows,
+                                &mut picker,
+                                &mut apps.service,
+                                &mut menu,
+                            );
+                        }
                     }
                     Ok(SessionWake::End) => {
                         io::write_stderr_line(
@@ -4121,7 +4471,6 @@ mod program {
                         programs: &mut programs,
                         switch: &mut switch,
                         display: &mut display,
-                        region: &mut region,
                         fade: &mut fade,
                         set,
                         sound: &mut sound,
@@ -4226,7 +4575,7 @@ mod program {
             // over a locked screen: the lock goes back on top, beneath only
             // the screensaver, before the frame is shown.
             saver.keep_topmost(&mut compositor);
-            lock.keep_topmost(&mut compositor, saver.window());
+            lock.keep_topmost(&shell, &mut compositor, saver.window());
             // A prompt keeps the pixels it was painted in, so one standing
             // through a change of look is repainted in the look now in force
             // rather than left in the one the user just left.
@@ -4291,6 +4640,7 @@ mod program {
                     &mut menu,
                     &mut picker,
                     &mut apps.service,
+                    &mut suspended,
                 ) {
                     return code;
                 }
@@ -6440,8 +6790,7 @@ mod program {
         pending_open: &'a mut Option<CommandSection>,
         programs: &'a mut Programs,
         switch: &'a mut SwitchUser,
-        display: &'a mut Option<RemoteDisplay<'static, RtDisplayTransport>>,
-        region: &'a mut Option<FrameRegion>,
+        display: &'a mut Option<Ring>,
         fade: &'a mut ScreenFade,
         set: u64,
         sound: &'a mut SoundSession,
@@ -6581,15 +6930,9 @@ mod program {
         fn step_aside(&mut self, seat: &mut Seat<'_>) -> bool {
             step_aside(
                 self.switch,
-                SessionScreen {
+                SessionDeparture {
                     display: self.display,
-                    region: self.region,
                     compositor: seat.compositor,
-                    shell: seat.shell,
-                    desktop: self.desktop,
-                    pinboard: self.pinboard,
-                    wallpapers: self.wallpapers,
-                    windows: self.windows,
                     fade: self.fade,
                     set: self.set,
                 },
@@ -7102,32 +7445,17 @@ mod program {
     /// the session reads it under its own identity, so this channel reaches
     /// no file the session could not already read.
     #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
-    fn serve_pinboard<S: DirectorySource>(
+    fn apply_pinboard<S: DirectorySource>(
+        applied: PinboardApplied,
         publisher: &Publisher,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-        (session_uid, deciding, covered): (u32, bool, bool),
+        (deciding, covered): (bool, bool),
         ticket: u64,
-        request: &[u8],
     ) -> Option<TrialAsk> {
-        // Merged over what is on its way to the store, so an apply arriving
-        // before the last one has landed does not undo it.
-        let attested = attest_pinboard(
-            session_uid,
-            &publisher.base(desktop.settings()),
-            ticket,
-            request,
-        );
-        let applied = match attested {
-            Ok(applied) => applied,
-            Err(err) => {
-                reply_pinboard(ticket, Err(err));
-                return None;
-            }
-        };
         // While the user is deciding about a resolution, one change is in
         // hand: another could only race the answer.
         if deciding {
@@ -7175,8 +7503,8 @@ mod program {
         None
     }
 
-    /// Attest a pending pinboard call against the session's own identity and
-    /// merge the settings it carries over the ones in effect.
+    /// Attest a pending pinboard call against the session's own identity,
+    /// merging the settings an apply carries over the ones in effect.
     ///
     /// # Errors
     ///
@@ -7188,13 +7516,87 @@ mod program {
         in_effect: &DesktopSettings,
         ticket: u64,
         request: &[u8],
-    ) -> Result<PinboardApplied, Errno> {
+    ) -> Result<PinboardCall, Errno> {
         let origin = tairix_rt::peer_origin(PINBOARD_ENDPOINT, ticket)?;
-        serve_pinboard_apply(session_uid, origin.uid(), in_effect, request).map_err(|refusal| {
+        serve_pinboard(session_uid, origin.uid(), in_effect, request).map_err(|refusal| {
             let msg = refusal.reason();
             app::report(APP_NAME, format_args!("{msg}"));
             refusal.errno()
         })
+    }
+
+    /// Serve the attested request `call` about the user's sound choices,
+    /// answering `ticket` now or once its work has come back.
+    #[allow(clippy::too_many_arguments)] // The loop state the requests reach, threaded explicitly.
+    fn serve_sound_call<S: DirectorySource, F: FnMut() -> S>(
+        call: &SoundCall,
+        ticket: u64,
+        effects: &mut Effects,
+        worker: &EffectsWorker,
+        themes: &[alloc::string::String],
+        picker: &mut SessionPicker<S, F>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        let now = tairix_rt::clock_get();
+        let work = match *call {
+            SoundCall::Read => match effects.read_ask() {
+                Ok(ask) => {
+                    match worker.submit(EffectsJob::Read { ask, ticket }) {
+                        Ok(true) => pump_effects(effects, worker, now),
+                        Ok(false) => {}
+                        Err(_) => reply_pinboard(ticket, Err(Errno::Busy)),
+                    }
+                    return;
+                }
+                Err(err) => Err(err),
+            },
+            SoundCall::Themes { from } => {
+                answer_themes(themes, from, ticket);
+                return;
+            }
+            SoundCall::Apply(document) => {
+                effects
+                    .apply(document.as_str(), ticket)
+                    .map_err(|(err, refusal)| {
+                        if let Some(refusal) = refusal {
+                            app::report(
+                                APP_NAME,
+                                format_args!("a sound settings document was refused: {refusal}"),
+                            );
+                        }
+                        err
+                    })
+            }
+            SoundCall::UseTheme(event) => effects.use_theme(event, ticket),
+            SoundCall::Pick(event) => {
+                let begun = effects.begin_pick(event, ticket).and_then(|()| {
+                    picker
+                        .begin_for(
+                            Requester::Sound(event),
+                            &tairix_abi::window_ipc::PickPurpose::Open,
+                            shell,
+                            compositor,
+                        )
+                        .map_err(|err| {
+                            effects.abandon_pick();
+                            if err == Errno::AlreadyExists {
+                                Errno::Busy
+                            } else {
+                                err
+                            }
+                        })
+                });
+                if let Err(err) = begun {
+                    reply_pinboard(ticket, Err(err));
+                }
+                return;
+            }
+        };
+        match work {
+            Ok(work) => submit_effects(effects, worker, work, now),
+            Err(err) => reply_pinboard(ticket, Err(err)),
+        }
     }
 
     /// Re-resolve the icon bar's application strip from live state and push
@@ -7299,10 +7701,7 @@ mod program {
     /// authority said no, could not be reached, or answered something that
     /// is not a verdict — is stated to the user and changes nothing: the
     /// desktop keeps the seat and keeps drawing.
-    fn step_aside<S: DirectorySource>(
-        switch: &mut SwitchUser,
-        screen: SessionScreen<'_, S>,
-    ) -> bool {
+    fn step_aside(switch: &mut SwitchUser, screen: SessionDeparture<'_>) -> bool {
         let mut screen = screen;
         match switch.step_aside(&mut RtSessionAuthority, &mut screen) {
             Ok(()) => true,
@@ -8052,6 +8451,310 @@ mod program {
             ) => {}
         }
         Routed::Continue
+    }
+
+    /// The most sound-choices jobs held at once: a load, a store, a push and
+    /// the pane's reads, each answered in turn. A containment bound on what a
+    /// caller can queue, not a capacity: a job past it is refused with its
+    /// reason.
+    const EFFECTS_JOBS: usize = 8;
+
+    /// One round trip for the user's sound choices: each is a store, a disk
+    /// or another service away.
+    enum EffectsJob {
+        /// Read the stored choices.
+        Load,
+        /// Store `choices`, the ask `number`, answering `ticket` once stored.
+        Store {
+            number: u64,
+            choices: UserChoices,
+            ticket: Option<u64>,
+        },
+        /// Delegate the files `choices` names to the cue authority's instance
+        /// `authority`, for the push the loop then posts.
+        Push {
+            authority: ProcId,
+            choices: UserChoices,
+        },
+        /// Answer the pane's read `ticket` from `ask`, over the machine's
+        /// document as it is now.
+        Read { ask: ReadAsk, ticket: u64 },
+    }
+
+    /// What a sound-choices round trip came to.
+    enum EffectsAnswer {
+        Loaded(LoadedChoices),
+        Stored {
+            number: u64,
+            result: Result<UserChoices, Errno>,
+            ticket: Option<u64>,
+        },
+        /// A push's files, delegated: the document it carries, each event's
+        /// handle, and which could not be handed over.
+        Handed {
+            document: alloc::string::String,
+            files: [u64; SoundEvent::ALL.len()],
+            unavailable: [bool; SoundEvent::ALL.len()],
+        },
+        /// A pane's read, answered on the worker.
+        Answered,
+    }
+
+    type EffectsWorker = Worker<
+        (),
+        EffectsJob,
+        EffectsAnswer,
+        tairix_util::defer::JobQueue<EffectsJob, EffectsAnswer>,
+    >;
+
+    fn serve_effects((): &mut (), job: &mut EffectsJob) -> EffectsAnswer {
+        match job {
+            EffectsJob::Load => EffectsAnswer::Loaded(load_choices(&mut RtHost)),
+            EffectsJob::Store {
+                number,
+                choices,
+                ticket,
+            } => EffectsAnswer::Stored {
+                number: *number,
+                result: store_choices(&mut RtHost, choices),
+                ticket: *ticket,
+            },
+            EffectsJob::Push { authority, choices } => {
+                let (files, unavailable) = hand_over_files(*authority, choices);
+                EffectsAnswer::Handed {
+                    document: choices.pushed(),
+                    files,
+                    unavailable,
+                }
+            }
+            EffectsJob::Read { ask, ticket } => {
+                let machine = machine_sound_settings();
+                let reading = ask.reading(&machine);
+                let mut frame = [0u8; PINBOARD_MAX_REPLY];
+                let len = encode_sound_reading(Ok(&reading.as_wire()), &mut frame)
+                    .or_else(|err| encode_sound_reading(Err(err), &mut frame));
+                if let Ok(len) = len {
+                    let _ = tairix_rt::call_reply(PINBOARD_ENDPOINT, *ticket, &frame[..len]);
+                }
+                EffectsAnswer::Answered
+            }
+        }
+    }
+
+    /// The machine's sound document as it is now, read tolerantly: the shipped
+    /// settings where there is none.
+    fn machine_sound_settings() -> SoundSettings {
+        read_file(
+            tairix_soundtheme::MACHINE_SETTINGS,
+            tairix_appconf::MAX_DOCUMENT_LEN,
+        )
+        .ok()
+        .and_then(|bytes| alloc::string::String::from_utf8(bytes).ok())
+        .and_then(|text| tairix_appconf::Document::parse(&text).ok())
+        .map(|document| <SoundSettings as tairix_appconf::Registry>::load(&document).0)
+        .unwrap_or_default()
+    }
+
+    /// Delegate each file `choices` names to the cue authority `authority`,
+    /// read-only: each event's handle, and which could not be handed over.
+    fn hand_over_files(
+        authority: ProcId,
+        choices: &UserChoices,
+    ) -> ([u64; SoundEvent::ALL.len()], [bool; SoundEvent::ALL.len()]) {
+        let mut unavailable = [false; SoundEvent::ALL.len()];
+        let mut files = [0u64; SoundEvent::ALL.len()];
+        for (at, event) in SoundEvent::ALL.into_iter().enumerate() {
+            let Some(path) = choices.file(event) else {
+                continue;
+            };
+            match hand_over(path, authority) {
+                Ok(handle) => files[at] = handle,
+                Err(err) => {
+                    unavailable[at] = true;
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "the file chosen for the {} sound could not be handed over ({err}); \
+                             its theme's plays",
+                            event.name()
+                        ),
+                    );
+                }
+            }
+        }
+        (files, unavailable)
+    }
+
+    /// Post the push whose files are delegated, its answer collected on the
+    /// cue authority's wake.
+    fn post_push(effects: &mut Effects, cue_posts: &mut tairix_soundtheme::PostedCues, set: u64) {
+        let Some((document, files)) = effects.take_post() else {
+            return;
+        };
+        if let Err(err) = cue_posts.push(
+            &mut tairix_soundtheme::cue::RtCuePost::new(set, CUE_TOKEN),
+            &document,
+            files,
+            tairix_soundtheme::POLICY_ANSWER_DEADLINE_NS,
+        ) {
+            refused_push(effects.pushed(tairix_rt::clock_get(), Err(err)));
+        }
+    }
+
+    /// State why the cue authority did not take the user's sound choices, if
+    /// it did not.
+    fn refused_push(refusal: Option<Errno>) {
+        if let Some(err) = refusal {
+            app::report(
+                APP_NAME,
+                format_args!("the cue authority did not take the sound choices ({err})"),
+            );
+        }
+    }
+
+    /// Delegate the file at `path` to `to`, read-only, if it is a regular file
+    /// a sound may be read from. The delegation names the path the user chose
+    /// and re-opens it as they could, so the descriptor is closed at once.
+    fn hand_over(path: &str, to: ProcId) -> Result<u64, Errno> {
+        let file = tairix_rt::File::open(path.as_bytes(), tairix_abi::fs::OpenFlags::READ)
+            .map_err(Errno::from_syscall)?;
+        let stat = file.stat().map_err(Errno::from_syscall)?;
+        if stat.kind != tairix_abi::fs::FileKind::Regular {
+            return Err(Errno::OutOfRange);
+        }
+        if usize::try_from(stat.size).map_or(true, |len| len > tairix_soundtheme::MAX_SOUND_BYTES) {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let handle = tairix_rt::fd_grant(file.fd(), 0, to);
+        u64::try_from(handle).map_err(|_| Errno::from_syscall(handle))
+    }
+
+    /// Hand `work` to the sound-choices worker, adopting at once what ran here
+    /// for want of one; work it has no room for is refused with its reason.
+    fn submit_effects(effects: &mut Effects, worker: &EffectsWorker, work: EffectsWork, now: u64) {
+        let job = match work {
+            EffectsWork::Store {
+                number,
+                choices,
+                ticket,
+            } => EffectsJob::Store {
+                number,
+                choices,
+                ticket,
+            },
+            EffectsWork::Push { authority, choices } => EffectsJob::Push { authority, choices },
+        };
+        match worker.submit(job) {
+            Ok(true) => pump_effects(effects, worker, now),
+            Ok(false) | Err(EffectsJob::Load | EffectsJob::Read { .. }) => {}
+            Err(EffectsJob::Store { number, ticket, .. }) => {
+                effects.stored(number, Err(Errno::Busy));
+                if let Some(ticket) = ticket {
+                    reply_pinboard(ticket, Err(Errno::Busy));
+                }
+            }
+            Err(EffectsJob::Push { .. }) => {
+                effects.pushed(now, Err(Errno::Busy));
+            }
+        }
+    }
+
+    /// Carry a pick the session made for itself into the user's sound
+    /// choices, answering the call that asked for it.
+    fn conclude_own_pick(own: OwnPick, effects: &mut Effects, worker: &EffectsWorker) {
+        let Requester::Sound(_) = own.requester else {
+            return;
+        };
+        let Some(path) = own.path else {
+            if let Some(ticket) = effects.cancelled() {
+                reply_pinboard(ticket, Ok(()));
+            }
+            return;
+        };
+        if let Ok(path) = tairix_appconf::SettingPath::new(&path) {
+            if let Some(work) = effects.chosen(&path) {
+                submit_effects(effects, worker, work, tairix_rt::clock_get());
+            }
+        } else {
+            app::report(
+                APP_NAME,
+                "the chosen file's path is not one a setting can name; nothing was chosen",
+            );
+            if let Some(ticket) = effects.cancelled() {
+                reply_pinboard(ticket, Err(Errno::LengthOutOfRange));
+            }
+        }
+    }
+
+    /// Adopt every sound-choices answer that has come back, then ask for the
+    /// read and the push owed, if either is.
+    fn pump_effects(effects: &mut Effects, worker: &EffectsWorker, now: u64) {
+        worker.collect_landed(|answer| match answer {
+            EffectsAnswer::Loaded(loaded) => {
+                for warning in &loaded.warnings {
+                    let _ = write!(Stderr, "{warning}");
+                }
+                effects.loaded(now, loaded.choices);
+            }
+            EffectsAnswer::Stored {
+                number,
+                result,
+                ticket,
+            } => {
+                if let Err(err) = &result {
+                    app::report(
+                        APP_NAME,
+                        format_args!("the sound choices could not be stored ({err})"),
+                    );
+                }
+                let outcome = result.as_ref().map(|_| ()).map_err(|err| *err);
+                effects.stored(number, result);
+                if let Some(ticket) = ticket {
+                    reply_pinboard(ticket, outcome);
+                }
+            }
+            EffectsAnswer::Handed {
+                document,
+                files,
+                unavailable,
+            } => effects.handed_over(document, files, unavailable),
+            EffectsAnswer::Answered => {}
+        });
+        if effects.next_load(now) {
+            match worker.submit(EffectsJob::Load) {
+                Ok(true) => pump_effects(effects, worker, now),
+                Ok(false) => {}
+                Err(_) => effects.loaded(now, None),
+            }
+        }
+        if let Some(work) = effects.next_push(now) {
+            submit_effects(effects, worker, work, now);
+        }
+    }
+
+    /// The cue authority's instance, as its notice says now.
+    fn cue_authority() -> Option<ProcId> {
+        let mut buf = [0u8; tairix_abi::NOTICE_PAYLOAD_MAX];
+        let read =
+            usize::try_from(tairix_rt::notice_read(NoticeTopic::CueAuthority, &mut buf)).ok()?;
+        match Notice::decode(NoticeTopic::CueAuthority, buf.get(..read)?) {
+            Ok(Notice::CueAuthority { instance }) => Some(instance),
+            _ => None,
+        }
+    }
+
+    /// Answer the pane's request `ticket` for the sound themes from `from`.
+    fn answer_themes(themes: &[alloc::string::String], from: u16, ticket: u64) {
+        let names: Vec<&str> = themes
+            .iter()
+            .skip(usize::from(from))
+            .take(usize::from(SOUND_THEMES_PAGE))
+            .map(alloc::string::String::as_str)
+            .collect();
+        let mut frame = [0u8; PINBOARD_MAX_REPLY];
+        if let Ok(len) = encode_sound_themes(&names, &mut frame) {
+            let _ = tairix_rt::call_reply(PINBOARD_ENDPOINT, ticket, &frame[..len]);
+        }
     }
 
     /// The session's round trips to the audio service.
@@ -9102,7 +9805,7 @@ mod program {
     /// no shipped pictures — and one unreadable category costs only its own
     /// wallpapers. Every refusal is stated on `stderr`.
     fn list_wallpaper_store() -> Vec<WallpaperName> {
-        let Some(entries) = list_store_dir(WALLPAPER_STORE) else {
+        let Some(entries) = list_store_dir(WALLPAPER_STORE, "wallpapers") else {
             return Vec::new();
         };
         // The store's own children are the categories; a stray file there is
@@ -9116,7 +9819,9 @@ mod program {
         let mut listings: Vec<(alloc::string::String, Vec<tairix_wallpaper::CatalogEntry>)> =
             Vec::with_capacity(categories.len());
         for category in categories {
-            let Some(listing) = list_store_dir(&tairix_wallpaper::category_path(&category)) else {
+            let Some(listing) =
+                list_store_dir(&tairix_wallpaper::category_path(&category), "wallpapers")
+            else {
                 continue;
             };
             // The shared catalog builder decides what counts as a wallpaper
@@ -9164,7 +9869,7 @@ mod program {
     fn load_cursor_sets(
         shell: &DesktopShell,
     ) -> Vec<(tairix_theme::CursorSetId, tairix_cursor::CursorTheme)> {
-        let Some(entries) = list_store_dir(tairix_cursor::CURSOR_STORE) else {
+        let Some(entries) = list_store_dir(tairix_cursor::CURSOR_STORE, "pointer sets") else {
             return Vec::new();
         };
         // The store's own children are the sets; a stray file there is
@@ -9187,16 +9892,16 @@ mod program {
             .collect()
     }
 
-    /// One wallpaper-store directory's entries, or `None` with the reason
-    /// stated on `stderr`.
-    fn list_store_dir(path: &str) -> Option<Vec<Entry>> {
+    /// One shipped store directory's entries, or `None` with the reason
+    /// stated on `stderr`, naming the `offered` it holds.
+    fn list_store_dir(path: &str, offered: &str) -> Option<Vec<Entry>> {
         let stream = match tairix_rt::read_dir_all(path.as_bytes()) {
             Ok(stream) => stream,
             Err(ret) => {
                 app::report(
                     APP_NAME,
                     format_args!(
-                        "{path}: {}; its wallpapers are not offered",
+                        "{path}: {}; its {offered} are not offered",
                         Errno::from_syscall(ret)
                     ),
                 );
@@ -9208,11 +9913,24 @@ mod program {
         else {
             app::report(
                 APP_NAME,
-                format_args!("{path}: listing not readable; its wallpapers are not offered"),
+                format_args!("{path}: listing not readable; its {offered} are not offered"),
             );
             return None;
         };
         Some(entries)
+    }
+
+    /// The sound themes the shipped store holds, in name order: read once,
+    /// at bring-up, since `/System` cannot change under a running session.
+    fn list_sound_themes() -> Vec<alloc::string::String> {
+        let entries = list_store_dir(tairix_soundtheme::SOUND_STORE, "sound themes");
+        tairix_soundtheme::themes(
+            entries
+                .iter()
+                .flatten()
+                .filter(|entry| entry.is_directory_backed())
+                .map(tairix_browse::Entry::name),
+        )
     }
 
     /// Spawn a desktop app as [`APP_ATTACH`] places it, forwarding the
@@ -9395,7 +10113,7 @@ mod program {
                 }
                 DocumentAuthority::Held { fd } => tairix_rt::fd_grant(fd, ceiling, app),
             };
-            let handle = u64::try_from(minted).map_err(|_| Errno::from_syscall(minted))?;
+            let handle = Errno::syscall_result(minted)?;
             // Handle zero is the kernel's reserved invalid value, never a mint.
             if handle == 0 {
                 return Err(Errno::OutOfRange);

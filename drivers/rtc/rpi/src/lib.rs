@@ -70,6 +70,12 @@ const REGISTER_HANDLE_MARKER: u64 = 0x5250_5254_0000_0001;
 /// match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the firmware mailbox the clock is reached through, and the
+/// restricted-sender RTC endpoint.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] =
+    &[CapabilityId::MAILBOX, CapabilityId::IPC_BIND_PRIVILEGED];
+
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from, so the
 /// match data can never drift from the driver. The device is the mailbox

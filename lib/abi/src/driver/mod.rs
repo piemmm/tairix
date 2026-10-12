@@ -45,6 +45,7 @@
 use crate::hwtree::{HwMatchKey, HwNode, HwResource, MsiAllocation};
 use crate::le::{put_u16, read_u16, read_u32};
 use crate::syscall::SYSCALL_TABLE_HASH_LEN;
+use crate::waitset::WaitSourceKind;
 use crate::{CapabilityId, Errno};
 
 pub mod accelerator;
@@ -58,9 +59,11 @@ pub mod codec;
 pub mod display;
 pub mod dma;
 pub mod dmaengine;
+pub mod encoder;
 pub mod filesystem;
 pub mod i2c;
 pub mod input;
+pub mod irqline;
 pub mod mailbox;
 pub mod mmio;
 pub mod msix;
@@ -336,6 +339,40 @@ pub enum CompletionSignal {
     TimedOut,
 }
 
+/// One of a device's event sources, as its driver hands it to the loop that
+/// serves the device: the wait-set member the loop parks on for it.
+///
+/// Whatever woke a source is collected by the driver when the loop asks it to
+/// read its events, so the source is quiet again before the loop re-parks.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DeviceWake {
+    /// A bound interrupt line: the handle `irq_bind` answered.
+    Irq(u64),
+    /// A message port this process bound, which another driver reports the
+    /// device's progress on.
+    Port(u64),
+    /// The answer to a call the driver posted on this call endpoint, a
+    /// supplier's event wait; the driver posts the next once it has the
+    /// answer, so the member stays the same.
+    CallReply(u64),
+    /// A call endpoint the driver serves for the device beside the one its
+    /// loop serves: a second protocol the same hardware speaks.
+    Calls(u64),
+}
+
+impl DeviceWake {
+    /// The wait-set member this source is.
+    #[must_use]
+    pub const fn member(self) -> (WaitSourceKind, u64) {
+        match self {
+            Self::Irq(handle) => (WaitSourceKind::Irq, handle),
+            Self::Port(port) => (WaitSourceKind::Port, port),
+            Self::CallReply(endpoint) => (WaitSourceKind::CallReply, endpoint),
+            Self::Calls(endpoint) => (WaitSourceKind::Endpoint, endpoint),
+        }
+    }
+}
+
 /// Stable error code returned across the driver ABI.
 ///
 /// The variants are kept disjoint from [`Errno`] so that a stray
@@ -480,6 +517,14 @@ pub enum DriverError {
     /// [`NoSpace`](Self::NoSpace): releasing another periodic stream on the
     /// bus can clear it. Maps to [`Errno::NoBandwidth`].
     NoBandwidth = 23,
+    /// The caller acted on a state of the device that has since moved: frames
+    /// presented to a display whose output now runs another mode, or none.
+    ///
+    /// Distinct from [`DeviceFault`](Self::DeviceFault): the device is
+    /// healthy and the caller's view of it is out of date, so reading the
+    /// state again and acting on what it says now clears it. Maps to
+    /// [`Errno::Stale`].
+    Stale = 24,
 }
 
 impl DriverError {
@@ -524,6 +569,7 @@ impl DriverError {
             21 => Ok(Self::DirectoryCycle),
             22 => Ok(Self::OutOfMemory),
             23 => Ok(Self::NoBandwidth),
+            24 => Ok(Self::Stale),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -556,6 +602,7 @@ impl DriverError {
             Self::DirectoryNotEmpty => Errno::NotEmpty,
             Self::OutOfMemory => Errno::OutOfMemory,
             Self::NoBandwidth => Errno::NoBandwidth,
+            Self::Stale => Errno::Stale,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -909,6 +956,46 @@ where
             }
             window = Some((base, resource.length()));
         }
+    }
+    let (base, len) = window.ok_or(DriverError::NotFound)?;
+    let len = usize::try_from(len).map_err(|_| DriverError::OutOfRange)?;
+    if len == 0 {
+        return Err(DriverError::OutOfRange);
+    }
+    Ok((base, len))
+}
+
+/// Resolve the register window named `name` among a driver's kernel-issued
+/// device-resource grants, as `(base, len)` to map: how a driver of a device
+/// with several windows finds each by its `reg-names` entry.
+///
+/// # Errors
+///
+/// * [`DriverError::NotFound`] if no window carries the name.
+/// * [`DriverError::Unsupported`] if two do — an ambiguous delivery refused
+///   rather than guessed at.
+/// * [`DriverError::OutOfRange`] for a zero-length window or a length past
+///   `usize` on the target.
+///
+/// # Capabilities
+///
+/// None; the map itself is capability-checked kernel-side.
+pub fn named_register_window<'a, I>(resources: I, name: &[u8]) -> Result<(u64, usize), DriverError>
+where
+    I: IntoIterator<Item = &'a HwResource>,
+{
+    let mut window: Option<(u64, u64)> = None;
+    for resource in resources {
+        if !resource.is_window_named(name) {
+            continue;
+        }
+        let Some(base) = resource.register_window_base() else {
+            continue;
+        };
+        if window.is_some() {
+            return Err(DriverError::Unsupported);
+        }
+        window = Some((base, resource.length()));
     }
     let (base, len) = window.ok_or(DriverError::NotFound)?;
     let len = usize::try_from(len).map_err(|_| DriverError::OutOfRange)?;
@@ -1334,6 +1421,20 @@ mod tests {
         assert_eq!(DriverError::DirectoryCycle.as_i32(), 21);
         assert_eq!(DriverError::OutOfMemory.as_i32(), 22);
         assert_eq!(DriverError::NoBandwidth.as_i32(), 23);
+        assert_eq!(DriverError::Stale.as_i32(), 24);
+    }
+
+    #[test]
+    fn each_device_wake_is_the_member_of_its_own_kind() {
+        use super::DeviceWake;
+        use crate::waitset::WaitSourceKind;
+        assert_eq!(DeviceWake::Irq(3).member(), (WaitSourceKind::Irq, 3));
+        assert_eq!(DeviceWake::Port(5).member(), (WaitSourceKind::Port, 5));
+        assert_eq!(
+            DeviceWake::CallReply(7).member(),
+            (WaitSourceKind::CallReply, 7)
+        );
+        assert_eq!(DeviceWake::Calls(9).member(), (WaitSourceKind::Endpoint, 9));
     }
 
     #[test]
@@ -1362,6 +1463,7 @@ mod tests {
         assert_eq!(DriverError::DirectoryCycle.as_errno(), Errno::OutOfRange);
         assert_eq!(DriverError::OutOfMemory.as_errno(), Errno::OutOfMemory);
         assert_eq!(DriverError::NoBandwidth.as_errno(), Errno::NoBandwidth);
+        assert_eq!(DriverError::Stale.as_errno(), Errno::Stale);
     }
 
     #[test]
@@ -1390,12 +1492,13 @@ mod tests {
             DriverError::DirectoryCycle,
             DriverError::OutOfMemory,
             DriverError::NoBandwidth,
+            DriverError::Stale,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(24), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(25), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 
@@ -1855,6 +1958,35 @@ mod tests {
         assert_eq!(
             sole_register_window(grants.iter()),
             Ok((0x4000_0000, 0x2000))
+        );
+    }
+
+    #[test]
+    fn named_register_window_finds_each_window_by_its_reg_names_entry() {
+        let named = |base, name: &[u8]| HwResource::mmio_named(base, 0x100, name).expect("fits");
+        let grants = [
+            named(0xFE90_0700, b"hdmi"),
+            named(0xFE90_0300, b"dvp"),
+            HwResource::irq(42, 1),
+            HwResource::mmio(0xFE90_0F00, 0x80),
+        ];
+        assert_eq!(
+            named_register_window(grants.iter(), b"dvp"),
+            Ok((0xFE90_0300, 0x100))
+        );
+        assert_eq!(
+            named_register_window(grants.iter(), b"phy"),
+            Err(DriverError::NotFound)
+        );
+        let twice = [named(0x1000, b"cec"), named(0x2000, b"cec")];
+        assert_eq!(
+            named_register_window(twice.iter(), b"cec"),
+            Err(DriverError::Unsupported)
+        );
+        let empty = [HwResource::mmio_named(0x1000, 0, b"rm").expect("fits")];
+        assert_eq!(
+            named_register_window(empty.iter(), b"rm"),
+            Err(DriverError::OutOfRange)
         );
     }
 

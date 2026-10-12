@@ -6,7 +6,7 @@ HATs with a digital volume. Stability tier: `experimental`.
 ## Supported hardware
 
 Device-tree `compatible = "ti,pcm5122"`, a child of the I²C bus it answers on.
-Its only reach to the part is the transfer endpoint its node's grant names,
+Its only reach to the part is the I²C target channel its node's link names,
 so it cannot address another device on the bus; its codec duty comes from the
 board's `simple-audio-card`.
 
@@ -15,7 +15,8 @@ board's `simple-audio-card`.
 | Capability | Why |
 |---|---|
 | `CAP_DRV_LOAD` | the load-time gate every driver clears |
-| `CAP_IPC_ENDPOINT` | the bus's transfer endpoint, through the node's grant |
+| `CAP_IPC_ENDPOINT` | the I²C controller its node's link names |
+| `CAP_SHM` | the buffer of the channel opened over that link |
 | `CAP_IPC_BIND_PRIVILEGED` | the codec's endpoint, under its codec `LinkDuty` |
 | `CAP_LOG_EMIT` | the record of every refusal, and why it ends |
 

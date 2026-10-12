@@ -13,11 +13,11 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::driver::sole_register_window;
+    use tairix_abi::driver::DeviceWake;
     use tairix_abi::hwlink::{LinkRequest, LinkRole};
     use tairix_abi::{DriverError, MmioMapper, HW_NODE_MAX_RESOURCES};
     use tairix_audiochan::cyclic::LinkDma;
-    use tairix_audiochan::{exit, fail, serve, Wake};
-    use tairix_caps::CapabilitySet;
+    use tairix_audiochan::{exit, fail, serve};
     use tairix_drv_audio_bcm2711_pwm::jack::Jack;
     use tairix_drv_audio_bcm2711_pwm::pwm::{self, Pwm};
     use tairix_drv_audio_bcm2711_pwm::{timing, CLOCK_HZ, REQUIRED_CAPABILITIES};
@@ -27,16 +27,9 @@ mod program {
     /// The dither's seed: its sequence wants decorrelation, not secrecy.
     const DITHER_SEED: u64 = 0x5057_4D44_4954_4852;
 
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        for cap in REQUIRED_CAPABILITIES {
-            caps.insert(*cap);
-        }
-        caps
-    }
-
     fn main() -> i32 {
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return fail(
                 exit::NO_HOST,
                 "pwm audio: the node's grants could not be read",
@@ -131,7 +124,7 @@ mod program {
                 Some(err),
             );
         }
-        serve(jack, &[Wake::CallReply(line.endpoint())])
+        serve(jack, &[DeviceWake::CallReply(line.endpoint())])
     }
 
     tairix_rt::entry!(main);

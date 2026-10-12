@@ -1503,8 +1503,8 @@ impl Panel {
 }
 
 impl Display for Panel {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(mode())
+    fn output(&self) -> Option<DisplayMode> {
+        Some(mode())
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
@@ -1540,6 +1540,47 @@ fn ribboned() -> LoginScreen<Authority> {
     login.refresh(0, None);
     login.repaint();
     login
+}
+
+/// The output moving rebuilds only what the screen's size shapes: the frame
+/// is the new mode's and is painted whole, the ribbon stands over it, and
+/// the screen asking for a password is the same one.
+#[test]
+fn a_screen_moved_onto_another_mode_is_rebuilt_in_place() {
+    let mut login = ribboned();
+    let notice = login.notice().to_string();
+    let larger = DisplayMode {
+        width_px: 1600,
+        height_px: 900,
+        stride_bytes: 1600 * 4,
+        format: DisplayFormat::Bgra8888,
+    };
+    let present = login.adopt_scanout(Scanout::new(larger).expect("a valid mode"), 0);
+
+    assert_eq!(present, Present::Whole);
+    assert_eq!(login.mode(), &larger);
+    assert_eq!(login.screen(), Rect::new(0, 0, 1600, 900));
+    assert_eq!(login.frame().len(), 1600 * 900 * 4);
+    assert_eq!(login.notice(), notice);
+}
+
+/// A new configuration lights the display, so a screen that had put it to
+/// sleep is awake again after the move, and sleeps again once idle.
+#[test]
+fn a_sleeping_screen_moved_onto_another_mode_goes_back_to_sleep() {
+    let mut login = ready();
+    let mut panel = Panel::switchable();
+    assert_eq!(
+        login.sleep_if_idle(&mut panel, SLEPT),
+        Some(SwitchedOff::Off)
+    );
+    let _ = login.adopt_scanout(Scanout::new(mode()).expect("a valid mode"), SLEPT);
+    assert!(!login.is_asleep(), "the move lit the display");
+    assert_eq!(
+        login.sleep_if_idle(&mut panel, SLEPT),
+        Some(SwitchedOff::Off),
+        "and it is switched off again, its input still a full wait old"
+    );
 }
 
 #[test]

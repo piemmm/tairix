@@ -97,6 +97,8 @@ mod program {
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
+    use tairix_soundtheme::cue::RtCuePost;
+    use tairix_soundtheme::{Answer, PostedCues, SoundEvent, PLAYED_OUT_WAIT_NS};
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, win_sizing, CycleOutcome,
         DegradedField, PanelLayout, Service, ServiceHost, Switchboard, SwitchboardAction,
@@ -260,6 +262,8 @@ mod program {
         /// what the cache above retains, and resolving that glyph's coverage
         /// is the cost this cache exists to pay once.
         artwork_resolver: Box<dyn ArtworkResolver>,
+        /// The machine's end sound, asked for and not yet answered.
+        cues: PostedCues,
     }
 
     impl RtHost {
@@ -304,7 +308,12 @@ mod program {
                 session: None,
                 artwork,
                 artwork_resolver: Box::new(DeferredArtwork(reads)),
+                cues: PostedCues::new(),
             }
+        }
+
+        fn cue_post(&self) -> RtCuePost {
+            RtCuePost::new(self.set, WaitToken::Cue.as_u64())
         }
 
         /// Give back every retained icon pixel the current memory-pressure
@@ -558,6 +567,24 @@ mod program {
             } else {
                 Err(Errno::from_syscall(ret))
             }
+        }
+
+        fn cue_end(&mut self) -> Result<(), Errno> {
+            let mut post = self.cue_post();
+            self.cues.post(
+                &mut post,
+                SoundEvent::Shutdown,
+                Answer::PlayedOut,
+                PLAYED_OUT_WAIT_NS,
+            )
+        }
+
+        fn end_sound_over(&mut self) -> bool {
+            let mut post = self.cue_post();
+            let mut over = false;
+            self.cues
+                .collect(&mut post, |event, _| over |= event == SoundEvent::Shutdown);
+            over
         }
 
         fn report_refusal(&mut self, action: &str, refusal: Errno) {
@@ -1538,6 +1565,7 @@ mod program {
                     service.panel_mut().repaint_whole();
                 }
             }
+            Some(WaitToken::Cue) => service.end_sound_answered(host),
             // A band that did not move needs no trim, a network edge is served
             // by the loop before it gets here, and a token the loop never arms
             // is a spurious wake: re-sample on the next pass.

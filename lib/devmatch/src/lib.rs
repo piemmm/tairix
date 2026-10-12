@@ -92,6 +92,23 @@ pub fn best_bind_priority(node_keys: &[HwMatchKey], bind_keys: &[DriverBindKey])
     best
 }
 
+/// Which of a driver's `bind_keys` it was bound to a node keyed `node_keys` by,
+/// as an index into `bind_keys`, or [`None`] when nothing matches.
+///
+/// The highest priority wins, as it won the node; among keys tied at it, the
+/// one matching the node's most specific key — the earliest, as a device tree
+/// lists `compatible` — and then the earliest in the table. A driver serving a
+/// binding family reads its variant from the index.
+#[must_use]
+pub fn matched_bind_key(node_keys: &[HwMatchKey], bind_keys: &[DriverBindKey]) -> Option<usize> {
+    let priority = best_bind_priority(node_keys, bind_keys)?;
+    node_keys.iter().find_map(|node| {
+        bind_keys
+            .iter()
+            .position(|bind| bind.priority == priority && bind.key.matches(node))
+    })
+}
+
 /// Resolve a node's match keys against every candidate, deterministically.
 ///
 /// The result depends only on the key sets and priorities, never on
@@ -139,6 +156,41 @@ mod tests {
             Ok(key) => key,
             Err(_) => unreachable!("test compatible strings fit HW_COMPATIBLE_MAX"),
         }
+    }
+
+    #[test]
+    fn the_matched_key_is_the_one_the_node_names_among_a_familys_bindings() {
+        let table = [
+            DriverBindKey::new(10, compat(b"brcm,bcm2835-dma")),
+            DriverBindKey::new(10, compat(b"brcm,bcm2711-dma")),
+        ];
+        assert_eq!(
+            matched_bind_key(&[compat(b"brcm,bcm2711-dma")], &table),
+            Some(1)
+        );
+        assert_eq!(
+            matched_bind_key(&[compat(b"brcm,bcm2835-dma")], &table),
+            Some(0)
+        );
+        assert_eq!(
+            matched_bind_key(&[compat(b"brcm,bcm2712-dma")], &table),
+            None
+        );
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_nodes_most_specific_key_and_priority_comes_first() {
+        let generic_first = [
+            DriverBindKey::new(10, compat(b"brcm,l2-intc")),
+            DriverBindKey::new(10, compat(b"brcm,bcm2711-l2-intc")),
+        ];
+        let node = [compat(b"brcm,bcm2711-l2-intc"), compat(b"brcm,l2-intc")];
+        assert_eq!(matched_bind_key(&node, &generic_first), Some(1));
+        let generic_preferred = [
+            DriverBindKey::new(20, compat(b"brcm,l2-intc")),
+            DriverBindKey::new(10, compat(b"brcm,bcm2711-l2-intc")),
+        ];
+        assert_eq!(matched_bind_key(&node, &generic_preferred), Some(0));
     }
 
     #[test]

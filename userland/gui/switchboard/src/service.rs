@@ -196,6 +196,18 @@ pub trait ServiceHost {
     /// successful power-off never returns at all.
     fn power(&mut self, action: PowerAction) -> Result<(), Errno>;
 
+    /// Ask for the machine's end sound, answered once it has played out or
+    /// its bounded wait has passed.
+    ///
+    /// # Errors
+    ///
+    /// The post's refusal: no sound authority to ask.
+    fn cue_end(&mut self) -> Result<(), Errno>;
+
+    /// Collect the sound authority's answers, answering whether the end
+    /// sound's has come — played out, refused, or given up on.
+    fn end_sound_over(&mut self) -> bool;
+
     /// State, in plain words, that `action` was refused with `refusal`.
     ///
     /// The service keeps running: the user is told which action did not
@@ -280,6 +292,8 @@ pub struct Service {
     /// Where the network report stands with the session. Pending at start, so
     /// an instance that may not read the interfaces still says so once.
     network_offer: NetworkOffer,
+    /// The power transition waiting on the machine's end sound.
+    pending_power: Option<PowerAction>,
     /// Which bundle each window owner was launched from, as the session has
     /// reported it — the one fact the process list cannot carry.
     bundles: OwnerBundles,
@@ -325,6 +339,7 @@ impl Service {
             watching: false,
             network: None,
             network_offer: NetworkOffer::Pending,
+            pending_power: None,
             bundles,
             home,
             next_sample_ns: 0,
@@ -537,7 +552,7 @@ impl Service {
                 self.bundles.record(owner, bundle.as_str());
                 self.rebuild_if_shown(host, authority);
             }
-            SwitchboardCommand::Power { action } => Self::power(host, action, authority),
+            SwitchboardCommand::Power { action } => self.power(host, action, authority),
             // The screensaver has nothing to draw until a report lands, so the
             // first is the sample already in hand rather than one a period on.
             SwitchboardCommand::WatchMachine { watch } => {
@@ -589,17 +604,43 @@ impl Service {
     /// again regardless. Either way the user is told which transition did
     /// not happen.
     ///
+    /// A granted transition first plays the machine's end sound out, within
+    /// its bound ([`Self::end_sound_answered`]); one asked for again while it
+    /// plays takes the later choice without asking twice, and a machine that
+    /// cannot ask for the sound transitions at once.
+    ///
     /// A granted power-off or restart never returns; a refusal from the
     /// kernel (an unsupported platform primitive, say) is stated like any
     /// other and the service keeps running.
-    fn power(host: &mut dyn ServiceHost, action: PowerAction, authority: &dyn CapabilityQuery) {
-        let attempted = power_phrase(action);
+    fn power(
+        &mut self,
+        host: &mut dyn ServiceHost,
+        action: PowerAction,
+        authority: &dyn CapabilityQuery,
+    ) {
         if !authority.holds(CapabilityId::SYSTEM_POWER) {
-            host.report_refusal(attempted, Errno::PermissionDenied);
+            host.report_refusal(power_phrase(action), Errno::PermissionDenied);
             return;
         }
+        if self.pending_power.replace(action).is_none() && host.cue_end().is_err() {
+            self.power_now(host);
+        }
+    }
+
+    /// The sound authority answered: move to the waiting power state once
+    /// the machine's end sound is over.
+    pub fn end_sound_answered(&mut self, host: &mut dyn ServiceHost) {
+        if host.end_sound_over() {
+            self.power_now(host);
+        }
+    }
+
+    fn power_now(&mut self, host: &mut dyn ServiceHost) {
+        let Some(action) = self.pending_power.take() else {
+            return;
+        };
         if let Err(refusal) = host.power(action) {
-            host.report_refusal(attempted, refusal);
+            host.report_refusal(power_phrase(action), refusal);
         }
     }
 

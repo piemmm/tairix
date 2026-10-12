@@ -3,10 +3,10 @@
 //!
 //! # The bit-exactness property, stated precisely
 //!
-//! A source of twenty-four bits or fewer, at unity gain, through an identity
-//! channel map, at the sink's own rate, with no other stream live, reaches the
-//! device **bit-exact**. Three things make that true rather than approximately
-//! true:
+//! A source of twenty-four bits or fewer, and no more than the sink resolves,
+//! at unity gain, through an identity channel map, at the sink's own rate, with
+//! no other stream live, reaches the device **bit-exact**. Three things make
+//! that true rather than approximately true:
 //!
 //! * the `f32` pivot's scale factors are powers of two, so a twenty-four-bit
 //!   integer survives the round trip unchanged;
@@ -48,6 +48,9 @@ pub const PIVOT_BITS: u32 = 24;
 pub struct SinkFormat {
     /// The encoding the device is clocked in.
     pub format: SampleFormat,
+    /// The bits of each sample the device resolves, one to the encoding's own:
+    /// the grid the one quantisation lands on.
+    pub resolution: u32,
     /// The rate it is clocked at. Every stream reaching the mixer is already
     /// at this rate; resampling is a per-stream stage above.
     pub rate: Rate,
@@ -66,6 +69,17 @@ impl SinkFormat {
     #[must_use]
     pub fn frame_bytes(&self) -> usize {
         self.channels() * self.format.bytes_per_sample()
+    }
+
+    /// Whether `bits` is a resolution of the encoding.
+    fn resolves(&self, bits: u32) -> bool {
+        (1..=self.format.valid_bits()).contains(&bits)
+    }
+
+    /// The grid the one quantisation lands on, in bits, or `None` for a float
+    /// encoding, which has none.
+    fn grid_bits(&self) -> Option<u32> {
+        (!self.format.is_float()).then_some(self.resolution)
     }
 }
 
@@ -132,11 +146,11 @@ impl Mixer {
     ///
     /// # Errors
     ///
-    /// * [`Errno::OutOfRange`] — a zero period, or one whose buffers would not
-    ///   be addressable.
+    /// * [`Errno::OutOfRange`] — a zero period, one whose buffers would not
+    ///   be addressable, or a resolution the encoding does not have.
     /// * [`Errno::OutOfMemory`] — a buffer could not be allocated.
     pub fn new(sink: SinkFormat, period_frames: usize, dither_seed: u64) -> Result<Self, Errno> {
-        if period_frames == 0 {
+        if period_frames == 0 || !sink.resolves(sink.resolution) {
             return Err(Errno::OutOfRange);
         }
         let widest = period_frames
@@ -164,6 +178,20 @@ impl Mixer {
     /// a path that was exact.
     pub fn set_dither(&mut self, dither: Dither) {
         self.dither = dither;
+    }
+
+    /// The device now resolves `bits` of each sample, as a changed sink on
+    /// the same connector may.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] — a resolution the encoding does not have.
+    pub fn set_resolution(&mut self, bits: u32) -> Result<(), Errno> {
+        if !self.sink.resolves(bits) {
+            return Err(Errno::OutOfRange);
+        }
+        self.sink.resolution = bits;
+        Ok(())
     }
 
     /// Sum `streams` into `frames` device frames written to `out`, returning
@@ -252,9 +280,15 @@ impl Mixer {
             // the material's resolution is the pivot's from here on.
             resolution = resolution.max(PIVOT_BITS);
         }
-        if self.dither == Dither::TriangularPdf && convert::narrows(resolution, self.sink.format) {
-            self.noise
-                .apply(self.sink.format, &mut self.accumulator[..span]);
+        if let Some(grid) = self.sink.grid_bits() {
+            let block = &mut self.accumulator[..span];
+            // Dither only what narrows: on a path that was exact it is noise.
+            if self.dither == Dither::TriangularPdf && grid < resolution {
+                self.noise.apply(grid, block);
+            }
+            if grid < self.sink.format.valid_bits() {
+                convert::requantise(grid, block);
+            }
         }
         Ok(convert::encode(
             self.sink.format,

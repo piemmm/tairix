@@ -23,14 +23,16 @@
 //! the service loads nothing but keeps observing.
 
 use alloc::vec::Vec;
+use core::iter;
 
+use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::{Errno, HwNode, HwTreeHeader, NoticeTopic};
 use tairix_devmatch::DriverCandidate;
 use tairix_log::{log as log_event, Event, Level, Sink};
 
 use crate::audiobind::{self, AudioBaselineSource, AudioBindState, AudiodBind};
-use crate::autoload::{match_and_load, unload_vanished, AutoloadState};
+use crate::autoload::{match_and_load, unload_vanished, AutoloadState, NodeReport};
 use crate::events;
 use crate::netbind::{bind_new_channels, NetBindState, NetstackBind};
 use crate::netcfg::{
@@ -38,6 +40,7 @@ use crate::netcfg::{
     NetworkConfigSource, NetworkInterfaceConfigSource,
 };
 use crate::observe::for_each_node;
+use crate::presence::{BootSettle, Devices, Pending, Presence};
 use crate::store::{fetch_catalogue, CatalogueDriver, DriverStoreCall};
 
 /// The kernel-facing hardware-tree operations the reactive loop performs,
@@ -192,7 +195,7 @@ fn grow_zeroed(buf: &mut Vec<u8>, len: usize) -> Result<(), Errno> {
 /// loaded or unloaded. A catalogue-fetch failure is
 /// **not** propagated — it is fail-soft (logged, retried).
 #[allow(clippy::too_many_arguments)]
-fn react_once<T: HwTreeService, C: DriverStoreCall>(
+fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
     netstack: &mut dyn NetstackBind,
@@ -206,6 +209,8 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     netifconfig: &mut NetIfConfigState,
     catalogue: &mut Option<Vec<CatalogueDriver>>,
     state: &mut AutoloadState,
+    settle: &mut BootSettle,
+    devices: &mut Devices,
     tree_buf: &mut Vec<u8>,
     reply_buf: &mut [u8],
     sink: &dyn Sink,
@@ -295,8 +300,43 @@ fn react_once<T: HwTreeService, C: DriverStoreCall>(
     // just bound this cycle can be matched (by MAC) and configured in the
     // same reaction; an interface not yet bound is retried at the next reaction.
     deliver_interface_configs(netifcfg, netifconfig, netstack, sink);
+    let channels_owed = netbind.has_deferred_work() || audiobind.has_deferred_work();
+    let now_ns = tree.now_ns();
+    if settle.observe(
+        now_ns,
+        catalogue.is_some(),
+        pending(&nodes, state, channels_owed),
+        sink,
+    ) {
+        tree.settled();
+    }
+    let moves = devices.update(&nodes, &state.observed, &present);
+    for event in iter::repeat_n(SoundEvent::DeviceDetached, moves.left)
+        .chain(iter::repeat_n(SoundEvent::DeviceAttached, moves.arrived))
+    {
+        tree.cue(event);
+    }
     state.observed = present;
     Ok(())
+}
+
+/// What the boot's settling still waits on in `nodes`: each node a driver was
+/// loaded for that has not settled, each node held for its supplier, and the
+/// channel hand-offs a service was not yet up to take.
+fn pending<'a>(
+    nodes: &'a [HwNode],
+    state: &'a AutoloadState,
+    channels_owed: bool,
+) -> impl Iterator<Item = Pending> + 'a {
+    nodes
+        .iter()
+        .filter(|node| {
+            let id = node.id();
+            (state.bindings.contains_key(&id) && !node.is_settled())
+                || matches!(state.reported.get(&id), Some(NodeReport::Held(_)))
+        })
+        .map(|node| Pending::Node(node.id()))
+        .chain(channels_owed.then_some(Pending::Channels))
 }
 
 /// The ids of `nodes`, ascending.
@@ -336,6 +376,11 @@ fn node_ids(nodes: &[HwNode]) -> Result<Vec<u32>, Errno> {
 /// the kernel triggers when it binds (once
 /// obtained, the static read-only store is not re-fetched).
 ///
+/// Through `tree`'s [`Presence`] it announces the device manager's readiness
+/// once the hardware present at boot has settled ([`BootSettle`]), and asks
+/// for the sound of each removable device that arrives on a running machine
+/// or leaves it ([`Devices`]).
+///
 /// # Errors
 ///
 /// Returns the first [`Errno`] a *tree-seam* operation reports
@@ -344,7 +389,7 @@ fn node_ids(nodes: &[HwNode]) -> Result<Vec<u32>, Errno> {
 /// fail-closed and never silently continues past such an error. A
 /// catalogue-fetch failure is fail-soft, not propagated.
 #[allow(clippy::too_many_arguments)]
-pub fn run<T: HwTreeService, C: DriverStoreCall>(
+pub fn run<T: HwTreeService + Presence, C: DriverStoreCall>(
     tree: &mut T,
     store: &mut C,
     netstack: &mut dyn NetstackBind,
@@ -375,6 +420,8 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
     // re-logs only the nodes whose decision changed, never every unbound one
     // over the slow diagnostic serial line.
     let mut state = AutoloadState::default();
+    let mut settle = BootSettle::default();
+    let mut devices = Devices::default();
     // The snapshot buffer the service owns for its lifetime: it starts
     // empty and `read_tree_growing` sizes it to the discovered tree on the
     // first read, growing it later only if the tree ever grows past it
@@ -395,6 +442,8 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
         &mut netifconfig,
         &mut catalogue,
         &mut state,
+        &mut settle,
+        &mut devices,
         &mut tree_buf,
         reply_buf,
         sink,
@@ -415,11 +464,16 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
             || audiobind_state.has_deferred_work()
             || netconfig.has_deferred_work()
             || netifconfig.has_deferred_work();
-        let timeout_ns = if outstanding {
+        let deferred_ns = if outstanding {
             DEFERRED_RETRY_NS
         } else {
             u64::MAX
         };
+        // A settle wait lapsing changes no generation either.
+        let settling_ns = settle
+            .deadline()
+            .map_or(u64::MAX, |at| at.saturating_sub(tree.now_ns()));
+        let timeout_ns = deferred_ns.min(settling_ns);
         match tree.wait_for_change(timeout_ns) {
             // Changed, or the deadline elapsed with work still outstanding:
             // either way re-react so the deferred milestone is retried.
@@ -440,6 +494,8 @@ pub fn run<T: HwTreeService, C: DriverStoreCall>(
             &mut netifconfig,
             &mut catalogue,
             &mut state,
+            &mut settle,
+            &mut devices,
             &mut tree_buf,
             reply_buf,
             sink,
@@ -491,6 +547,13 @@ mod tests {
         waited_under: Vec<u64>,
         reported_nodes: Vec<u32>,
         wait_error: Option<Errno>,
+        /// The monotonic clock, advanced by `tick` on every wait.
+        clock: u64,
+        tick: u64,
+        /// How many times readiness was announced.
+        settled: usize,
+        /// Every sound asked for, in order.
+        cues: Vec<SoundEvent>,
     }
 
     impl ScriptedTree {
@@ -502,7 +565,25 @@ mod tests {
                 waited_under: Vec::new(),
                 reported_nodes: Vec::new(),
                 wait_error: None,
+                clock: 0,
+                tick: 0,
+                settled: 0,
+                cues: Vec::new(),
             }
+        }
+    }
+
+    impl Presence for ScriptedTree {
+        fn now_ns(&mut self) -> u64 {
+            self.clock
+        }
+
+        fn settled(&mut self) {
+            self.settled += 1;
+        }
+
+        fn cue(&mut self, event: SoundEvent) {
+            self.cues.push(event);
         }
     }
 
@@ -523,6 +604,7 @@ mod tests {
             }
             self.waits += 1;
             self.waited_under.push(timeout_ns);
+            self.clock += self.tick;
             Ok(())
         }
 
@@ -751,6 +833,91 @@ mod tests {
             "{:?}",
             sink.ids()
         );
+    }
+
+    /// A removable device found as its bus came up makes no sound; one
+    /// plugged in on the running machine is cued arriving and, pulled out,
+    /// leaving — once each, though it is two nodes.
+    #[test]
+    fn a_removable_device_is_cued_once_each_way_and_a_boot_device_never() {
+        let root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root);
+        let controller = HwNode::new(2, 1, HwDeviceClass::Bus);
+        let usb = |id, address, hot| {
+            let mut node = input_node(id, HwMatchKey::usb(0x046D, 0xC31C, 0x03_01_01));
+            node.set_identity(id, 2);
+            node.set_address(address);
+            node.set_removable(true);
+            node.admit_published(hot);
+            node
+        };
+        let boot = [root, controller, usb(3, 0x11, false)];
+        let plugged = [
+            root,
+            controller,
+            usb(3, 0x11, false),
+            usb(4, 0x21, true),
+            usb(5, 0x21, true),
+        ];
+        let mut tree = ScriptedTree::new(vec![
+            encode(1, &boot),
+            encode(2, &plugged),
+            encode(3, &boot),
+        ]);
+        let mut store = ScriptedStore::new(Vec::new());
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &mut NoAudiod,
+            &mut NoAudioBaseline,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(2),
+        )
+        .expect("every cycle runs");
+
+        assert_eq!(
+            tree.cues,
+            [SoundEvent::DeviceAttached, SoundEvent::DeviceDetached]
+        );
+        assert_eq!(tree.settled, 1, "nothing was waited on");
+    }
+
+    /// A driver that never settles holds the device manager's readiness back
+    /// for its budget alone, and the lapse is recorded.
+    #[test]
+    fn a_driver_that_never_settles_holds_readiness_back_for_its_budget() {
+        let kbd = HwMatchKey::virtio(0x1234);
+        let root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root);
+        let snapshot = encode(1, &[root, input_node(2, kbd)]);
+        let mut tree = ScriptedTree::new(vec![snapshot.clone(), snapshot]);
+        tree.tick = crate::SETTLE_BUDGET_NS;
+        let mut store = ScriptedStore::new(vec![(7, vec![bind(5, kbd)])]);
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &mut NoAudiod,
+            &mut NoAudioBaseline,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(1),
+        )
+        .expect("both cycles run");
+
+        assert_eq!(tree.waited_under, [crate::SETTLE_BUDGET_NS]);
+        assert_eq!(tree.settled, 1);
+        assert!(sink.ids().contains(&events::SETTLE_LAPSED.0));
     }
 
     #[test]
@@ -1287,10 +1454,26 @@ mod tests {
     /// caller's buffer is large enough, then copies the whole snapshot out —
     /// the double for exercising [`read_tree_growing`]'s grow-and-retry. `reads` counts every `read_tree` call so a test
     /// can assert a grow actually happened.
+    /// A tree double that announces and cues nothing, on a clock that never
+    /// moves: for the tests about loading alone.
+    macro_rules! quiet_presence {
+        ($tree:ty) => {
+            impl Presence for $tree {
+                fn now_ns(&mut self) -> u64 {
+                    0
+                }
+                fn settled(&mut self) {}
+                fn cue(&mut self, _event: SoundEvent) {}
+            }
+        };
+    }
+
     struct FixedSnapshotTree {
         snapshot: Vec<u8>,
         reads: usize,
     }
+
+    quiet_presence!(FixedSnapshotTree);
 
     impl HwTreeService for FixedSnapshotTree {
         fn read_tree(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
@@ -1423,6 +1606,8 @@ mod tests {
         snapshot: Vec<u8>,
     }
 
+    quiet_presence!(StaticTree);
+
     impl StaticTree {
         fn new(snapshot: Vec<u8>) -> Self {
             Self { snapshot }
@@ -1546,18 +1731,22 @@ mod tests {
         );
     }
 
-    /// The deadline is bounded only while the fetch is outstanding: once the
-    /// catalogue is in hand the loop parks indefinitely, so the steady state
-    /// takes no wakes.
+    /// The deadline is bounded only while something is outstanding — the
+    /// fetch, then the loaded driver's settling — and once the boot hardware
+    /// has settled the loop parks indefinitely, so the steady state takes no
+    /// wakes.
     #[test]
-    fn the_wait_is_bounded_only_while_the_catalogue_is_outstanding() {
+    fn the_wait_is_bounded_only_while_the_catalogue_or_a_settling_is_outstanding() {
         let kbd = HwMatchKey::virtio(0x1234);
         let node = input_node(2, kbd);
+        let mut settled = node;
+        settled.set_settled(true);
         let root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root);
         let mut tree = ScriptedTree::new(vec![
             encode(1, &[root, node]),
             encode(2, &[root, node]),
-            encode(3, &[root, node]),
+            encode(3, &[root, settled]),
+            encode(4, &[root, settled]),
         ]);
         let mut store = DeferredCatalogue {
             refusals: 1,
@@ -1577,14 +1766,18 @@ mod tests {
             &mut NoIfConfig,
             &sink,
             &mut reply_buf,
-            Some(2),
+            Some(3),
         )
-        .expect("both cycles run");
+        .expect("every cycle runs");
 
         assert_eq!(
             tree.waited_under.as_slice(),
-            &[DEFERRED_RETRY_NS, u64::MAX],
-            "bounded while the fetch was outstanding, indefinite afterwards"
+            &[DEFERRED_RETRY_NS, crate::SETTLE_BUDGET_NS, u64::MAX],
+            "bounded while the fetch, then the settling, was outstanding; indefinite afterwards"
+        );
+        assert_eq!(
+            tree.settled, 1,
+            "readiness is announced once, when it settled"
         );
     }
 

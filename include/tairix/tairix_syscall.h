@@ -163,6 +163,8 @@ extern "C" {
 #define TAIRIX_SYS_FS_WATCH_READ 137u
 #define TAIRIX_SYS_PORT_ADMIT 138u
 #define TAIRIX_SYS_FOREGROUND_HELD 139u
+#define TAIRIX_SYS_HW_NODE_SETTLE 140u
+#define TAIRIX_SYS_CONSOLE_RELOCATE 141u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -339,6 +341,10 @@ typedef struct tairix_spawn_attach {
 * for: a stated bound, or this. */
 #define TAIRIX_GRANT_EXTENT_INHERIT ((uint64_t)0xffffffffffffffffull)
 
+/* call_post() deadline_ns that never passes: the request is answered only
+* by its server or by the endpoint's end. */
+#define TAIRIX_CALL_DEADLINE_NONE ((uint64_t)0xffffffffffffffffull)
+
 /* fs_lock() / fs_lock_query() — advisory byte-range locks (AGENTS.md sec.9).
 * A lock is owned by the OPEN FILE DESCRIPTION behind the descriptor, not by
 * the process: a duplicated or spawn-inherited descriptor shares it, a second
@@ -443,6 +449,10 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_WAIT_SOURCE_DIR_WATCH 13u
 #define TAIRIX_WAIT_SOURCE_FOREGROUND 14u
 #define TAIRIX_WAIT_SOURCE_HARDWARE_TREE 15u
+/* waitset_wait() timeout_ns that parks until a member is ready, and the
+* child-member id that observes any child. */
+#define TAIRIX_WAITSET_TIMEOUT_NONE ((uint64_t)0xffffffffffffffffull)
+#define TAIRIX_WAITSET_CHILD_ANY ((uint64_t)0xffffffffffffffffull)
 
 /* System notice topics (the `topic` argument of notice_read() and
 * notice_publish(), uint32_t) and each topic's exact payload length. A topic
@@ -467,6 +477,10 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_NOTICE_PAYLOAD_LEN_AUDIO_DEVICES 8u
 #define TAIRIX_NOTICE_TOPIC_NETWORK 6u
 #define TAIRIX_NOTICE_PAYLOAD_LEN_NETWORK 8u
+#define TAIRIX_NOTICE_TOPIC_DISPLAY_OUTPUT 7u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DISPLAY_OUTPUT 8u
+#define TAIRIX_NOTICE_TOPIC_CUE_AUTHORITY 8u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_CUE_AUTHORITY 16u
 
 /* latency_watch() — declare the calling thread's interactive frame budget in
 * nanoseconds. Returns the budget actually armed: the value clamped up to
@@ -606,7 +620,7 @@ int32_t tairix_sys_call_post(uint64_t a0, void * a1, uintptr_t a2, void * a3, ui
 uint64_t tairix_sys_call_reap(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 int32_t tairix_sys_call_cancel(uint64_t a0, uint64_t a1);
 int32_t tairix_sys_hw_node_health(uint64_t a0);
-uint64_t tairix_sys_hw_self_node(void);
+uint64_t tairix_sys_hw_self_node(void * a0, uintptr_t a1);
 int32_t tairix_sys_sched_set_priority(int64_t a0, uint32_t a1);
 int32_t tairix_sys_system_power(uint32_t a0);
 uint64_t tairix_sys_call_grant(uint64_t a0, uint64_t a1);
@@ -643,6 +657,8 @@ uint64_t tairix_sys_fs_watch(uint32_t a0, uint64_t a1);
 uint64_t tairix_sys_fs_watch_read(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_port_admit(uint64_t a0, uint64_t a1);
 uint64_t tairix_sys_foreground_held(uint32_t a0);
+int32_t tairix_sys_hw_node_settle(void);
+uint64_t tairix_sys_console_relocate(void * a0, uintptr_t a1);
 
 #ifdef __cplusplus
 } /* extern "C" */

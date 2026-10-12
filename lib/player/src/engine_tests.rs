@@ -1425,7 +1425,7 @@ fn a_tracks_stated_loudness_is_applied_only_when_asked_and_only_where_stated() {
         *value *= gain;
     }
     tairix_audio::convert::DitherSource::new(super::DITHER_SEED)
-        .apply(SampleFormat::S16, &mut pivot[..samples]);
+        .apply(SampleFormat::S16.valid_bits(), &mut pivot[..samples]);
     let mut expected = vec![0u8; pcm.len()];
     tairix_audio::convert::encode(SampleFormat::S16, &pivot[..samples], &mut expected);
     assert_eq!(heard(&service), expected);
@@ -1438,4 +1438,156 @@ fn a_tracks_stated_loudness_is_applied_only_when_asked_and_only_where_stated() {
     let (mut player, service) = engine(normalised(true), &[("x.flac", signal_flac())]);
     assert_eq!(play_out(&mut player, &service), Outcome::Played);
     assert_eq!(heard(&service), pcm, "no gain stated");
+}
+
+/// An Ogg FLAC link of counting frames from `first`, its title `title`.
+fn counting_link(rate: u32, first: u32, frames: u32, serial: u32, title: &str) -> Vec<u8> {
+    use tairix_sound::flac_encode::{encode, Options, Params};
+    let samples: Vec<i32> = (first..first + frames)
+        .flat_map(|frame| {
+            [
+                i32::try_from(frame & 0x7FFF).unwrap_or(0),
+                i32::try_from(frame >> 15).unwrap_or(0),
+            ]
+        })
+        .collect();
+    let params = Params {
+        rate,
+        channels: 2,
+        bits: 16,
+    };
+    let mut writer = encode(params, &samples, Options::default()).expect("encodes");
+    let field = alloc::format!("TITLE={title}");
+    writer.comments("tests", &[field.as_str()]);
+    writer.finish_ogg(serial, 4000)
+}
+
+/// A chained file's links of one shape follow each other into the one
+/// stream, each opened in turn and its tags handed over as it opens.
+#[test]
+fn a_chained_file_plays_its_links_gapless_one_after_another() {
+    let chain = [
+        counting_link(8_000, 0, 4_000, 1, "first"),
+        counting_link(8_000, 10_000, 3_000, 2, "second"),
+    ]
+    .concat();
+    let (mut engine, service) = engine(ask(&["chain.ogg"]), &[("chain.ogg", chain)]);
+    assert_eq!(play_out(&mut engine, &service), Outcome::Played);
+    assert_eq!(
+        service.borrow().streams.len(),
+        1,
+        "no gap between the links"
+    );
+    let mut expected: Vec<u32> = (0..4_000).collect();
+    expected.extend(10_000..13_000);
+    assert_eq!(spelled_frames(&heard(&service)), expected);
+    let links: Vec<u32> = engine
+        .take_notes()
+        .iter()
+        .filter_map(|note| match note {
+            Note::Opened {
+                entry: FIRST, link, ..
+            } => Some(*link),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(links, [0, 1]);
+    let linked = engine.take_link_metadata();
+    assert_eq!(linked.len(), 1);
+    assert_eq!((linked[0].0, linked[0].1), (FIRST, 1));
+    assert!(linked[0].2.tags.iter().any(|tag| tag.value == "second"));
+}
+
+/// A link of another shape waits for the stream before it to play out, as
+/// an entry of another shape does.
+#[test]
+fn a_link_of_another_shape_waits_for_the_stream_before_it() {
+    let chain = [
+        counting_link(8_000, 0, 2_000, 1, "first"),
+        counting_link(16_000, 50_000, 3_000, 2, "second"),
+    ]
+    .concat();
+    let (mut engine, service) = engine(ask(&["chain.ogg"]), &[("chain.ogg", chain)]);
+    assert_eq!(play_out(&mut engine, &service), Outcome::Played);
+    let service = service.borrow();
+    assert_eq!(service.streams.len(), 2);
+    assert_eq!(
+        spelled_frames(&service.streams[0].heard),
+        (0..2_000).collect::<Vec<u32>>()
+    );
+    assert_eq!(
+        spelled_frames(&service.streams[1].heard),
+        (50_000..53_000).collect::<Vec<u32>>()
+    );
+    assert_eq!(service.streams[1].params.expect("opened").rate.hz(), 16_000);
+}
+
+/// A start lying in a later link is found there, a duration runs on across
+/// links, and a start past every link leaves the entry out.
+#[test]
+fn an_extent_reaches_across_the_links_of_a_chain() {
+    let chain = [
+        counting_link(8_000, 0, 4_000, 1, "first"),
+        counting_link(8_000, 10_000, 4_000, 2, "second"),
+    ]
+    .concat();
+    let bounded = |start_ms: u64, duration_ms: Option<u64>| Ask {
+        extent: Extent {
+            start: Span::from_nanos(start_ms * 1_000_000),
+            duration: duration_ms.map(|ms| Span::from_nanos(ms * 1_000_000)),
+        },
+        ..ask(&["chain.ogg"])
+    };
+    let (mut late, service) = engine(bounded(750, None), &[("chain.ogg", chain.clone())]);
+    assert_eq!(play_out(&mut late, &service), Outcome::Played);
+    assert_eq!(
+        spelled_frames(&heard(&service)),
+        (12_000..14_000).collect::<Vec<u32>>()
+    );
+    let (mut spanning, service) = engine(bounded(250, Some(500)), &[("chain.ogg", chain.clone())]);
+    assert_eq!(play_out(&mut spanning, &service), Outcome::Played);
+    let mut across: Vec<u32> = (2_000..4_000).collect();
+    across.extend(10_000..12_000);
+    assert_eq!(spelled_frames(&heard(&service)), across);
+    let (mut past, service) = engine(bounded(2_000, None), &[("chain.ogg", chain)]);
+    assert_eq!(
+        play_out(&mut past, &service),
+        Outcome::Failed(Failure::NothingPlayable)
+    );
+    assert!(past.take_notes().iter().any(|note| matches!(
+        note,
+        Note::Skipped {
+            why: Skip::StartsPastEnd,
+            ..
+        }
+    )));
+}
+
+/// A seek past the end of the link being heard goes on into the next link,
+/// the time beyond the end carried into it.
+#[test]
+fn a_seek_past_a_link_s_end_goes_on_into_the_next() {
+    let chain = [
+        counting_link(8_000, 0, 40_000, 1, "first"),
+        counting_link(8_000, 100_000, 160_000, 2, "second"),
+    ]
+    .concat();
+    let (mut engine, service) = engine(ask(&["chain.ogg"]), &[("chain.ogg", chain)]);
+    engine.begin(0);
+    let now = run(&mut engine, &service, 0, |engine, _| {
+        engine.status().position >= 8_000
+    });
+    let before = service.borrow().streams[0].heard.len();
+    let heard_at = u32::try_from(engine.status().position).expect("small");
+    engine.on_control(now, Control::Forward);
+    run(&mut engine, &service, now, |engine, service| {
+        service.streams[0].heard.len() >= before + 4 * 4 && engine.status().link == 1
+    });
+    let service = service.borrow();
+    let after = spelled_frames(&service.streams[0].heard[before..]);
+    assert_eq!(
+        after.first().copied(),
+        Some(100_000 + heard_at + 80_000 - 40_000)
+    );
+    assert_eq!(engine.status().link, 1);
 }

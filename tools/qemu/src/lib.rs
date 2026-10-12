@@ -703,6 +703,11 @@ pub struct SerialInjection {
     /// Serial-console substring the runner waits for before writing.
     /// The guest prints it once it is blocked reading input.
     pub ready_marker: String,
+    /// Whether the marker is a one-shot witness — a record a run emits once —
+    /// looked for over the whole transcript rather than past the previous
+    /// step's match, so one that landed before that match still opens its
+    /// step.
+    pub witness: bool,
     /// Delay between observing the readiness marker and writing the line.
     /// Zero sends on the same supervision tick.
     pub delay_after_marker: Duration,
@@ -770,8 +775,25 @@ pub enum SoundCard {
     /// controller.
     Usb,
     /// QEMU's Intel High Definition Audio controller (`intel-hda`) with an
-    /// output-only codec (`hda-output`).
+    /// output-only codec (`hda-output`). The codec's timer refills a buffer of
+    /// [`HDA_CODEC_BUFFER_BYTES`] from the guest by the virtual clock, and when
+    /// a stall of QEMU's main loop lets it fill before the backend drains it,
+    /// QEMU discards the whole buffer and traces `hda_audio_overrun`: the run
+    /// logs that trace to [`hda_overrun_log`] so a capture is checked against
+    /// what the card itself reports losing.
     Hda,
+}
+
+/// Bytes `hda-output` holds between the guest's stream and the backend: the
+/// whole of it is what one `hda_audio_overrun` discards.
+pub const HDA_CODEC_BUFFER_BYTES: usize = 8192;
+
+/// Where an HDA run whose capture is `wav` logs QEMU's overrun trace.
+#[must_use]
+pub fn hda_overrun_log(wav: &Path) -> PathBuf {
+    let mut log = wav.as_os_str().to_owned();
+    log.push(".overruns");
+    PathBuf::from(log)
 }
 
 /// The rate QEMU's `wav` backend states in its header when it may not be
@@ -842,6 +864,8 @@ pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
         }
         SoundCard::Hda => {
             backend.push(geometry);
+            let mut trace = OsString::from("enable=hda_audio_overrun,file=");
+            trace.push(hda_overrun_log(path));
             vec![
                 OsString::from("-audiodev"),
                 backend,
@@ -849,6 +873,8 @@ pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
                 OsString::from("intel-hda,id=hda0"),
                 OsString::from("-device"),
                 OsString::from("hda-output,audiodev=snd0,bus=hda0.0"),
+                OsString::from("-trace"),
+                trace,
             ]
         }
         SoundCard::Usb => {
@@ -1981,6 +2007,28 @@ impl Spec {
     ) -> Self {
         self.serial_input.push(SerialInjection {
             ready_marker: ready_marker.into(),
+            witness: false,
+            delay_after_marker,
+            line: line.into(),
+        });
+        self
+    }
+
+    /// Append one scripted step gated on a one-shot witness: written once
+    /// `ready_marker` has appeared anywhere on the serial console, before or
+    /// after the previous step's match, and `delay_after_marker` has elapsed.
+    /// For a record a run emits exactly once — which a cursor that had already
+    /// passed it would wait on for ever — never for a prompt.
+    #[must_use]
+    pub fn with_serial_witness(
+        mut self,
+        ready_marker: impl Into<String>,
+        delay_after_marker: Duration,
+        line: impl Into<String>,
+    ) -> Self {
+        self.serial_input.push(SerialInjection {
+            ready_marker: ready_marker.into(),
+            witness: true,
             delay_after_marker,
             line: line.into(),
         });
@@ -2701,13 +2749,18 @@ fn advance_serial_script<W: Write>(
     while state.step < steps.len() {
         let serial_step = &steps[state.step];
         if state.matched.is_none() {
+            let from = if serial_step.witness {
+                0
+            } else {
+                state.search_from
+            };
             let found = {
                 let log = captured
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                log[state.search_from..]
+                log[from..]
                     .find(&serial_step.ready_marker)
-                    .map(|at| state.search_from + at + serial_step.ready_marker.len())
+                    .map(|at| from + at + serial_step.ready_marker.len())
             };
             let Some(matched_end) = found else { break };
             state.matched = Some(PendingSerialStep {
@@ -2736,7 +2789,7 @@ fn advance_serial_script<W: Write>(
                 break;
             }
         }
-        state.search_from = pending.matched_end;
+        state.search_from = state.search_from.max(pending.matched_end);
         state.step += 1;
         state.matched = None;
     }
@@ -4307,11 +4360,13 @@ mod tests {
         let steps = [
             SerialInjection {
                 ready_marker: "Password".into(),
+                witness: false,
                 delay_after_marker: Duration::ZERO,
                 line: "root\n".into(),
             },
             SerialInjection {
                 ready_marker: "root@tairix ~% ".into(),
+                witness: false,
                 delay_after_marker: Duration::ZERO,
                 line: "audiotone\n".into(),
             },
@@ -4594,6 +4649,7 @@ mod tests {
         let start = Instant::now();
         let steps = [SerialInjection {
             ready_marker: String::from("root@tairix ~% "),
+            witness: false,
             delay_after_marker: Duration::from_secs(1),
             line: String::from("s"),
         }];
@@ -4634,6 +4690,7 @@ mod tests {
         let start = Instant::now();
         let steps = [SerialInjection {
             ready_marker: String::from("prompt"),
+            witness: false,
             delay_after_marker: Duration::ZERO,
             line: String::from("ab"),
         }];
@@ -4650,6 +4707,41 @@ mod tests {
             .expect("type second byte on the next tick");
         assert_eq!(state.step, 1);
         assert_eq!(output.expect("writer"), b"ab");
+    }
+
+    /// A one-shot record that landed before the previous step's match still
+    /// opens its witness step, and does not pull the cursor back for the
+    /// prompts after it.
+    #[test]
+    fn a_witness_that_landed_before_the_cursor_still_opens_its_step() {
+        let start = Instant::now();
+        let s = Spec::for_aarch64_kernel("/tmp/k")
+            .with_serial_input("Username: ", Duration::ZERO, "u")
+            .with_serial_witness("id=7 the sound played out", Duration::ZERO, "w")
+            .with_serial_input("Password: ", Duration::ZERO, "p");
+        let captured = Mutex::new(String::from(
+            "Password: id=7 the sound played out\nUsername: ",
+        ));
+        let mut output = Some(Vec::new());
+        let mut state = SerialScriptState::default();
+        for _ in 0..4 {
+            advance_serial_script(&s.serial_input, &captured, &mut output, &mut state, start)
+                .expect("advance");
+        }
+        assert_eq!(
+            output.as_ref().expect("writer"),
+            b"uw",
+            "the witness behind it"
+        );
+        assert_eq!(state.step, 2, "the earlier prompt is not taken again");
+        captured
+            .lock()
+            .expect("the transcript")
+            .push_str("\nPassword: ");
+        advance_serial_script(&s.serial_input, &captured, &mut output, &mut state, start)
+            .expect("advance");
+        assert_eq!(output.expect("writer"), b"uwp");
+        assert_eq!(state.step, 3);
     }
 
     #[test]

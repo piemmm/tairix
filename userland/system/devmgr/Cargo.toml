@@ -20,7 +20,12 @@ workspace = true
 # into the kernel image (E0152 / allocator clash).
 [features]
 default = ["program"]
-program = ["dep:tairix-rt", "dep:tairix-sysconfig", "dep:tairix-netconfig"]
+program = [
+    "dep:tairix-rt",
+    "dep:tairix-sysconfig",
+    "dep:tairix-netconfig",
+    "dep:tairix-soundtheme",
+]
 
 # The package is both the `tairix-devmgr` match-policy library (above) and the
 # `Run` entry-point binary of the device-manager service installed at
@@ -75,6 +80,9 @@ tairix-netconfig = { path = "../../../lib/netconfig", version = "=0.0.0", option
 # with `default-features = false`, so it never enters the kernel image.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The cue client the service asks for a removable device's sounds with,
+# posted from its one wait-set so the sound authority never stalls a reaction.
+tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0", optional = true, default-features = false, features = ["rt"] }
 # The sysinfo client's `IpcTransport`, which the boot delivery path reads the
 # machine's RAM total through; it needs that same runtime, so the feature is
 # enabled only where the runtime is linked.

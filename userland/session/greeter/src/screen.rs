@@ -10,7 +10,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::Display;
+use tairix_abi::driver::display::{Display, DisplayMode};
 use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::touch::TouchFrame;
@@ -247,6 +247,41 @@ impl<T: SessionTransport> LoginScreen<T> {
     #[must_use]
     pub const fn screen(&self) -> Rect {
         self.scanout.screen()
+    }
+
+    /// The mode the screen is drawn for.
+    #[must_use]
+    pub const fn mode(&self) -> &DisplayMode {
+        self.scanout.mode()
+    }
+
+    /// Draw on `scanout` from now on, the output having moved to its mode
+    /// (`plans/DISPLAY.md` D12), at monotonic `now_ns`.
+    ///
+    /// Only what is shaped by the screen is rebuilt: the pointer is held on
+    /// the new screen, the ribbon raised again over it, and everything
+    /// painted afresh. The account chosen, anything typed and a lockout
+    /// running all carry over. A new configuration lights the display, so
+    /// the screen counts as awake again and goes back to sleep once the
+    /// input it has seen is a full wait old.
+    pub fn adopt_scanout(&mut self, scanout: Scanout, now_ns: u64) -> Present {
+        let mode = *scanout.mode();
+        self.cursor.rescreen(&mode);
+        self.touch
+            .set_screen(mode.width_px, mode.height_px, self.scale.dpi());
+        if let Some(pointer) = self.pointer.as_mut() {
+            pointer.set_pointer(self.cursor.at());
+        }
+        let ribbon = self.scene.take().is_some();
+        self.scanout = scanout;
+        self.painted = None;
+        self.paint_owed = true;
+        self.sleep = DisplaySleep::new();
+        self.wake_owed = false;
+        if ribbon {
+            let _ = self.raise_ribbon(now_ns);
+        }
+        self.repaint()
     }
 
     /// The line currently shown under the field.

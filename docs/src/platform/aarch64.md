@@ -96,16 +96,29 @@ a-time regardless.
 | `init_uart_baud` | `115200` | the image builder imports `uart_init::CONSOLE_BAUD`, so firmware output and the kernel-programmed 8N1 line share one definition for every image profile; logging is best-effort and never blocks on the UART |
 | `gpio` | `40,41=a0` | route the headphone jack's two pins to PWM1's channels, their first alternate function |
 | `dtoverlay` | `tairix-pwm-audio` | the first-party overlay below: the jack's PWM block enabled for its driver |
+| `dtoverlay` | `tairix-display` | the first-party overlay below: the nodes the native display engine binds enabled, the firmware's own display devices disabled |
 | `armstub` | `armstub8.bin` | optional PSCI-providing secondary-core stub (enables the `smc`-conduit PSCI `CPU_ON` path of P5) |
 
-The image builder writes one overlay of its own, `overlays/tairix-pwm-audio.dtbo`,
-with the tree writer of [`tairix-fdt`](../lib/fdt.md). It targets the base
-tree's `pwm1` label: it enables the block, names it
-`tairix,bcm2711-pwm-audio` ahead of `brcm,bcm2835-pwm` so the headphone-jack
-driver binds it and nothing mistakes a general PWM block for the jack, and
-gives it the DMA request line its node lacks, line 1 of the `dma` label's
-controller. The two labels are left for the firmware's loader to resolve
-under `__fixups__`, as `dtc` writes an overlay.
+The image builder writes two overlays of its own with the tree writer of
+[`tairix-fdt`](../lib/fdt.md), each label left for the firmware's loader to
+resolve under `__fixups__`, as `dtc` writes an overlay:
+
+- `overlays/tairix-pwm-audio.dtbo` targets the base tree's `pwm1` label: it
+  enables the block, names it `tairix,bcm2711-pwm-audio` ahead of
+  `brcm,bcm2835-pwm` so the headphone-jack driver binds it and nothing
+  mistakes a general PWM block for the jack, and gives it the DMA request
+  line its node lacks, line 1 of the `dma` label's controller.
+- `overlays/tairix-display.dtbo` enables the nodes the native display engine
+  binds, which the base tree leaves disabled — `hvs`, `hdmi0`, `hdmi1`, their
+  DDC buses `ddc0` and `ddc1`, the `dvp` gates their audio is clocked
+  through, and `aon_intr`, the interrupt controller their hotplug lines
+  reach. It names the engine's window `hvs`, and gives the DDC buses the
+  `#address-cells`/`#size-cells` the I²C controller binding states and the
+  base tree omits, by which the walk reads a node as a bus. It disables the
+  firmware's own display devices, `fb` (its framebuffer) and `firmwarekms`,
+  as Linux's `vc4-kms-v3d` does: only then does the firmware hand the display
+  to the ARM and stop driving it when the engine says so. A test checks every
+  label against the pinned base tree's `__symbols__`.
 
 An I²S HAT is the user's own configuration: its overlay enables the `i2s`
 block and describes the card as a `simple-audio-card` linking it to the
@@ -505,14 +518,18 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   input. No ramfb device (`etc/ramfb` absent), no fw_cfg node, or any
   failed transfer falls back to the UART (fail closed); the headless
   UART-backed verticals are unchanged.
-- **The display node.** The same surface is published as the boot display
-  node the display service autoloads against. A surface the `VideoCore`
-  firmware allocated carries the firmware framebuffer's own binding,
-  `brcm,bcm2708-fb`, ahead of the generic `simple-framebuffer`: the firmware
-  owns that display's power, so its own service (`drivers/display/rpi_fb`)
-  outbids the generic one and can switch the display off
-  ([Display drivers](../drivers/display.md)). A `ramfb` surface carries
-  `simple-framebuffer` alone.
+- **The display node.** Where the tree enables the display engine
+  (`platform::display_engine`), no boot display node is published: the HVS
+  node states the discovery-only `BootConsole` fact, and its driver has the
+  kernel move the console onto a block the kernel owns below the HVS's DMA
+  reach (`console_relocate`) before it tells the firmware the display is the
+  ARM's. The console then renders through the direct map, cleaning each band
+  it paints to the point of coherency as it does on the firmware's surface,
+  and repaints from its retained screen in the disposition it held; the
+  firmware's surface is never touched again ([Display
+  drivers](../drivers/display.md)). Otherwise the surface is published as the
+  boot display node, keyed `simple-framebuffer`, that the generic display
+  service binds — a `ramfb` surface, or a board without the engine.
 - **Cell-grid attach (post-MMU, by design).** The pre-MMU phase only
   *records* the discovered surface and clears it to a clean background;
   it does **not** build the renderer, because `tairix_fbcon` keeps a
@@ -1394,8 +1411,7 @@ can size:
 
 - the VideoCore firmware mailbox (`brcm,bcm2835-mbox`, PI Stage P7) — a
   `Dma` request for a one-page property-buffer carve bounded by the
-  30-bit VideoCore aperture, which `drivers/display/rpi_hvs::wiring`
-  binds;
+  30-bit VideoCore aperture, which the mailbox service carves;
 - the BCM2711 EMMC2 SD host (`brcm,bcm2711-emmc2`, PI Stage P8) — the
   translated `Dma` window of its `/emmc2bus` `dma-ranges`
   (`fdtwalk::push_dma_windows`), which the firmware rewrites per `SoC`
@@ -1437,6 +1453,18 @@ can size:
 
   The bridge's own controller/config (ECAM-access) window flows through
   the generic translated-`reg` path, not the augmentation.
+
+The display engine's fixed wiring, which the tree leaves implicit, is stated
+here too, from the outputs `tairix_vcmailbox::ENGINE_OUTPUTS` names. The HVS
+node (`brcm,bcm2711-hvs`) carries each pixel valve's translated window —
+`valve2` and `valve4`, read from the valves' own nodes, which stay disabled
+because a valve is never a node of its own — an `Encoder` link to the HDMI
+block each feeds (`hdmi0`, `hdmi1`), and the translated DMA windows of its
+bus, through which its scan-out reads memory. Each HDMI block carries the
+`Encoder` duty those links name. The HDMI binding lists its interrupt
+controller's registers among its own as `intr2`; the port refuses that
+window (`FdtPlatform::grants_window`), since it is the controller's grant,
+never the encoder's.
 
 The walker is host-tested against the shared DTB fixtures (the `virt`-
 and Pi-shaped trees, a nested `ranges`-translating bus, the PCIe bridge
@@ -1501,10 +1529,11 @@ carve request) is what the service binds.
   hardware-tree node the kernel attests the caller is the driver of
   (`call_peer_node`), and forwards one tag of a driver's working set, word
   for word in its shape, only from the driver of that tag's device: the
-  screen blank from the firmware framebuffer's, the xHCI reload notice for
+  display-done notice from the display engine's, the xHCI reload notice for
   the VL805's own address from the VL805's, the RTC time and backup reading
-  and the time write from the PMIC clock's, and the ARM clock's rates and its
-  rate write with the turbo transition skipped from the firmware clocks'.
+  and the time write from the PMIC clock's, and the rates of the ARM, core
+  and HDMI clocks and their rate writes with the turbo transition skipped
+  from the firmware clocks'.
   The device keys are defined once in `lib/vcmailbox` and each driver's bind
   table is built from its key. Code execution, GPU memory, voltages,
   one-time-programmable bits, GPIO, framebuffer allocation and the revision

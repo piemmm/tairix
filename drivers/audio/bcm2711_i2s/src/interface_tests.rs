@@ -61,10 +61,12 @@ impl LinkCall for Clock {
                 self.log.borrow_mut().push(Event::ClockRelease);
                 encode_release_reply(reply)
             }
+            ClockRequest::Floor { .. } => panic!("the interface runs its clock at a rate"),
             ClockRequest::Describe(_) => encode_clock_state(
                 reply,
                 ClockState {
                     hz: 0,
+                    max_hz: 337_500_000,
                     held_elsewhere: false,
                 },
             ),
@@ -409,6 +411,23 @@ fn configuring_runs_the_bit_clock_for_two_slots_a_frame_and_the_codec_in_the_lin
         interface.dma_mut().channel.period_bytes,
         MIN_PERIOD_FRAMES * 8
     );
+}
+
+/// Two channels are not a stereo pair unless they are left and right: any
+/// other layout is refused rather than played as one.
+#[test]
+fn a_two_channel_layout_other_than_stereo_is_refused() {
+    use tairix_abi::driver::audio::ChannelPosition::{FrontCentre, FrontLeft};
+    let parts = Parts::new(true);
+    let mut interface = parts.standard();
+    let refused = interface.configure(
+        0,
+        &ConfigureParams {
+            channel_map: ChannelMap::new(&[FrontLeft, FrontCentre]).expect("a layout"),
+            ..params(48_000, 512)
+        },
+    );
+    assert!(matches!(refused, Err(DriverError::Unsupported)));
 }
 
 #[test]

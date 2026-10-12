@@ -83,6 +83,26 @@ has nothing for a login screen to ask, so it audits
 `SESSION_ENDPOINT_UNAVAILABLE` once at startup and every round runs the
 text prompt rather than claiming a rendezvous nothing answers.
 
+Each round records what it chose as `ROUND_CHOSEN`: the login it runs, the
+effective default, and what kept a graphical one from it (no desktop or
+login-screen bundle, or no display service, with the call's refusal).
+
+A text prompt does not wait for its round to end to notice a graphical
+login becoming possible. It parks on one wait-set holding its console's
+input and the `DisplayOutput` and `Mounts` notices — the display service
+announces itself once its rendezvous is bound, and the bundles and the
+settings store live on mounted volumes. On a notice it re-probes, and if
+the round would now be graphical while nothing is typed at the username
+prompt, the round ends (`TEXT_ROUND_SUPERSEDED`) and the next one puts the
+login screen up. A notice that lands while someone is typing is weighed at
+the next untouched prompt instead. That is what lets a machine whose display
+service binds after login's first round — a display engine waiting on its
+clocks and encoders — reach the graphical login without anyone logging in
+first. A prompt a failed graphical round fell back to never gives way, so a
+broken login screen is not retried at every move of the display. A console
+the wait-set cannot watch is recorded once (`TEXT_ROUND_UNWATCHED`), and its
+prompt reads exactly as before.
+
 The bundle probes are a read-only `fs_open` of each `Run` path, closed
 again at once: the probe wants existence, not bytes, and keeps no
 descriptor. The display probe is one `Query` call — login holds no seat
@@ -284,6 +304,15 @@ fail-closed.
 
 The text round keeps no session-table entry, so a session it starts cannot
 step aside; fast user switching is a property of the graphical round.
+
+## The sounds of a session
+
+The authority owns a session's start and end, so it is the one principal the
+cue authority lets make their sounds ([`soundd`](./soundd.md)). It cues
+`Login` once a session is started — text, or a fresh desktop, never one a
+switch resumes — and `Logout` once a session has ended, never when a desktop
+only stepped aside. Each cue is posted and its answer collected from the
+supervision wait-set, so a sound never delays a prompt or a session.
 
 ## The terminal a session leaves behind
 

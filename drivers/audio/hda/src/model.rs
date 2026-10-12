@@ -112,16 +112,17 @@ pub mod pin {
     pub const EAPD: u32 = 1 << 16;
 }
 
-/// An ELD naming `monitor`: the four-byte header, the baseline block's fixed
-/// sixteen bytes, and the name.
+/// An ELD naming `monitor`, on an HDMI link: the four-byte header, the
+/// baseline block's fixed sixteen bytes and the name, padded to whole words.
 #[must_use]
 pub fn eld(monitor: &str) -> Vec<u8> {
     let name = monitor.as_bytes();
-    let mut eld = std::vec![0u8; 20 + name.len()];
+    let words = (16 + name.len()).div_ceil(4);
+    let mut eld = std::vec![0u8; 4 + words * 4];
     eld[0] = 2 << 3;
-    eld[2] = u8::try_from((16 + name.len()).div_ceil(4)).unwrap_or(0);
+    eld[2] = u8::try_from(words).unwrap_or(0);
     eld[4] = u8::try_from(name.len()).unwrap_or(0) & 0x1F;
-    eld[20..].copy_from_slice(name);
+    eld[20..20 + name.len()].copy_from_slice(name);
     eld
 }
 

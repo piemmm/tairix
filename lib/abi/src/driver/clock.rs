@@ -7,12 +7,17 @@
 //! bound under the node's [`LinkDuty`](crate::hwlink::LinkDuty), and a
 //! consumer calls it naming the [`LinkRequest`] discovery gave it for its
 //! clock.
+//!
+//! A clock follows one of two policies, the controller's to state. An exact
+//! clock is run at a rate its first holder sets and another holder joins at;
+//! a floored clock runs at no less than the highest floor any holder states,
+//! the policy a clock several consumers and the firmware share needs.
 
 use crate::hwlink::{LinkRequest, LinkRole};
 use crate::hwtree::{HwResource, NodeEndpointBlock};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::reply::{decode_status_reply, encode_status_reply, STATUS_REPLY_LEN};
-use crate::Errno;
+use crate::{DriverError, Errno};
 
 /// The endpoints clock controllers serve, indexed by the controller's node id.
 /// Binding one takes the node's clock [`LinkDuty`](crate::hwlink::LinkDuty).
@@ -40,6 +45,8 @@ pub enum ClockOp {
     Run = 2,
     /// Stop the clock and give it up.
     Release = 3,
+    /// State the lowest rate this holder needs the clock to run at.
+    Floor = 4,
 }
 
 impl ClockOp {
@@ -48,6 +55,7 @@ impl ClockOp {
             1 => Some(Self::Describe),
             2 => Some(Self::Run),
             3 => Some(Self::Release),
+            4 => Some(Self::Floor),
             _ => None,
         }
     }
@@ -55,24 +63,24 @@ impl ClockOp {
     const fn request_body_len(self) -> usize {
         match self {
             Self::Describe | Self::Release => HwResource::WIRE_LEN,
-            Self::Run => HwResource::WIRE_LEN + 8,
+            Self::Run | Self::Floor => HwResource::WIRE_LEN + 8,
         }
     }
 
     const fn reply_body_len(self) -> usize {
         match self {
-            Self::Describe => 16,
-            Self::Run => 8,
+            Self::Describe => 24,
+            Self::Run | Self::Floor => 8,
             Self::Release => 0,
         }
     }
 }
 
-/// Largest request frame: a [`ClockRequest::Run`].
+/// Largest request frame: a [`ClockRequest::Run`] or [`ClockRequest::Floor`].
 pub const CLOCK_MAX_REQUEST: usize = HEADER_LEN + HwResource::WIRE_LEN + 8;
 
 /// Largest reply frame: a [`ClockOp::Describe`] report.
-pub const CLOCK_MAX_REPLY: usize = REPLY_HEADER_LEN + 16;
+pub const CLOCK_MAX_REPLY: usize = REPLY_HEADER_LEN + 24;
 
 /// A request to a clock controller's endpoint, naming the consumer's clock
 /// link, which the controller believes only once the kernel confirms the
@@ -91,6 +99,13 @@ pub enum ClockRequest {
     },
     /// Stop the clock and give it up, so another consumer may set it.
     Release(LinkRequest),
+    /// Run the clock at no less than `hz` while this holder holds it.
+    Floor {
+        /// The consumer's clock link.
+        link: LinkRequest,
+        /// The lowest rate this holder needs, in Hz.
+        hz: u64,
+    },
 }
 
 /// A clock's state, as [`ClockOp::Describe`] reports it.
@@ -98,6 +113,9 @@ pub enum ClockRequest {
 pub struct ClockState {
     /// The rate it runs at, in Hz; `0` while it is stopped.
     pub hz: u64,
+    /// The highest rate it can run at, in Hz: what a consumer whose work
+    /// scales with the clock can count on.
+    pub max_hz: u64,
     /// Another consumer holds it, so it runs only at the rate it has.
     pub held_elsewhere: bool,
 }
@@ -113,6 +131,7 @@ impl ClockRequest {
             Self::Describe(_) => ClockOp::Describe,
             Self::Run { .. } => ClockOp::Run,
             Self::Release(_) => ClockOp::Release,
+            Self::Floor { .. } => ClockOp::Floor,
         }
     }
 
@@ -120,7 +139,10 @@ impl ClockRequest {
     #[must_use]
     pub const fn link(&self) -> &LinkRequest {
         match self {
-            Self::Describe(link) | Self::Release(link) | Self::Run { link, .. } => link,
+            Self::Describe(link)
+            | Self::Release(link)
+            | Self::Run { link, .. }
+            | Self::Floor { link, .. } => link,
         }
     }
 
@@ -139,7 +161,7 @@ impl ClockRequest {
         frame[6] = op as u8;
         frame[HEADER_LEN..HEADER_LEN + HwResource::WIRE_LEN]
             .copy_from_slice(&HwResource::request(self.link()).to_le_bytes());
-        if let Self::Run { hz, .. } = self {
+        if let Self::Run { hz, .. } | Self::Floor { hz, .. } = self {
             put_u64(frame, HEADER_LEN + HwResource::WIRE_LEN, *hz);
         }
         Ok(len)
@@ -179,7 +201,23 @@ impl ClockRequest {
                 link,
                 hz: read_u64(bytes, HEADER_LEN + HwResource::WIRE_LEN),
             },
+            ClockOp::Floor => Self::Floor {
+                link,
+                hz: read_u64(bytes, HEADER_LEN + HwResource::WIRE_LEN),
+            },
         })
+    }
+}
+
+/// The refusal a controller's reason stands for: a clock run at exact rates
+/// refuses a floor as unsupported, one another consumer holds at another rate
+/// is busy, and any other reason is the controller failing.
+#[must_use]
+pub const fn refusal(reason: Errno) -> DriverError {
+    match reason {
+        Errno::NotSupported => DriverError::Unsupported,
+        Errno::Busy => DriverError::Busy,
+        other => DriverError::from_errno(other),
     }
 }
 
@@ -224,9 +262,10 @@ fn success_body(bytes: &[u8], op: ClockOp) -> Result<&[u8], Errno> {
 pub fn encode_describe_reply(out: &mut [u8], state: ClockState) -> Result<usize, Errno> {
     let (body, len) = success_frame(out, ClockOp::Describe)?;
     put_u64(body, 0, state.hz);
+    put_u64(body, 8, state.max_hz);
     put_u32(
         body,
-        8,
+        16,
         if state.held_elsewhere {
             HELD_ELSEWHERE
         } else {
@@ -241,20 +280,24 @@ pub fn encode_describe_reply(out: &mut [u8], state: ClockState) -> Result<usize,
 /// # Errors
 ///
 /// The refusal the reply carries, or [`Errno::BadMagic`] for a frame of the
-/// wrong length or a set bit no field defines.
+/// wrong length, a set bit no field defines, or a clock running above its
+/// own highest rate.
 pub fn decode_describe_reply(bytes: &[u8]) -> Result<ClockState, Errno> {
     let body = success_body(bytes, ClockOp::Describe)?;
-    let flags = read_u32(body, 8);
-    if flags & !HELD_ELSEWHERE != 0 || read_u32(body, 12) != 0 {
+    let flags = read_u32(body, 16);
+    let (hz, max_hz) = (read_u64(body, 0), read_u64(body, 8));
+    if flags & !HELD_ELSEWHERE != 0 || read_u32(body, 20) != 0 || hz > max_hz {
         return Err(Errno::BadMagic);
     }
     Ok(ClockState {
-        hz: read_u64(body, 0),
+        hz,
+        max_hz,
         held_elsewhere: flags & HELD_ELSEWHERE != 0,
     })
 }
 
-/// Frame the reply to [`ClockOp::Run`]: the rate the clock now runs at.
+/// Frame the reply to [`ClockOp::Run`] or [`ClockOp::Floor`]: the rate the
+/// clock now runs at.
 ///
 /// # Errors
 ///
@@ -265,7 +308,7 @@ pub fn encode_run_reply(out: &mut [u8], hz: u64) -> Result<usize, Errno> {
     Ok(len)
 }
 
-/// Decode the reply to [`ClockOp::Run`].
+/// Decode the reply to [`ClockOp::Run`] or [`ClockOp::Floor`].
 ///
 /// # Errors
 ///

@@ -254,28 +254,47 @@ fn write_formatted<W: core::fmt::Write>(w: &mut W, event: &Event<'_>) {
 /// Freestanding-only; the host build has no device, so a host read is empty.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn getchar() -> Option<u8> {
+    if !console_rx_pending() {
+        return None;
+    }
     let (base, model) = console::current();
-    let status_reg = (base + model.status_offset()) as *const u32;
     let data_reg = (base + model.data_offset()) as *const u32;
     // SAFETY: `base` is the discovered console UART's MMIO base and the
-    // offsets are the model's documented registers, so both are
-    // naturally-aligned 32-bit device registers and touch no Rust-managed
-    // memory. The data register is read only after `rx_ready` confirms a byte
-    // is present, so it never pops an empty receive FIFO.
-    unsafe {
-        if !model.rx_ready(core::ptr::read_volatile(status_reg)) {
-            return None;
-        }
-        // The received byte is in the low 8 bits; the upper bits carry
-        // framing/parity flags this bootstrap backing does not surface.
-        Some((core::ptr::read_volatile(data_reg) & 0xff) as u8)
-    }
+    // offset is the model's documented data register, a naturally-aligned
+    // 32-bit device register touching no Rust-managed memory. It is read only
+    // after the status register reported a byte, so it never pops an empty
+    // receive FIFO.
+    let data = unsafe { core::ptr::read_volatile(data_reg) };
+    // The received byte is in the low 8 bits; the upper bits carry
+    // framing/parity flags this bootstrap backing does not surface.
+    Some((data & 0xff) as u8)
 }
 
 /// See the target variant above.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
 fn getchar() -> Option<u8> {
     None
+}
+
+/// Whether the console UART's receive FIFO holds a byte, read from its status
+/// register alone, so the byte stays for whoever drains it.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[must_use]
+pub fn console_rx_pending() -> bool {
+    let (base, model) = console::current();
+    let status_reg = (base + model.status_offset()) as *const u32;
+    // SAFETY: `base` is the discovered console UART's MMIO base and the
+    // offset is the model's documented status register, a naturally-aligned
+    // 32-bit device register touching no Rust-managed memory; reading it
+    // takes no byte.
+    model.rx_ready(unsafe { core::ptr::read_volatile(status_reg) })
+}
+
+/// See the target variant above: the host build has no device.
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+#[must_use]
+pub fn console_rx_pending() -> bool {
+    false
 }
 
 /// Switch the console from poll-only receive to **receive-interrupt-driven**,

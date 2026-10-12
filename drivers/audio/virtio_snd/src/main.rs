@@ -44,43 +44,16 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::driver::sole_register_window;
     use tairix_abi::driver::virtio::VirtioHost;
     use tairix_abi::driver::virtio_pci::virtio_pci_windows;
+    use tairix_abi::driver::{sole_register_window, DeviceWake};
     use tairix_abi::time::MonotonicClock;
-    use tairix_abi::{CapabilityId, DriverError, MmioMapper};
+    use tairix_abi::{DriverError, MmioMapper};
     use tairix_audiochan::{exit, fail};
-    use tairix_caps::CapabilitySet;
     use tairix_drv_audio_virtio_snd::VirtioSnd;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_rt::ClockDelay;
     use tairix_virtio::{MmioTransport, PciTransport};
-
-    /// The capability set the driver host re-checks up front before issuing a
-    /// `mmio_map` / `dma_alloc` / `irq_bind` trap, so a missing grant fails
-    /// fast without a round trip. It mirrors the resources the matched node
-    /// requested — the register window (`CAP_MMIO_MAP`), the DMA region
-    /// (`CAP_MEM_DMA`), and the device interrupt line the serve loop parks on
-    /// (`CAP_IRQ_BIND`) — plus the authority to map the mixer's granted PCM
-    /// regions (`CAP_SHM`), to claim and bind the reserved device-channel
-    /// endpoint (`CAP_IPC_ENDPOINT`, `CAP_IPC_BIND_PRIVILEGED`), to publish
-    /// the `audiochan` node (`CAP_HW_EMIT`), and to emit its readiness beacon
-    /// (`CAP_LOG_EMIT`). It deliberately does **not** hold
-    /// `CAP_AUDIO_DEVICE`: that is the authority to *command* an audio
-    /// driver, which the mixer holds and this process is the subject of. The
-    /// kernel is the authority and re-checks every trap regardless.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::MEM_DMA);
-        caps.insert(CapabilityId::IRQ_BIND);
-        caps.insert(CapabilityId::SHM);
-        caps.insert(CapabilityId::IPC_ENDPOINT);
-        caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
-        caps.insert(CapabilityId::HW_EMIT);
-        caps.insert(CapabilityId::LOG_EMIT);
-        caps
-    }
 
     /// Why a bring-up gave up once the transport was built, on either bus.
     /// The `error` field the record carries is what the device or the kernel
@@ -96,7 +69,11 @@ mod program {
         // The QEMU `virt` virtio interconnect snoops the CPU caches, so the
         // DMA carve is coherent kernel-side and no cache-maintenance shim is
         // supplied here, which keeps the program platform-neutral.
-        let host = match RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) {
+        let caps = tairix_drv_audio_virtio_snd::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let host = match RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) {
             Ok(host) => host,
             Err(err) => {
                 return fail(
@@ -157,7 +134,7 @@ mod program {
                     Ok(audio) => audio,
                     Err(err) => return fail(exit::BRINGUP_FAILED, OPEN_REFUSED, Some(err)),
                 };
-                tairix_audiochan::serve(audio, &[tairix_audiochan::Wake::Irq(irq_handle)])
+                tairix_audiochan::serve(audio, &[DeviceWake::Irq(irq_handle)])
             }
             // No role-tagged window at all: a single-aperture MMIO delivery.
             Err(DriverError::NotFound) => {
@@ -195,7 +172,7 @@ mod program {
                     Ok(audio) => audio,
                     Err(err) => return fail(exit::BRINGUP_FAILED, OPEN_REFUSED, Some(err)),
                 };
-                tairix_audiochan::serve(audio, &[tairix_audiochan::Wake::Irq(irq_handle)])
+                tairix_audiochan::serve(audio, &[DeviceWake::Irq(irq_handle)])
             }
             // Some virtio-PCI windows but not the full four — a malformed,
             // mis-provisioned node. Fail closed rather than half-bind.

@@ -50,8 +50,8 @@ impl Part {
     }
 }
 
-impl I2cPort for Part {
-    fn transfer(&self, write: &[u8], read: &mut [u8]) -> Result<(), DriverError> {
+impl I2cPort for &Part {
+    fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), DriverError> {
         let (&register, values) = write.split_first().ok_or(DriverError::OutOfRange)?;
         assert!(register < 0x80, "page 0 holds registers below 128");
         assert!(values.len() <= 1, "one register a transfer");

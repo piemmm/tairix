@@ -49,7 +49,7 @@ Indexed/packed-pixel and sub-32-bpp modes are out of scope for `abi-v1`
   framebuffer is device-visible memory and is reached only through the
   capability-gated `MmioMapper`, never through a pointer the driver
   synthesises from the block's `PhysBasePtr` (`AGENTS.md` §4).
-- The `Display` methods (`mode_info`, `present`) are gated by ownership
+- The `Display` methods (`output`, `present`) are gated by ownership
   of the `DriverHandle` returned from `register`.
 - `present` is additionally gated on the presenting client's live seat
   lease when the host wires one (`DriverHost::seat_gate`,

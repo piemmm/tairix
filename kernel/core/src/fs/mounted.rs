@@ -315,6 +315,10 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         if let Ok(Some(host)) = self.writeback_host.get() {
             shared.lock().set_writeback_host(handle, *host);
         }
+        // What the mount listing reports of the volume moved — its name,
+        // type, space and availability — though the table's own mounts did
+        // not: an unlocked root is exactly this.
+        crate::notice::mounts_changed();
         Ok(shared)
     }
 
@@ -433,7 +437,10 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             .iter_mut()
             .find(|e| e.handle == handle)
             .ok_or(Errno::NotImplemented)?;
-        entry.availability = availability;
+        if entry.availability != availability {
+            entry.availability = availability;
+            crate::notice::mounts_changed();
+        }
         Ok(())
     }
 
@@ -594,6 +601,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         if let Some(watch) = &entry.watch {
             watch.release();
         }
+        crate::notice::mounts_changed();
         Some(entry.driver)
     }
 

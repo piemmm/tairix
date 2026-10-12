@@ -11,26 +11,21 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The crate is **only** a binary: the `Run` entry point of the virtio-input
-# keyboard driver bundle, installed under `/System/Drivers/` and autoloaded into
-# user space by `devmgr` when a virtio-input device is discovered. It links the
-# userland runtime `tairix-rt`, so it is a separate crate
-# from the kernel-linked `tairix-drv-input-virtio-input` driver shell (the kernel
-# must not pull in the userland `_start` / panic handler), and depends only on
-# `lib/*` crates so the layering holds (no `drivers/*`→`drivers/*` edge).
-# It is a freestanding pure-Rust program on the native Tier-1 targets and an
-# inert host stub elsewhere (`src/main.rs` / `build.rs`), mirroring
-# `drivers/input/usb_kbd`.
+# Two targets: the `Run` entry point of the driver bundle (`src/main.rs`),
+# autoloaded into user space by `devmgr`, and the capabilities its signed
+# manifest requests (`src/lib.rs`), which the image builder reads too. It links
+# the userland runtime `tairix-rt`, so it is a separate crate from
+# the kernel-linked `tairix-drv-input-virtio-input` driver shell (the kernel must not pull in the userland `_start` / panic handler),
+# and depends only on `lib/*` crates so the layering holds. The binary is an
+# inert host stub off bare metal (`build.rs`).
 
-# Everything the freestanding program links is pulled in only for the bare-metal
-# targets the binary is actually built for; on the host the binary is an inert
-# stub with no dependencies.
-[target.'cfg(target_os = "none")'.dependencies]
-# The frozen `abi-v1` surface (`InputEvent`, `KeyInput`, `CapabilityId`,
-# `DriverError`, and the `sole_register_window` grant helper).
+[dependencies]
+# The capability vocabulary the manifest request is spelled in.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The capability-set type the rt-backed `DriverHost` is built over.
-tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+
+# Everything else the freestanding program links is pulled in only for the
+# bare-metal targets the binary is actually built for.
+[target.'cfg(target_os = "none")'.dependencies]
 # The bus-agnostic virtio transports this driver builds over its granted
 # window(s) — the single-aperture `MmioTransport` and the four-window
 # `PciTransport` — a `lib/*` crate, so the layering holds (the driver

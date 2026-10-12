@@ -373,7 +373,7 @@ These are absolute. They override any local convenience.
     - **Carve-out — a device's own driver/support crate may know its device.**
       A crate (or driver-crate `lib` target) whose entire purpose is one piece
       of hardware (e.g. the `drivers/bus/pcie_brcm` / `drivers/bus/usb/vl805`
-      driver crates, `drivers/display/rpi_hvs`, `lib/vcmailbox`), or one
+      driver crates, `drivers/display/bcm2711_hvs`, `lib/vcmailbox`), or one
       programming model of DMA translation unit (a `kernel/iommu/<family>`
       crate, matched to a discovered unit exactly as a driver is), legitimately
       targets that hardware; that is its job. But it is *reached only through
@@ -567,27 +567,29 @@ tairix/
 │   ├── accelerator/     # Offload engines: virtio_crypto.
 │   ├── audio/           # Sound devices: virtio_snd, usb_uac, hda, bcm2711_pwm,
 │   │                    #   bcm2711_i2s, and the codecs pcm5102a, pcm5122.
-│   ├── clock/           # Clock controllers: bcm2711_cprman.
-│   ├── cpufreq/         # CPU frequency mechanisms: rpi (VideoCore ARM clock).
+│   ├── clock/           # Clock controllers: bcm2711_cprman, bcm2711_dvp,
+│   │                    #   rpi_firmware (the VideoCore's clocks, the ARM
+│   │                    #   clock's frequency mechanism among them).
 │   ├── display/
 │   │   ├── vesa/
 │   │   ├── framebuffer/
 │   │   ├── gpu_virtio/
-│   │   ├── rpi_fb/       # Raspberry Pi firmware framebuffer, with its power switch.
-│   │   └── rpi_hvs/      # Raspberry Pi VideoCore HVS compositor.
-│   ├── dma/             # DMA engines: bcm2835 (the Broadcom legacy engines).
+│   │   ├── bcm2711_hvs/  # Raspberry Pi 4 display engine: the HVS and its HDMI pixel valves.
+│   │   └── bcm2711_hdmi/ # Raspberry Pi 4 HDMI transmitters, each an encoder-v1 encoder.
+│   ├── dma/             # DMA engines: bcm2835 (the Broadcom legacy and DMA4 engines).
 │   ├── filesystem/
 │   │   ├── adfs/        # Acorn ADFS / RISC OS FileCore, read/write.
 │   │   ├── ext4/
 │   │   ├── fat32/
 │   │   └── arxfs/      # Native, POSIX-compliant, capability-aware FS.
 │   ├── input/
+│   ├── irq/             # Second-level interrupt controllers: brcmstb_l2.
 │   ├── network/
 │   ├── rtc/            # Real-time clocks: pl031, goldfish, mc146818, rpi,
 │   │                    #   and the I2C chips ds3231/pcf8523/pcf85063a.
 │   ├── storage/
 │   └── bus/             # Bus drivers: virtio, mmio, usb/ (xhci, vl805),
-│                        #   pcie_brcm, i2c/ (bcm2835).
+│                        #   pcie_brcm, i2c/ (bcm2835, brcmstb).
 │
 ├── lib/                 # Shared no_std crates. The only place for common code.
 │   ├── abi/             # Stable user/kernel ABI types.
@@ -606,6 +608,7 @@ tairix/
 │   ├── bootload/        # Firmware-neutral boot-chain loader core.
 │   ├── browse/          # Shared directory-browser engine.
 │   ├── caps/            # Capability primitives.
+│   ├── clock/           # Clock-controller side (clock-v1 server).
 │   ├── cmdres/          # Shared command-word resolution policy.
 │   ├── codec/           # Codec driver side (codec-v1 server).
 │   ├── collections/     # Heap-backed no_std containers not in core/alloc: the
@@ -631,7 +634,10 @@ tairix/
 │   ├── discovery/       # Link-local service discovery client (discovery-v1).
 │   ├── display/         # Display-service protocol engine.
 │   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers.
+│   ├── dmaengine/       # DMA controller side (dmaengine-v1 endpoint + serve loop).
 │   ├── drvrt/           # User-space driver runtime host.
+│   ├── edid/            # Display-sink descriptions: EDID and its extensions, ELD.
+│   ├── encoder/         # Display encoder side (encoder-v1 server).
 │   ├── enrolment/       # Service enrolment store engine (which services may start).
 │   ├── fbcon/           # Shared arch-neutral framebuffer text-console engine.
 │   ├── fdt/             # Shared FDT/DTB reader.
@@ -649,6 +655,7 @@ tairix/
 │   ├── help/            # Shared command-help engine.
 │   ├── hid/             # Arch-neutral HID boot-protocol decode.
 │   ├── i2c/             # I2C register-transaction protocol over the transfer seam.
+│   ├── i2cbus/          # I2C controller side: the i2c-v1 endpoint every controller serves.
 │   ├── icon/            # Shared desktop icons: glyph vocabulary, artwork cache,
 │   │                    #   and the shipped raster masters in `assets/`.
 │   ├── image/           # Fail-closed raster-image decoding (PNG).
@@ -689,7 +696,9 @@ tairix/
 │   ├── sandbox/         # The parser-sandbox seam.
 │   ├── seat/            # Arch-neutral seat model.
 │   ├── sound/           # Sound-file decoding: AU, WAV, FLAC (native, Ogg),
-│   │                    #   streamed from any input; the gated FLAC encoder.
+│   │                    #   MPEG audio, streamed from any input; the gated
+│   │                    #   FLAC encoder.
+│   ├── soundtheme/      # Desktop sounds: event assets, themes, settings, cue client.
 │   ├── spirv/           # SPIR-V shader module: decode, validate, build.
 │   ├── ssh/             # The pure SSH protocol engine (no I/O, clock, or RNG).
 │   ├── supervisor/      # Pre-boot Supervisor REPL engine + built-in commands.
@@ -728,6 +737,7 @@ tairix/
 │   │   ├── devmgr/      # Device manager: hardware-tree match + driver autoload.
 │   │   ├── appmgr/      # Application bundle loader.
 │   │   ├── audiod/      # Audio mixer/router: sole holder of CAP_AUDIO_DEVICE.
+│   │   ├── soundd/      # Cue authority: plays the desktop's sounds.
 │   │   ├── confd/       # App-data service: the per-app settings store.
 │   │   ├── timed/       # Time service: NTP client, sole CAP_TIME_SET holder.
 │   │   └── installer/   # Image installer (partitioning, user creation, naming).
@@ -1121,7 +1131,7 @@ an update to this section.
 - **A vendor or chip name is permitted *only* as the leaf directory** of a
   driver whose entire purpose is that one specific part — the driver's own
   crate/bundle directory, which holds the driver file(s) inside it (e.g. the
-  source crate `drivers/bus/usb/vl805/`, `drivers/display/rpi_hvs/`, and the
+  source crate `drivers/bus/usb/vl805/`, `drivers/display/bcm2711_hvs/`, and the
   installed `/System/Drivers/bus_usb/broadcom_chip_1234/<driver>`). The
   vendor/chip name is the *directory* that contains the driver module, never a
   segment of the class/bus namespace above it. The leaf names the concrete

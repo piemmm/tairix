@@ -50,7 +50,7 @@ fn every_settings_row_is_a_badge_with_its_own_symbol() {
         .collect();
     assert_eq!(
         badges.len(),
-        30,
+        32,
         "one badge per settings category and disclosed pane"
     );
     for kind in ICON_KINDS {

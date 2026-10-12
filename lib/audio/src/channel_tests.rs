@@ -148,6 +148,63 @@ fn seven_point_one_prefers_the_rear_slots_before_folding_to_the_fronts() {
     close(to_stereo.weight(1, 7), FOLD);
 }
 
+/// 6.1: 5.1 with the side pair and a rear centre between them.
+fn surround_61() -> ChannelMap {
+    ChannelMap::new(&[
+        ChannelPosition::FrontLeft,
+        ChannelPosition::FrontRight,
+        ChannelPosition::FrontCentre,
+        ChannelPosition::LowFrequency,
+        ChannelPosition::RearCentre,
+        ChannelPosition::SideLeft,
+        ChannelPosition::SideRight,
+    ])
+    .expect("a valid 6.1 layout")
+}
+
+/// A rear centre splits into whichever surround pair the sink has at one over
+/// root two each, and reaches each front at a half: a surround pair's fold,
+/// applied to both of its halves.
+#[test]
+fn a_rear_centre_splits_into_a_surround_pair_and_folds_forward_by_half() {
+    let to_51 = ChannelMatrix::derive(&surround_61(), &surround_51()).expect("6.1 into 5.1");
+    close(to_51.weight(4, 4), FOLD);
+    close(to_51.weight(5, 4), FOLD);
+    close(to_51.weight(4, 5), 1.0);
+    let to_71 = ChannelMatrix::derive(&surround_61(), &surround_71()).expect("6.1 into 7.1");
+    close(to_71.weight(4, 4), FOLD);
+    close(to_71.weight(5, 4), FOLD);
+    close(to_71.weight(6, 5), 1.0);
+    let to_stereo = ChannelMatrix::derive(&surround_61(), &ChannelMap::STEREO).expect("6.1 down");
+    close(to_stereo.weight(0, 4), 0.5);
+    close(to_stereo.weight(1, 4), 0.5);
+    close(to_stereo.weight(0, 5), FOLD);
+    let to_mono =
+        ChannelMatrix::derive(&surround_61(), &ChannelMap::MONO).expect("6.1 to one channel");
+    close(to_mono.weight(0, 4), 0.5);
+    assert!(ChannelMatrix::derive(&surround_61(), &surround_61())
+        .expect("itself")
+        .is_identity());
+}
+
+/// A sink whose one surround is a rear centre takes a source's surround pair
+/// there at one over root two each, as BS.775 folds 3/2 into 3/1.
+#[test]
+fn a_surround_pair_folds_into_a_lone_rear_centre() {
+    let lcrs = ChannelMap::new(&[
+        ChannelPosition::FrontLeft,
+        ChannelPosition::FrontRight,
+        ChannelPosition::FrontCentre,
+        ChannelPosition::RearCentre,
+    ])
+    .expect("a valid four-channel layout");
+    let matrix = ChannelMatrix::derive(&surround_51(), &lcrs).expect("5.1 into four channels");
+    close(matrix.weight(3, 4), FOLD);
+    close(matrix.weight(3, 5), FOLD);
+    close(matrix.weight(0, 4), 0.0);
+    close(matrix.weight(2, 2), 1.0);
+}
+
 #[test]
 fn an_upmix_leaves_the_channels_the_source_does_not_carry_silent() {
     let matrix = ChannelMatrix::derive(&ChannelMap::STEREO, &surround_51()).expect("stereo up");

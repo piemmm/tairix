@@ -16,6 +16,8 @@ is `pub(crate)` per `AGENTS.md` §8.
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
 | `drivers/bus/usb/xhci`   | generic xHCI host (`qemu-xhci`, Pi 4 VL805) | Protocol, enumeration, serving and isochronous streams; end to end on QEMU's `qemu-xhci` on every QEMU port; VL805 metal pending |
 | `drivers/bus/usb/vl805`  | Pi 4 (VL805 device)   | User-space bus-driver crate: firmware-reload policy + `Run` bin (reload firmware → emit `usb,xhci` node B; host-proven); metal pending |
+| `drivers/bus/i2c/bcm2835` | every Pi (BSC)       | `i2c-v1` controller; host-proven against a simulated BSC; metal pending |
+| `drivers/bus/i2c/brcmstb` | Pi 4 (HDMI DDC)      | `i2c-v1` controller; host-proven against a simulated controller; metal pending |
 
 ## Capability model
 
@@ -812,6 +814,35 @@ protocol-faithful `lib/vcmailbox` mock firmware and the reload-and-publish
 wiring against `DriverHost`
 doubles; the live reload → publish chain is the on-metal acceptance item
 (`plans/PI.md` P10).
+
+## I²C controllers
+
+An I²C bus has no enumeration protocol, so a controller emits nothing: its
+targets come from the platform's tree as links to it, and the controller
+serves `i2c-v1` under its node's duty through the shared endpoint
+(`lib/i2cbus`, [`tairix-i2cbus`](../lib/i2cbus.md)). A driver supplies only
+its bus — the speed it runs at and a transaction run through a channel's
+buffer.
+
+- **`drivers/bus/i2c/bcm2835`** is the Broadcom Serial Controller every Pi
+  exposes. It has no repeated-START command and issues one by starting the
+  next message while the write before it is active, withholding that write's
+  last byte until then so a preempted driver cannot let the controller end it
+  first; a read must end the transaction. Its FIFO is paced by its
+  interrupts, and its divider is set from the VPU clock, described over its
+  clock link, before every transaction.
+- **`drivers/bus/i2c/brcmstb`** is the BCM2711 HDMI blocks' DDC controller
+  (`brcm,bcm2711-hdmi-i2c`). A command moves up to 32 bytes and carries its
+  own START, repeated START and STOP conditions, so every transaction shape is
+  native; every chunk after a message's first continues it. The tree wires it
+  no interrupt, so a command's completion is read after sleeping its time on
+  the wire on a one-shot timer. Bring-up takes the controller from the HDMI
+  block's automatic I²C engine. It runs its bus at the fastest of its eight
+  fixed clocks at or below the speed the node declares.
+
+Each gives a transaction up, and resets its controller, only once the bus has
+made no progress for a step's time on the wire and a one-second stall, the
+Linux I²C core's default. `plans/I2C.md` carries both designs.
 
 ## Register-window hand-off
 

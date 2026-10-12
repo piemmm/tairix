@@ -11,7 +11,10 @@ play — play sound files
 Plays each file in turn on a sink. Every file is decoded in a sandboxed
 worker that holds no authority at all, so a hostile file can at worst end its
 own decode: it is left out with the reason stated and the rest of the list
-plays. AU, WAV and FLAC files are read, FLAC native or in Ogg.
+plays. AU, WAV, FLAC, Vorbis, Opus and MPEG audio (MP1, MP2 and MP3) files are
+read, FLAC native or in Ogg and Vorbis and Opus in Ogg; an Ogg file's chained
+streams play one
+after another.
 
 Consecutive files of one rate, sample format and channel layout play gapless,
 in one stream. A file of another shape waits for what is queued to play out,

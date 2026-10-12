@@ -32,6 +32,12 @@
 //!   holds any *other* generation (the seat was revoked and re-acquired)
 //!   is refused `NotFound` until the new owner reconfigures — one owner's
 //!   frames can never scan out under another's lease.
+//! * **Frames reach only the output they were shaped for.** The output is
+//!   the driver's and moves under every client (`plans/DISPLAY.md` D12): a
+//!   `Configure` whose geometry is not the mode it runs now, or a `Present`
+//!   of frames shaped for another — no output at all included — is refused
+//!   `Stale`, and the configuration stands, so it serves again the moment
+//!   the output runs its mode once more.
 //! * **A configuration ends with its lease, and only then.** The hosting
 //!   binary hands the engine the kernel's own announcement of the boot
 //!   seat's lease ([`DisplayServer::lease_moved`]), and a configuration
@@ -40,13 +46,18 @@
 //!   tell the owner that lost its lease from a stranger that never held
 //!   it, so letting one release the configuration would let any process
 //!   take the desktop's screen away.
+//! * **One principal's frames never reach the next.** A configuration
+//!   released with its lease, or replaced under another lease, tells the
+//!   display where the screen went (`Display::released`), so a driver
+//!   scanning out frames of its own shows the console or nothing rather than
+//!   the outgoing presenter's last frame.
 //! * **A switched-off display never outlives the configuration that asked
 //!   for it.** Releasing or replacing a configuration switches the display
 //!   back on first, so a crashed or departed presenter cannot leave the
 //!   next owner of the seat — the text console included — with a dark
 //!   screen.
 //! * **Every bound is checked before any pixel access.** The configured
-//!   geometry must equal the active mode exactly, the mapped region must
+//!   geometry must equal the output's mode exactly, the mapped region must
 //!   hold every frame, the frame index must name a configured frame, and
 //!   *every* damage rectangle must lie inside the mode — the whole list is
 //!   checked before the first is blitted, so one bad rectangle refuses the
@@ -61,7 +72,7 @@ use tairix_abi::driver::display::{
     DamageList, DamageRect, Display, DisplayFormat, DisplayMode, DisplayPower,
 };
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use tairix_abi::seat::{DisplayLease, SEAT_PRIMARY};
+use tairix_abi::seat::{DisplayLease, ReleaseSurface, SEAT_PRIMARY};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, Errno, ProcId};
 
@@ -230,19 +241,17 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
             // state this engine holds.
             DisplayRequest::QueryStats => {
                 let result = match peer.holds_capability(ticket, CapabilityId::SYSINFO_HW) {
-                    Ok(true) => self.device_stats(display),
+                    Ok(true) => Ok(self.device_stats(display)),
                     Ok(false) => Err(Errno::PermissionDenied),
                     Err(err) => Err(err),
                 };
                 stats(reply, result)
             }
             DisplayRequest::Query { seat_id } => {
-                let result = peer.live_generation(ticket, seat_id).and_then(|_| {
-                    display
-                        .mode_info()
-                        .map_err(tairix_abi::DriverError::as_errno)
-                });
-                mode(reply, result)
+                let result = peer
+                    .live_generation(ticket, seat_id)
+                    .map(|_| display.output());
+                output(reply, result)
             }
             DisplayRequest::Configure {
                 seat_id,
@@ -312,6 +321,9 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
             // that stays dark is retried on the next lease edge and refused
             // to the next configure.
             let _ = self.release(display);
+            // A lease already held anew ended with the edge unseen: the
+            // newcomer is taking over.
+            display.released(lease.released_to().unwrap_or(ReleaseSurface::Handover));
         }
     }
 
@@ -340,27 +352,25 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
     }
 
     /// The device's own statistics: the occupancy this engine measured, what
-    /// the driver reports about the device, and the mode it scans out.
+    /// the driver reports about the device, and the mode it scans out, if it
+    /// has an output.
     ///
     /// `busy_ns` and `idle_ns` partition the window since the device was
     /// first driven, so the two always sum to a real elapsed span rather than
     /// to a total the engine chose. A device that has never been presented to
     /// has no window at all and reports neither, which is what leaves the
     /// reader with no share instead of a fabricated idle one.
-    fn device_stats(&self, display: &dyn Display) -> Result<DisplayStats, Errno> {
-        let mode = display
-            .mode_info()
-            .map_err(tairix_abi::DriverError::as_errno)?;
+    fn device_stats(&self, display: &dyn Display) -> DisplayStats {
         let window_ns = self
             .window_start_ns
             .map_or(0, |start| self.clock.now_ns().saturating_sub(start));
-        Ok(DisplayStats {
+        DisplayStats {
             seat_id: self.configured.as_ref().map_or(0, |c| c.seat_id),
             busy_ns: self.busy_ns,
             idle_ns: window_ns.saturating_sub(self.busy_ns),
             device: display.device_report(),
-            mode,
-        })
+            mode: display.output(),
+        }
     }
 
     /// Whether the engine currently holds a configured frame region.
@@ -384,6 +394,10 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
 
     /// Adopt the caller's granted frame region for `seat_id` under the
     /// live `generation`, replacing any earlier configuration.
+    ///
+    /// A geometry that is not the output's mode is the caller's view of an
+    /// output that has moved, and is refused [`Errno::Stale`] before
+    /// anything is released or mapped.
     #[allow(clippy::too_many_arguments)]
     fn configure(
         &mut self,
@@ -398,18 +412,17 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
         stride_bytes: u32,
         format: DisplayFormat,
     ) -> Result<(), Errno> {
-        let mode = display
-            .mode_info()
-            .map_err(tairix_abi::DriverError::as_errno)?;
+        let mode = DisplayMode {
+            width_px,
+            height_px,
+            stride_bytes,
+            format,
+        };
         // The frames must be bit-compatible with the scan-out surface:
         // an exact-mode match, so a present is a bounded copy with no
         // conversion on the hot path.
-        if width_px != mode.width_px
-            || height_px != mode.height_px
-            || stride_bytes != mode.stride_bytes
-            || format != mode.format
-        {
-            return Err(Errno::LengthOutOfRange);
+        if display.output() != Some(mode) {
+            return Err(Errno::Stale);
         }
         let frame_len = frame_bytes(&mode)?;
         let total = frame_len
@@ -419,7 +432,14 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
         // the mapper may release it before mapping the new grant. A display
         // that cannot be switched back on is refused here, loudly, rather
         // than handed to a presenter whose every frame would be invisible.
+        let handover = self
+            .configured
+            .as_ref()
+            .is_some_and(|c| (c.seat_id, c.generation) != (seat_id, generation));
         self.release(display)?;
+        if handover {
+            display.released(ReleaseSurface::Handover);
+        }
         let region = self.mapper.map(grantor, shm_handle, total)?;
         if region.bytes().len() < total {
             return Err(Errno::LengthOutOfRange);
@@ -476,6 +496,9 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
         if configured.seat_id != seat_id || configured.generation != generation {
             return Err(Errno::NotFound);
         }
+        if display.output() != Some(configured.mode) {
+            return Err(Errno::Stale);
+        }
         if frame_index >= configured.frame_count {
             return Err(Errno::OutOfRange);
         }
@@ -527,8 +550,11 @@ fn status(reply: &mut [u8; DISPLAY_REPLY_MAX], result: Result<(), Errno>) -> usi
     STATUS_REPLY_LEN
 }
 
-/// Encode a mode outcome into `reply`, returning the frame length.
-fn mode(reply: &mut [u8; DISPLAY_REPLY_MAX], result: Result<DisplayMode, Errno>) -> usize {
+/// Encode an output outcome into `reply`, returning the frame length.
+fn output(
+    reply: &mut [u8; DISPLAY_REPLY_MAX],
+    result: Result<Option<DisplayMode>, Errno>,
+) -> usize {
     reply[..DISPLAY_MODE_REPLY_LEN].copy_from_slice(&encode_mode_reply(result));
     DISPLAY_MODE_REPLY_LEN
 }

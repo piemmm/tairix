@@ -23,7 +23,8 @@ It is separate from `lib/audio` for the reason `lib/netchan` is separate from
   claims a reserved device-channel endpoint bound restricted-sender on
   `CAP_AUDIO_DEVICE`, emits the `audiochan` hardware-tree node the device
   manager hands to the mixer, and parks on a wait set over `{call endpoint,
-  device interrupt}`.
+  device interrupt}`. `Channel` is the same claimed and published channel for
+  a driver whose own loop serves another protocol of the device beside it.
 
 ## The cyclic engine
 
@@ -33,8 +34,8 @@ from a looping buffer, written once over two seams: `DmaPort`, the channel
 `FrameCodec`, how the device's frame sits in the buffer. The buffer holds four
 periods and the one after the period playing is always written, as silence
 counted lost when the mixer supplied none, because a period left alone would
-replay a lap-old sound. A buffer frame is as many bytes as a ring frame of two
-channels in the codec's format, whole FIFO words, so a period is read from the
+replay a lap-old sound. A buffer frame is as many bytes as a ring frame of the
+codec's channels in its format, whole FIFO words, so a period is read from the
 ring straight into place. A stream ends parked: the codec's parked frame fills
 the buffer and the channel stops at its next boundary, once that frame has
 reached the device. The modelled channel drivers test against is

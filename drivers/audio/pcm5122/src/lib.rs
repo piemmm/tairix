@@ -5,8 +5,8 @@
 //! automatically from the rates it detects; the driver programs the framing
 //! and the word length the link and the stream state, and serves the part's
 //! digital volume, 24 dB to −103 dB in half-decibel steps, as the stream's
-//! gain. Its whole authority over the part is the transfer endpoint its node's
-//! grant names, so it reaches no other device on the bus.
+//! gain. Its whole authority over the part is the I²C target channel its
+//! node's link names, so it reaches no other device on the bus.
 //!
 //! References: TI SLASE91, the `PCM512x` datasheet; Linux
 //! `sound/soc/codecs/pcm512x.c` for the consumer-mode sequence.
@@ -24,11 +24,12 @@ use tairix_abi::{
 use tairix_i2c::Device;
 
 /// The capabilities the driver runs with, which its signed manifest requests:
-/// the transfer endpoint its node's grant names, the codec's endpoint, and
-/// the log.
+/// the I²C controller its node's link names and the buffer of the channel
+/// opened over it, the codec's endpoint, and the log.
 pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::IPC_ENDPOINT,
     CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::SHM,
     CapabilityId::LOG_EMIT,
 ];
 
@@ -184,7 +185,7 @@ impl<P: I2cPort, D: Delay> Pcm5122<P, D> {
         Ok(())
     }
 
-    fn apply_mute(&self) -> Result<(), DriverError> {
+    fn apply_mute(&mut self) -> Result<(), DriverError> {
         let silent = self.muted || !self.running;
         self.part.update_one(MUTE, |mute| {
             if silent {
@@ -197,7 +198,7 @@ impl<P: I2cPort, D: Delay> Pcm5122<P, D> {
 
     /// Wait, within its budget, for both analogue outputs to finish their
     /// soft mute, so the interface's clocks can stop under a silent part.
-    fn settle_mute(&self) -> Result<(), DriverError> {
+    fn settle_mute(&mut self) -> Result<(), DriverError> {
         for _ in 0..MUTE_SETTLE_READS {
             if self.part.read_one(ANALOG_MUTE_DET)? & OUTPUTS_LIVE == 0 {
                 return Ok(());
@@ -301,7 +302,7 @@ const REGISTER_HANDLE_MARKER: u64 = 0x5031_3232_0000_0001;
 /// # Capabilities
 ///
 /// Requires [`CapabilityId::DRV_LOAD`]. Serving the codec additionally needs
-/// the transfer endpoint its node's grant names and its codec `LinkDuty`.
+/// the I²C target channel its node's link names and its codec `LinkDuty`.
 pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     if !host.has_capability(CapabilityId::DRV_LOAD) {
         return Err(DriverError::PermissionDenied);

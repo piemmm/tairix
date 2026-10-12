@@ -241,7 +241,7 @@ mod program {
             };
             let file = File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
             let handle = tairix_rt::fd_grant(file.fd(), ceiling, recipient);
-            u64::try_from(handle).map_err(|_| Errno::from_syscall(handle))
+            Errno::syscall_result(handle)
         }
     }
 

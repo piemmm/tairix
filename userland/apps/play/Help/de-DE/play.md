@@ -11,8 +11,11 @@ play — Tondateien abspielen
 Spielt jede Datei der Reihe nach auf einer Ausgabe ab. Jede Datei wird in einem
 abgeschotteten Prozess ohne jede Befugnis dekodiert, sodass eine feindselige
 Datei höchstens ihre eigene Dekodierung beenden kann: Sie wird mit genanntem
-Grund ausgelassen, und der Rest der Liste wird gespielt. Gelesen werden AU-, WAV-
-und FLAC-Dateien, FLAC eigenständig oder in Ogg.
+Grund ausgelassen, und der Rest der Liste wird gespielt. Gelesen werden AU-, WAV-,
+FLAC-, Vorbis-, Opus- und MPEG-Audio-Dateien (MP1, MP2 und MP3), FLAC
+eigenständig oder in Ogg, Vorbis und Opus in Ogg; die verketteten Datenströme
+einer Ogg-Datei werden
+nacheinander gespielt.
 
 Aufeinanderfolgende Dateien mit gleicher Abtastrate, gleichem Sampleformat und
 gleicher Kanalanordnung werden lückenlos in einem Datenstrom gespielt. Eine

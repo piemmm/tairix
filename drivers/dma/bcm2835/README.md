@@ -1,16 +1,20 @@
 # `tairix-drv-dma-bcm2835`
 
-Autoloaded user-space driver for the **Broadcom legacy DMA engines**, the
-controller every Raspberry Pi's SPI, PCM/I²S, PWM and SD host stream through.
+Autoloaded user-space driver for the **Broadcom DMA engines**: the legacy
+engines every Raspberry Pi's SPI, PCM/I²S, PWM and SD host stream through, and
+the BCM2711's DMA4 engines its HDMI audio streams through.
 Stability tier: `experimental`.
 
 ## Supported hardware
 
-Device-tree `compatible = "brcm,bcm2835-dma"`: the BCM2835, BCM2837 and
-BCM2711 legacy engines, full and LITE channels alike. It binds only through
-the discovery match (`BIND_KEYS`) and names no board and no address. The
-BCM2711's DMA4 engines (`brcm,bcm2711-dma`) are a different register model
-and are not served here.
+- `compatible = "brcm,bcm2835-dma"`: the BCM2835, BCM2837 and BCM2711 legacy
+  engines, full and LITE channels alike, 32-bit addresses.
+- `compatible = "brcm,bcm2711-dma"`: the BCM2711's DMA4 engines, 40-bit
+  addresses within a 36-bit interface.
+
+It binds only through the discovery match (`BIND_KEYS`), names no board and no
+address, and learns which engines its node holds from the bind key the node
+matched. Both read the one request-cell binding.
 
 ## Required capabilities
 
@@ -35,9 +39,9 @@ attested facts, and hands back a mapping. See `docs/src/drivers/dma.md`.
 - **No pause, no memory-to-memory, no one-shot scatter-gather.** The seam is
   cyclic peripheral transfers; the others arrive with a consumer that needs
   them.
-- **Blocks are held to a LITE channel's 65 532 bytes on every channel**, and a
-  chain to one page of blocks, so a shape is admitted or refused whichever
-  channel serves it.
+- **Blocks are held to a LITE channel's 65 532 bytes on every legacy
+  channel**, a DMA4 block to a gibibyte, and a chain to one page of blocks, so
+  a shape is admitted or refused whichever channel of a node serves it.
 - **A service late by a whole lap of the buffer is invisible** to the
   controller, whose count is by period. The consumer sees it in the service
   times its waits report.
@@ -57,12 +61,14 @@ attested facts, and hands back a mapping. See `docs/src/drivers/dma.md`.
 
 ## Testing
 
-Host tests drive the engine and the endpoint against a register-level model
-that fetches control blocks from simulated memory as the silicon does: the
-chain walked cyclically with one interrupt per period, LITE limits, the
-pause-drain-reset stop, the three error flags, a fetch from freed memory, and
-a block whose memory side leaves its buffer. The endpoint's tests answer the
-kernel's grant questions by the kernel's own coverage rule.
+Host tests drive each engine against its own register-level model, both
+fetching control blocks from one simulated memory as the silicon does: the
+chain walked cyclically with one interrupt per period, the block limits, the
+pause-drain-reset stop, the error flags, a fetch from freed memory, and a
+block whose memory side leaves its buffer; the DMA4 model also holds every
+block to its information-word fields, the shifted block names, a 40-bit
+buffer and the AXI protection. The endpoint's tests answer the kernel's grant
+questions by the kernel's own coverage rule.
 
 QEMU runs no cyclic DREQ-paced chain, so there is no integration test; metal
 acceptance is `plans/PI.md` P13.
@@ -70,4 +76,5 @@ acceptance is `plans/PI.md` P13.
 ## References
 
 - BCM2711 ARM Peripherals, chapter 4 (DMA Controller).
-- `plans/SOUND.md` SND5 — the staged design this driver lands.
+- The Raspberry Pi kernel's `bcm2835-dma` driver, for the DMA4 engines.
+- `plans/SOUND.md` SND5, SND19c — the staged design this driver lands.

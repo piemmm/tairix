@@ -8,10 +8,12 @@ use std::collections::VecDeque;
 use std::vec;
 use std::vec::Vec;
 
-use tairix_abi::driver::audio::{AudioInterrupt, ChannelMap, Frames, Rate, SampleFormat};
+use tairix_abi::driver::audio::{
+    AudioInterrupt, ChannelMap, Frames, JackState, Rate, SampleFormat,
+};
 use tairix_abi::driver::audio_channel::{
-    decode_configure_reply, AttachParams, AudioChannelNotify, AudioChannelRequest, ConfigureParams,
-    AUDIO_CHANNEL_MAX_REQUEST,
+    decode_configure_reply, notify_endpoint_for, AttachParams, AudioChannelNotify,
+    AudioChannelRequest, ConfigureParams, AUDIO_CHANNEL_MAX_REQUEST,
 };
 use tairix_abi::driver::audio_ring::{aligned_region, PcmGeometry, REGION_ALIGN_PADDING};
 use tairix_abi::reply::decode_status_reply;
@@ -21,7 +23,8 @@ use super::{ChannelIo, Dispatcher, MappedRegion};
 use crate::mock_audio::{MockAudio, MOCK_PERIOD, MOCK_RATE_HZ, SINK, SOURCE};
 
 const MIXER: ProcId = ProcId::from_raw([9; 16]);
-const NOTIFY_PORT: u64 = 0xACE0;
+const NOTIFY_PORT: u64 = notify_endpoint_for(9, 0);
+const WATCH_PORT: u64 = notify_endpoint_for(9, 0x80);
 const RING_FRAMES: u32 = 512;
 
 fn ring_len() -> usize {
@@ -181,6 +184,56 @@ fn periods_reported(dispatcher: &TestDispatcher, endpoint: u16) -> usize {
                 && matches!(notify, AudioChannelNotify::PeriodElapsed { endpoint: e, .. } if *e == endpoint)
         })
         .count()
+}
+
+fn watch(dispatcher: &mut TestDispatcher) {
+    let watched = dispatcher.io.call(&AudioChannelRequest::Watch {
+        notify_endpoint: WATCH_PORT,
+    });
+    dispatcher.on_call();
+    assert_eq!(decode_status_reply(dispatcher.io.reply(watched)), Ok(()));
+}
+
+fn jack_changes(dispatcher: &TestDispatcher) -> Vec<(u64, AudioChannelNotify)> {
+    dispatcher
+        .io
+        .notified
+        .iter()
+        .filter(|(_, notify)| matches!(notify, AudioChannelNotify::JackChanged { .. }))
+        .copied()
+        .collect()
+}
+
+/// A connector changes whether or not anything plays through it, so the
+/// change reaches the mixer's watch with nothing attached, and only there.
+#[test]
+fn a_jack_change_reaches_the_watch_attached_or_not() {
+    let mut dispatcher = dispatcher();
+    watch(&mut dispatcher);
+    dispatcher.server.audio_mut().pending.jack_changed = 1 << SINK;
+    dispatcher.on_event();
+    let changed = AudioChannelNotify::JackChanged {
+        endpoint: SINK,
+        jack: JackState::Present,
+    };
+    assert_eq!(jack_changes(&dispatcher), [(WATCH_PORT, changed)]);
+    ready(&mut dispatcher, SINK);
+    dispatcher.server.audio_mut().pending.jack_changed = 1 << SINK;
+    dispatcher.on_event();
+    assert_eq!(
+        jack_changes(&dispatcher),
+        [(WATCH_PORT, changed), (WATCH_PORT, changed)],
+        "not the attachment's port"
+    );
+}
+
+#[test]
+fn a_jack_change_with_no_watch_is_told_to_nobody() {
+    let mut dispatcher = dispatcher();
+    ready(&mut dispatcher, SINK);
+    dispatcher.server.audio_mut().pending.jack_changed = 1 << SINK;
+    dispatcher.on_event();
+    assert!(jack_changes(&dispatcher).is_empty());
 }
 
 #[test]

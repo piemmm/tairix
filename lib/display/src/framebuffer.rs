@@ -176,8 +176,8 @@ impl<'h> Framebuffer<'h> {
 }
 
 impl Display for Framebuffer<'_> {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(self.mode)
+    fn output(&self) -> Option<DisplayMode> {
+        Some(self.mode)
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {

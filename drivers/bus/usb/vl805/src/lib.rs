@@ -84,6 +84,11 @@ const REGISTER_HANDLE_MARKER: u64 = 0x564C_3830_3500_0001;
 /// specificity decides).
 const BIND_PRIORITY: u16 = 20;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the firmware mailbox the controller's firmware is reloaded through, and
+/// publishing the controller as an xHCI node. It maps nothing it forwards.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[CapabilityId::MAILBOX, CapabilityId::HW_EMIT];
+
 /// This driver's hardware bind table: the VL805 USB host controller, matched
 /// by its exact PCI identity ([`VL805_KEY`]), class included, so an EHCI or
 /// OHCI function on the same device id could not bind this driver. The single

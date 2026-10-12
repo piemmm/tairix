@@ -33,6 +33,13 @@ pub const SYSCALL_TABLE_HASH_LEN: usize = 32;
 /// program may write the file as the user could, and no further.
 pub const GRANT_EXTENT_INHERIT: u64 = u64::MAX;
 
+/// The [`SyscallNumber::CALL_POST`] deadline that never passes: the posted
+/// request is answered only by its server or by the endpoint's end.
+///
+/// What a consumer waiting on an event that may never come posts with, such
+/// as a display engine waiting for its connector to move.
+pub const CALL_DEADLINE_NONE: u64 = u64::MAX;
+
 /// The most [`SyscallNumber::FD_GRANT`] delegations one grantor may have
 /// pending — minted and not yet redeemed — to one recipient.
 ///
@@ -2004,8 +2011,8 @@ impl SyscallNumber {
     /// Arguments: `endpoint: u64` — the call-endpoint id; `request: *const u8`
     /// and `request_len: usize` — the request payload; `ticket_out: *mut u64`
     /// — receives the minted ticket; `deadline_ns: u64` — the relative
-    /// timeout after which the reap reports [`crate::Errno::TimedOut`]
-    /// (`u64::MAX` = no deadline, the `waitset_wait`/`irq_wait` convention).
+    /// timeout after which the reap reports [`crate::Errno::TimedOut`], or
+    /// [`CALL_DEADLINE_NONE`].
     /// Returns `0`, or `-errno`.
     ///
     /// The same capability, per-endpoint grant, and size checks as
@@ -2810,6 +2817,38 @@ impl SyscallNumber {
     /// authority every other terminal control names; not audited, because
     /// it reads the caller's own standing and changes nothing.
     pub const FOREGROUND_HELD: Self = Self(139);
+
+    /// Mark the calling driver's own node settled (`plans/SOUND.md` SND22):
+    /// every child its device presented when it came up has been published,
+    /// so whatever it publishes next arrived on a running machine.
+    ///
+    /// Takes no arguments. Returns `0`, or `-errno`. The kernel resolves the
+    /// caller's own matched node from its task id, so a driver settles only
+    /// the node it was loaded for. It shares the
+    /// [`crate::CapabilityId::HW_EMIT`] grant with the publish path: only a
+    /// driver that may publish children has a settling of its own to
+    /// announce, and the kernel settles every other driver's node as it
+    /// loads it. A caller with no loaded node, or a build with no
+    /// hardware-tree store wired, fails closed
+    /// ([`Errno::PermissionDenied`] / [`Errno::NotImplemented`]).
+    pub const HW_NODE_SETTLE: Self = Self(140);
+
+    /// Move the kernel's framebuffer console off the firmware's memory onto
+    /// memory the kernel owns and the caller's device reaches, so a display
+    /// engine can take the screen over from the firmware that lit it.
+    ///
+    /// `(buf, len)`: the console's surface is written into `buf` as one
+    /// framebuffer [`crate::HwResource`]. Returns the bytes written, or
+    /// `-errno`. Only the driver of a node discovery marked
+    /// [`crate::HwProperty::BootConsole`] is answered
+    /// ([`Errno::PermissionDenied`] otherwise), and it holds
+    /// [`crate::CapabilityId::MEM_DMA`], since its device reads the memory.
+    /// The surface lies below the node's untranslated DMA reach and is the
+    /// console's for the life of the kernel, so a second call answers the
+    /// same one. A console that cannot move — none to move, no memory below
+    /// the reach — stays where it was ([`Errno::NotFound`],
+    /// [`Errno::OutOfMemory`], [`Errno::OutOfRange`]).
+    pub const CONSOLE_RELOCATE: Self = Self(141);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;

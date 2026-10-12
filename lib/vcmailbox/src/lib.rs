@@ -11,11 +11,10 @@
 //! the `VideoCore` **bus** addresses the firmware speaks and the ARM
 //! **physical** addresses the kernel can map. Every consumer rides it:
 //! the aarch64 port's framebuffer boot console (`plans/PI.md` P7b), the
-//! `drivers/display/rpi_hvs` HVS driver (`plans/PI.md` P7), the
-//! `drivers/display/rpi_fb` firmware-framebuffer service, which switches the
-//! display off through the firmware's blank request, the VL805 firmware
-//! reload (`plans/PI.md` P10), and the PMIC real-time clock
-//! (`plans/TIMESYNC.md` TS-4), which is not memory-mapped at all.
+//! display engine's takeover of the display (`plans/SOUND.md` `SND19m`), the
+//! firmware's clocks, the VL805 firmware reload (`plans/PI.md` P10), and the
+//! PMIC real-time clock (`plans/TIMESYNC.md` TS-4), which is not
+//! memory-mapped at all.
 //!
 //! Two layers, split so the protocol is host-testable without hardware:
 //!
@@ -49,7 +48,7 @@ use core::ptr::NonNull;
 
 use tairix_abi::driver::display::DisplayFormat;
 use tairix_abi::driver::dma::DmaSlab;
-use tairix_abi::driver::mailbox::MAILBOX_PROPERTY_WORDS;
+use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::pci::CLASS_USB_XHCI;
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, HwMatchKey, RegisterWindow};
@@ -67,26 +66,9 @@ mod tests;
 /// spelling the string themselves.
 pub const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
 
-/// Binding name of a scan-out surface the `VideoCore` firmware allocated —
-/// the Raspberry Pi vendor tree's name for the firmware framebuffer device.
-///
-/// The aarch64 port publishes its boot display under this key, ahead of the
-/// generic `simple-framebuffer` one, when the surface came from the firmware
-/// over the mailbox, and `drivers/display/rpi_fb` binds it: that surface's
-/// power is the firmware's to switch, which no generic driver can reach.
-pub const FIRMWARE_FRAMEBUFFER_COMPATIBLE: &[u8] = b"brcm,bcm2708-fb";
-
 // The devices whose drivers the mailbox service answers. Each driver's bind
 // table is built from its key here, so the device the kernel attests a caller
 // is loaded for is exactly the one its requests are admitted against.
-
-/// The scan-out surface the firmware allocated: its driver may blank it.
-pub const FIRMWARE_FRAMEBUFFER_KEY: HwMatchKey =
-    match HwMatchKey::compatible(FIRMWARE_FRAMEBUFFER_COMPATIBLE) {
-        Ok(key) => key,
-        // A too-long literal fails const evaluation; this never runs.
-        Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
-    };
 
 /// The real-time clock the Pi 5's PMIC carries, which is not memory-mapped:
 /// its driver may read the clock and set it.
@@ -102,6 +84,65 @@ pub const FIRMWARE_CLOCKS_KEY: HwMatchKey =
         Ok(key) => key,
         Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
     };
+
+/// Device-tree `compatible` string of the display engine, the HVS.
+pub const DISPLAY_ENGINE_COMPATIBLE: &[u8] = b"brcm,bcm2711-hvs";
+
+/// The display engine the firmware drives until it is told not to: its
+/// driver may say the display is its own.
+pub const DISPLAY_ENGINE_KEY: HwMatchKey = match HwMatchKey::compatible(DISPLAY_ENGINE_COMPATIBLE) {
+    Ok(key) => key,
+    // A too-long literal fails const evaluation; this never runs.
+    Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
+};
+
+/// One HDMI output of the display engine, as the BCM2711 wires it.
+///
+/// The device tree leaves the wiring implicit, so the aarch64 port states it
+/// on the engine's node — the pixel valve's register window, named
+/// [`Self::window`], and a link named [`Self::link`] to the encoder it feeds —
+/// and the engine's driver finds each output by those names.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct EngineOutput {
+    /// The name the valve's window carries.
+    pub window: &'static [u8],
+    /// The name the encoder's link carries.
+    pub link: &'static [u8],
+    /// The pixel valve's `compatible`.
+    pub valve: &'static [u8],
+    /// The HDMI encoder's `compatible`.
+    pub encoder: &'static [u8],
+}
+
+/// The display engine's HDMI outputs: pixel valve 2 feeds HDMI0, pixel valve
+/// 4 HDMI1.
+pub const ENGINE_OUTPUTS: [EngineOutput; 2] = [
+    EngineOutput {
+        window: b"valve2",
+        link: b"hdmi0",
+        valve: b"brcm,bcm2711-pixelvalve2",
+        encoder: b"brcm,bcm2711-hdmi0",
+    },
+    EngineOutput {
+        window: b"valve4",
+        link: b"hdmi1",
+        valve: b"brcm,bcm2711-pixelvalve4",
+        encoder: b"brcm,bcm2711-hdmi1",
+    },
+];
+
+const _: () = {
+    let mut at = 0;
+    while at < ENGINE_OUTPUTS.len() {
+        let output = ENGINE_OUTPUTS[at];
+        assert!(
+            output.window.len() <= tairix_abi::hwtree::WINDOW_NAME_MAX
+                && output.link.len() <= tairix_abi::hwlink::LINK_NAME_MAX,
+            "an output's names fit a window and a link"
+        );
+        at += 1;
+    }
+};
 
 /// The VL805 USB host controller (VIA `1106:3483`, an xHCI function), whose
 /// firmware only the `VideoCore` can reload: its driver may ask it to.
@@ -169,6 +210,8 @@ pub enum MailboxError {
     /// The returned geometry is inconsistent (pitch narrower than a
     /// scanline, or a buffer smaller than `pitch * height`).
     BadGeometry,
+    /// The channel to the mailbox service failed the exchange, as it says.
+    Channel(DriverError),
 }
 
 impl MailboxError {
@@ -181,6 +224,7 @@ impl MailboxError {
             Self::Timeout | Self::FirmwareError => DriverError::DeviceFault,
             Self::MalformedResponse => DriverError::BadMagic,
             Self::BadAperture | Self::BadGeometry => DriverError::LengthOutOfRange,
+            Self::Channel(err) => err,
         }
     }
 }
@@ -188,12 +232,8 @@ impl MailboxError {
 // --- Property message geometry ----------------------------------------
 
 /// Fixed word count of the framebuffer property message (header,
-/// six tags, end tag, padded to a 16-byte multiple).
-///
-/// This is the same `VideoCore` property-channel width the host↔driver
-/// [`MailboxChannel`](tairix_abi::driver::mailbox::MailboxChannel) seam
-/// transports, so it is defined once in `lib/abi` and re-used here rather
-/// than duplicated.
+/// six tags, end tag, padded to a 16-byte multiple): the width the
+/// [`MailboxChannel`] seam transports.
 pub const PROPERTY_WORDS: usize = MAILBOX_PROPERTY_WORDS;
 
 /// Byte length of the property message ([`PROPERTY_WORDS`] words).
@@ -235,6 +275,9 @@ const TAG_GET_PITCH: u32 = 0x0004_0008;
 /// (Pi 4 rev 1.4 and later) that drops its firmware, and only the
 /// `VideoCore` can reload it (`plans/PI.md` P10).
 const TAG_NOTIFY_XHCI_RESET: u32 = 0x0003_0058;
+/// Tag: the ARM's display engine driver has taken the display over, so the
+/// firmware stops driving it (`RPI_FIRMWARE_NOTIFY_DISPLAY_DONE`; no values).
+const TAG_NOTIFY_DISPLAY_DONE: u32 = 0x0003_0066;
 
 /// Firmware pixel-order value for BGR ([`DisplayFormat::Bgra8888`]).
 const PIXEL_ORDER_BGR: u32 = 0;
@@ -823,51 +866,6 @@ pub fn decode_firmware_revision_response(
     tag_word(words, TAG_GET_FIRMWARE_REVISION)
 }
 
-// --- Display blanking -----------------------------------------------------
-
-/// `RPI_FIRMWARE_FRAMEBUFFER_BLANK`: blank or unblank the firmware's display
-/// output (request and response: one state word, bit 0 set when blanked).
-/// The firmware's own `hdmi_blanking` setting decides whether a blanked HDMI
-/// output is also switched off, so the monitor may sleep.
-const TAG_BLANK_SCREEN: u32 = 0x0004_0002;
-
-/// The blanked bit of [`TAG_BLANK_SCREEN`]'s state word.
-const BLANK_STATE_BIT: u32 = 1;
-
-/// Encode the blank-screen property message: `blank` switches the display's
-/// output off, `false` switches it back on.
-#[must_use]
-pub fn encode_blank_screen(blank: bool) -> [u32; PROPERTY_WORDS] {
-    request(&[(TAG_BLANK_SCREEN, &[u32::from(blank)])])
-}
-
-/// Validate the firmware's answer to [`encode_blank_screen`]`(blank)`.
-///
-/// The firmware reports the state it left the output in, so an answer
-/// naming the other state is a switch it did not make.
-///
-/// # Errors
-///
-/// * [`MailboxError::FirmwareError`] — the firmware rejected the request,
-///   or reports the output in the other state.
-/// * [`MailboxError::MalformedResponse`] — a protocol violation, or an
-///   unhonoured tag.
-pub fn decode_blank_screen_response(
-    words: &[u32; PROPERTY_WORDS],
-    blank: bool,
-) -> Result<(), MailboxError> {
-    match words[1] {
-        CODE_RESPONSE_OK => {}
-        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
-        _ => return Err(MailboxError::MalformedResponse),
-    }
-    let state = tag_word(words, TAG_BLANK_SCREEN)?;
-    if (state & BLANK_STATE_BIT != 0) != blank {
-        return Err(MailboxError::FirmwareError);
-    }
-    Ok(())
-}
-
 // --- VL805 xHCI firmware reload ------------------------------------------
 
 /// Encode the `TAG_NOTIFY_XHCI_RESET` property message naming the VL805 at
@@ -903,6 +901,47 @@ pub fn decode_xhci_reset_response(words: &[u32; PROPERTY_WORDS]) -> Result<u32, 
     }
     let value = find_tag(words, TAG_NOTIFY_XHCI_RESET)?;
     Ok(value.words.first().copied().unwrap_or(0))
+}
+
+// --- Display takeover ----------------------------------------------------
+
+/// Encode the notification that the display engine's driver has taken the
+/// display over.
+#[must_use]
+pub fn encode_display_done() -> [u32; PROPERTY_WORDS] {
+    request(&[(TAG_NOTIFY_DISPLAY_DONE, &[])])
+}
+
+/// The firmware's answer to [`encode_display_done`] when it does not confirm
+/// that it stopped driving the display, in its own codes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Unconfirmed {
+    /// The message's response code; a refusal is `0x8000_0001`.
+    pub header: u32,
+    /// The tag's code word, while the message still frames the tag. A
+    /// firmware that did not process the tag leaves it a request's.
+    pub tag: Option<u32>,
+}
+
+/// Whether the firmware's answer to [`encode_display_done`] confirms it has
+/// stopped driving the display: an OK message whose tag it processed. The tag
+/// carries no values, so its response length is not read.
+///
+/// # Errors
+///
+/// [`Unconfirmed`], carrying the answer's codes, for any other answer.
+pub fn decode_display_done_response(words: &[u32; PROPERTY_WORDS]) -> Result<(), Unconfirmed> {
+    let tag = locate_tag(words, TAG_NOTIFY_DISPLAY_DONE)
+        .ok()
+        .map(|tag| tag.code);
+    if words[1] == CODE_RESPONSE_OK && tag.is_some_and(|code| code & TAG_RESPONSE_BIT != 0) {
+        Ok(())
+    } else {
+        Err(Unconfirmed {
+            header: words[1],
+            tag,
+        })
+    }
 }
 
 // --- Real-time clock registers -------------------------------------------
@@ -1037,8 +1076,9 @@ const TAG_SET_CLOCK_RATE: u32 = 0x0003_8002;
 /// With it clear the firmware performs its turbo transition as part of the
 /// rate change, which moves the part to its turbo operating point — so a
 /// request to *lower* the ARM clock leaves it at the maximum, and a governor
-/// asking for the floor is silently answered with the ceiling. `clk-raspberrypi`
-/// sets it for the same reason (its `raspberrypi_firmware_prop.disable_turbo`).
+/// asking for the floor is silently answered with the ceiling.
+/// `clk-raspberrypi` declares the word (`raspberrypi_firmware_prop.disable_turbo`)
+/// but its initialiser leaves it clear.
 pub(crate) const SKIP_SETTING_TURBO: u32 = 1;
 
 /// Which clock a rate exchange names.
@@ -1053,10 +1093,26 @@ pub(crate) const SKIP_SETTING_TURBO: u32 = 1;
 pub enum FirmwareClock {
     /// The ARM core clock — the one dynamic frequency scaling moves.
     Arm = 3,
+    /// The core clock the display engine and the `VideoCore` run from.
+    Core = 4,
     /// The base clock of the BCM2711's second SD host (EMMC2), which the
     /// firmware programs and the host's SD clock is divided from.
     Emmc2 = 12,
+    /// The HDMI blocks' state-machine clock (`M2MC`), shared by both.
+    M2mc = 13,
+    /// The HDMI blocks' pixel-path clock (`PIXEL_BVB`), shared by both.
+    PixelBvb = 14,
 }
+
+/// The clocks the firmware-clocks node's driver serves to the nodes that link
+/// to them, by the selector their links carry: the display engine's core
+/// clock and the HDMI blocks' two. The ARM clock is the frequency
+/// mechanism's, and no link reaches it.
+pub const LINKED_CLOCKS: [FirmwareClock; 3] = [
+    FirmwareClock::Core,
+    FirmwareClock::M2mc,
+    FirmwareClock::PixelBvb,
+];
 
 impl FirmwareClock {
     /// The firmware's selector word.
@@ -1178,6 +1234,15 @@ pub fn decode_clock_rate_write_response(
     match tag_pair(words, TAG_SET_CLOCK_RATE)? {
         (echoed, rate) if echoed == clock.as_u32() => Ok(rate),
         _ => Err(MailboxError::MalformedResponse),
+    }
+}
+
+/// A channel to the mailbox service carries the same exchange a doorbell
+/// does, so every client frames its requests through the one set of
+/// functions here.
+impl<C: MailboxChannel + ?Sized> MailboxTransport for &C {
+    fn exchange(&mut self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
+        MailboxChannel::exchange(*self, message).map_err(MailboxError::Channel)
     }
 }
 

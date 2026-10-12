@@ -1,6 +1,6 @@
 //! The session's ownership of the user's pinboard settings: the scope they
 //! live in, and the one policy that decides whether a foreign caller's
-//! *apply* request may be honoured (`plans/PINBOARD.md` §2, §6,
+//! pinboard request may be honoured (`plans/PINBOARD.md` §2, §6,
 //! `plans/APPDATA.md` §3.11).
 //!
 //! Settings are per-user configuration (`lib/wallpaper`), kept in this
@@ -26,19 +26,22 @@
 //! Nothing here spells a path or names a bundle: the app-data service derives
 //! the store from the identity the kernel attested for this task.
 //!
-//! The apply channel's decision is here, not beside the serve loop, so it is
+//! The channel's decision is here, not beside the serve loop, so it is
 //! host-testable without a running kernel: the caller's uid is the
 //! kernel-attested one the embedder reads off the endpoint, and this module
 //! reads the carried document with the same registry the store's own document
 //! is read with. Nothing here performs I/O, so the path the document names is
 //! read later, by the session, under the session's own identity — a caller can
-//! never use this channel to reach a file it could not read itself.
+//! never use this channel to reach a file it could not read itself. The same
+//! attestation admits the sound requests, which name no path at all
+//! ([`crate::effects`]).
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest};
+use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_appconf::Registry;
@@ -65,13 +68,13 @@ pub struct LoadedPinboard {
     pub warnings: Vec<String>,
 }
 
-/// Why an *apply* request arriving on the pinboard channel was refused.
+/// Why a request arriving on the pinboard channel was refused.
 ///
 /// Carries both the wire [`Errno`] the caller receives and the `stderr`
 /// line the session states in its own house style, so the one refusal
 /// decision names both without this pure policy performing any I/O.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PinboardApplyRefusal {
+pub enum PinboardRefusal {
     /// The caller's kernel-attested origin uid is not the uid this session
     /// runs as, so it is asking to rewrite somebody else's desktop.
     Unattested,
@@ -81,7 +84,7 @@ pub enum PinboardApplyRefusal {
     Undecodable(DocumentRefusal),
 }
 
-impl PinboardApplyRefusal {
+impl PinboardRefusal {
     /// The wire [`Errno`] the caller receives.
     #[must_use]
     pub const fn errno(&self) -> Errno {
@@ -97,8 +100,8 @@ impl PinboardApplyRefusal {
     #[must_use]
     pub fn reason(&self) -> String {
         match self {
-            Self::Unattested => String::from("pinboard apply from another user refused"),
-            Self::Malformed(err) => format!("malformed pinboard apply refused ({err:?})"),
+            Self::Unattested => String::from("pinboard request from another user refused"),
+            Self::Malformed(err) => format!("malformed pinboard request refused ({err:?})"),
             Self::Undecodable(refusal) => {
                 format!("pinboard apply carries an unusable settings document: {refusal}")
             }
@@ -211,16 +214,16 @@ pub fn publish_pinboard(
     Ok(read_pinboard(&store))
 }
 
-/// Attest an *apply* request against the session's own identity and lay the
-/// settings it carries over `in_effect`.
+/// Attest a pinboard request against the session's own identity, laying the
+/// settings an apply carries over `in_effect`.
 ///
 /// `caller_uid` is the **kernel-attested** origin uid of the calling task,
 /// read off the endpoint by the embedder — never anything the caller said
 /// about itself. Only a caller running as this session's own user may
-/// rewrite this session's desktop: a request from any other uid is
-/// [`PinboardApplyRefusal::Unattested`] and reads nothing. A frame that
-/// will not decode, or a document the registry's strict reading refuses, is
-/// likewise a typed refusal.
+/// rewrite this session's desktop or its user's sounds: a request from any
+/// other uid is [`PinboardRefusal::Unattested`] and reads nothing. A frame
+/// that will not decode, or a document the registry's strict reading refuses,
+/// is likewise a typed refusal.
 ///
 /// The request is **merged** over the settings currently in effect rather
 /// than replacing them, because the desktop has more than one surface
@@ -236,22 +239,65 @@ pub fn publish_pinboard(
 ///
 /// # Errors
 ///
-/// The [`PinboardApplyRefusal`] naming why the request was refused. Nothing
-/// is half-applied: `in_effect` is what the desktop keeps on a refusal.
-pub fn serve_pinboard_apply(
+/// The [`PinboardRefusal`] naming why the request was refused. Nothing is
+/// half-applied: `in_effect` is what the desktop keeps on a refusal.
+pub fn serve_pinboard(
     session_uid: u32,
     caller_uid: u32,
     in_effect: &DesktopSettings,
     request: &[u8],
-) -> Result<PinboardApplied, PinboardApplyRefusal> {
+) -> Result<PinboardCall, PinboardRefusal> {
     if caller_uid != session_uid {
-        return Err(PinboardApplyRefusal::Unattested);
+        return Err(PinboardRefusal::Unattested);
     }
-    let request = PinboardRequest::from_bytes(request).map_err(PinboardApplyRefusal::Malformed)?;
-    let PinboardRequest::Apply { document } = request;
-    let settings =
-        merge_applied(in_effect, document.as_str()).map_err(PinboardApplyRefusal::Undecodable)?;
-    Ok(PinboardApplied { settings, document })
+    let sound = match PinboardRequest::from_bytes(request).map_err(PinboardRefusal::Malformed)? {
+        PinboardRequest::Apply { document } => {
+            let settings = merge_applied(in_effect, document.as_str())
+                .map_err(PinboardRefusal::Undecodable)?;
+            return Ok(PinboardCall::Apply(PinboardApplied { settings, document }));
+        }
+        PinboardRequest::SoundRead => SoundCall::Read,
+        PinboardRequest::SoundThemes { from } => SoundCall::Themes { from },
+        PinboardRequest::SoundApply { document } => SoundCall::Apply(document),
+        PinboardRequest::SoundPick { event } => SoundCall::Pick(event),
+        PinboardRequest::SoundUseTheme { event } => SoundCall::UseTheme(event),
+    };
+    Ok(PinboardCall::Sound(sound))
+}
+
+/// What an attested pinboard call asks for.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "an attested call is matched at once and never kept, so its size is one stack frame's"
+)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PinboardCall {
+    /// Adopt the desktop settings an apply makes.
+    Apply(PinboardApplied),
+    /// Read or change the user's sound choices.
+    Sound(SoundCall),
+}
+
+/// A request about the user's sound choices ([`crate::effects`]).
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a request is matched at once and never kept, so its size is one stack frame's"
+)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SoundCall {
+    /// Say what they are.
+    Read,
+    /// Name the themes from the `from`th on.
+    Themes {
+        /// How many the pages before named.
+        from: u16,
+    },
+    /// Lay a document over them.
+    Apply(PinboardDocument),
+    /// Have the user choose the file an event plays.
+    Pick(SoundEvent),
+    /// Have an event play its theme's sound again.
+    UseTheme(SoundEvent),
 }
 
 /// What an attested apply asked for: the settings it makes over the ones in
@@ -340,7 +386,8 @@ mod tests {
     };
 
     use super::{
-        load_pinboard, publish_pinboard, serve_pinboard_apply, AskedSettings, PinboardApplyRefusal,
+        load_pinboard, publish_pinboard, serve_pinboard, AskedSettings, PinboardCall,
+        PinboardRefusal, SoundCall,
     };
 
     /// A change made while an earlier one is still being written is made over
@@ -409,7 +456,26 @@ mod tests {
             .collect();
         let document = PinboardDocument::new(&settings.document_of(&applicable).render())
             .expect("renders a valid document");
-        PinboardRequest::Apply { document }.to_le_bytes().to_vec()
+        frame(&PinboardRequest::Apply { document })
+    }
+
+    fn frame(request: &PinboardRequest) -> Vec<u8> {
+        let mut out = [0u8; tairix_abi::pinboard_ipc::PINBOARD_MAX_REQUEST];
+        let len = request.encode(&mut out).expect("encodes");
+        out[..len].to_vec()
+    }
+
+    /// What an attested apply asked for, or why it was refused.
+    fn applied(
+        session: u32,
+        caller: u32,
+        in_effect: &DesktopSettings,
+        request: &[u8],
+    ) -> Result<DesktopSettings, PinboardRefusal> {
+        match serve_pinboard(session, caller, in_effect, request)? {
+            PinboardCall::Apply(applied) => Ok(applied.settings),
+            PinboardCall::Sound(call) => panic!("not an apply: {call:?}"),
+        }
     }
 
     #[test]
@@ -511,13 +577,12 @@ mod tests {
     fn an_apply_from_the_session_user_reads_its_document() {
         let frame = apply_frame(&edited());
         assert_eq!(
-            serve_pinboard_apply(
+            applied(
                 SESSION_UID,
                 SESSION_UID,
                 &DesktopSettings::default(),
                 &frame
-            )
-            .map(|applied| applied.settings),
+            ),
             Ok(edited())
         );
     }
@@ -526,35 +591,28 @@ mod tests {
     fn an_apply_from_another_user_is_refused_without_reading_it() {
         let frame = apply_frame(&edited());
         assert_eq!(
-            serve_pinboard_apply(
+            applied(
                 SESSION_UID,
                 SESSION_UID + 1,
                 &DesktopSettings::default(),
                 &frame
             ),
-            Err(PinboardApplyRefusal::Unattested)
+            Err(PinboardRefusal::Unattested)
         );
         // Even a frame that could never decode is refused on identity
         // first, so a foreign caller learns nothing about the grammar.
         assert_eq!(
-            serve_pinboard_apply(SESSION_UID, 0, &DesktopSettings::default(), &[]),
-            Err(PinboardApplyRefusal::Unattested)
+            applied(SESSION_UID, 0, &DesktopSettings::default(), &[]),
+            Err(PinboardRefusal::Unattested)
         );
-        assert_eq!(
-            PinboardApplyRefusal::Unattested.errno(),
-            Errno::PermissionDenied
-        );
+        assert_eq!(PinboardRefusal::Unattested.errno(), Errno::PermissionDenied);
     }
 
     #[test]
     fn a_malformed_frame_from_the_session_user_is_refused() {
-        let refusal =
-            serve_pinboard_apply(SESSION_UID, SESSION_UID, &DesktopSettings::default(), &[])
-                .expect_err("a truncated frame cannot decode");
-        assert_eq!(
-            refusal,
-            PinboardApplyRefusal::Malformed(Errno::BufferTooSmall)
-        );
+        let refusal = applied(SESSION_UID, SESSION_UID, &DesktopSettings::default(), &[])
+            .expect_err("a truncated frame cannot decode");
+        assert_eq!(refusal, PinboardRefusal::Malformed(Errno::BufferTooSmall));
         assert_eq!(refusal.errno(), Errno::BufferTooSmall);
     }
 
@@ -564,8 +622,8 @@ mod tests {
         // build cannot show is refused, where the *store's* same value would
         // only cost that one field its default.
         let document = PinboardDocument::new("sort = sideways\n").expect("well-formed transport");
-        let frame = PinboardRequest::Apply { document }.to_le_bytes();
-        let refusal = serve_pinboard_apply(
+        let frame = frame(&PinboardRequest::Apply { document });
+        let refusal = applied(
             SESSION_UID,
             SESSION_UID,
             &DesktopSettings::default(),
@@ -574,7 +632,7 @@ mod tests {
         .expect_err("an unusable document is refused");
         assert_eq!(
             refusal,
-            PinboardApplyRefusal::Undecodable(DocumentRefusal::InvalidValue(SettingsKey::Sort))
+            PinboardRefusal::Undecodable(DocumentRefusal::InvalidValue(SettingsKey::Sort))
         );
         assert_eq!(refusal.errno(), Errno::OutOfRange);
         assert!(refusal.reason().contains("sort"));
@@ -605,9 +663,9 @@ mod tests {
     #[test]
     fn every_refusal_states_a_reason() {
         for refusal in [
-            PinboardApplyRefusal::Unattested,
-            PinboardApplyRefusal::Malformed(Errno::BadMagic),
-            PinboardApplyRefusal::Undecodable(DocumentRefusal::Unparsed(1)),
+            PinboardRefusal::Unattested,
+            PinboardRefusal::Malformed(Errno::BadMagic),
+            PinboardRefusal::Undecodable(DocumentRefusal::Unparsed(1)),
         ] {
             assert!(!refusal.reason().is_empty());
         }
@@ -630,15 +688,12 @@ mod tests {
         let document = asked
             .document_of(&tairix_wallpaper::SettingsKey::PINBOARD)
             .render();
-        let frame = PinboardRequest::Apply {
+        let frame = frame(&PinboardRequest::Apply {
             document: PinboardDocument::new(&document).expect("a bounded document"),
-        }
-        .to_le_bytes()
-        .to_vec();
+        });
 
-        let merged = serve_pinboard_apply(SESSION_UID, SESSION_UID, &in_effect, &frame)
-            .expect("the backdrop keys are valid")
-            .settings;
+        let merged = applied(SESSION_UID, SESSION_UID, &in_effect, &frame)
+            .expect("the backdrop keys are valid");
         assert_eq!(merged.sort, IconSort::Size);
         assert_eq!(merged.appearance, in_effect.appearance);
         assert_eq!(merged.density, in_effect.density);
@@ -649,17 +704,15 @@ mod tests {
     #[test]
     fn an_apply_naming_the_sound_controls_is_refused_whole() {
         let in_effect = DesktopSettings::default();
-        let frame = PinboardRequest::Apply {
+        let frame = frame(&PinboardRequest::Apply {
             document: PinboardDocument::new("sort = size\naudio.muted = 0000000000000051.0\n")
                 .expect("a bounded document"),
-        }
-        .to_le_bytes()
-        .to_vec();
+        });
         assert_eq!(
-            serve_pinboard_apply(SESSION_UID, SESSION_UID, &in_effect, &frame),
-            Err(PinboardApplyRefusal::Undecodable(
-                DocumentRefusal::OutsideGroup(tairix_wallpaper::SettingsKey::AudioMuted)
-            ))
+            applied(SESSION_UID, SESSION_UID, &in_effect, &frame),
+            Err(PinboardRefusal::Undecodable(DocumentRefusal::OutsideGroup(
+                tairix_wallpaper::SettingsKey::AudioMuted
+            )))
         );
     }
 
@@ -671,11 +724,53 @@ mod tests {
         };
         let frame = apply_frame(&edited());
         assert_eq!(
-            serve_pinboard_apply(SESSION_UID, SESSION_UID + 1, &in_effect, &frame),
-            Err(PinboardApplyRefusal::Unattested)
+            applied(SESSION_UID, SESSION_UID + 1, &in_effect, &frame),
+            Err(PinboardRefusal::Unattested)
         );
         // The identity check precedes the parse, so the settings in effect
         // are untouched whatever the document said.
         assert_eq!(in_effect.appearance, tairix_abi::desktop::Appearance::Dark);
+    }
+
+    /// A sound request is attested exactly as an apply is, and handed on as
+    /// what it asks: the policy reads no document of the user's sounds.
+    #[test]
+    fn a_sound_request_is_attested_and_classified() {
+        let in_effect = DesktopSettings::default();
+        let document =
+            PinboardDocument::new("sound.bell.enabled = false\n").expect("a bounded document");
+        for (request, call) in alloc::vec![
+            (PinboardRequest::SoundRead, SoundCall::Read),
+            (
+                PinboardRequest::SoundThemes { from: 8 },
+                SoundCall::Themes { from: 8 },
+            ),
+            (
+                PinboardRequest::SoundApply { document },
+                SoundCall::Apply(document),
+            ),
+            (
+                PinboardRequest::SoundPick {
+                    event: tairix_abi::sound_cue::SoundEvent::Error,
+                },
+                SoundCall::Pick(tairix_abi::sound_cue::SoundEvent::Error),
+            ),
+            (
+                PinboardRequest::SoundUseTheme {
+                    event: tairix_abi::sound_cue::SoundEvent::Bell,
+                },
+                SoundCall::UseTheme(tairix_abi::sound_cue::SoundEvent::Bell),
+            ),
+        ] {
+            let frame = frame(&request);
+            assert_eq!(
+                serve_pinboard(SESSION_UID, SESSION_UID, &in_effect, &frame),
+                Ok(PinboardCall::Sound(call))
+            );
+            assert_eq!(
+                serve_pinboard(SESSION_UID, SESSION_UID + 1, &in_effect, &frame),
+                Err(PinboardRefusal::Unattested)
+            );
+        }
     }
 }

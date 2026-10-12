@@ -134,13 +134,20 @@ Stability tier: **experimental**.
   worker asks for the pages its decoder reads (`DecodeEvent::Need`, page
   aligned, at most `MAX_NEED_BYTES`), the owner reads and supplies them, and
   the worker answers the request it was serving. One request is outstanding
-  at a time: open, decode (at most `MAX_BLOCK_FRAMES`) or seek, then any
-  number of need and supply exchanges, then its one answer. The worker holds
+  at a time: open, decode (at most `MAX_BLOCK_FRAMES`), seek or next link,
+  then any number of need and supply exchanges, then its one answer. A chained
+  file is read a link at a time: an open names the link it opens and its
+  answer states where that link begins, `next_link` asks for the one after
+  the link that ended (`DecodeEvent::Opened` with its stream, or
+  `DecodeEvent::LastLink`), and the client believes a link only where its
+  place follows from what was asked — the link named, or the next of the one
+  held, further into the file. The worker holds
   up to `CACHE_PAGES` pages in a least-recently-used cache keyed by a seed the
-  owner draws, so a file cannot choose which of its offsets collide. The
+  owner draws (`rt::draw_seed`, the one draw every owner takes it from), so a
+  file cannot choose which of its offsets collide. The
   bound is the decoders' own statement of what one decode reads at the
-  limits (`tairix_sound::max_working_set`, a FLAC stream's largest admissible
-  frame at most) with the read-ahead behind it, and pages are held only as a
+  limits (`tairix_sound::max_working_set`: an Opus seek's pre-roll in
+  packets of the mapping's largest, at most) with the read-ahead behind it, and pages are held only as a
   file needs them; a need asks
   for the read that missed plus the pages a sequential decode reads next, so
   a stream costs one exchange a window. A decoder call that misses changes
@@ -157,10 +164,10 @@ Stability tier: **experimental**.
   the stream states, stream facts of a real format, encoding, rate,
   channel map and sample format, metadata within `LIMITS` — and a reply that
   does not is `AudioDecodeError::Unbelievable`, for the owner to condemn the
-  worker. After a replacement, `restart` opens the file again in it, refuses
-  a stream that now reads as another, and returns the replacement to the
-  stream's position by seeking or, for a stream that cannot seek, by decoding
-  up to it; a stream that fails its worker at the same position twice is
+  worker. After a replacement, `restart` opens the file again in it at the
+  link the stream was in, refuses a stream that now reads as another, and
+  returns the replacement to the stream's position by seeking or, for a stream
+  that cannot seek, by decoding up to it; a stream that fails its worker at the same position twice is
   given up (`CannotResume`). `session_bounds` is the session an owner admits
   it under: one largest frame each way.
 - **`rt`** (feature `program`, freestanding targets only) — the

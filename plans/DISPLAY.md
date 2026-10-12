@@ -31,6 +31,7 @@ seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 | **D9** | The display's power follows its configuration: `SetPower`, the kernel's display-lease notice, one service loop for every display driver, and the Pi's firmware power switch | done |
 | **D10** | A user-settable UI scale | done |
 | **D11** | A user-settable desktop resolution, resampled onto the unchanged output | done |
+| **D12** | The display follows its output: no output, an output arriving and leaving, a new mode announced, and every client converging onto it | done |
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -228,7 +229,7 @@ prompts. Plan files state current state, not history (`AGENTS.md` §13).
 
 ### Stage D10 — a user-settable UI scale
 
-**Done.** The compositor owns the output's `Scale`, the session reports it in
+The compositor owns the output's `Scale`, the session reports it in
 the desktop record, and every application and session-drawn surface resolves
 its lengths through the reported value. The user chooses it: it is the `scale`
 key of the user's desktop settings (`lib/wallpaper`), set from Settings'
@@ -305,9 +306,85 @@ Pi's firmware framebuffer and HVS included — with no driver change.
 Settings composes the choice on its Displays pane
 (`plans/NEW-DESKTOP-SETTINGS.md`).
 
+### Stage D12 — the display follows its output
+
+A display drives whatever its output is now: nothing while no sink
+is connected, and otherwise the mode its driver chose for the sink it has —
+the sink's preferred mode where the pipe carries it (`plans/SOUND.md` §Native
+HDMI on the Pi 4). The output is the driver's to know and to choose, and it
+moves when a sink arrives, leaves, or offers another mode. D11 lets the user
+draw the desktop smaller than the output; D12 lets the output itself move
+under a running session.
+
+- **The output.** `Display::output` answers the mode the output runs, or
+  `None` while there is none. It moves only across `Display::service_events`,
+  which the service loop calls when one of the event sources the driver's
+  `Run` handed `serve` fired — a `tairix_abi::driver::DeviceWake`, the
+  interrupt line, port or posted call's reply an audio device channel parks on
+  too. A display whose output never moves names no source and keeps the
+  default, which does nothing. The driver quiets every source that fired
+  whatever it answers, so a failing one cannot spin the loop.
+- **The announcement.** `NoticeTopic::DisplayOutput` is a counted topic: the
+  display service's count of output moves. The service announces it when it
+  starts, resuming one past the count on the board so a client of an earlier
+  instance converges onto this one, and after every `service_events` that
+  moved the output — before it serves another request, so a refusal that
+  follows a move always has its edge pending. Only the process bound to
+  `DISPLAY_ENDPOINT` may publish it. Reading it is ungated: it says only that
+  something moved, and what moved stays behind the lease-gated `Query`.
+- **The protocol.** `Query` answers the output: a mode, or none. A
+  `Configure` whose geometry is not the output's mode — none included — is
+  refused `Stale`, and so is a `Present` of frames whose mode is not the
+  output's. Neither drops the configuration: it still ends with its lease and
+  only then (D9), so its frames come back into use the moment the output runs
+  their mode again, and the next `Configure` replaces them and lights the
+  display. `QueryStats` reports the mode scanned out, or none.
+- **Frames, one way.** A client establishes frames through
+  `tairix_display::establish_frames`: the shared region, its grant, the
+  configure, and the ring, which owns the region and unmaps it when dropped.
+- **The session follows.** It parks on the topic. A present refused `Stale`
+  (frames no longer the output's) or `NotFound` (a restarted service holding
+  none) suspends presenting until the next announcement, which both a move
+  and a restart send, so a service that refused frames without announcing can
+  make the session wait but never spin. On the announcement it converges once:
+  - **No output:** it gives its frames back and composes nothing. A frame no
+    one can see is work for nothing. The seat, the windows and the desktop
+    record stay as they were.
+  - **The mode its frames hold:** the whole output is owed to the display
+    again (`Compositor::owe_output`); nothing is recomposed.
+  - **Any other mode:** it establishes frames for that mode and re-lays
+    everything the screen's size shapes, through the one re-lay a resolution
+    change and a resume use too: the bar, the backdrop and its icons, the
+    windows, the prompts placed on it again, any menu or tip taken down, the
+    pointer held on it, the caches a screenful bounds re-held to it
+    (`ReclaimCache::rebudget`), the desktop record published. An open
+    resolution trial is declined, because it asked about an output that is
+    gone, and a screensaver is taken down and started again over the new
+    screen.
+
+  The lock redraws itself over the screen now drawn before every composite,
+  and while it cannot, the session presents nothing. A refusal of its own
+  reconfigure leaves the session dormant with the reason stated, and the next
+  announcement tries again. A session that comes up, or resumes, while no
+  output is connected, or onto an output that moves before frames reach it,
+  comes up dormant and follows the next announcement.
+- **The greeter follows** the same way at its scale. With no output it
+  presents nothing. On every announcement naming an output it establishes
+  frames afresh — the output may be a new sink, or a restarted service holding
+  none of the old ones — and a new mode rebuilds its screen in place, keeping
+  the account chosen and anything typed.
+- **Proof.** Host tests at every layer: the codecs and the fuzzed round trip;
+  the engine's refusals and the configuration they leave standing; the
+  topic's authority and generation; the session's follow decision, the
+  resume that comes back dormant, the lock covering a grown screen, the
+  re-budgeted caches; and the greeter's in-place rebuild. No display the tree
+  drives in QEMU can move its output. virtio-gpu, which can, is
+  `plans/FIX-DISPLAY-ACCELERATION.md`'s; the HDMI engine's metal run
+  (`plans/SOUND.md` SND19q) is the end-to-end acceptance.
+
 ### Stage D1 — `lib/seat`: the arch-neutral seat model
 
-**Done.** The dependency-free `no_std` crate `lib/seat` (`tairix-seat`,
+The dependency-free `no_std` crate `lib/seat` (`tairix-seat`,
 registered in `AGENTS.md` §3 and the workspace) is the one seat state
 machine:
 
@@ -335,7 +412,7 @@ directions, generation monotonicity, and foreground retargeting.
 
 ### Stage D2 — fold `InputFocus` into a per-seat sink; owner-checked `display_*`
 
-**Done.** The kernel seat registry (`kernel/core/src/seat.rs`,
+The kernel seat registry (`kernel/core/src/seat.rs`,
 `SeatRegistry`) replaced the owner-less `InputFocus` arbiter: it hosts
 `tairix_seat::SeatState` under its own lock next to the text sink and the
 bounded, zeroing desktop keyboard channel — one routing definition, driven
@@ -354,7 +431,7 @@ seat returns input to the text foreground.
 
 ### Stage D3 — `CAP_SEAT_ADMIN`, `seat_switch` / `seat_revoke`, and `seatmgr`
 
-**Done.** The single new capability `CAP_SEAT_ADMIN` (id 33) landed with
+The single new capability `CAP_SEAT_ADMIN` (id 33) landed with
 its two enforcement points and its sole holder in one change (§5.2 rule 2):
 
 - `seat_switch` (`abi-v1` 70) retargets an unowned seat's foreground text
@@ -391,7 +468,7 @@ kernel/sysinfod pages state the enforced behaviour.
 
 ### Stage D4 — present right derived from the live lease
 
-**Done.** The present right is derived from the live seat lease, not from
+The present right is derived from the live seat lease, not from
 the framebuffer mapping:
 
 - `display_acquire` returns the minted lease's generation (`>= 1`), so the
@@ -405,9 +482,9 @@ the framebuffer mapping:
   call.
 - The gate reaches a driver as the host seam
   `DriverHost::seat_gate() -> Option<&dyn SeatGate>` (default `None`; a
-  seatless headless/bring-up host presents ungated, §17.3). All three
-  display drivers (`framebuffer`, `vesa`, `rpi_hvs` — software `present`
-  and hardware `present_layers` alike) consult it *first*, before any
+  seatless headless/bring-up host presents ungated, §17.3). Every display
+  driver (`framebuffer`, `vesa`, `gpu_virtio`, `bcm2711_hvs`) consults it
+  *first*, before any
   validation or surface access; a revoked client is refused with the new
   `DriverError::SeatRevoked` (14, → `Errno::SeatRevoked`) while its
   mapping persists. Arch-neutral; no board names in the gate.
@@ -422,7 +499,7 @@ READMEs, syscall table row 23 (`u64` lease generation).
 
 ### Stage D5 — per-console controlling owner + foreground handoff
 
-**Done.** Each terminal — a text console or a pty — carries a kernel-tracked
+Each terminal — a text console or a pty — carries a kernel-tracked
 controlling (foreground) owner, enforced fail-closed with no `SIGTTIN`-style
 signal race:
 
@@ -470,7 +547,7 @@ them. Docs: `docs/src/desktop/seat.md` (D5 section),
 
 ### Stage D6 — multi-seat / hotplug
 
-**Done.** The kernel seat registry hosts every seat on the machine, each
+The kernel seat registry hosts every seat on the machine, each
 an independent `tairix_seat::SeatState` with its own lock, text sink, and
 zeroing keyboard channel:
 
@@ -910,12 +987,19 @@ What it guarantees:
 - **One service loop.** `lib/display::service` (feature `service`) is the
   bring-up, park and serve loop both display services run, so the lease
   handling cannot differ between drivers; a driver's `main` is its surface.
-- **The Pi's power switch.** `drivers/display/rpi_fb` binds the boot display
-  node through the firmware framebuffer's own key, `brcm,bcm2708-fb`, which
-  the aarch64 port publishes ahead of `simple-framebuffer`, at priority 20
-  over the generic service's 10; it blanks through the firmware property
-  channel (`lib/vcmailbox`'s blank request) over `CAP_MAILBOX`. Its metal run
-  is `plans/PI.md`'s.
+- **The Pi's power switch.** On a Pi 4 the boot console belongs to the
+  display engine's node (`BootConsole`), so the native engine
+  (`drivers/display/bcm2711_hvs`) serves the seat's display and powers its
+  outputs down itself (`plans/SOUND.md` §Native HDMI on the Pi 4); no
+  firmware blank is involved.
+- **The console leaves the firmware's memory first.** A display engine that
+  takes the screen over from the firmware has the kernel move its
+  framebuffer console onto a block the kernel owns below the engine's DMA
+  reach (`console_relocate`) before it tells the firmware the display is the
+  ARM's, because the firmware may then take its own framebuffer back. The
+  console repaints there from its retained screen in whatever disposition it
+  held; the block is the console's for the kernel's life, so a restarted
+  engine is answered the same one.
 
 ## 6. Tests, docs, and gate (binding)
 

@@ -43,8 +43,11 @@
 //! the resolution and translation logic is exercised on the host without a
 //! kernel. Production driver processes use [`RtGrantSyscalls`], which forwards
 //! to `tairix_rt`'s wrappers — the one syscall trap.
+//!
+//! A link supplier's own tests answer it through `testkit`'s fake kernel,
+//! exposed by the `test-support` feature.
 
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(any(test, feature = "test-support")), no_std)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
@@ -53,8 +56,16 @@ mod supplier;
 mod syscalls;
 
 pub use host::{GrantedResource, RtDriverHost, MAX_GRANTS};
-pub use supplier::{RtSupplier, SupplierHost};
+pub use supplier::{refusal, Recorder, RtSupplier, Supplier, SupplierHost};
 pub use syscalls::{GrantSyscalls, RtGrantSyscalls};
 
+#[cfg(target_os = "none")]
+pub mod serve;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod testkit;
+
+#[cfg(test)]
+mod testkit_tests;
 #[cfg(test)]
 mod tests;

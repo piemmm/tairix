@@ -35,6 +35,14 @@ const MODE: DisplayMode = DisplayMode {
 /// Bytes one MODE frame occupies.
 const FRAME_LEN: usize = 48;
 
+/// A narrower mode the output moves to, whose frames fit the rig's region.
+const NARROW: DisplayMode = DisplayMode {
+    width_px: 2,
+    height_px: 3,
+    stride_bytes: 8,
+    format: DisplayFormat::Bgra8888,
+};
+
 const SEAT: u64 = 0;
 const TICKET: u64 = 7;
 
@@ -183,6 +191,10 @@ struct RecordingDisplay {
     switches: Vec<DisplayPower>,
     /// When set, a power switch fails with it.
     power_fails: Option<DriverError>,
+    /// What the output runs; a test moves it as a hotplug would.
+    output: Option<DisplayMode>,
+    /// Where the screen went each time a presenter's lease ended.
+    released: Vec<ReleaseSurface>,
 }
 
 impl RecordingDisplay {
@@ -190,38 +202,51 @@ impl RecordingDisplay {
         Self {
             scanout: vec![0u8; FRAME_LEN],
             has_power: true,
+            output: Some(MODE),
             ..Self::default()
         }
+    }
+
+    /// Bytes one frame of the output's mode occupies.
+    fn frame_len(&self) -> Result<usize, DriverError> {
+        let mode = self.output.ok_or(DriverError::Stale)?;
+        Ok(mode.stride_bytes as usize * mode.height_px as usize)
     }
 }
 
 impl Display for RecordingDisplay {
-    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-        Ok(MODE)
+    fn output(&self) -> Option<DisplayMode> {
+        self.output
     }
 
     fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
         if let Some(err) = self.fail_with {
             return Err(err);
         }
-        if frame.len() < FRAME_LEN {
+        let len = self.frame_len()?;
+        if frame.len() < len {
             return Err(DriverError::BufferTooSmall);
         }
-        self.scanout.copy_from_slice(&frame[..FRAME_LEN]);
+        self.scanout[..len].copy_from_slice(&frame[..len]);
         self.presents += 1;
         self.last_damage.clear();
         Ok(())
+    }
+
+    fn released(&mut self, surface: ReleaseSurface) {
+        self.released.push(surface);
     }
 
     fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
         if let Some(err) = self.fail_with {
             return Err(err);
         }
-        DamageRect::validate_list(damage, &MODE)?;
-        if frame.len() < FRAME_LEN {
+        let mode = self.output.ok_or(DriverError::Stale)?;
+        DamageRect::validate_list(damage, &mode)?;
+        if frame.len() < self.frame_len()? {
             return Err(DriverError::BufferTooSmall);
         }
-        let stride = MODE.stride_bytes as usize;
+        let stride = mode.stride_bytes as usize;
         for rect in damage {
             let x0 = rect.x as usize * 4;
             let span = rect.width_px as usize * 4;
@@ -300,15 +325,24 @@ impl Rig {
     }
 
     fn configure(&mut self, frames: u32) -> Result<(), Errno> {
+        self.configure_for(frames, MODE)
+    }
+
+    fn configure_for(&mut self, frames: u32, mode: DisplayMode) -> Result<(), Errno> {
         self.status(&DisplayRequest::Configure {
             seat_id: SEAT,
             shm_handle: GRANT,
             frame_count: frames,
-            width_px: MODE.width_px,
-            height_px: MODE.height_px,
-            stride_bytes: MODE.stride_bytes,
-            format: MODE.format,
+            width_px: mode.width_px,
+            height_px: mode.height_px,
+            stride_bytes: mode.stride_bytes,
+            format: mode.format,
         })
+    }
+
+    fn query(&mut self) -> Result<Option<DisplayMode>, Errno> {
+        let reply = self.serve(&DisplayRequest::Query { seat_id: SEAT });
+        tairix_abi::display_ipc::decode_mode_reply(&reply)
     }
 
     fn present(&mut self, frame_index: u32, damage: &[DamageRect]) -> Result<(), Errno> {
@@ -341,8 +375,7 @@ fn full() -> DamageRect {
 #[test]
 fn query_returns_the_mode_to_the_live_owner_only() {
     let mut rig = Rig::new(2, 1);
-    let reply = rig.serve(&DisplayRequest::Query { seat_id: SEAT });
-    assert_eq!(tairix_abi::display_ipc::decode_mode_reply(&reply), Ok(MODE));
+    assert_eq!(rig.query(), Ok(Some(MODE)));
     assert_eq!(rig.seat.asked, vec![(TICKET, SEAT)]);
 
     // A non-owner learns nothing — not even the mode.
@@ -363,7 +396,7 @@ fn a_device_read_is_gated_on_hardware_authority_not_on_a_lease() {
     rig.seat = MockSeat::refusing(Errno::SeatNotOwner).holding(Ok(true));
     let reply = rig.serve(&DisplayRequest::QueryStats);
     let stats = decode_stats_reply(&reply).expect("a holder reads the device");
-    assert_eq!(stats.mode, MODE);
+    assert_eq!(stats.mode, Some(MODE));
     assert_eq!(stats.device, DisplayDeviceReport::SOFTWARE);
     assert_eq!(stats.seat_id, 0, "nothing is configured yet");
     // The lease oracle was not consulted at all: a device read acts for no
@@ -463,8 +496,8 @@ fn an_accelerated_device_publishes_its_own_capabilities() {
     // the engine passes its report through rather than inventing one.
     struct AcceleratedDisplayStub;
     impl Display for AcceleratedDisplayStub {
-        fn mode_info(&self) -> Result<DisplayMode, DriverError> {
-            Ok(MODE)
+        fn output(&self) -> Option<DisplayMode> {
+            Some(MODE)
         }
         fn present(&mut self, _frame: &[u8]) -> Result<(), DriverError> {
             Ok(())
@@ -560,11 +593,11 @@ fn present_with_partial_damage_blits_only_the_region() {
 }
 
 #[test]
-fn configure_refuses_a_geometry_that_is_not_the_active_mode() {
+fn configure_refuses_a_geometry_that_is_not_the_outputs_mode() {
     let mut rig = Rig::new(2, 1);
     for (w, h, stride, format) in [
         (
-            MODE.width_px + 1,
+            MODE.width_px - 1,
             MODE.height_px,
             MODE.stride_bytes,
             MODE.format,
@@ -597,9 +630,53 @@ fn configure_refuses_a_geometry_that_is_not_the_active_mode() {
             stride_bytes: stride,
             format,
         });
-        assert_eq!(refused, Err(Errno::LengthOutOfRange));
+        assert_eq!(refused, Err(Errno::Stale));
         assert!(!rig.server.is_configured());
     }
+}
+
+#[test]
+fn with_no_output_a_query_answers_none_and_a_configure_is_stale() {
+    let mut rig = Rig::new(2, 1);
+    rig.display.output = None;
+    assert_eq!(rig.query(), Ok(None));
+    assert_eq!(rig.configure(2), Err(Errno::Stale));
+    assert!(!rig.server.is_configured());
+    assert_eq!(*rig.maps.borrow(), 0, "nothing is mapped for no output");
+    rig.seat = MockSeat::refusing(Errno::SeatNotOwner).holding(Ok(true));
+    let stats = decode_stats_reply(&rig.serve(&DisplayRequest::QueryStats)).expect("read");
+    assert_eq!(stats.mode, None);
+}
+
+/// The output moving under configured frames makes them stale without
+/// dropping them: they scan out again the moment the output runs their mode,
+/// and nothing reaches the device while it runs another or none.
+#[test]
+fn frames_go_stale_while_the_output_runs_another_mode_and_serve_again_after() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.present(0, &[full()]), Ok(()));
+    for moved in [Some(NARROW), None] {
+        rig.display.output = moved;
+        assert_eq!(rig.present(1, &[full()]), Err(Errno::Stale));
+        assert!(rig.server.is_configured(), "the frames stand");
+    }
+    assert_eq!(rig.display.presents + rig.display.region_presents, 1);
+    rig.display.output = Some(MODE);
+    assert_eq!(rig.present(1, &[full()]), Ok(()));
+    assert_eq!(*rig.maps.borrow(), 1, "the same frames, never re-mapped");
+}
+
+#[test]
+fn a_configure_for_the_mode_the_output_moved_to_replaces_the_stale_frames() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    rig.display.output = Some(NARROW);
+    assert_eq!(rig.query(), Ok(Some(NARROW)));
+    assert_eq!(rig.configure(2), Err(Errno::Stale), "the old geometry");
+    assert_eq!(rig.configure_for(2, NARROW), Ok(()));
+    assert_eq!(*rig.maps.borrow(), 2);
+    assert_eq!(rig.present(1, &[DamageRect::full(&NARROW)]), Ok(()));
 }
 
 #[test]
@@ -798,6 +875,55 @@ fn an_ended_lease_releases_its_configuration_and_lights_the_display() {
     assert_eq!(rig.present(0, &[full()]), Err(Errno::NotFound));
 }
 
+/// A display scanning out frames of its own must not go on showing a
+/// departed presenter's: it is told where the screen went.
+#[test]
+fn the_display_learns_where_the_screen_went_when_its_presenter_leaves() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    rig.lease_moved(DisplayLease::held(1, ProcId::KERNEL));
+    assert!(
+        rig.display.released.is_empty(),
+        "the live lease is left alone"
+    );
+    rig.lease_moved(DisplayLease::ended(1, ReleaseSurface::Text));
+    assert_eq!(rig.display.released, [ReleaseSurface::Text]);
+
+    rig.seat = MockSeat::live(2);
+    assert_eq!(rig.configure(2), Ok(()));
+    rig.lease_moved(DisplayLease::ended(2, ReleaseSurface::Handover));
+    assert_eq!(
+        rig.display.released[1..],
+        [ReleaseSurface::Handover],
+        "nothing shows until the next presenter's first frame"
+    );
+
+    rig.seat = MockSeat::live(3);
+    assert_eq!(rig.configure(2), Ok(()));
+    rig.lease_moved(DisplayLease::held(4, ProcId::KERNEL));
+    assert_eq!(
+        rig.display.released[2..],
+        [ReleaseSurface::Handover],
+        "a lease held anew is a newcomer taking over"
+    );
+}
+
+/// A newer lease can configure before its edge reaches the service; the
+/// frames left by the old one go even so.
+#[test]
+fn frames_configured_under_a_new_lease_hand_the_screen_over() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.configure(2), Ok(()));
+    assert!(
+        rig.display.released.is_empty(),
+        "the same presenter reconfiguring keeps its screen"
+    );
+    rig.seat = MockSeat::live(2);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.display.released, [ReleaseSurface::Handover]);
+}
+
 #[test]
 fn a_new_configuration_starts_with_the_display_on() {
     let mut rig = Rig::new(2, 1);
@@ -853,6 +979,9 @@ fn error_conversions_preserve_the_seat_and_fault_vocabulary() {
         driver_error_from_errno(Errno::SeatNotOwner),
         DriverError::PermissionDenied
     );
+    // A view of the output that has moved is the client's to correct, not a
+    // fault of the device.
+    assert_eq!(driver_error_from_errno(Errno::Stale), DriverError::Stale);
     // A condition with no driver equivalent fails closed as a fault.
     assert_eq!(
         driver_error_from_errno(Errno::EntropyNotReady),
@@ -893,7 +1022,10 @@ fn client_session(frames: u32) -> (Rc<RefCell<Rig>>, DisplayClient<Loopback>, Di
         },
         SEAT,
     );
-    let mode = client.query().expect("owner queries the mode");
+    let mode = client
+        .query()
+        .expect("owner queries the output")
+        .expect("an output is connected");
     client
         .configure(GRANT, frames, &mode)
         .expect("configure under the live lease");
@@ -1155,6 +1287,39 @@ fn a_remote_display_switches_the_seats_display() {
     assert_eq!(
         remote.set_power(DisplayPower::On),
         Err(DriverError::NotImplemented)
+    );
+}
+
+/// A ring configures the service over its own frames, as it lays them out:
+/// the frames it owns are the ones the service presents.
+#[test]
+fn a_ring_configures_the_service_over_the_frames_it_owns() {
+    let rig = Rc::new(RefCell::new(Rig::new(2, 1)));
+    let client = DisplayClient::new(
+        Loopback {
+            rig: Rc::clone(&rig),
+        },
+        SEAT,
+    );
+    let mut remote =
+        RemoteDisplay::new(client, MODE, vec![0u8; FRAME_LEN * 2], 2).expect("valid ring");
+    assert!(!rig.borrow().server.is_configured());
+    assert_eq!(remote.configure(GRANT), Ok(()));
+    assert!(rig.borrow().server.is_configured());
+    rig.borrow_mut().display.output = Some(NARROW);
+    assert_eq!(remote.configure(GRANT), Err(Errno::Stale));
+}
+
+#[test]
+fn a_remote_display_reports_an_output_that_moved_as_stale() {
+    let (rig, client, mode) = client_session(2);
+    let mut view = vec![0u8; FRAME_LEN * 2];
+    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
+    rig.borrow_mut().display.output = None;
+    assert_eq!(
+        remote.present(&[0x33; FRAME_LEN]),
+        Err(DriverError::Stale),
+        "the compositor's present says to read the output again"
     );
 }
 

@@ -29,6 +29,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use tairix_abi::driver::display::DisplayMode;
 use tairix_abi::{Errno, InputMode, TerminalSize};
 use tairix_fbcon::Surface;
 use tairix_inline::SecretRing;
@@ -148,6 +149,24 @@ pub trait ConsoleWrite: Sync {
     /// [`Self::set_surface`]'s.
     fn reclaim_surface(&self) {}
 
+    /// The framebuffer surface this console paints, when it paints one.
+    ///
+    /// The default is [`None`]: a byte-stream console paints no surface.
+    fn surface(&self) -> Option<ConsoleSurface> {
+        None
+    }
+
+    /// Move this console onto the zeroed, kernel-owned block of `len` bytes
+    /// at physical `phys` and repaint it there in the disposition it holds,
+    /// so a display engine taking the screen over from the firmware leaves
+    /// nothing of the console in memory the firmware may take back.
+    ///
+    /// The default refuses: a console painting no surface has none to move.
+    fn relocate(&self, phys: u64, len: u64) -> Relocation {
+        let _ = (phys, len);
+        Relocation::Refused
+    }
+
     /// Discard everything a finished session left on this console's display,
     /// so none of it can reach whoever uses the terminal next.
     ///
@@ -171,6 +190,38 @@ pub trait ConsoleWrite: Sync {
             }
         }
     }
+}
+
+/// A framebuffer console's surface: where it lies, its shape, and whose
+/// memory it is.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct ConsoleSurface {
+    /// CPU-physical base.
+    pub phys: u64,
+    /// Its shape.
+    pub mode: DisplayMode,
+    /// The kernel owns the memory, rather than the firmware that lit the
+    /// screen.
+    pub kernel_owned: bool,
+}
+
+impl ConsoleSurface {
+    /// The bytes the surface spans, or `None` where that overflows.
+    #[must_use]
+    pub fn len_bytes(&self) -> Option<u64> {
+        u64::from(self.mode.stride_bytes).checked_mul(u64::from(self.mode.height_px))
+    }
+}
+
+/// What [`ConsoleWrite::relocate`] did with the block it was offered.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum Relocation {
+    /// The console paints the block now, and keeps it for the kernel's life.
+    Moved(ConsoleSurface),
+    /// The console already paints kernel memory, so the block is unused.
+    Owned(ConsoleSurface),
+    /// No surface to move, or a block that cannot hold it.
+    Refused,
 }
 
 /// The console sink installed before any real device exists.
@@ -239,6 +290,14 @@ pub trait ConsoleRead {
     /// default source ([`NullConsoleRead`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno>;
+
+    /// Whether a read would return at once rather than park: input is
+    /// pending, or the device refuses reads.
+    ///
+    /// A peek that takes nothing, safe from any context, so a wait-set can
+    /// watch the console for a reader that drains it later. Required, so no
+    /// backing can be silently deaf to a watcher.
+    fn input_ready(&self) -> bool;
 
     /// Read available console input into `buf`, waiting at most
     /// `timeout_ns` nanoseconds for input to arrive.
@@ -364,6 +423,10 @@ impl ConsoleRead for NullConsoleRead {
     fn read(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn input_ready(&self) -> bool {
+        true
+    }
 }
 
 /// The shared [`NullConsoleRead`] instance a read-less console entry
@@ -481,6 +544,11 @@ pub const CONSOLE_INPUT_QUEUE_CAPACITY: usize = 256;
 /// and again on drop, so nothing survives a change of holder.
 pub struct ConsoleInputQueue {
     ring: SpinLock<SecretRing<u8, CONSOLE_INPUT_QUEUE_CAPACITY>>,
+    /// Whether the ring holds a byte, stored under the ring lock at every
+    /// change and before the push's wake. An interrupt pushes into the ring,
+    /// so a peek that took the lock with interrupts enabled could deadlock
+    /// against it.
+    occupied: AtomicBool,
 }
 
 impl Default for ConsoleInputQueue {
@@ -496,6 +564,7 @@ impl ConsoleInputQueue {
     pub const fn new() -> Self {
         Self {
             ring: SpinLock::new(SecretRing::new(0)),
+            occupied: AtomicBool::new(false),
         }
     }
 
@@ -514,7 +583,9 @@ impl ConsoleInputQueue {
     /// cannot widen it.
     fn drain(&self, buf: &mut [u8]) -> usize {
         let mut ring = self.ring.lock();
-        tairix_tty::read_bounded(buf, || ring.pop_front())
+        let drained = tairix_tty::read_bounded(buf, || ring.pop_front());
+        self.occupied.store(!ring.is_empty(), Ordering::Release);
+        drained
     }
 
     /// Free space, in bytes, currently available in the ring.
@@ -535,7 +606,10 @@ impl ConsoleInputQueue {
     /// (a short push when the ring fills; the producer retries the
     /// remainder and never blocks).
     fn enqueue(&self, bytes: &[u8]) -> usize {
-        self.ring.lock().push_slice(bytes)
+        let mut ring = self.ring.lock();
+        let pushed = ring.push_slice(bytes);
+        self.occupied.store(!ring.is_empty(), Ordering::Release);
+        pushed
     }
 }
 
@@ -547,11 +621,17 @@ impl ConsoleRead for ConsoleInputQueue {
         Ok(self.drain(buf))
     }
 
+    fn input_ready(&self) -> bool {
+        self.occupied.load(Ordering::Acquire)
+    }
+
     fn purge(&self) {
         // Blanking every slot, not just the queued ones, so a credential typed
         // ahead of the reader leaves nothing behind — no drain bound (`read`
         // stops at a line delimiter) can leave a byte queued either.
-        self.ring.lock().purge();
+        let mut ring = self.ring.lock();
+        ring.purge();
+        self.occupied.store(false, Ordering::Release);
     }
 }
 
@@ -1444,6 +1524,14 @@ where
         self.read_until(buf, limit, may_read)
     }
 
+    fn input_ready(&self) -> bool {
+        self.inner.input_ready()
+    }
+
+    fn poll_interval_ns(&self) -> Option<u64> {
+        self.inner.poll_interval_ns()
+    }
+
     fn purge(&self) {
         // Straight to the backing: this adapter's own `read` parks until
         // input arrives, so draining through it would wait for the very
@@ -1482,6 +1570,10 @@ mod tests {
     impl ConsoleRead for PolledRead {
         fn read(&self, _buf: &mut [u8]) -> Result<usize, Errno> {
             Ok(0)
+        }
+
+        fn input_ready(&self) -> bool {
+            false
         }
 
         fn poll_interval_ns(&self) -> Option<u64> {
@@ -1526,6 +1618,10 @@ mod tests {
             buf[..take].copy_from_slice(&self.bytes[..take]);
             Ok(take)
         }
+
+        fn input_ready(&self) -> bool {
+            self.error.is_some() || !self.bytes.is_empty()
+        }
     }
 
     fn leaked_arch() -> &'static TestArch {
@@ -1562,6 +1658,10 @@ mod tests {
             self.pending.fetch_sub(take, Ordering::Relaxed);
             buf[..take].fill(b'x');
             Ok(take)
+        }
+
+        fn input_ready(&self) -> bool {
+            self.pending() > 0
         }
     }
 
@@ -1604,6 +1704,31 @@ mod tests {
         blocking.purge();
 
         assert_eq!(INNER.pending(), 0);
+    }
+
+    /// The blocking adapter answers a watcher's peek and re-poll interval
+    /// from its backing: it parks only its own readers, so a wait-set
+    /// watching the console must see what the device itself would report.
+    #[test]
+    fn the_blocking_adapter_reports_its_backings_readiness_and_repoll() {
+        static PENDING: DepletingRead = DepletingRead::with_pending(1);
+        static POLLED: PolledRead = PolledRead;
+        let ready = BlockingConsoleRead::new(leaked_arch(), &PENDING, None);
+        let polled = BlockingConsoleRead::new(leaked_arch(), &POLLED, None);
+
+        assert!(ready.input_ready());
+        assert!(!polled.input_ready());
+        assert_eq!(ready.poll_interval_ns(), None);
+        assert_eq!(polled.poll_interval_ns(), Some(POLLED_INTERVAL_NS));
+    }
+
+    /// A device that refuses reads is ready: a watcher woken by it reads the
+    /// refusal at once rather than parking on a console that never answers.
+    #[test]
+    fn a_refusing_device_is_ready_for_its_watcher() {
+        static REFUSING: ScriptedRead = ScriptedRead::with_error(Errno::DeviceFault);
+        assert!(NULL_CONSOLE_READ.input_ready());
+        assert!(REFUSING.input_ready());
     }
 
     /// The display-purge default is the honest best effort for a terminal the
@@ -2310,6 +2435,26 @@ mod tests {
         // Drained dry, a further read reports the empty poll (which
         // `BlockingConsoleRead` turns into a park).
         assert_eq!(queue.read(&mut buf), Ok(0));
+    }
+
+    /// The peek follows every change of the ring without taking a byte: a
+    /// push makes the queue ready, a drain that leaves bytes keeps it so,
+    /// and the drain that empties it or a purge clears it.
+    #[test]
+    fn input_queue_readiness_follows_push_drain_and_purge() {
+        let queue = ConsoleInputQueue::new();
+        assert!(!queue.input_ready());
+        assert_eq!(queue.push(b"ab"), Ok(2));
+        assert!(queue.input_ready());
+        assert!(queue.input_ready(), "the peek takes nothing");
+        let mut one = [0u8; 1];
+        assert_eq!(queue.read(&mut one), Ok(1));
+        assert!(queue.input_ready());
+        assert_eq!(queue.read(&mut one), Ok(1));
+        assert!(!queue.input_ready());
+        assert_eq!(queue.push(b"c"), Ok(1));
+        queue.purge();
+        assert!(!queue.input_ready());
     }
 
     #[test]

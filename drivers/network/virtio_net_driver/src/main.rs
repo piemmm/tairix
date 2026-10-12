@@ -49,34 +49,11 @@ mod program {
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::driver::virtio::VirtioHost;
     use tairix_abi::driver::virtio_pci::virtio_pci_windows;
-    use tairix_abi::{CapabilityId, DriverError, MmioMapper};
-    use tairix_caps::CapabilitySet;
+    use tairix_abi::{DriverError, MmioMapper};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_netchan::exit;
     use tairix_virtio::{MmioTransport, PciTransport};
     use tairix_virtio_net::VirtioNet;
-
-    /// The capability set the driver host re-checks up front before issuing a
-    /// `mmio_map` / `dma_alloc` / `irq_bind` trap, so a missing grant fails
-    /// fast without a round trip. It mirrors the resources the matched node
-    /// requested — the register window (`CAP_MMIO_MAP`), the DMA region
-    /// (`CAP_MEM_DMA`), and the device interrupt line the serve loop parks on
-    /// (`CAP_IRQ_BIND`) — plus the authority to claim and bind the reserved
-    /// device-channel endpoint (`CAP_IPC_ENDPOINT`, `CAP_IPC_BIND_PRIVILEGED`)
-    /// and publish the `netchan` node (`CAP_HW_EMIT`). The kernel is the
-    /// authority and re-checks every trap regardless.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::MEM_DMA);
-        caps.insert(CapabilityId::IRQ_BIND);
-        caps.insert(CapabilityId::SHM);
-        caps.insert(CapabilityId::IPC_ENDPOINT);
-        caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
-        caps.insert(CapabilityId::HW_EMIT);
-        caps.insert(CapabilityId::LOG_EMIT);
-        caps
-    }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
@@ -87,7 +64,11 @@ mod program {
         // The QEMU `virt` virtio interconnect snoops the CPU caches, so the
         // DMA carve is coherent kernel-side and no cache-maintenance shim is
         // supplied here (`coherency = None`, keeping the program neutral).
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = tairix_drv_network_virtio_net_driver::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return exit::NO_HOST;
         };
         let Some(irq_line) = host.irq_line() else {

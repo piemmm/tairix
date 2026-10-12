@@ -86,10 +86,14 @@ pub const VIRTIO_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd
 /// any platform-published linear scan-out surface.
 pub const FRAMEBUFFER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"framebuffer", b"Run"];
 
-/// Store path of the Raspberry Pi firmware-framebuffer display service
-/// bundle: class `display`, the leaf `rpi_fb` (the `VideoCore` firmware's
-/// scan-out surface, switched off through the firmware mailbox).
-pub const RPI_FB_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"rpi_fb", b"Run"];
+/// Store path of the BCM2711 display engine bundle: class `display`, the part
+/// leaf `bcm2711_hvs` (the HVS and the pixel valves feeding the HDMI outputs).
+pub const BCM2711_HVS_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"bcm2711_hvs", b"Run"];
+
+/// Store path of the BCM2711 HDMI transmitter bundle: class `display`, the
+/// part leaf `bcm2711_hdmi` (each HDMI block, an encoder of the display
+/// engine).
+pub const BCM2711_HDMI_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"bcm2711_hdmi", b"Run"];
 
 /// Store path of the virtio-net link-layer driver bundle: class `network`,
 /// the `virtio_net` leaf naming the (vendor-neutral) driver — the path the
@@ -167,23 +171,36 @@ pub const MC146818_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"mc146818", b"R
 /// mailbox).
 pub const RPI_RTC_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"rpi", b"Run"];
 
-/// Store path of the Raspberry Pi CPU frequency driver bundle: class
-/// `cpufreq`, the leaf `rpi` (the `VideoCore` firmware's ARM core clock,
+/// Store path of the Raspberry Pi firmware-clocks driver bundle: class
+/// `clock`, the leaf `rpi_firmware` (the clocks the `VideoCore` firmware owns,
 /// reached over the firmware mailbox).
-pub const RPI_CPUFREQ_STORE_PATH: &[&[u8]] = &[b"Drivers", b"cpufreq", b"rpi", b"Run"];
+pub const RPI_FIRMWARE_CLOCKS_STORE_PATH: &[&[u8]] =
+    &[b"Drivers", b"clock", b"rpi_firmware", b"Run"];
 
 /// Store path of the Broadcom Serial Controller I2C bus driver bundle: class
 /// `bus_i2c`, the controller leaf `bcm2835` (the part name appears only at
 /// the leaf; the class namespace above it stays vendor-neutral).
 pub const I2C_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_i2c", b"bcm2835", b"Run"];
 
+/// Store path of the BCM2711 HDMI blocks' DDC controller driver bundle: class
+/// `bus_i2c`, the controller-family leaf `brcmstb`.
+pub const I2C_BRCMSTB_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_i2c", b"brcmstb", b"Run"];
+
 /// Store path of the Broadcom legacy DMA engine driver bundle: class `dma`,
 /// the leaf `bcm2835` its binding is named for.
 pub const DMA_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"dma", b"bcm2835", b"Run"];
 
+/// Store path of the Broadcom second-level interrupt controller driver bundle:
+/// class `irq`, the leaf `brcmstb_l2` its controller family is named for.
+pub const IRQ_BRCMSTB_L2_STORE_PATH: &[&[u8]] = &[b"Drivers", b"irq", b"brcmstb_l2", b"Run"];
+
 /// Store path of the BCM2711 clock manager driver bundle: class `clock`, the
 /// part leaf `bcm2711_cprman`.
 pub const CPRMAN_BCM2711_STORE_PATH: &[&[u8]] = &[b"Drivers", b"clock", b"bcm2711_cprman", b"Run"];
+
+/// Store path of the BCM2711 DVP clock-gate driver bundle: class `clock`, the
+/// part leaf `bcm2711_dvp`.
+pub const DVP_BCM2711_STORE_PATH: &[&[u8]] = &[b"Drivers", b"clock", b"bcm2711_dvp", b"Run"];
 
 /// Store path of the DS3231 / DS1307 real-time-clock driver bundle: class
 /// `rtc`, the chip leaf `ds3231`.
@@ -294,11 +311,7 @@ pub fn build_pcie_brcm_bundle(
         ctx,
         arch,
         "tairix-drv-bus-pcie-brcm",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::HW_EMIT,
-        ],
+        tairix_drv_bus_pcie_brcm::REQUIRED_CAPABILITIES,
         tairix_drv_bus_pcie_brcm::BIND_KEYS,
         profile,
     )
@@ -326,7 +339,7 @@ pub fn build_vl805_bundle(
         ctx,
         arch,
         "tairix-drv-bus-usb-vl805",
-        &[CapabilityId::MAILBOX, CapabilityId::HW_EMIT],
+        tairix_drv_bus_usb_vl805::REQUIRED_CAPABILITIES,
         tairix_drv_bus_usb_vl805::BIND_KEYS,
         profile,
     )
@@ -358,16 +371,7 @@ pub fn build_xhci_bundle(
         ctx,
         arch,
         "tairix-drv-bus-usb",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::MEM_DMA,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::SHM,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-            CapabilityId::HW_EMIT,
-            CapabilityId::LOG_EMIT,
-            CapabilityId::SCHED_REALTIME,
-        ],
+        tairix_drv_bus_usb::REQUIRED_CAPABILITIES,
         tairix_drv_bus_usb::BIND_KEYS,
         profile,
     )
@@ -375,7 +379,7 @@ pub fn build_xhci_bundle(
 
 /// Build and sign the USB HID **class**-driver bundle.
 ///
-/// Its manifest is authored from the driver crate's own `REQUIRED_CAPS` and
+/// Its manifest is authored from the driver crate's own `REQUIRED_CAPABILITIES` and
 /// `BIND_KEYS`, so the granted set is the set the program requests: inject
 /// seat records, map its interface's shared buffer, call its interface's URB
 /// endpoint, and log. It holds **no** MMIO, DMA, or IRQ authority, and
@@ -394,7 +398,7 @@ pub fn build_usb_hid_bundle(
         ctx,
         arch,
         "tairix-drv-input-usb-hid",
-        tairix_drv_input_usb_hid::REQUIRED_CAPS,
+        tairix_drv_input_usb_hid::REQUIRED_CAPABILITIES,
         tairix_drv_input_usb_hid::BIND_KEYS,
         profile,
     )
@@ -404,7 +408,7 @@ pub fn build_usb_hid_bundle(
 ///
 /// A pure BOT/SCSI class driver: it holds **no** MMIO, DMA, or IRQ
 /// authority. Its manifest is authored from the driver crate's own
-/// `REQUIRED_CAPS` and `BIND_KEYS`, so the granted set matches the set the
+/// `REQUIRED_CAPABILITIES` and `BIND_KEYS`, so the granted set matches the set the
 /// program requests and it autoloads against the mass-storage interface
 /// node the HCD emitted (`plans/DEVICES.md` D2).
 ///
@@ -420,7 +424,7 @@ pub fn build_usb_msd_bundle(
         ctx,
         arch,
         "tairix-drv-storage-usb-msd",
-        tairix_drv_storage_usb_msd::REQUIRED_CAPS,
+        tairix_drv_storage_usb_msd::REQUIRED_CAPABILITIES,
         tairix_drv_storage_usb_msd::BIND_KEYS,
         profile,
     )
@@ -452,13 +456,7 @@ pub fn build_volmgr_bundle(
         ctx,
         arch,
         "tairix-drv-storage-volmgr",
-        &[
-            CapabilityId::SHM,
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::FS_MOUNT,
-            CapabilityId::HW_EMIT,
-            CapabilityId::LOG_EMIT,
-        ],
+        tairix_drv_storage_volmgr::REQUIRED_CAPABILITIES,
         tairix_drv_storage_volmgr::BIND_KEYS,
         profile,
     )
@@ -496,11 +494,7 @@ pub fn build_raid_member_bundle(
         ctx,
         arch,
         "tairix-drv-storage-raid-member",
-        &[
-            CapabilityId::SHM,
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::LOG_EMIT,
-        ],
+        tairix_drv_storage_raid_member::REQUIRED_CAPABILITIES,
         tairix_drv_storage_raid_member::BIND_KEYS,
         profile,
     )
@@ -542,13 +536,7 @@ pub fn build_raid_bundle(
         ctx,
         arch,
         "tairix-drv-storage-raid",
-        &[
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::SHM,
-            CapabilityId::HW_EMIT,
-            CapabilityId::LOG_EMIT,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-        ],
+        tairix_drv_storage_raid::REQUIRED_CAPABILITIES,
         tairix_drv_storage_raid::BIND_KEYS,
         profile,
     )
@@ -576,12 +564,7 @@ pub fn build_virtio_kbd_bundle(
         ctx,
         arch,
         "tairix-drv-input-virtio-kbd",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::MEM_DMA,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::INPUT_INJECT,
-        ],
+        tairix_drv_input_virtio_kbd::REQUIRED_CAPABILITIES,
         tairix_drv_input_virtio_input::BIND_KEYS,
         profile,
     )
@@ -613,30 +596,25 @@ pub fn build_framebuffer_bundle(
         ctx,
         arch,
         "tairix-drv-display-framebuffer",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::SHM,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-            CapabilityId::LOG_EMIT,
-        ],
+        tairix_drv_display_framebuffer::REQUIRED_CAPABILITIES,
         tairix_drv_display_framebuffer::BIND_KEYS,
         profile,
     )
 }
 
-/// Build and sign the Raspberry Pi firmware-framebuffer display service
-/// bundle.
+/// Build and sign the BCM2711 display engine bundle.
 ///
-/// The framebuffer service's rights, plus `CAP_MAILBOX` for the firmware
-/// channel the display is switched off through; read from the driver's own
-/// single definition. Carries `tairix_drv_display_rpi_fb::BIND_KEYS`, so it
-/// autoloads against a boot display the firmware allocated and outranks the
-/// generic service there, and stays unbound on every other surface.
+/// It maps the HVS's and the pixel valves' windows (`CAP_MMIO_MAP`), carves
+/// its scan-out frames (`CAP_MEM_DMA`), maps the client frames it presents
+/// (`CAP_SHM`), calls its encoders and its core clock (`CAP_IPC_ENDPOINT`),
+/// binds the seat's display endpoint (`CAP_IPC_BIND_PRIVILEGED`), tells the
+/// firmware the display is its own (`CAP_MAILBOX`) and logs its decisions
+/// (`CAP_LOG_EMIT`). Carries `tairix_drv_display_bcm2711_hvs::BIND_KEYS`.
 ///
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_rpi_fb_bundle(
+pub fn build_bcm2711_hvs_bundle(
     ctx: &Context,
     arch: PieArch,
     profile: ImageProfile,
@@ -644,9 +622,36 @@ pub fn build_rpi_fb_bundle(
     build_bundle(
         ctx,
         arch,
-        "tairix-drv-display-rpi-fb",
-        tairix_drv_display_rpi_fb::REQUIRED_CAPABILITIES,
-        tairix_drv_display_rpi_fb::BIND_KEYS,
+        "tairix-drv-display-bcm2711-hvs",
+        tairix_drv_display_bcm2711_hvs::REQUIRED_CAPABILITIES,
+        tairix_drv_display_bcm2711_hvs::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the BCM2711 HDMI transmitter bundle.
+///
+/// It maps its block's windows (`CAP_MMIO_MAP`) and its DDC channel's and
+/// audio DMA buffers (`CAP_SHM`), calls its clocks, its DDC bus, its interrupt
+/// controller and its DMA channel (`CAP_IPC_ENDPOINT`), binds its encoder and
+/// audio channel endpoints (`CAP_IPC_BIND_PRIVILEGED`), publishes the audio
+/// channel's node (`CAP_HW_EMIT`) and logs its decisions (`CAP_LOG_EMIT`).
+/// Carries `tairix_drv_display_bcm2711_hdmi::BIND_KEYS`, both transmitters'.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_bcm2711_hdmi_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-display-bcm2711-hdmi",
+        tairix_drv_display_bcm2711_hdmi::REQUIRED_CAPABILITIES,
+        tairix_drv_display_bcm2711_hdmi::BIND_KEYS,
         profile,
     )
 }
@@ -676,16 +681,7 @@ pub fn build_virtio_net_bundle(
         ctx,
         arch,
         "tairix-drv-network-virtio-net-driver",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::MEM_DMA,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::SHM,
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-            CapabilityId::HW_EMIT,
-            CapabilityId::LOG_EMIT,
-        ],
+        tairix_drv_network_virtio_net_driver::REQUIRED_CAPABILITIES,
         tairix_drv_network_virtio_net::BIND_KEYS,
         profile,
     )
@@ -718,16 +714,7 @@ pub fn build_virtio_snd_bundle(
         ctx,
         arch,
         "tairix-drv-audio-virtio-snd",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::MEM_DMA,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::SHM,
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-            CapabilityId::HW_EMIT,
-            CapabilityId::LOG_EMIT,
-        ],
+        tairix_drv_audio_virtio_snd::REQUIRED_CAPABILITIES,
         tairix_drv_audio_virtio_snd::BIND_KEYS,
         profile,
     )
@@ -757,7 +744,7 @@ pub fn build_usb_uac_bundle(
         ctx,
         arch,
         "tairix-drv-audio-usb-uac",
-        tairix_drv_audio_usb_uac::REQUIRED_CAPS,
+        tairix_drv_audio_usb_uac::REQUIRED_CAPABILITIES,
         tairix_drv_audio_usb_uac::BIND_KEYS,
         profile,
     )
@@ -786,7 +773,7 @@ pub fn build_hda_bundle(
         ctx,
         arch,
         "tairix-drv-audio-hda",
-        tairix_drv_audio_hda::REQUIRED_CAPS,
+        tairix_drv_audio_hda::REQUIRED_CAPABILITIES,
         tairix_drv_audio_hda::BIND_KEYS,
         profile,
     )
@@ -872,10 +859,11 @@ pub fn build_pcm5102a_bundle(
 
 /// Build and sign the PCM5122 codec driver bundle.
 ///
-/// Like the I2C clock chips it holds no register window: it calls the
-/// transfer endpoint its node's grant names (`CAP_IPC_ENDPOINT`), binds its
-/// codec endpoint (`CAP_IPC_BIND_PRIVILEGED`) and records its refusals
-/// (`CAP_LOG_EMIT`). Carries `tairix_drv_audio_pcm5122::BIND_KEYS`.
+/// Like the I2C clock chips it holds no register window: it calls the I2C
+/// controller its node's link names (`CAP_IPC_ENDPOINT`) and maps the
+/// channel buffer it is granted (`CAP_SHM`), binds its codec endpoint
+/// (`CAP_IPC_BIND_PRIVILEGED`) and records its refusals (`CAP_LOG_EMIT`).
+/// Carries `tairix_drv_audio_pcm5122::BIND_KEYS`.
 ///
 /// # Errors
 ///
@@ -920,16 +908,7 @@ pub fn build_genet_bundle(
         ctx,
         arch,
         "tairix-drv-network-genet",
-        &[
-            CapabilityId::MMIO_MAP,
-            CapabilityId::MEM_DMA,
-            CapabilityId::IRQ_BIND,
-            CapabilityId::SHM,
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::IPC_BIND_PRIVILEGED,
-            CapabilityId::HW_EMIT,
-            CapabilityId::LOG_EMIT,
-        ],
+        tairix_drv_network_genet::REQUIRED_CAPABILITIES,
         tairix_drv_network_genet::BIND_KEYS,
         profile,
     )
@@ -957,7 +936,7 @@ pub fn build_pl031_bundle(
         ctx,
         arch,
         "tairix-drv-rtc-pl031",
-        &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED],
+        tairix_drv_rtc_pl031::REQUIRED_CAPABILITIES,
         tairix_drv_rtc_pl031::BIND_KEYS,
         profile,
     )
@@ -982,7 +961,7 @@ pub fn build_goldfish_bundle(
         ctx,
         arch,
         "tairix-drv-rtc-goldfish",
-        &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED],
+        tairix_drv_rtc_goldfish::REQUIRED_CAPABILITIES,
         tairix_drv_rtc_goldfish::BIND_KEYS,
         profile,
     )
@@ -1009,7 +988,7 @@ pub fn build_mc146818_bundle(
         ctx,
         arch,
         "tairix-drv-rtc-mc146818",
-        &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED],
+        tairix_drv_rtc_mc146818::REQUIRED_CAPABILITIES,
         tairix_drv_rtc_mc146818::BIND_KEYS,
         profile,
     )
@@ -1038,27 +1017,28 @@ pub fn build_rpi_rtc_bundle(
         ctx,
         arch,
         "tairix-drv-rtc-rpi",
-        &[CapabilityId::MAILBOX, CapabilityId::IPC_BIND_PRIVILEGED],
+        tairix_drv_rtc_rpi::REQUIRED_CAPABILITIES,
         tairix_drv_rtc_rpi::BIND_KEYS,
         profile,
     )
 }
 
-/// Build and sign the Raspberry Pi CPU frequency driver bundle.
+/// Build and sign the Raspberry Pi firmware-clocks driver bundle.
 ///
-/// Like [`build_rpi_rtc_bundle`] it requests no `CAP_MMIO_MAP` — the ARM
-/// clock belongs to the firmware, so its only path to the hardware is a
-/// property exchange the kernel gates on `CAP_MAILBOX` — and no
-/// `CAP_IRQ_BIND`, since it owns no interrupt line. It requests no
-/// `CAP_IPC_BIND_PRIVILEGED` either: it serves nobody, and instead holds
-/// `CAP_CPUFREQ` to take the machine's frequency mechanism role. Carries
-/// `tairix_drv_cpufreq_rpi::BIND_KEYS`, so it autoloads against a discovered
-/// `raspberrypi,firmware-clocks` node and stays unbound on a board with none.
+/// Like [`build_rpi_rtc_bundle`] it requests no `CAP_MMIO_MAP` — the clocks
+/// belong to the firmware, so its only path to them is a property exchange the
+/// kernel gates on `CAP_MAILBOX` — and no `CAP_IRQ_BIND`, since it owns no
+/// interrupt line. It holds `CAP_CPUFREQ` to take the machine's frequency
+/// mechanism role for the ARM clock, and `CAP_IPC_BIND_PRIVILEGED` to serve the
+/// node's `clock-v1` endpoint for the display's clocks. Carries
+/// `tairix_drv_clock_rpi_firmware::BIND_KEYS`, so it autoloads against a
+/// discovered `raspberrypi,firmware-clocks` node and stays unbound on a board
+/// with none.
 ///
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_rpi_cpufreq_bundle(
+pub fn build_rpi_firmware_clocks_bundle(
     ctx: &Context,
     arch: PieArch,
     profile: ImageProfile,
@@ -1066,9 +1046,9 @@ pub fn build_rpi_cpufreq_bundle(
     build_bundle(
         ctx,
         arch,
-        "tairix-drv-cpufreq-rpi",
-        tairix_drv_cpufreq_rpi::REQUIRED_CAPABILITIES,
-        tairix_drv_cpufreq_rpi::BIND_KEYS,
+        "tairix-drv-clock-rpi-firmware",
+        tairix_drv_clock_rpi_firmware::REQUIRED_CAPABILITIES,
+        tairix_drv_clock_rpi_firmware::BIND_KEYS,
         profile,
     )
 }
@@ -1077,10 +1057,11 @@ pub fn build_rpi_cpufreq_bundle(
 ///
 /// It owns the controller's register window (`CAP_MMIO_MAP`) and its
 /// interrupt line (`CAP_IRQ_BIND`, which every transfer parks on rather than
-/// spinning), and binds one reserved transfer endpoint per child the device
-/// tree declared (`CAP_IPC_BIND_PRIVILEGED`). It holds no clock authority:
-/// the chips above it report readings, and only `timed` sets the machine
-/// clock. Carries `tairix_drv_bus_i2c_bcm2835::BIND_KEYS`.
+/// spinning), serves `i2c-v1` under its node's duty
+/// (`CAP_IPC_BIND_PRIVILEGED`), grants each channel its buffer (`CAP_SHM`) and
+/// describes the VPU clock over its clock link (`CAP_IPC_ENDPOINT`). It holds
+/// no clock authority: the chips above it report readings, and only `timed`
+/// sets the machine clock. Carries `tairix_drv_bus_i2c_bcm2835::BIND_KEYS`.
 ///
 /// # Errors
 ///
@@ -1096,6 +1077,33 @@ pub fn build_i2c_bcm2835_bundle(
         "tairix-drv-bus-i2c-bcm2835",
         tairix_drv_bus_i2c_bcm2835::REQUIRED_CAPABILITIES,
         tairix_drv_bus_i2c_bcm2835::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the BCM2711 HDMI DDC controller driver bundle.
+///
+/// It owns the controller's and the automatic I2C engine's windows
+/// (`CAP_MMIO_MAP`), serves `i2c-v1` under its node's duty
+/// (`CAP_IPC_BIND_PRIVILEGED`) and grants each channel its buffer
+/// (`CAP_SHM`). It binds no interrupt: the tree wires none, so a command's
+/// completion is read after sleeping its time on the wire. Carries
+/// `tairix_drv_bus_i2c_brcmstb::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_i2c_brcmstb_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-bus-i2c-brcmstb",
+        tairix_drv_bus_i2c_brcmstb::REQUIRED_CAPABILITIES,
+        tairix_drv_bus_i2c_brcmstb::BIND_KEYS,
         profile,
     )
 }
@@ -1127,6 +1135,32 @@ pub fn build_dma_bcm2835_bundle(
     )
 }
 
+/// Build and sign the Broadcom second-level interrupt controller driver
+/// bundle for installation into the image's `/System/Drivers/` store.
+///
+/// It maps the controller's registers (`CAP_MMIO_MAP`), parks on its own line
+/// of the root controller (`CAP_IRQ_BIND`) and binds the node's endpoint under
+/// its interrupt-line duty (`CAP_IPC_BIND_PRIVILEGED`). Carries
+/// `tairix_drv_irq_brcmstb_l2::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_irq_brcmstb_l2_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-irq-brcmstb-l2",
+        tairix_drv_irq_brcmstb_l2::REQUIRED_CAPABILITIES,
+        tairix_drv_irq_brcmstb_l2::BIND_KEYS,
+        profile,
+    )
+}
+
 /// Build and sign the BCM2711 clock manager driver bundle.
 ///
 /// It is the one process that maps the clock manager's registers
@@ -1152,13 +1186,38 @@ pub fn build_cprman_bcm2711_bundle(
     )
 }
 
+/// Build and sign the BCM2711 DVP clock-gate driver bundle.
+///
+/// It is the one process that maps the DVP block's registers
+/// (`CAP_MMIO_MAP`) and binds the node's endpoint under its clock duty
+/// (`CAP_IPC_BIND_PRIVILEGED`). Carries
+/// `tairix_drv_clock_bcm2711_dvp::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_dvp_bcm2711_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-clock-bcm2711-dvp",
+        tairix_drv_clock_bcm2711_dvp::REQUIRED_CAPABILITIES,
+        tairix_drv_clock_bcm2711_dvp::BIND_KEYS,
+        profile,
+    )
+}
+
 /// Build and sign the DS3231 / DS1307 clock-chip driver bundle.
 ///
 /// Like every I2C clock chip it requests no `CAP_MMIO_MAP`: it owns no
-/// registers, only `CAP_IPC_ENDPOINT` to call the transfer endpoint its
-/// matched node's grant names and `CAP_IPC_BIND_PRIVILEGED` to serve the RTC
-/// endpoint `timed` reads. The same no-clock-authority split as
-/// [`build_pl031_bundle`].
+/// registers, only `CAP_IPC_ENDPOINT` to call the I2C controller its node's
+/// link names, `CAP_SHM` to map the channel buffer it is granted, and
+/// `CAP_IPC_BIND_PRIVILEGED` to serve the RTC endpoint `timed` reads. The same
+/// no-clock-authority split as [`build_pl031_bundle`].
 ///
 /// # Errors
 ///
@@ -1172,7 +1231,7 @@ pub fn build_ds3231_bundle(
         ctx,
         arch,
         "tairix-drv-rtc-ds3231",
-        I2C_RTC_CAPABILITIES,
+        tairix_drv_rtc_ds3231::REQUIRED_CAPABILITIES,
         tairix_drv_rtc_ds3231::BIND_KEYS,
         profile,
     )
@@ -1193,7 +1252,7 @@ pub fn build_pcf8523_bundle(
         ctx,
         arch,
         "tairix-drv-rtc-pcf8523",
-        I2C_RTC_CAPABILITIES,
+        tairix_drv_rtc_pcf8523::REQUIRED_CAPABILITIES,
         tairix_drv_rtc_pcf8523::BIND_KEYS,
         profile,
     )
@@ -1214,20 +1273,11 @@ pub fn build_pcf85063a_bundle(
         ctx,
         arch,
         "tairix-drv-rtc-pcf85063a",
-        I2C_RTC_CAPABILITIES,
+        tairix_drv_rtc_pcf85063a::REQUIRED_CAPABILITIES,
         tairix_drv_rtc_pcf85063a::BIND_KEYS,
         profile,
     )
 }
-
-/// The capability set every I2C clock-chip bundle requests: a call to its own
-/// transfer endpoint and the privilege to serve the RTC endpoint. Defined once
-/// because it is the same set by definition — none of these parts owns a
-/// register window.
-const I2C_RTC_CAPABILITIES: &[CapabilityId] = &[
-    CapabilityId::IPC_ENDPOINT,
-    CapabilityId::IPC_BIND_PRIVILEGED,
-];
 
 /// The composed, signed driver bundles the `-M virt` autoload verticals
 /// plant into their whole-disk fixture's `/System/Drivers/` store, each
@@ -1634,7 +1684,7 @@ mod tests {
         network: (String, Vec<u8>),
         genet: (String, Vec<u8>),
         rtc: (String, Vec<u8>),
-        rpi_fb: (String, Vec<u8>),
+        engine: (String, Vec<u8>),
     }
 
     impl BundleSource {
@@ -1660,9 +1710,9 @@ mod tests {
                     path_str(PL031_STORE_PATH),
                     sign(tairix_drv_rtc_pl031::BIND_KEYS),
                 ),
-                rpi_fb: (
-                    path_str(RPI_FB_STORE_PATH),
-                    sign(tairix_drv_display_rpi_fb::BIND_KEYS),
+                engine: (
+                    path_str(BCM2711_HVS_STORE_PATH),
+                    sign(tairix_drv_display_bcm2711_hvs::BIND_KEYS),
                 ),
             }
         }
@@ -1676,7 +1726,7 @@ mod tests {
                 &self.network,
                 &self.genet,
                 &self.rtc,
-                &self.rpi_fb,
+                &self.engine,
             ]
         }
     }
@@ -1694,7 +1744,7 @@ mod tests {
     }
 
     /// Scan the whole store, candidate indices pinned by scan order (input 0,
-    /// display 1, virtio-net 2, GENET 3, PL031 4, Pi firmware display 5).
+    /// display 1, virtio-net 2, GENET 3, PL031 4, display engine 5).
     fn scanned_store(source: &BundleSource) -> DriverStore {
         let paths: Vec<&str> = source.all().iter().map(|(p, _)| p.as_str()).collect();
         scan_store(source, &paths, &DiscardSink)
@@ -1758,7 +1808,7 @@ mod tests {
             sign(tairix_drv_network_virtio_net::BIND_KEYS),
             sign(tairix_drv_network_genet::BIND_KEYS),
             sign(tairix_drv_rtc_pl031::BIND_KEYS),
-            sign(tairix_drv_display_rpi_fb::BIND_KEYS),
+            sign(tairix_drv_display_bcm2711_hvs::BIND_KEYS),
         ] {
             // The same fail-closed structural check the image build applies
             // to every planted bundle accepts each one.
@@ -1814,23 +1864,16 @@ mod tests {
         }
     }
 
-    /// The firmware's surface is published under its own binding and the
-    /// generic model both: the Pi service, which can switch it off, must win
-    /// it, and must never take a surface the port did not tag as the
-    /// firmware's.
+    /// The engine's node binds the display engine, and a generic surface the
+    /// generic service: the engine never takes a surface it does not scan.
     #[test]
-    fn the_firmware_display_binds_the_pi_service_over_the_generic_one() {
+    fn the_engine_s_node_binds_the_engine_and_a_generic_surface_the_generic_service() {
         let source = BundleSource::new();
         let store = scanned_store(&source);
         let candidates = store.candidates();
-        let firmware_display = [
-            HwMatchKey::compatible(tairix_vcmailbox::FIRMWARE_FRAMEBUFFER_COMPATIBLE)
-                .expect("fits"),
-            HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE).expect("fits"),
-        ];
-        match resolve(&firmware_display, &candidates) {
+        match resolve(&[tairix_vcmailbox::DISPLAY_ENGINE_KEY], &candidates) {
             MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 5),
-            other => panic!("the firmware display must bind the Pi service, got {other:?}"),
+            other => panic!("the engine's node must bind the engine, got {other:?}"),
         }
         let generic = [HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE).expect("fits")];
         match resolve(&generic, &candidates) {
@@ -1848,5 +1891,87 @@ mod tests {
         let candidates = store.candidates();
         let node_keys = [HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID + 1)];
         assert_eq!(resolve(&node_keys, &candidates), MatchResolution::Unmatched);
+    }
+
+    /// Whether `text` names a driver's one declared capability list.
+    fn declared(text: &str) -> bool {
+        ["REQUIRED_CAPABILITIES", "SERVICE_CAPS"]
+            .iter()
+            .any(|name| text.contains(name))
+    }
+
+    /// The first argument of each call to `callee` in `source`.
+    fn first_arguments<'s>(source: &'s str, callee: &str) -> Vec<&'s str> {
+        source
+            .match_indices(callee)
+            .filter_map(|(at, _)| {
+                let rest = &source[at + callee.len()..];
+                rest.find([',', ')']).map(|end| rest[..end].trim())
+            })
+            .collect()
+    }
+
+    /// A driver's manifest and its binary's own re-check of its grants name
+    /// one capability list, so the two cannot drift apart.
+    #[test]
+    fn every_bundle_and_its_binary_request_the_drivers_one_declared_list() {
+        // Each builder passes the context, the architecture, the package and
+        // then the capabilities.
+        let calls: Vec<&str> = include_str!("image_drivers.rs")
+            .split("build_bundle(\n        ctx,\n")
+            .skip(1)
+            .collect();
+        assert!(!calls.is_empty(), "the builders are found");
+        for call in calls {
+            let caps = call.lines().nth(2).map(str::trim);
+            assert!(
+                caps.is_some_and(declared),
+                "a bundle states its capabilities other than by its driver's list: {caps:?}"
+            );
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("xtask sits two levels below the workspace root");
+        let mut sources = Vec::new();
+        rust_sources_below(&root.join("drivers"), &mut sources);
+        assert!(!sources.is_empty(), "the driver tree is found");
+        for path in sources {
+            let source = std::fs::read_to_string(&path).expect("a readable source");
+            for argument in [
+                "RtDriverHost::from_grants_query(",
+                "RtDriverHost::new(",
+                "Node::open(",
+                "tairix_clock::open(",
+                "tairix_i2cbus::open(",
+            ]
+            .into_iter()
+            .flat_map(|callee| first_arguments(&source, callee))
+            {
+                let bound = source
+                    .split(&format!("let {argument} = "))
+                    .nth(1)
+                    .and_then(|rest| rest.split(';').next());
+                assert!(
+                    declared(argument) || bound.is_some_and(declared),
+                    "{} builds its grants' capability set other than from its declared list",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    fn rust_sources_below(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources_below(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
     }
 }

@@ -118,7 +118,17 @@ and releases a dependent only once every dependency it names is
   A condition is only ever satisfied by a principal that genuinely knows it:
   `netstack` provides `network-up` by announcing readiness once its endpoints
   are bound, which is what `discoveryd` requires, since its sockets live in
-  the stack and a stack relaunch takes them with it. `display-present` has no
+  the stack and a stack relaunch takes them with it. `boot-complete` is the
+  manager's own (`Init::complete_boot`): asserted once every boot-floor
+  service has settled — ready, or failed with no relaunch pending — and never
+  withdrawn, so a floor service restarting later does not un-boot the
+  machine. `soundd` and `devmgr` are `ready=notify`, announcing once their
+  endpoint is bound and once the boot hardware has settled, so the condition
+  is not reached before either. `filesystems-mounted` is the manager's too,
+  asserted when the writable root is first seen mounted. PID 1 cues the
+  machine's start sound once both hold — the floor settled and the root
+  unlocked, so a user can log in and the machine's sound policy, which lives
+  on that root, can be read (`plans/SOUND.md` SND22). `display-present` has no
   truthful producer today (`seatmgr` and `devmgr` both reach ready on a
   headless machine), so nothing declares it. The
   headless guarantee for a GUI-only service does not rest on a condition
@@ -178,13 +188,23 @@ pinning the old default. A **per-user** store lives under the user's own
 `/Users/<u>/Settings/Services/` and parses identically.
 
 PID 1 boots on the vendor layer alone and calls `Init::adopt_overrides` the
-moment the administrator's document becomes readable — on a bounded doubling
-one-shot ladder (`lib/util::retry`, shared with the clock service, which waits
-the same way for the same reason), because no userland event says when the root
-was unlocked — stopping anything it disables and recording
-`SERVICE_ENROLMENT_REVOKED`. A disabled service therefore runs for the few
-seconds before the unlock; nothing is *granted* by the document being
-unreadable, so this is a narrowing that arrives late, not a fail-open.
+moment the writable root is mounted — it watches the `Mounts` notice, which the
+kernel publishes when the unlocked root's driver registers behind its mounts,
+and confirms the root answers — stopping anything the document disables and
+recording `SERVICE_ENROLMENT_REVOKED`. A root holding no document leaves the
+vendor layer standing. A disabled service therefore runs for the few seconds
+before the unlock; nothing is *granted* by the document being unreadable, so
+this is a narrowing that arrives late, not a fail-open. Until the layer is
+adopted every enrolment change is refused (`RecordUnread`, answered `NoData`)
+and nothing is written, so a record nobody has read is never replaced; a document that is
+there but will not read keeps that refusal, is reported on `stderr`, and is
+read again on the next change to the mounts. The same moment asserts
+`filesystems-mounted`.
+
+The enrolment governs the enrolled tier alone. Adopting the administrator's
+record never stops a boot-floor service, which no enrolment names, and an
+enrolment change naming one is refused (`BootFloor`, answered `NotSupported`)
+rather than reported as a change that already holds.
 
 - **The store holds only enrolment records — not unit metadata.** A
   service's restart policy, activation mode, linger, dependencies,
@@ -596,16 +616,19 @@ account its program runs as, resolved to a uid at parse time:
 
 A `service`, `enrolled`, or `ondemand` directive may follow its account with
 `key=value` options, the floor's unit metadata: `watchdog=<n>s`,
-`restart=never|on-failure|always`, `requires=<condition>[,…]`, and
-`provides=<condition>[,…]`. A provider is `notify`-ready, since what it
-provides cannot hold before it announces it. A `session` takes none.
+`restart=never|on-failure|always`, `requires=<condition>[,…]`,
+`provides=<condition>[,…]`, and `ready=immediate|notify`. A provider and an
+`ondemand` service are `notify`-ready without saying so, since what a
+provider provides cannot hold before it announces it and an on-demand client
+waits for the endpoint; declaring either `immediate` refuses the config
+(`ConflictingOptions`). A `session` takes none.
 
 Because the config is the first thing a freshly spawned program reads, the
 parser treats it as untrusted input (`AGENTS.md` §19.5): it is
 allocation-free, borrows from its source text, and **fails closed** with a
 `ConfigError` — refusing an unknown or duplicated directive, a directive
 given the wrong argument, a non-absolute `session` path, an unknown,
-malformed, or repeated option, an over-long config, or an omitted required
+malformed, repeated, or contradictory option, an over-long config, or an omitted required
 directive — rather than guess at a malformed intent (`AGENTS.md` §2.9,
 §5.4.5).
 

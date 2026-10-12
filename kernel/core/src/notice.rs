@@ -23,6 +23,8 @@
 //! | `AudioCapture` | a counter bumped when the published count differs | retained here |
 //! | `AudioDevices` | a counter bumped when the published change count differs | retained here |
 //! | `Network` | a counter bumped when the published change count differs | retained here |
+//! | `DisplayOutput` | a counter bumped when the published change count differs | retained here |
+//! | `CueAuthority` | a counter bumped when the published instance differs | retained here |
 //!
 //! The display lease's word only grows across transitions, so it is its own
 //! generation, and both are read from the seat registry the caller runs
@@ -32,8 +34,8 @@
 //!
 //! Every topic is readable by any process bar the display lease: when a
 //! console lease is taken and given up is what the gated seat inventory
-//! reports, so only the two services that own the seat's devices and must
-//! follow it — display and audio — are told it ([`may_observe`]).
+//! reports, so only the services that must follow it — display, audio and
+//! the cue authority — are told it ([`may_observe`]).
 //!
 //! The memory-pressure generation is the band depth *itself* rather than a
 //! counter, so a band that deepens and relaxes again before a waiter runs
@@ -56,6 +58,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use tairix_abi::audio::AUDIO_ENDPOINT;
 use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
+use tairix_abi::sound_cue::SOUND_CUE_ENDPOINT;
 use tairix_abi::{Errno, ProcId};
 use tairix_kernel_ipc::EndpointId;
 use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities};
@@ -109,8 +112,8 @@ pub fn mounts_changed() {
 
 /// Whether the process `observer` may read `topic` or be woken by it.
 ///
-/// The display lease is for the services owning the seat's devices alone: the
-/// processes the kernel attests bound the reserved display and audio
+/// The display lease is for the services following the seat alone: the
+/// processes the kernel attests bound the reserved display, audio and cue
 /// rendezvous, which only a privileged bind can.
 #[must_use]
 pub fn may_observe(topic: NoticeTopic, observer: u64) -> bool {
@@ -120,9 +123,13 @@ pub fn may_observe(topic: NoticeTopic, observer: u64) -> bool {
         | NoticeTopic::MemoryPressure
         | NoticeTopic::AudioCapture
         | NoticeTopic::AudioDevices
-        | NoticeTopic::Network => true,
+        | NoticeTopic::Network
+        | NoticeTopic::DisplayOutput
+        | NoticeTopic::CueAuthority => true,
         NoticeTopic::DisplayLease => {
-            binds(DISPLAY_ENDPOINT, observer) || binds(AUDIO_ENDPOINT, observer)
+            binds(DISPLAY_ENDPOINT, observer)
+                || binds(AUDIO_ENDPOINT, observer)
+                || binds(SOUND_CUE_ENDPOINT, observer)
         }
     }
 }
@@ -143,7 +150,9 @@ pub fn generation(topic: NoticeTopic, seats: &SeatRegistry) -> u64 {
         NoticeTopic::Desktop
         | NoticeTopic::AudioCapture
         | NoticeTopic::AudioDevices
-        | NoticeTopic::Network => SLOTS.lock()[topic.as_u32() as usize].generation,
+        | NoticeTopic::Network
+        | NoticeTopic::DisplayOutput
+        | NoticeTopic::CueAuthority => SLOTS.lock()[topic.as_u32() as usize].generation,
         NoticeTopic::Mounts => MOUNT_GENERATION.load(Ordering::Acquire),
         // The band depth *is* the generation, so a move and a move back
         // leave a waiter's view already correct.
@@ -174,7 +183,9 @@ pub fn payload(
         NoticeTopic::Desktop
         | NoticeTopic::AudioCapture
         | NoticeTopic::AudioDevices
-        | NoticeTopic::Network => {
+        | NoticeTopic::Network
+        | NoticeTopic::DisplayOutput
+        | NoticeTopic::CueAuthority => {
             let slot = SLOTS.lock()[topic.as_u32() as usize];
             if slot.len == 0 {
                 return Ok(None);
@@ -228,6 +239,8 @@ pub fn publish(notice: &Notice) -> Result<bool, Errno> {
             | NoticeTopic::AudioCapture
             | NoticeTopic::AudioDevices
             | NoticeTopic::Network
+            | NoticeTopic::DisplayOutput
+            | NoticeTopic::CueAuthority
     ) {
         return Err(Errno::PermissionDenied);
     }
@@ -420,6 +433,31 @@ mod tests {
         assert_eq!(
             Notice::decode(NoticeTopic::Network, &out[..len]),
             Ok(Notice::Network { changes: 1 })
+        );
+    }
+
+    /// Each output move the display service counts wakes a subscriber, a
+    /// re-statement wakes nobody, and anyone may read that one happened.
+    #[test]
+    fn each_counted_output_move_moves_the_generation() {
+        let _registry = registry_guard();
+        let topic = NoticeTopic::DisplayOutput;
+        let before = generation(topic, &NULL_SEAT_REGISTRY);
+        assert_eq!(publish(&Notice::DisplayOutput { changes: 1 }), Ok(true));
+        let first = generation(topic, &NULL_SEAT_REGISTRY);
+        assert_ne!(first, before);
+        assert_eq!(publish(&Notice::DisplayOutput { changes: 1 }), Ok(false));
+        assert_eq!(generation(topic, &NULL_SEAT_REGISTRY), first);
+        assert_eq!(publish(&Notice::DisplayOutput { changes: 2 }), Ok(true));
+        assert_ne!(generation(topic, &NULL_SEAT_REGISTRY), first);
+        assert!(super::may_observe(topic, 77));
+        let mut out = [0u8; NOTICE_PAYLOAD_MAX];
+        let len = payload(topic, &NULL_SEAT_REGISTRY, &no_processes(), &mut out)
+            .expect("fits")
+            .expect("published");
+        assert_eq!(
+            Notice::decode(topic, &out[..len]),
+            Ok(Notice::DisplayOutput { changes: 2 })
         );
     }
 

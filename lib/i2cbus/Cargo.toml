@@ -1,0 +1,31 @@
+[package]
+name = "tairix-i2cbus"
+description = "TAIRiX i2c-v1 controller side: the endpoint every I2C controller driver serves under its node's duty — each channel opened over a link the kernel attests, granted its own buffer, every message held to the address its link reaches and the repeated STARTs its bus can issue — and the freestanding bring-up and serve loop around it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `i2c-v1` frames, the transaction and link records.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The supplier seam the endpoint asks the kernel about its callers through,
+# and the loop it is served from.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fake kernel the endpoint's tests are answered through.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0", features = ["test-support"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability set a driver opens its node with.
+tairix-caps = { path = "../caps", version = "=0.0.0" }
+# Every decision, recorded with a stable event id.
+tairix-log = { path = "../log", version = "=0.0.0" }
+# Each channel's shared buffer, and the grant of it to its client.
+tairix-rt = { path = "../rt", version = "=0.0.0" }

@@ -266,7 +266,7 @@ fn open_reports_decoded_mode() {
     let host = MockHost::full(8);
     let fb = VesaFramebuffer::open(&host, &bgra_block(4, 2, 16, 0xFD00_0000)).expect("open");
     assert_eq!(
-        fb.mode_info().expect("mode"),
+        fb.output().expect("an output"),
         DisplayMode {
             width_px: 4,
             height_px: 2,

@@ -173,6 +173,8 @@ pub mod chmap {
     pub const SL: u8 = 9;
     /// `VIRTIO_SND_CHMAP_SR`.
     pub const SR: u8 = 10;
+    /// `VIRTIO_SND_CHMAP_RC`.
+    pub const RC: u8 = 11;
 }
 
 /// Sample-format bit positions within a PCM info record's `formats` mask.

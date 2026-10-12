@@ -1,0 +1,34 @@
+[package]
+name = "tairix-drv-clock-bcm2711-dvp"
+description = "TAIRiX autoloaded user-space driver for the BCM2711 DVP clock gates (brcm,brcm2711-dvp): serves clock-v1 for the gate of the 108 MHz clock each HDMI block's audio logic runs from, open exactly while a holder needs it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Two targets, one crate, on cargo's default paths and names like every sibling
+# driver: the bundle builder cross-compiles `--bin <package>`. The gates
+# (`src/lib.rs`) are host-testable against a register-level model, alone and
+# behind the shared `clock-v1` endpoint; the `Run` binary (`src/main.rs`) links
+# the userland runtime, so it is freestanding-only and an inert host stub
+# elsewhere (`build.rs`).
+
+[dependencies]
+# The register seam and the driver-error vocabulary.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `clock-v1` endpoint the gates are served through, and the node bring-up
+# around it.
+tairix-clock = { path = "../../../lib/clock", version = "=0.0.0" }
+
+[dev-dependencies]
+# The endpoint rig and the fake kernel its tests are answered through.
+tairix-clock = { path = "../../../lib/clock", version = "=0.0.0", features = ["test-support"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# `_start`.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

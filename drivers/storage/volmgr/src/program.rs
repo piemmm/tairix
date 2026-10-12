@@ -23,9 +23,8 @@ use tairix_abi::blkio::BLK_DATA_LEN;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, HW_NODE_ROOT};
 use tairix_abi::raid_ipc::{RAID_CANDIDATE_COMPATIBLE, RAID_MEMBER_COMPATIBLE};
 use tairix_abi::volume::{VolumeAttachRequest, VOLUME_ATTACH_MAX_LEN};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode};
+use tairix_abi::{Errno, HwDeviceClass, HwMatchKey, HwNode};
 use tairix_blkclient::{RemoteBlock, RtBlkCall};
-use tairix_caps::CapabilitySet;
 use tairix_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
 use tairix_drv_storage_volmgr::plan::{plan_volumes, PlanSummary, VolumePlan};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
@@ -92,21 +91,6 @@ const VOLMGR_RAID_CANDIDATE: EventId = EventId(4191);
 /// Diagnostic event id: the blank-device node could not be published, so this
 /// disk cannot be named when creating an array. Not fatal to anything else.
 const VOLMGR_RAID_CANDIDATE_UNPUBLISHED: EventId = EventId(4192);
-
-/// The capability set the driver host re-checks up front; the kernel is
-/// the authority and re-checks every trap. It is the least-privilege set
-/// this policy driver needs — no MMIO, DMA, or IRQ. Node emission is held
-/// only to publish the RAID member node below, and the kernel admits that
-/// emission only for resources this task already holds.
-fn driver_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    caps.insert(CapabilityId::SHM);
-    caps.insert(CapabilityId::IPC_ENDPOINT);
-    caps.insert(CapabilityId::FS_MOUNT);
-    caps.insert(CapabilityId::HW_EMIT);
-    caps.insert(CapabilityId::LOG_EMIT);
-    caps
-}
 
 /// Publish the member node the array composer's agent binds, re-declaring
 /// this device's transport under it (`plans/FIX-IO.md` `IO6c`).
@@ -339,7 +323,11 @@ fn attach_all(endpoint: u64, window_id: u64, plans: &[VolumePlan]) -> u64 {
 /// driver afresh.
 fn main() -> i32 {
     // No MMIO/DMA grants to map, so no coherency shim is needed.
-    let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+    let caps = tairix_drv_storage_volmgr::REQUIRED_CAPABILITIES
+        .iter()
+        .copied()
+        .collect();
+    let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
         return EXIT_NO_HOST;
     };
     // The matched storage node carried two transport grants: the blkio
@@ -402,17 +390,20 @@ fn main() -> i32 {
                 publish_raid_candidate(endpoint, window_id);
             }
         }
-        return 0;
+    } else {
+        // A refused sibling volume was logged above; the exit stays `0` so a
+        // partially attachable device still serves what it can.
+        log_hex_event(
+            VOLMGR_PROBED,
+            Level::Info,
+            "volmgr: device probed and volumes published",
+            "attached_hex",
+            attached,
+        );
     }
-    // A refused sibling volume was logged above; the exit stays `0` so a
-    // partially attachable device still serves what it can.
-    log_hex_event(
-        VOLMGR_PROBED,
-        Level::Info,
-        "volmgr: device probed and volumes published",
-        "attached_hex",
-        attached,
-    );
+    // Everything the device holds is published and nothing appears later. A
+    // refused settle only leaves the device manager to wait out its bound.
+    let _ = tairix_rt::hw_node_settle();
     0
 }
 

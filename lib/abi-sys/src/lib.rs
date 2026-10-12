@@ -170,6 +170,8 @@ const NUM_HW_EMIT_NODE: u64 = SyscallNumber::HW_EMIT_NODE.as_u16() as u64;
 const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 const NUM_HW_NODE_HEALTH: u64 = SyscallNumber::HW_NODE_HEALTH.as_u16() as u64;
 const NUM_HW_SELF_NODE: u64 = SyscallNumber::HW_SELF_NODE.as_u16() as u64;
+const NUM_HW_NODE_SETTLE: u64 = SyscallNumber::HW_NODE_SETTLE.as_u16() as u64;
+const NUM_CONSOLE_RELOCATE: u64 = SyscallNumber::CONSOLE_RELOCATE.as_u16() as u64;
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
 const NUM_SHM_MAP: u64 = SyscallNumber::SHM_MAP.as_u16() as u64;
@@ -2325,26 +2327,56 @@ pub extern "C" fn sys_hw_node_health(health: u64) -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_HW_NODE_HEALTH, [health, 0, 0, 0, 0, 0])) }
 }
 
-/// `hw_self_node`: report the hardware-tree node id the calling driver was
-/// autoloaded for (`SyscallNumber::HW_SELF_NODE`). Returns the caller's own
-/// node id (`≥ 0`) on success, or a `TAIRIX_E_*` code reinterpreted into the
-/// result.
+/// `hw_self_node`: write the calling driver's own node record into `buf` (a
+/// buffer of `len` bytes) (`SyscallNumber::HW_SELF_NODE`) — the hardware-tree
+/// node it was autoloaded for and the keys that node is matched by, a
+/// `tairix_hw_self_node` record. Returns the bytes written, or a `TAIRIX_E_*`
+/// code reinterpreted into the result.
 ///
-/// A leaf block driver uses this to locate itself in the discovered topology,
-/// so it can read the published fault-domain health of its parent
-/// bus/hub/controller chain and attribute a controller-wide blip to the fault
-/// domain rather than to the disk. It needs no capability (learning one's
-/// *own* node id is the unprivileged self-identity baseline); the kernel
-/// resolves the node from the caller's task id, never a caller-supplied id, so
-/// a driver only ever learns its own identity and never the global tree. A
-/// caller with no matched node fails closed.
+/// It needs no capability (learning one's *own* node is the unprivileged
+/// self-identity baseline); the kernel resolves the node from the caller's
+/// task, never a caller-supplied id, and validates the `(buf, len)` pair
+/// against the caller's address space before writing it. A caller with no
+/// matched node, or a buffer too small for the record, fails closed.
 #[must_use]
 #[export_name = "tairix_sys_hw_self_node"]
-pub extern "C" fn sys_hw_self_node() -> u64 {
+pub extern "C" fn sys_hw_self_node(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates the `(buf, len)` pair
+    // against the caller's address space before writing it.
+    unsafe { raw_syscall(NUM_HW_SELF_NODE, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
+}
+
+/// `hw_node_settle`: mark the calling driver's own node settled
+/// (`SyscallNumber::HW_NODE_SETTLE`) once everything its device presented as
+/// it came up has been published, so a child published after it is one that
+/// arrived on a running machine. Requires `TAIRIX_CAP_HW_EMIT`; the kernel
+/// settles the caller's own matched node only, and a caller with none fails
+/// closed. Returns a `TAIRIX_E_*` code (`0` on success).
+#[must_use]
+#[export_name = "tairix_sys_hw_node_settle"]
+pub extern "C" fn sys_hw_node_settle() -> i32 {
     // SAFETY: `raw_syscall` is always safe to invoke; the kernel resolves the
     // caller's own matched node on the far side of the trap. No memory operand
     // is passed.
-    unsafe { raw_syscall(NUM_HW_SELF_NODE, [0, 0, 0, 0, 0, 0]) }
+    unsafe { ret_i32(raw_syscall(NUM_HW_NODE_SETTLE, [0, 0, 0, 0, 0, 0])) }
+}
+
+/// `console_relocate`: move the kernel's framebuffer console off the
+/// firmware's memory onto memory the kernel owns and the caller's device
+/// reaches, writing that surface into `buf` (a buffer of `len` bytes) as one
+/// framebuffer `tairix_hw_resource_t` (`SyscallNumber::CONSOLE_RELOCATE`).
+/// Returns the bytes written, or a `TAIRIX_E_*` code reinterpreted into the
+/// result.
+///
+/// Requires `TAIRIX_CAP_MEM_DMA`; the kernel answers only the driver of a
+/// node discovery marked `TAIRIX_HW_PROPERTY_BOOT_CONSOLE`, and validates the
+/// `(buf, len)` pair against the caller's address space before writing it.
+#[must_use]
+#[export_name = "tairix_sys_console_relocate"]
+pub extern "C" fn sys_console_relocate(buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates the `(buf, len)` pair
+    // against the caller's address space before writing it.
+    unsafe { raw_syscall(NUM_CONSOLE_RELOCATE, [ptr_arg(buf), len as u64, 0, 0, 0, 0]) }
 }
 
 /// `msi_alloc`: allocate a message-signalled interrupt (MSI) vector for a PCI
@@ -3622,7 +3654,9 @@ mod tests {
         (NUM_HW_EMIT_NODE, "hw_emit_node", 2),
         (NUM_HW_REMOVE_NODE, "hw_remove_node", 2),
         (NUM_HW_NODE_HEALTH, "hw_node_health", 1),
-        (NUM_HW_SELF_NODE, "hw_self_node", 0),
+        (NUM_HW_SELF_NODE, "hw_self_node", 2),
+        (NUM_HW_NODE_SETTLE, "hw_node_settle", 0),
+        (NUM_CONSOLE_RELOCATE, "console_relocate", 2),
         (NUM_MSI_ALLOC, "msi_alloc", 2),
         (NUM_SHM_CREATE, "shm_create", 2),
         (NUM_SHM_MAP, "shm_map", 2),
@@ -3797,6 +3831,15 @@ mod tests {
             );
         });
         assert_eq!(number, NUM_BOOT_SESSION_GET);
+        assert_eq!(args, NO_ARGS);
+    }
+
+    #[test]
+    fn hw_node_settle_passes_no_operand() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_hw_node_settle(), 0);
+        });
+        assert_eq!(number, NUM_HW_NODE_SETTLE);
         assert_eq!(args, NO_ARGS);
     }
 
@@ -4239,6 +4282,20 @@ mod tests {
             assert_eq!(sys_resource_grants(ptr, len), len as u64);
         });
         assert_eq!(number, NUM_RESOURCE_GRANTS);
+        assert_eq!(args[0], ptr as usize as u64);
+        assert_eq!(args[1], len as u64);
+        assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn console_relocate_marshals_pointer_and_len() {
+        let mut buf = [0u8; tairix_abi::HwResource::WIRE_LEN];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let len = buf.len();
+        let (number, args) = capture(len as u64, || {
+            assert_eq!(sys_console_relocate(ptr, len), len as u64);
+        });
+        assert_eq!(number, NUM_CONSOLE_RELOCATE);
         assert_eq!(args[0], ptr as usize as u64);
         assert_eq!(args[1], len as u64);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);

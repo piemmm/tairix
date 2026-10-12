@@ -63,6 +63,7 @@ const EVERY_PANE: &[Pane] = &[
     Pane::TcpIp,
     Pane::Bluetooth,
     Pane::Sound,
+    Pane::SoundEffects,
     Pane::Notifications,
     Pane::Keyboard,
     Pane::Mouse,
@@ -419,7 +420,7 @@ fn a_closed_strip_lists_the_categories_alone() {
 
 #[test]
 fn a_single_pane_category_never_discloses_a_pane_row() {
-    let rows = strip_rows(&opened(&[Category::Sound]), "");
+    let rows = strip_rows(&opened(&[Category::Keyboard]), "");
     assert!(!rows.iter().any(|row| matches!(row, StripRow::Pane(..))));
 }
 
@@ -451,8 +452,28 @@ fn only_a_disclosing_category_row_has_no_destination() {
 
 #[test]
 fn a_search_reaches_a_category_by_its_own_label() {
-    let rows = strip_rows(&opened(&[Category::General]), "sound");
-    assert_eq!(rows, alloc::vec![StripRow::Category(Category::Sound)]);
+    let rows = strip_rows(&opened(&[Category::General]), "keyboard");
+    assert_eq!(rows, alloc::vec![StripRow::Category(Category::Keyboard)]);
+}
+
+/// The Sound category holds the devices and the desktop's own sounds, and a
+/// search discloses whichever of them it reaches.
+#[test]
+fn a_search_reaches_each_sound_pane_by_what_it_sets() {
+    assert_eq!(
+        strip_rows(&opened(&[Category::General]), "sound effects"),
+        alloc::vec![
+            StripRow::Category(Category::Sound),
+            StripRow::Pane(Category::Sound, Pane::SoundEffects),
+        ]
+    );
+    assert_eq!(
+        strip_rows(&opened(&[Category::General]), "microphone"),
+        alloc::vec![
+            StripRow::Category(Category::Sound),
+            StripRow::Pane(Category::Sound, Pane::Sound),
+        ]
+    );
 }
 
 #[test]

@@ -109,6 +109,10 @@ impl HwTreeSource for Tree {
         self.nodes.lock().iter().for_each(visit);
         Ok(())
     }
+
+    fn settle(&self, _node_id: u32) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// A reference unit, its frames and a tree, in statics of this expansion's

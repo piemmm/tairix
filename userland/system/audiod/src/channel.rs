@@ -183,6 +183,19 @@ impl<T: AudioChannelTransport> AudioChannelClient<T> {
         )
     }
 
+    /// Name the port the driver tells of a change to any endpoint's
+    /// connector.
+    ///
+    /// # Errors
+    ///
+    /// A transport failure, or the driver's typed refusal.
+    pub fn watch(&mut self, notify_endpoint: u64) -> Result<(), Errno> {
+        self.exchange(
+            AudioChannelRequest::Watch { notify_endpoint },
+            decode_status_reply,
+        )
+    }
+
     /// Encode `request`, call the driver, and decode its reply with `decode`.
     ///
     /// The one place a request frame is built and a reply is read, so no

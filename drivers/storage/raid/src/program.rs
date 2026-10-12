@@ -291,24 +291,6 @@ struct Composer {
     scratch: Vec<u8>,
 }
 
-/// The capability set the driver host re-checks up front; the kernel is the
-/// authority and re-checks every trap. It is the least-privilege set the
-/// composer needs: own the reserved rendezvous and each array's block endpoint
-/// and connect to each member (`CAP_IPC_ENDPOINT`), map each member's window
-/// and create each array's (`CAP_SHM`), publish the array node
-/// (`CAP_HW_EMIT`), record its decisions (`CAP_LOG_EMIT`), and bind the
-/// reserved rendezvous id a squatter must not claim first
-/// (`CAP_IPC_BIND_PRIVILEGED`). No MMIO, DMA, IRQ, or mount authority.
-fn driver_caps() -> CapabilitySet {
-    let mut caps = CapabilitySet::empty();
-    caps.insert(CapabilityId::IPC_ENDPOINT);
-    caps.insert(CapabilityId::SHM);
-    caps.insert(CapabilityId::HW_EMIT);
-    caps.insert(CapabilityId::LOG_EMIT);
-    caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
-    caps
-}
-
 /// Emit one diagnostic record carrying a single hex-rendered field.
 fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static str, value: u64) {
     let mut value_buf = [0u8; 16];
@@ -1562,7 +1544,11 @@ impl Composer {
 }
 
 fn main() -> i32 {
-    let Ok(_host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+    let caps = tairix_drv_storage_raid::REQUIRED_CAPABILITIES
+        .iter()
+        .copied()
+        .collect();
+    let Ok(_host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
         return EXIT_NO_HOST;
     };
     if !create_registry_endpoint() {
@@ -1623,6 +1609,10 @@ fn main() -> i32 {
     );
 
     let mut composer = Composer::new(set, member_set, maintenance_scratch());
+    // An array is composed from members offered later, never found as the
+    // composer comes up, so it has nothing of its own to publish first. A
+    // refused settle only leaves the device manager to wait out its bound.
+    let _ = tairix_rt::hw_node_settle();
     loop {
         let now_ns = tairix_rt::clock_get();
         let now_wall = tairix_rt::wall_time()

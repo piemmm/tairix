@@ -131,9 +131,10 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
         if causes.is_empty() {
             return;
         }
+        // A connector changes whether or not anything plays through it; only
+        // the period sources are held down with nowhere to put frames.
         if !self.server.any_attached() {
             let _ = self.server.audio_mut().set_event_interrupts(false);
-            return;
         }
         for endpoint in 0..MAX_DEVICE_ENDPOINTS {
             self.report_endpoint(causes, endpoint);
@@ -149,14 +150,13 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
             self.service_loss(endpoint);
         }
         if AudioInterrupt::names(causes.jack_changed, endpoint) {
-            if let Ok(facts) = self.server.audio().endpoint_facts(endpoint) {
-                self.notify(
+            let watch = self.server.watch_endpoint();
+            if let (Some(port), Ok(facts)) = (watch, self.server.audio().endpoint_facts(endpoint)) {
+                let changed = AudioChannelNotify::JackChanged {
                     endpoint,
-                    AudioChannelNotify::JackChanged {
-                        endpoint,
-                        jack: facts.jack,
-                    },
-                );
+                    jack: facts.jack,
+                };
+                self.io.notify(port, &changed.encode());
             }
         }
     }
@@ -316,6 +316,10 @@ impl<A: Audio, I: ChannelIo> Dispatcher<A, I> {
                 if !self.server.any_attached() {
                     let _ = self.server.audio_mut().set_event_interrupts(false);
                 }
+                self.io.reply(ticket, &reply);
+            }
+            Ok(AudioChannelRequest::Watch { notify_endpoint }) => {
+                let reply = self.server.watch(notify_endpoint);
                 self.io.reply(ticket, &reply);
             }
             Err(err) => self.io.reply(ticket, &encode_status_reply(Err(err))),

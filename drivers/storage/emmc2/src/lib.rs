@@ -198,7 +198,7 @@ pub enum DmaArea {
 }
 
 /// The environment the metal [`IrqSdhci`] host runs the engine in: the
-/// completion park, the timed wait, and where the engine's trace goes.
+/// completion park and the timed wait.
 ///
 /// The driver is generic over `lib/abi` only, so it cannot name the kernel's
 /// IRQ-wait machinery; the kernel supplies an implementation that blocks the
@@ -210,10 +210,6 @@ pub trait CompletionWait: Delay {
     /// implementation's bounded budget elapses; the caller re-reads
     /// `INTERRUPT` on a fire and fails closed on a timeout.
     fn await_irq(&self) -> CompletionSignal;
-
-    /// Record a step of the engine's work as a [`Trace`] record; an
-    /// environment that records nothing keeps this no-op.
-    fn trace(&self, _record: Trace) {}
 }
 
 /// The signalling voltage of the card's I/O rail.
@@ -358,10 +354,6 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
             staging.data.withhold();
             staging.table.withhold();
         }
-    }
-
-    fn trace(&mut self, record: Trace) {
-        self.waiter.trace(record);
     }
 }
 

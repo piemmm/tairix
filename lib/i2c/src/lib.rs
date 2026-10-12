@@ -17,10 +17,10 @@
 //! # What a caller holds
 //!
 //! A [`Device`] is one [`I2cPort`], which is the whole authority a chip driver
-//! has: on the real bus that port is the transfer endpoint its bus driver
-//! serves it on, and no address crosses that wire, so a chip driver cannot
-//! reach a neighbour however it is compromised. The same [`Device`] runs
-//! unchanged against a mock part in a host test.
+//! has: on the real bus that port is a target channel, which reaches the one
+//! address its link names, so a chip driver cannot reach a neighbour however
+//! it is compromised. The same [`Device`] runs unchanged against a mock part
+//! in a host test.
 //!
 //! Reference: the I²C-bus specification, NXP UM10204.
 
@@ -28,21 +28,15 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-pub use tairix_abi::driver::i2c::{I2cPort, MAX_TRANSFER_LEN};
+pub use tairix_abi::driver::i2c::I2cPort;
 use tairix_abi::DriverError;
 
-/// The largest register block one transaction can carry.
-///
-/// One byte of the write phase is spent on the register pointer, so a block
-/// write reaches one byte less than the phase bound. Derived rather than
-/// restated, so it cannot drift from the seam's own bound.
-pub const MAX_BLOCK_LEN: usize = MAX_TRANSFER_LEN - 1;
+/// The longest register block one write carries: an `SMBus` block, which
+/// bounds the frame the write builds with its register pointer.
+pub const MAX_BLOCK_LEN: usize = 32;
 
 /// One register-addressed part, reached over its own transfer port.
-///
-/// Copy-cheap over a borrowed port, so a driver can hold one per functional
-/// block of a chip that answers on several ports.
-#[derive(Copy, Clone, Debug)]
+#[derive(Debug)]
 pub struct Device<P> {
     port: P,
 }
@@ -58,13 +52,9 @@ impl<P: I2cPort> Device<P> {
     ///
     /// # Errors
     ///
-    /// [`DriverError::LengthOutOfRange`] if `out` is longer than
-    /// [`MAX_TRANSFER_LEN`]; otherwise whatever the port reports
-    /// ([`I2cPort::transfer`]). `out` is left untouched on every failure.
-    pub fn read(&self, first: u8, out: &mut [u8]) -> Result<(), DriverError> {
-        if out.len() > MAX_TRANSFER_LEN {
-            return Err(DriverError::LengthOutOfRange);
-        }
+    /// Whatever the port reports ([`I2cPort::transfer`]). `out` is left
+    /// untouched on every failure.
+    pub fn read(&mut self, first: u8, out: &mut [u8]) -> Result<(), DriverError> {
         self.port.transfer(&[first], out)
     }
 
@@ -73,7 +63,7 @@ impl<P: I2cPort> Device<P> {
     /// # Errors
     ///
     /// As [`read`](Self::read).
-    pub fn read_one(&self, register: u8) -> Result<u8, DriverError> {
+    pub fn read_one(&mut self, register: u8) -> Result<u8, DriverError> {
         let mut byte = [0u8];
         self.read(register, &mut byte)?;
         Ok(byte[0])
@@ -86,11 +76,11 @@ impl<P: I2cPort> Device<P> {
     /// [`DriverError::LengthOutOfRange`] if `bytes` is longer than
     /// [`MAX_BLOCK_LEN`] (the pointer byte shares the write phase);
     /// otherwise whatever the port reports ([`I2cPort::transfer`]).
-    pub fn write(&self, first: u8, bytes: &[u8]) -> Result<(), DriverError> {
+    pub fn write(&mut self, first: u8, bytes: &[u8]) -> Result<(), DriverError> {
         if bytes.len() > MAX_BLOCK_LEN {
             return Err(DriverError::LengthOutOfRange);
         }
-        let mut frame = [0u8; MAX_TRANSFER_LEN];
+        let mut frame = [0u8; MAX_BLOCK_LEN + 1];
         frame[0] = first;
         frame[1..=bytes.len()].copy_from_slice(bytes);
         self.port.transfer(&frame[..=bytes.len()], &mut [])
@@ -101,7 +91,7 @@ impl<P: I2cPort> Device<P> {
     /// # Errors
     ///
     /// As [`write`](Self::write).
-    pub fn write_one(&self, register: u8, value: u8) -> Result<(), DriverError> {
+    pub fn write_one(&mut self, register: u8, value: u8) -> Result<(), DriverError> {
         self.write(register, &[value])
     }
 
@@ -116,7 +106,7 @@ impl<P: I2cPort> Device<P> {
     ///
     /// As [`read`](Self::read) and [`write`](Self::write).
     pub fn update_one<F: FnOnce(u8) -> u8>(
-        &self,
+        &mut self,
         register: u8,
         update: F,
     ) -> Result<(), DriverError> {

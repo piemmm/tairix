@@ -583,6 +583,7 @@ const fn identity(route: u32, product_id: u16, interface_class: u32) -> DeviceId
         interface_number: 0,
         interface_class,
         serial_number: None,
+        removable: true,
     }
 }
 

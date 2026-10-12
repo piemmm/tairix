@@ -566,12 +566,12 @@ fn graphics_device() -> DisplayStats {
                 per_layer_opacity: true,
             }),
         },
-        mode: DisplayMode {
+        mode: Some(DisplayMode {
             width_px: 1920,
             height_px: 1080,
             stride_bytes: 7680,
             format: DisplayFormat::Bgra8888,
-        },
+        }),
     }
 }
 

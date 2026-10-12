@@ -1415,21 +1415,21 @@ mod tests {
         let cell = human_db();
         // The whole directory: compiled rows first, then the human half.
         let all = rows(&user_directory_page(&cell, 0, 64).expect("page encodes"));
-        assert_eq!(all.len(), 13);
+        assert_eq!(all.len(), 14);
         assert_eq!(all[0], (0, String::from("system")));
-        assert_eq!(all[12], (1000, String::from("root")));
+        assert_eq!(all[13], (1000, String::from("root")));
         // A page straddling the seam carries the tail of the compiled half
         // and the head of the human half.
-        let seam = rows(&user_directory_page(&cell, 11, 2).expect("page encodes"));
+        let seam = rows(&user_directory_page(&cell, 12, 2).expect("page encodes"));
         assert_eq!(
             seam,
             alloc::vec![
-                (tairix_users::DISCOVERYD_UID.0, String::from("discoveryd")),
+                (tairix_users::SOUNDD_UID.0, String::from("soundd")),
                 (1000, String::from("root")),
             ]
         );
         // An offset past the end is the empty paging terminator.
-        assert!(rows(&user_directory_page(&cell, 13, 64).expect("page encodes")).is_empty());
+        assert!(rows(&user_directory_page(&cell, 14, 64).expect("page encodes")).is_empty());
     }
 
     /// Decode a group page's packed records into owned `(gid, name)` rows.

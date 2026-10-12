@@ -70,6 +70,12 @@ pub const MC146818_COMPATIBLE: &[u8] = b"motorola,mc146818";
 /// match ranks above a generic class-wildcard driver.
 const BIND_PRIORITY: u16 = 10;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the port-I/O trap its port pair is reached through, which `CAP_MMIO_MAP`
+/// gates, and the restricted-sender RTC endpoint.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] =
+    &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED];
+
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from, so the
 /// match data can never drift from the driver.

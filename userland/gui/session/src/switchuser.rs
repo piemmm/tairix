@@ -74,15 +74,12 @@ pub trait SessionAuthority {
     fn request_background(&mut self) -> Result<SessionVerdict, Errno>;
 }
 
-/// The session's ownership of the screen, as the switch drives it.
+/// The session giving the screen up, as the switch drives it.
 ///
 /// Every method is a step the switch performs in a fixed order and nothing
 /// else calls: [`fade_out`](Self::fade_out), [`suspend`](Self::suspend),
-/// then [`release_seat`](Self::release_seat) on the way out, and
-/// [`acquire_seat`](Self::acquire_seat), [`query_mode`](Self::query_mode),
-/// [`reconfigure`](Self::reconfigure), [`fade_in`](Self::fade_in),
-/// [`repaint_all`](Self::repaint_all) on the way back.
-pub trait SeatPresentation {
+/// then [`release_seat`](Self::release_seat).
+pub trait SeatDeparture {
     /// Dissolve the screen to black, presenting every frame of it, and
     /// return once it is fully dark.
     ///
@@ -93,14 +90,6 @@ pub trait SeatPresentation {
     /// the fade's own span, and complete at once under a reduced-motion
     /// theme.
     fn fade_out(&mut self);
-
-    /// Put the screen at black and begin fading it back up, so the repaint
-    /// that follows appears rather than snaps on.
-    ///
-    /// The seat comes back cleared, so this session returns exactly as a
-    /// fresh one arrives. Only the first frame is drawn here; the serve loop
-    /// carries the rest, having its next frame folded into its own park.
-    fn fade_in(&mut self);
 
     /// Stop compositing and hand back the shared frame region.
     ///
@@ -113,7 +102,16 @@ pub trait SeatPresentation {
     /// The kernel purges the seat's undrained input on the lease change, so
     /// nothing typed at this desktop reaches the next owner.
     fn release_seat(&mut self);
+}
 
+/// The session taking the screen back, as the switch drives it.
+///
+/// Every method is a step the switch performs in a fixed order and nothing
+/// else calls: [`acquire_seat`](Self::acquire_seat),
+/// [`query_output`](Self::query_output), [`reconfigure`](Self::reconfigure),
+/// [`publish_desktop`](Self::publish_desktop), [`fade_in`](Self::fade_in),
+/// [`repaint_all`](Self::repaint_all).
+pub trait SeatReturn {
     /// Re-take the seat lease.
     ///
     /// # Errors
@@ -122,20 +120,21 @@ pub trait SeatPresentation {
     /// this session may no longer take it.
     fn acquire_seat(&mut self) -> Result<(), Errno>;
 
-    /// Re-read the display mode now in force.
+    /// Re-read the display's output: the mode it runs now, or [`None`] while
+    /// nothing is connected.
     ///
     /// # Errors
     ///
     /// The display service's typed refusal or a transport failure. The mode
     /// is never guessed from the one this session came up with.
-    fn query_mode(&mut self) -> Result<DisplayMode, Errno>;
+    fn query_output(&mut self) -> Result<Option<DisplayMode>, Errno>;
 
     /// Re-establish the shared frame region for `mode` and re-lay every
     /// surface whose geometry comes from the mode.
     ///
     /// Everything mode-sized is rebuilt here rather than assumed: the frame
     /// region, the compositor's own buffers, the bar, the desktop icons,
-    /// and the wallpaper's fit.
+    /// the windows, the prompts, the screensaver, and the wallpaper's fit.
     ///
     /// # Errors
     ///
@@ -148,6 +147,14 @@ pub trait SeatPresentation {
     /// comes back to need not be the one it stepped aside from, and an
     /// application that was not told would lay itself out to the old one.
     fn publish_desktop(&mut self);
+
+    /// Put the screen at black and begin fading it back up, so the repaint
+    /// that follows appears rather than snaps on.
+    ///
+    /// The seat comes back cleared, so this session returns exactly as a
+    /// fresh one arrives. Only the first frame is drawn here; the serve loop
+    /// carries the rest, having its next frame folded into its own park.
+    fn fade_in(&mut self);
 
     /// Repaint every pixel of `mode` and present it.
     ///
@@ -219,7 +226,7 @@ impl WakeRefusal {
 pub enum ResumeFailure {
     /// The seat could not be re-acquired.
     SeatRefused(Errno),
-    /// The display mode could not be re-read.
+    /// The display's output could not be re-read.
     ModeUnavailable(Errno),
     /// The shared frame could not be re-established for that mode.
     FrameRefused(Errno),
@@ -234,7 +241,7 @@ impl ResumeFailure {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::SeatRefused(_) => "could not take the screen back; ending the session",
-            Self::ModeUnavailable(_) => "could not re-read the display mode; ending the session",
+            Self::ModeUnavailable(_) => "could not re-read the display output; ending the session",
             Self::FrameRefused(_) => "could not re-establish the display frame; ending the session",
             Self::PaintRefused(_) => "could not repaint the screen; ending the session",
         }
@@ -329,7 +336,7 @@ impl SwitchUser {
     pub fn step_aside(
         &mut self,
         authority: &mut dyn SessionAuthority,
-        presentation: &mut dyn SeatPresentation,
+        presentation: &mut dyn SeatDeparture,
     ) -> Result<(), SwitchRefusal> {
         if !self.is_available() || self.background {
             return Err(SwitchRefusal::Unavailable);
@@ -368,13 +375,14 @@ impl SwitchUser {
         SessionWake::decode(message).map_err(WakeRefusal::Malformed)
     }
 
-    /// Come back to the foreground: re-take the seat, re-read the mode —
-    /// which may have changed while another account held the screen —
+    /// Come back to the foreground: re-take the seat, re-read the output —
+    /// which may have moved while another account held the screen —
     /// re-establish the shared frame for it, and repaint every pixel out of
     /// black.
     ///
-    /// Answers the mode now in force, which the caller uses to rebuild what
-    /// it owns outside the presentation (the pointer's screen rectangle).
+    /// Answers the mode now in force, or [`None`] when no output is
+    /// connected: the session is foreground then, holding the seat and
+    /// drawing nothing until an output arrives (`plans/DISPLAY.md` D12).
     ///
     /// # Errors
     ///
@@ -382,25 +390,34 @@ impl SwitchUser {
     /// stays background, because it still has no screen to draw on.
     pub fn resume(
         &mut self,
-        presentation: &mut dyn SeatPresentation,
-    ) -> Result<DisplayMode, ResumeFailure> {
+        presentation: &mut dyn SeatReturn,
+    ) -> Result<Option<DisplayMode>, ResumeFailure> {
         presentation
             .acquire_seat()
             .map_err(ResumeFailure::SeatRefused)?;
-        let mode = presentation
-            .query_mode()
+        let output = presentation
+            .query_output()
             .map_err(ResumeFailure::ModeUnavailable)?;
-        presentation
-            .reconfigure(mode)
-            .map_err(ResumeFailure::FrameRefused)?;
+        // The output moved after it was read: its announcement brings the
+        // session onto where it went, so it comes back dormant meanwhile.
+        let output = match output.map(|mode| presentation.reconfigure(mode)) {
+            Some(Err(Errno::Stale)) => None,
+            Some(Err(err)) => return Err(ResumeFailure::FrameRefused(err)),
+            Some(Ok(())) | None => output,
+        };
+        // Dormant or not, the desktop record on the board is the last
+        // foreground session's, so this one's is published either way.
         presentation.publish_desktop();
-        // Before the repaint, so the frame it presents is the first of the
-        // fade rather than the full-strength desktop appearing at once.
-        presentation.fade_in();
-        presentation
-            .repaint_all(mode)
-            .map_err(ResumeFailure::PaintRefused)?;
+        if let Some(mode) = output {
+            // Before the repaint, so the frame it presents is the first of
+            // the fade rather than the full-strength desktop appearing at
+            // once.
+            presentation.fade_in();
+            presentation
+                .repaint_all(mode)
+                .map_err(ResumeFailure::PaintRefused)?;
+        }
         self.background = false;
-        Ok(mode)
+        Ok(output)
     }
 }

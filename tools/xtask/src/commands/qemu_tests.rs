@@ -33,6 +33,7 @@ use tairix_qemu::{
     DmaTranslation, InterruptControllers, NamedKey, Outcome, ReservedSocket, Runner, SoundCard,
     Spec,
 };
+use tairix_test_audio_wire::ReportedLoss;
 
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
@@ -537,6 +538,12 @@ enum FsDisk {
     /// walks the codec on its link and hands its channel to `audiod`. Only
     /// this disk carries the fixtures; no production image ships them.
     HdaAudioRootDisk,
+    /// The [`Self::AudioRootDisk`] layout with no machine sound document, so
+    /// the machine's own default policy plays every lifecycle sound: the
+    /// lifecycle verticals' backing (`plans/SOUND.md` SND22). Every other
+    /// audio disk turns off the sounds its script provokes
+    /// ([`sound_plant`]), because each holds its capture to one signal.
+    LifecycleAudioRootDisk,
     /// The [`Self::StreamRootDisk`] layout **plus** a planted
     /// `/System/Settings/Configuration/system.conf`
     /// ([`tairix_test_netstack_wire::ECN_SYSTEM_CONF`]) that turns
@@ -1269,6 +1276,56 @@ const AUDIOSEAT_SERIAL: &[(&str, Duration, &str)] = &[
         Duration::ZERO,
         "exit\n",
     ),
+];
+
+/// The cue verticals' shell line: the fixture's cue run.
+const AUDIOCUE_LINE: &str = "audiotone cue\n";
+
+/// The serial script the cue verticals run: unlock, log in, ask the cue
+/// authority for a desktop sound, and exit once it has played out.
+const AUDIOCUE_SERIAL: &[(&str, Duration, &str)] = &[
+    ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+    ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
+    ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+    ("root@tairix ~% ", Duration::ZERO, AUDIOCUE_LINE),
+    (
+        tairix_test_audio_wire::CUE_PASS_MARKER,
+        Duration::ZERO,
+        "exit\n",
+    ),
+];
+
+/// The machine sounds an audio vertical's script provokes, in the order it
+/// provokes them: its boot, and the session it opens and closes.
+const SCRIPTED_LIFECYCLE: [tairix_soundtheme::SoundEvent; 3] = [
+    tairix_soundtheme::SoundEvent::Startup,
+    tairix_soundtheme::SoundEvent::Login,
+    tairix_soundtheme::SoundEvent::Logout,
+];
+
+/// `soundd`'s record that the startup sound played out, as the kernel's
+/// diagnostic sink writes it. It and its two siblings are pinned to the
+/// service's own event and messages by a unit test below.
+const STARTUP_PLAYED_MARKER: &str = "id=22008 soundd: the startup sound played out";
+/// [`STARTUP_PLAYED_MARKER`] for the login sound.
+const LOGIN_PLAYED_MARKER: &str = "id=22008 soundd: the login sound played out";
+/// [`STARTUP_PLAYED_MARKER`] for the logout sound.
+const LOGOUT_PLAYED_MARKER: &str = "id=22008 soundd: the logout sound played out";
+
+/// The serial markers that are one-shot witnesses rather than prompts: records
+/// a run emits once, each the effect of the script's own previous step, so they
+/// are matched over the whole transcript and one landing before that step's
+/// match still opens its step.
+const SERIAL_WITNESSES: [&str; 2] = [STARTUP_PLAYED_MARKER, LOGIN_PLAYED_MARKER];
+
+/// The serial script the lifecycle verticals run: unlock, sign in once the
+/// startup sound has played out, and sign out once the login sound has, so no
+/// two sounds overlap and the capture holds each master whole.
+const LIFECYCLE_SERIAL: &[(&str, Duration, &str)] = &[
+    ("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE),
+    (STARTUP_PLAYED_MARKER, Duration::ZERO, SESSION_USERNAME_LINE),
+    ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
+    (LOGIN_PLAYED_MARKER, Duration::ZERO, "exit\n"),
 ];
 
 /// Serial marker the TCP-listener vertical waits for before typing the shell
@@ -7293,6 +7350,171 @@ static TESTS: &[QemuTest] = &[
         serial: AUDIOSEAT_SERIAL,
         expect: Expect::Pass,
     },
+    // `plans/SOUND.md` SND21: the aarch64 cue vertical — the same disk and
+    // sound card, with `audiotone cue` asking the cue authority for a desktop
+    // sound. `soundd` resolves it to the shipped theme's asset, decodes it in
+    // its parser sandbox and plays it through `audiod`, refilling a ring the
+    // sound outlasts; the host holds the capture to the master's own decoded
+    // samples, which it decodes independently of the guest.
+    QemuTest {
+        package: "tairix-test-audio-qemu-aarch64",
+        binary: "tairix-test-audio-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: AUDIOCUE_SERIAL,
+        expect: Expect::Pass,
+    },
+    // `plans/SOUND.md` SND21: the riscv64 cue vertical — the same disk and
+    // sound card, with `audiotone cue` asking the cue authority for a desktop
+    // sound. `soundd` resolves it to the shipped theme's asset, decodes it in
+    // its parser sandbox and plays it through `audiod`, refilling a ring the
+    // sound outlasts; the host holds the capture to the master's own decoded
+    // samples, which it decodes independently of the guest.
+    QemuTest {
+        package: "tairix-test-audio-qemu-riscv64",
+        binary: "tairix-test-audio-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: AUDIOCUE_SERIAL,
+        expect: Expect::Pass,
+    },
+    // `plans/SOUND.md` SND21: the x86_64 cue vertical — the same disk and
+    // sound card, with `audiotone cue` asking the cue authority for a desktop
+    // sound. `soundd` resolves it to the shipped theme's asset, decodes it in
+    // its parser sandbox and plays it through `audiod`, refilling a ring the
+    // sound outlasts; the host holds the capture to the master's own decoded
+    // samples, which it decodes independently of the guest.
+    QemuTest {
+        package: "tairix-test-audio-qemu-x86-64",
+        binary: "tairix-test-audio-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: AUDIOCUE_SERIAL,
+        expect: Expect::Pass,
+    },
+    // `plans/SOUND.md` SND22: the aarch64 lifecycle vertical — the virtio sound
+    // card with the machine's own default policy. Init cues the startup sound
+    // once the boot floor has settled and the root is mounted, the login
+    // service cues the login and logout sounds around the scripted session,
+    // and the host holds the capture to the three shipped masters in order.
+    QemuTest {
+        package: "tairix-test-audio-qemu-aarch64",
+        binary: "tairix-test-audio-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::LifecycleAudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: LIFECYCLE_SERIAL,
+        expect: Expect::Pass,
+    },
+    // `plans/SOUND.md` SND22: the riscv64 lifecycle vertical — the virtio sound
+    // card with the machine's own default policy. Init cues the startup sound
+    // once the boot floor has settled and the root is mounted, the login
+    // service cues the login and logout sounds around the scripted session,
+    // and the host holds the capture to the three shipped masters in order.
+    QemuTest {
+        package: "tairix-test-audio-qemu-riscv64",
+        binary: "tairix-test-audio-qemu-riscv64",
+        target: "riscv64gc-unknown-none-elf",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::LifecycleAudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: LIFECYCLE_SERIAL,
+        expect: Expect::Pass,
+    },
+    // `plans/SOUND.md` SND22: the x86_64 lifecycle vertical — the virtio sound
+    // card with the machine's own default policy. Init cues the startup sound
+    // once the boot floor has settled and the root is mounted, the login
+    // service cues the login and logout sounds around the scripted session,
+    // and the host holds the capture to the three shipped masters in order.
+    QemuTest {
+        package: "tairix-test-audio-qemu-x86-64",
+        binary: "tairix-test-audio-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::LifecycleAudioRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: LIFECYCLE_SERIAL,
+        expect: Expect::Pass,
+    },
     // `plans/SOUND.md` SND10: the same disk and sound card, played by
     // `play` from a FLAC file instead of by the `audiotone` fixture. The file
     // is the shared signal planted at `tairix_test_audio_wire::SIGNAL_FILE`,
@@ -11437,6 +11659,40 @@ fn login_type_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, Strin
     Ok(Some((components, settings.render())))
 }
 
+/// The machine sound document an audio vertical plants on its encrypted root
+/// volume, or `None` where the machine's own default policy is wanted.
+///
+/// Each audio vertical but the lifecycle one holds its capture to one signal,
+/// so the sounds its own script provokes ([`SCRIPTED_LIFECYCLE`]) are turned
+/// off, as an administrator may turn them off. Any other sound — a device
+/// counted as having arrived when it was there at boot — still reaches the
+/// capture and fails the run. The document is rendered by the sound registry
+/// itself, so it cannot drift from the grammar the guest reads.
+fn sound_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
+    use tairix_appconf::Registry as _;
+    use tairix_soundtheme::settings::{SoundKey, SoundSettings};
+
+    if !matches!(
+        t.fs_disk,
+        FsDisk::AudioRootDisk | FsDisk::UsbAudioRootDisk | FsDisk::HdaAudioRootDisk
+    ) {
+        return Ok(None);
+    }
+    let keys = SCRIPTED_LIFECYCLE.map(SoundKey::EventEnabled);
+    let mut quiet = SoundSettings::default();
+    if let Some(refused) = keys
+        .iter()
+        .find(|&&key| !quiet.read(key, tairix_appconf::bool_text(false)))
+    {
+        return Err(format!(
+            "test --qemu ({}): the sound registry will not turn `{refused}` off",
+            t.package
+        ));
+    }
+    let components = root_volume_components(t, tairix_soundtheme::MACHINE_SETTINGS)?;
+    Ok(Some((components, quiet.document_of(&keys).render())))
+}
+
 /// Every document a vertical plants on its encrypted root volume, as the
 /// borrowed `(components, bytes)` pairs the image builder takes. The one
 /// place root-volume plants are assembled, so each encrypted-root builder
@@ -11447,6 +11703,7 @@ fn root_plants(
 ) -> Result<Vec<(Vec<String>, String)>, String> {
     let mut plants = vec![library_plant(t, apps)?];
     plants.extend(login_type_plant(t)?);
+    plants.extend(sound_plant(t)?);
     Ok(plants)
 }
 
@@ -11764,7 +12021,7 @@ fn audio_stores(
 ) -> Result<(&'static [AppStoreFile], &'static [AppStoreFile]), String> {
     const EMPTY: &[AppStoreFile] = &[];
     let drivers = match t.fs_disk {
-        FsDisk::AudioRootDisk => {
+        FsDisk::AudioRootDisk | FsDisk::LifecycleAudioRootDisk => {
             super::image_drivers::audio_driver_store_files(ctx, arch, profile)?
         }
         FsDisk::UsbAudioRootDisk => {
@@ -12170,7 +12427,7 @@ fn expected_wallpaper() -> Result<&'static ExpectedWallpaper, String> {
 /// under the default's category and name.
 fn default_wallpaper_master() -> Result<
     (
-        &'static tairix_syshelp::GraphicsFile,
+        &'static tairix_syshelp::AssetFile,
         tairix_wallpaper::WallpaperFit,
     ),
     String,
@@ -12189,10 +12446,10 @@ fn default_wallpaper_master() -> Result<
     // A master is identified by its category as well as its name: the
     // masters are filed one directory level deep and a name is unique only
     // within its own category.
-    let master = tairix_syshelp::GRAPHICS_FILES
+    let master = tairix_syshelp::ASSET_FILES
         .iter()
         .find(|asset| {
-            asset.family == tairix_syshelp::GraphicsFamilyKind::Wallpaper
+            asset.family == tairix_syshelp::AssetFamilyKind::Wallpaper
                 && asset.category == Some(tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY)
                 && asset.file == tairix_wallpaper::DEFAULT_WALLPAPER
         })
@@ -12209,7 +12466,7 @@ fn default_wallpaper_master() -> Result<
 /// How a diagnostic names a shipped graphics master: its
 /// `<category>/<file>` path where its family files assets in categories,
 /// its bare name where the family is flat.
-fn master_name(master: &tairix_syshelp::GraphicsFile) -> String {
+fn master_name(master: &tairix_syshelp::AssetFile) -> String {
     match master.category {
         Some(category) => format!("{category}/{}", master.file),
         None => master.file.to_string(),
@@ -12224,7 +12481,7 @@ fn master_name(master: &tairix_syshelp::GraphicsFile) -> String {
 ///
 /// A message naming the master the desktop's own decoder refuses.
 fn decode_wallpaper_master(
-    master: &tairix_syshelp::GraphicsFile,
+    master: &tairix_syshelp::AssetFile,
     width: u32,
     height: u32,
 ) -> Result<tairix_image::RasterImage, String> {
@@ -13876,7 +14133,8 @@ const SETTINGS_ABSENCE_CATEGORY: tairix_settings::Category = tairix_settings::Ca
 /// category that discloses no panes, so it draws no chevron, that the walk
 /// never presses, and that sits mid-strip, so the column seats it on the
 /// strip's first page and on the page that brings Storage in alike.
-const SETTINGS_RESTING_CATEGORY: tairix_settings::Category = tairix_settings::Category::Sound;
+const SETTINGS_RESTING_CATEGORY: tairix_settings::Category =
+    tairix_settings::Category::Notifications;
 
 /// What one photographed Settings frame draws where its dump reads, on screen.
 #[derive(Copy, Clone, Debug)]
@@ -14325,6 +14583,15 @@ fn settings_frame(
     let selected = shell
         .selected_row()
         .ok_or_else(|| "settings script: no strip row is drawn selected".to_string())?;
+    if SETTINGS_RESTING_CATEGORY
+        .row()
+        .is_none_or(tairix_settings::CategoryRow::discloses)
+    {
+        return Err(format!(
+            "settings script: {SETTINGS_RESTING_CATEGORY:?} discloses panes, so its resting row \
+             draws a chevron"
+        ));
+    }
     let resting = shell
         .rows()
         .iter()
@@ -17133,6 +17400,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         | FsDisk::AudioRootDisk
         | FsDisk::UsbAudioRootDisk
         | FsDisk::HdaAudioRootDisk
+        | FsDisk::LifecycleAudioRootDisk
         | FsDisk::RtcRootDisk => Some(net_root_fs_disk_image(t, stores)?),
     })
 }
@@ -17183,10 +17451,16 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
             "stream-root.img",
             "stream-root",
         ),
-        FsDisk::AudioRootDisk | FsDisk::UsbAudioRootDisk | FsDisk::HdaAudioRootDisk => {
+        FsDisk::AudioRootDisk
+        | FsDisk::UsbAudioRootDisk
+        | FsDisk::HdaAudioRootDisk
+        | FsDisk::LifecycleAudioRootDisk => {
             let (extension, label) = match t.fs_disk {
                 FsDisk::UsbAudioRootDisk => ("usb-audio-root.img", "usb-audio-root"),
                 FsDisk::HdaAudioRootDisk => ("hda-audio-root.img", "hda-audio-root"),
+                FsDisk::LifecycleAudioRootDisk => {
+                    ("lifecycle-audio-root.img", "lifecycle-audio-root")
+                }
                 _ => ("audio-root.img", "audio-root"),
             };
             (audio_drivers, apps_with_audiotone, extension, label)
@@ -17751,6 +18025,21 @@ fn memtest_takeover_gates(spec: Spec, binary: &str) -> Spec {
         .with_runtime_ceiling(MEMTEST_TAKEOVER_RUNTIME_CEILING)
 }
 
+/// End a lifecycle vertical at its logout sound's own record, or return `spec`
+/// untouched for any other run.
+///
+/// The guest runs no player whose exit could end the run, so a QEMU-monitor
+/// `system_reset` does once `soundd` has written that the last scripted sound
+/// played out. Under `-no-reboot` the reset exits QEMU with status 0, accepted
+/// as a pass only when the record is on the serial.
+fn lifecycle_sound_gates(spec: Spec, t: &QemuTest) -> Spec {
+    if t.fs_disk != FsDisk::LifecycleAudioRootDisk {
+        return spec;
+    }
+    spec.with_reset_success_marker(LOGOUT_PLAYED_MARKER)
+        .with_monitor_command(LOGOUT_PLAYED_MARKER, 1, "system_reset")
+}
+
 /// Check the host-side audio capture holds exactly the signal the guest
 /// played (`plans/SOUND.md` SND4's headline assertion).
 ///
@@ -17767,21 +18056,83 @@ fn assert_audio_capture(t: &QemuTest, path: &Path, card: SoundCard) -> Result<()
             path.display()
         )
     })?;
-    // The seat run is the one enrolment whose stream is held, and only at its
-    // named frame.
-    let check = if t.serial.iter().any(|(_, _, line)| *line == AUDIOSEAT_LINE) {
-        tairix_test_audio_wire::payload_matches_held_signal
+    let runs = |run: &str| t.serial.iter().any(|(_, _, line)| *line == run);
+    let label_hz = card.capture_label_hz();
+    let loss = reported_loss(path, card)?;
+    // The lifecycle and cue runs are held to the shipped masters; the seat run
+    // is the one enrolment whose stream is held, and only at its named frame.
+    let matched = if t.fs_disk == FsDisk::LifecycleAudioRootDisk {
+        let masters = SCRIPTED_LIFECYCLE
+            .into_iter()
+            .map(shipped_master)
+            .collect::<Result<Vec<_>, _>>()?;
+        let sounds: Vec<&[i16]> = masters.iter().map(Vec::as_slice).collect();
+        tairix_test_audio_wire::payload_matches_sequence(&wav, label_hz, &sounds)
+    } else if runs(AUDIOCUE_LINE) {
+        let master = shipped_master(tairix_test_audio_wire::CUE_EVENT)?;
+        tairix_test_audio_wire::payload_matches_pcm(&wav, label_hz, &master)
+    } else if runs(AUDIOSEAT_LINE) {
+        tairix_test_audio_wire::payload_matches_held_signal(&wav, label_hz)
     } else {
-        tairix_test_audio_wire::payload_matches_signal
+        tairix_test_audio_wire::payload_matches_signal(&wav, label_hz, loss)
     };
-    check(&wav, card.capture_label_hz()).map_err(|mismatch| {
+    matched.map_err(|mismatch| {
         format!(
             "test --qemu ({}): the emulated sound card did not receive the signal the guest \
-             played ({mismatch:?}); capture: {}",
+             played ({mismatch:?}, {} buffers reported lost); capture: {}",
             t.package,
+            loss.buffers,
             path.display()
         )
     })
+}
+
+/// The whole buffers the card behind `capture` reports discarding itself:
+/// one per `hda_audio_overrun` the HDA codec logged, and none for a card that
+/// reports no losses. A log never written reports none, so a stall it would
+/// have explained fails the comparison rather than passing unexplained.
+fn reported_loss(capture: &Path, card: SoundCard) -> Result<ReportedLoss, String> {
+    if card != SoundCard::Hda {
+        return Ok(ReportedLoss::NONE);
+    }
+    let log = tairix_qemu::hda_overrun_log(capture);
+    let text = match std::fs::read_to_string(&log) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(format!(
+                "the codec overrun log {} could not be read: {err}",
+                log.display()
+            ))
+        }
+    };
+    Ok(ReportedLoss {
+        buffers: text
+            .lines()
+            .filter(|line| line.contains("hda_audio_overrun"))
+            .count(),
+        frames: tairix_qemu::HDA_CODEC_BUFFER_BYTES / tairix_test_audio_wire::FRAME_BYTES,
+    })
+}
+
+/// The samples of the shipped master `event` sounds, decoded on the host
+/// independently of the guest's own decode.
+fn shipped_master(event: tairix_soundtheme::SoundEvent) -> Result<Vec<i16>, String> {
+    let file = format!(
+        "{}{}",
+        tairix_soundtheme::SoundAsset::of(event).name(),
+        tairix_soundtheme::event::SOUND_FILE_EXTENSION
+    );
+    let master = tairix_syshelp::ASSET_FILES
+        .iter()
+        .find(|asset| {
+            asset.family == tairix_syshelp::AssetFamilyKind::Sound
+                && asset.category == Some(tairix_soundtheme::DEFAULT_THEME)
+                && asset.file == file
+        })
+        .ok_or_else(|| format!("the shipped theme carries no master {file}"))?;
+    tairix_syshelp::sound::shipped_samples(master.bytes, tairix_sound::SoundFormat::Flac)
+        .map_err(|why| format!("the shipped master {file} {why}"))
 }
 
 /// Attach `t`'s remaining devices (network capture, display, input, the
@@ -17794,6 +18145,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     let (mut spec, peer, _wire_socks) = attach_net_peer(t, kernel, spec)?;
 
     spec = memtest_takeover_gates(spec, t.binary);
+    spec = lifecycle_sound_gates(spec, t);
     spec = dma_translation_gates(spec, t.binary);
     spec = interrupt_controller_gates(spec, t.binary);
     spec = x86_64_topology_gates(spec, t.binary);
@@ -17846,7 +18198,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     // signal the guest played. A stale capture is removed first, exactly as a
     // stale screendump is, so the assertion can never read old bytes.
     let card = match t.fs_disk {
-        FsDisk::AudioRootDisk => Some(SoundCard::Virtio),
+        FsDisk::AudioRootDisk | FsDisk::LifecycleAudioRootDisk => Some(SoundCard::Virtio),
         FsDisk::UsbAudioRootDisk => Some(SoundCard::Usb),
         FsDisk::HdaAudioRootDisk => Some(SoundCard::Hda),
         _ => None,
@@ -17854,6 +18206,10 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     let audio_capture = if let Some(card) = card {
         let path = sidecar_path(kernel, t, replica, "audio.wav");
         remove_stale_sidecar(t.package, "audio capture", &path)?;
+        if card == SoundCard::Hda {
+            let log = tairix_qemu::hda_overrun_log(&path);
+            remove_stale_sidecar(t.package, "codec overrun log", &log)?;
+        }
         spec = spec.with_audio_capture(&path, card);
         Some((path, card))
     } else {
@@ -17866,7 +18222,11 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     // runner replay the scripted exchange, each line typed once the guest
     // prints that step's prompt.
     for (marker, delay_after_marker, line) in t.serial {
-        spec = spec.with_serial_input(*marker, *delay_after_marker, *line);
+        spec = if SERIAL_WITNESSES.contains(marker) {
+            spec.with_serial_witness(*marker, *delay_after_marker, *line)
+        } else {
+            spec.with_serial_input(*marker, *delay_after_marker, *line)
+        };
     }
 
     let serial_log = sidecar_path(kernel, t, replica, "serial.log");
@@ -18079,15 +18439,16 @@ mod tests {
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
         qemu_job_weight, row_holds_track, screendump_ext, screendump_path, settings_pointer_script,
         sidecar_path, touch_pointer_script, Expect, FsDisk, PrimePlan, QemuTest, TypedStep,
-        AARCH64_TARGET, APPBAR_SETTLED_MARKER, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL,
-        AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER,
-        BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        AARCH64_TARGET, APPBAR_SETTLED_MARKER, AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE,
+        AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_KEY_MARKER,
+        BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
         DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES,
-        LIBRARY_SHOWN_MARKER, MEMSOAK_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET,
-        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT,
-        SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER,
-        TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE,
-        UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL, LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER,
+        MEMSOAK_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET, SCRIPTED_LIFECYCLE,
+        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, STARTUP_PLAYED_MARKER,
+        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
+        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
         VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
         VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
     };
@@ -19398,6 +19759,99 @@ mod tests {
         assert!(enrolled.iter().all(|t| t.fs_disk == FsDisk::AudioRootDisk));
     }
 
+    /// The cue vertical runs the fixture's own cue argument, one runs on each
+    /// architecture, and the master it is held to is in the shipped theme.
+    #[test]
+    fn the_cue_line_runs_the_fixtures_cue_argument_against_a_shipped_master() {
+        assert_eq!(
+            AUDIOCUE_LINE,
+            format!(
+                "{} {}\n",
+                tairix_test_audio_wire::COMMAND,
+                tairix_test_audio_wire::CUE_ARG
+            )
+        );
+        let enrolled = TESTS
+            .iter()
+            .filter(|t| t.serial == AUDIOCUE_SERIAL)
+            .collect::<Vec<_>>();
+        assert_eq!(enrolled.len(), 3, "one cue vertical per architecture");
+        assert!(enrolled.iter().all(|t| t.fs_disk == FsDisk::AudioRootDisk));
+        let master =
+            super::shipped_master(tairix_test_audio_wire::CUE_EVENT).expect("the master decodes");
+        assert!(
+            master.len() / 2 > tairix_abi::driver::audio::ring_bounds::MAX_FRAMES as usize,
+            "the cue outlasts one ring, so the authority must refill it"
+        );
+    }
+
+    /// The lifecycle markers are the records `soundd` writes, one lifecycle
+    /// vertical runs on each architecture, and every master it is held to is
+    /// in the shipped theme.
+    #[test]
+    fn the_lifecycle_verticals_step_on_the_cue_authoritys_own_records() {
+        use tairix_soundd::events::{played_out_message, MACHINE_CUE_PLAYED};
+
+        let markers = [
+            STARTUP_PLAYED_MARKER,
+            LOGIN_PLAYED_MARKER,
+            LOGOUT_PLAYED_MARKER,
+        ];
+        for (marker, event) in markers.into_iter().zip(SCRIPTED_LIFECYCLE) {
+            assert_eq!(
+                marker,
+                format!("id={} {}", MACHINE_CUE_PLAYED.0, played_out_message(event))
+            );
+            super::shipped_master(event).expect("the master decodes");
+        }
+        let enrolled = TESTS
+            .iter()
+            .filter(|t| t.fs_disk == FsDisk::LifecycleAudioRootDisk)
+            .collect::<Vec<_>>();
+        assert_eq!(enrolled.len(), 3, "one lifecycle vertical per architecture");
+        assert!(enrolled.iter().all(|t| t.serial == LIFECYCLE_SERIAL));
+    }
+
+    /// Every other audio disk turns off exactly the sounds its script
+    /// provokes, in a document the guest's own registry reads whole, and the
+    /// lifecycle disk plants none.
+    #[test]
+    fn the_other_audio_disks_turn_off_exactly_the_scripted_sounds() {
+        use tairix_appconf::Registry as _;
+        use tairix_soundtheme::{SoundEvent, SoundSettings};
+
+        for t in TESTS.iter().filter(|t| {
+            matches!(
+                t.fs_disk,
+                FsDisk::AudioRootDisk | FsDisk::UsbAudioRootDisk | FsDisk::HdaAudioRootDisk
+            )
+        }) {
+            let (components, text) = super::sound_plant(t)
+                .expect("the document renders")
+                .expect("the disk plants it");
+            assert_eq!(
+                format!("/{}", components.join("/")),
+                tairix_soundtheme::MACHINE_SETTINGS
+            );
+            let document = tairix_appconf::Document::parse(&text).expect("the document parses");
+            let (settings, refused) = SoundSettings::load(&document);
+            assert!(refused.is_empty(), "{refused:?}");
+            for event in SoundEvent::ALL {
+                assert_eq!(
+                    settings.event(event).enabled,
+                    !SCRIPTED_LIFECYCLE.contains(&event),
+                    "{event:?}"
+                );
+            }
+        }
+        for t in TESTS
+            .iter()
+            .filter(|t| t.fs_disk == FsDisk::LifecycleAudioRootDisk)
+        {
+            assert_eq!(super::sound_plant(t), Ok(None));
+        }
+    }
+
     /// The listener vertical's serial-script marker is exactly the `tcpserve`
     /// fixture's own success marker, so the script waits for the marker the
     /// program actually prints and the two cannot drift.
@@ -20056,7 +20510,8 @@ mod tests {
     }
 
     /// Regression guard: a scripted marker must be a line some process prints
-    /// and leaves standing, never a transient line from a concurrent one.
+    /// and leaves standing, never a transient line from a concurrent one —
+    /// unless it is a registered witness.
     ///
     /// The harness matches each marker at or after the previous step's match,
     /// so a marker naming an audit record — which whichever task happens to
@@ -20065,11 +20520,16 @@ mod tests {
     /// detached controller's `comm=stress` exit line and hung for the whole
     /// runtime ceiling whenever the monitor dialogue outlasted the load, since
     /// the controller had already exited and no further such line could
-    /// appear. Wait on a prompt, a banner, or a program's own message instead.
+    /// appear. Wait on a prompt, a banner, or a program's own message instead;
+    /// a record emitted once a run is a witness, matched over the whole
+    /// transcript, which no cursor can pass.
     #[test]
     fn no_serial_marker_waits_on_an_audit_record() {
         for t in TESTS {
             for (marker, _, _) in t.serial {
+                if super::SERIAL_WITNESSES.contains(marker) {
+                    continue;
+                }
                 for field in AUDIT_FIELD_PREFIXES {
                     assert!(
                         !marker.contains(field),

@@ -66,3 +66,12 @@ pub const CONTROL_REFUSED: EventId = EventId(4233);
 
 /// The machine's baseline beneath every tenant's controls was adopted.
 pub const BASELINE_ADOPTED: EventId = EventId(4234);
+
+/// A stream asked to play for the machine or another session, which only the
+/// cue authority may, and only for a notification, was refused, and to whom.
+pub const TENANCY_REFUSED: EventId = EventId(4235);
+
+/// An endpoint's facts changed under its streams — a sink replugged that
+/// plays less — so its streams hold their positions as lost and the endpoint
+/// is released for the next stream to configure afresh.
+pub const ENDPOINT_CHANGED: EventId = EventId(4236);

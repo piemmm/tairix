@@ -44,7 +44,7 @@ use crate::layout::{local_rect, BarLayout, Hit, NotificationsLayout, ReadoutLayo
 use crate::library::{LibraryIconRequest, LibraryLayout, LibraryPopup};
 use crate::menu::{self, MenuRequest, MenuSubject};
 use crate::network::{NetworkStatus, NETWORK_SIGNAL};
-use crate::notifications::{NotificationArea, StatusSignal, TransientNotification};
+use crate::notifications::{NotificationArea, Raised, StatusSignal, TransientNotification};
 use crate::picker::{PickerEntry, PickerLayout, WindowPicker};
 use crate::repaint::TaskbarRepaint;
 use crate::sound::{SoundPanel, SoundPanelLayout, SoundState, RECORDING_SIGNAL, VOLUME_SIGNAL};
@@ -590,15 +590,15 @@ impl Taskbar {
     /// when it changed the shown set — how the session relays a producer's
     /// raise over the notification IPC. A raise changes both the popover that
     /// shows the card and the bar's notification-area icon (the count it
-    /// implies), so both latch together. Answers whether anything changed.
+    /// implies), so both latch together. Answers what the raise did.
     ///
     /// # Errors
     ///
     /// The area's refusal of a notification past its bounds; nothing changes.
-    pub fn raise_notification(&mut self, note: TransientNotification) -> Result<bool, Errno> {
-        let changed = self.notifications.raise(note)?;
-        self.note_notifications_changed(changed);
-        Ok(changed)
+    pub fn raise_notification(&mut self, note: TransientNotification) -> Result<Raised, Errno> {
+        let raised = self.notifications.raise(note)?;
+        self.note_notifications_changed(raised.changed());
+        Ok(raised)
     }
 
     /// Clear the transient notification identified by `(producer, key)`,

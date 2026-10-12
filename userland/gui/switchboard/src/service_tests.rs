@@ -878,7 +878,7 @@ fn an_unchanged_sample_one_period_later_presents_nothing_new() {
 // ---- power transitions -------------------------------------------------
 
 #[test]
-fn a_power_command_acts_only_under_the_power_capability() {
+fn a_power_command_plays_the_end_sound_out_before_acting() {
     for action in [PowerAction::PowerOff, PowerAction::Restart] {
         let mut host = RecordingHost::new();
         let mut service = service();
@@ -888,13 +888,56 @@ fn a_power_command_acts_only_under_the_power_capability() {
             SwitchboardCommand::Power { action },
             &SYSTEM_POWER_AUTHORITY,
         );
+        assert_eq!(host.end_cues, 1);
+        assert!(host.powered.is_empty(), "the power waits on the sound");
 
+        // An answer that is not the end sound's moves nothing.
+        service.end_sound_answered(&mut host);
+        assert!(host.powered.is_empty());
+
+        host.end_over = true;
+        service.end_sound_answered(&mut host);
         assert_eq!(host.powered, alloc::vec![action]);
         assert!(
             host.refusals.is_empty(),
             "a granted transition states no refusal"
         );
+        // Answered once: a stray later answer acts on nothing.
+        service.end_sound_answered(&mut host);
+        assert_eq!(host.powered, alloc::vec![action]);
     }
+}
+
+#[test]
+fn a_machine_that_cannot_ask_for_its_end_sound_powers_off_at_once() {
+    let mut host = RecordingHost::new();
+    host.cue_refusal = Some(Errno::NotFound);
+    let mut service = service();
+    service.command(
+        &mut host,
+        SwitchboardCommand::Power {
+            action: PowerAction::PowerOff,
+        },
+        &SYSTEM_POWER_AUTHORITY,
+    );
+    assert_eq!(host.powered, alloc::vec![PowerAction::PowerOff]);
+}
+
+#[test]
+fn a_change_of_mind_while_the_end_sound_plays_is_the_one_acted_on() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    for action in [PowerAction::PowerOff, PowerAction::Restart] {
+        service.command(
+            &mut host,
+            SwitchboardCommand::Power { action },
+            &SYSTEM_POWER_AUTHORITY,
+        );
+    }
+    assert_eq!(host.end_cues, 1, "the sound is asked for once");
+    host.end_over = true;
+    service.end_sound_answered(&mut host);
+    assert_eq!(host.powered, alloc::vec![PowerAction::Restart]);
 }
 
 #[test]
@@ -914,6 +957,7 @@ fn a_power_command_without_the_capability_is_refused_and_never_attempted() {
         host.powered.is_empty(),
         "the machine is never asked to stop without the authority to stop it"
     );
+    assert_eq!(host.end_cues, 0, "nor does it sound an end it may not make");
     assert_eq!(
         host.refusals,
         alloc::vec![(
@@ -953,6 +997,7 @@ fn a_kernel_refusal_of_a_permitted_transition_is_stated_and_the_service_lives_on
     // primitive, say). The user is told and the service keeps monitoring.
     let mut host = RecordingHost::new();
     host.power_refusal = Some(Errno::NotSupported);
+    host.end_over = true;
     let mut service = service();
 
     service.command(
@@ -962,6 +1007,7 @@ fn a_kernel_refusal_of_a_permitted_transition_is_stated_and_the_service_lives_on
         },
         &SYSTEM_POWER_AUTHORITY,
     );
+    service.end_sound_answered(&mut host);
 
     assert_eq!(host.powered, alloc::vec![PowerAction::Restart]);
     assert_eq!(

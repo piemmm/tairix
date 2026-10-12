@@ -77,11 +77,13 @@ mod program {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use core::cell::RefCell;
+    use core::cell::{Cell, RefCell};
+    use core::time::Duration;
     use tairix_abi::display_ipc::{DisplayRequest, DISPLAY_ENDPOINT, DISPLAY_MODE_REPLY_LEN};
     use tairix_abi::elevate::{
         elevate_endpoint, ElevateArgv, ELEVATE_MAX_OUTPUT, ELEVATE_MAX_REPLY, ELEVATE_MAX_REQUEST,
     };
+    use tairix_abi::notice::NoticeTopic;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::session_ipc::{
         SessionWake, SESSION_ENDPOINT, SESSION_END_GRACE, SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
@@ -103,14 +105,16 @@ mod program {
         effective_session_kind, elevated_attach, end_live_sessions, events, forget_ended_sessions,
         handle_elevate_request, handle_session_request, session_attach, session_environment,
         session_program, supervise, AttemptBudget, AuthenticatedUser, Authenticator, Captured,
-        ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad, LiveSessions, Login,
-        LoginConfig, LoginError, LoginStatus, LoginView, SessionDirectory, SessionKind,
-        SessionLauncher, SessionOutcome, SessionWaker, StatusSource, DESKTOP_SESSION_PATH,
-        GREETER_SERVICE_PATH,
+        ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad, InputWait,
+        InputWake, LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView,
+        SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
+        DESKTOP_SESSION_PATH, GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
     use tairix_rt::LogSink;
+    use tairix_soundtheme::cue::RtCuePost;
+    use tairix_soundtheme::{Answer, PostedCues, SoundEvent, CUE_ANSWER_DEADLINE_NS};
     use tairix_termcap::TermType;
     use tairix_users::{UsersDb, GREETER_UID, MAX_DB_LEN};
     use tairix_util::secret::wipe;
@@ -154,6 +158,126 @@ mod program {
             // it was and the login still re-prompts.
             let _ = tairix_rt::purge_terminal();
         }
+    }
+
+    /// The text prompt's wait-set token for console input.
+    const PROMPT_INPUT: u64 = 1;
+    /// The text prompt's wait-set token for a notice a round's choice of
+    /// login rests on.
+    const PROMPT_MOVED: u64 = 2;
+
+    /// Where the text prompt waits: one wait-set over the console's input and
+    /// the notices a round's choice of login rests on — a display service
+    /// arriving or its output moving, and the volumes holding the bundles and
+    /// the settings store. Its own set, so the requests login serves elsewhere
+    /// never wake the prompt.
+    struct RtInputWait {
+        /// `None` when the console could not be watched: every wait then
+        /// reports input at once, and the view's own bounded read waits.
+        set: Option<u64>,
+        /// A notice moved while the prompt could not give way, to be weighed
+        /// at the next wait that can rather than lost.
+        moved: Cell<bool>,
+    }
+
+    impl RtInputWait {
+        /// Build the wait-set, recording — and leaving the prompt unwatched —
+        /// when any member is refused.
+        fn new(sink: LogSink) -> Self {
+            let set = Self::watch()
+                .map_err(|errno| {
+                    log(
+                        &sink,
+                        &Event {
+                            level: Level::Warn,
+                            id: events::TEXT_ROUND_UNWATCHED,
+                            message: "login: the text prompt cannot watch for a graphical login",
+                            fields: &[Field {
+                                key: "error",
+                                value: FieldValue::Error(errno),
+                            }],
+                        },
+                    );
+                })
+                .ok();
+            Self {
+                set,
+                moved: Cell::new(false),
+            }
+        }
+
+        fn watch() -> Result<u64, Errno> {
+            let created = tairix_rt::waitset_create();
+            let set = u64::try_from(created).map_err(|_| Errno::from_syscall(created))?;
+            let members = [
+                (
+                    WaitSourceKind::Stream,
+                    u64::from(tairix_abi::STDIN),
+                    PROMPT_INPUT,
+                ),
+                (
+                    WaitSourceKind::SystemNotice,
+                    u64::from(NoticeTopic::DisplayOutput.as_u32()),
+                    PROMPT_MOVED,
+                ),
+                (
+                    WaitSourceKind::SystemNotice,
+                    u64::from(NoticeTopic::Mounts.as_u32()),
+                    PROMPT_MOVED,
+                ),
+            ];
+            for (kind, id, token) in members {
+                let ret = tairix_rt::waitset_ctl(set, WaitSetOp::Add, kind, id, token);
+                if ret != 0 {
+                    return Err(Errno::from_syscall(ret));
+                }
+            }
+            Ok(set)
+        }
+    }
+
+    impl InputWait for RtInputWait {
+        fn wait(&self, bound: Duration, may_yield: bool) -> InputWake {
+            let Some(set) = self.set else {
+                return InputWake::Input;
+            };
+            if may_yield && self.moved.take() && graphical_login_now() {
+                return InputWake::Superseded;
+            }
+            let bound_ns = u64::try_from(bound.as_nanos()).unwrap_or(u64::MAX).max(1);
+            let deadline = tairix_rt::clock_get().saturating_add(bound_ns);
+            loop {
+                let left = deadline.saturating_sub(tairix_rt::clock_get());
+                if left == 0 {
+                    return InputWake::Elapsed;
+                }
+                let mut token = 0u64;
+                let ret = tairix_rt::waitset_wait(set, left, &mut token);
+                if ret != 0 {
+                    // Anything but the bound elapsing hands the wait to the
+                    // view's own read, which fails closed on a dead console.
+                    return if Errno::from_syscall(ret) == Errno::TimedOut {
+                        InputWake::Elapsed
+                    } else {
+                        InputWake::Input
+                    };
+                }
+                if token == PROMPT_INPUT {
+                    return InputWake::Input;
+                }
+                if !may_yield {
+                    self.moved.set(true);
+                } else if graphical_login_now() {
+                    return InputWake::Superseded;
+                }
+            }
+        }
+    }
+
+    /// Whether a round starting now would run the graphical login.
+    fn graphical_login_now() -> bool {
+        graphical_availability() == Graphical::Available
+            && session_default() == SessionKind::Graphical
     }
 
     /// The view's status figures, queried live from `sysinfod` and the
@@ -224,6 +348,8 @@ mod program {
     /// started. Shared by all of them: the wake says only "one of mine
     /// exited", and the sweep that follows finds which.
     const TOKEN_LAUNCHED: u64 = 4;
+    /// The waitset token naming the sound authority's answer to a cue.
+    const TOKEN_CUE: u64 = 5;
 
     /// Consecutive greeters a graphical round starts before it gives up and
     /// runs the text login instead.
@@ -294,6 +420,9 @@ mod program {
         /// wait-set under [`TOKEN_LAUNCHED`], so an exit wakes whichever
         /// supervision is parked and the sweep reaps it.
         launched: RefCell<Vec<i64>>,
+        /// The login and logout sounds asked for and not yet answered, whose
+        /// answers wake the set under [`TOKEN_CUE`].
+        cues: RefCell<PostedCues>,
     }
 
     impl ConsoleServer {
@@ -323,6 +452,7 @@ mod program {
                 elevate: None,
                 session: None,
                 launched: RefCell::new(Vec::new()),
+                cues: RefCell::new(PostedCues::new()),
             };
             // Unrestricted senders on both: any process may post —
             // placement and identity are enforced per request by the
@@ -536,6 +666,18 @@ mod program {
             });
         }
 
+        /// Ask for a session's start or end sound, never waiting for it: a
+        /// refusal is the authority's to record, and the session goes on
+        /// either way.
+        fn cue(&self, event: SoundEvent) {
+            let _ = self.cues.borrow_mut().post(
+                &mut RtCuePost::new(self.waitset, TOKEN_CUE),
+                event,
+                Answer::Started,
+                CUE_ANSWER_DEADLINE_NS,
+            );
+        }
+
         /// Park on the wait-set until `pid` exits, handing every other wake
         /// to `serve`, and report how the watch ended.
         ///
@@ -582,6 +724,10 @@ mod program {
                     }
                     if token == TOKEN_LAUNCHED {
                         self.reap_launched();
+                    } else if token == TOKEN_CUE {
+                        self.cues
+                            .borrow_mut()
+                            .collect(&mut RtCuePost::new(self.waitset, TOKEN_CUE), |_, _| {});
                     } else if matches!(serve(token), Watch::Release) {
                         break Ok(Watched::Released);
                     }
@@ -920,6 +1066,9 @@ mod program {
             // frame region are that user's authority (its manifest ∩ the
             // account ceiling), never login's.
             let pid = spawn_session(user, kind)?;
+            if let Some(server) = self.server {
+                server.cue(SoundEvent::Login);
+            }
             let watched = match self.server.filter(|server| server.elevate.is_some()) {
                 Some(server) => server.supervise_child(pid, |token| {
                     if let (TOKEN_ELEVATE, Some(endpoint)) = (token, server.elevate) {
@@ -936,6 +1085,9 @@ mod program {
                 // an exit, which this reap collects.
                 Watched::Released => plain_wait(pid)?,
             };
+            if let Some(server) = self.server {
+                server.cue(SoundEvent::Logout);
+            }
             Ok(SessionOutcome { kind, exit_code })
         }
     }
@@ -1177,6 +1329,7 @@ mod program {
                     "desktop session started",
                     &user.username,
                 );
+                self.server.cue(SoundEvent::Login);
                 pid
             };
             let watched = {
@@ -1213,6 +1366,7 @@ mod program {
                 "desktop session ended",
                 &user.username,
             );
+            self.server.cue(SoundEvent::Logout);
         }
 
         /// Record one round decision, naming the account it concerns.
@@ -1359,19 +1513,45 @@ mod program {
         buf.get(..len).ok_or(Errno::OutOfRange)
     }
 
-    /// Whether a graphical session can be launched on this round: the
-    /// desktop bundle is installed **and** a display service is live.
-    /// Both facts are re-checked per round — a service that came up (or a
-    /// bundle installed) after boot arms a configured graphical default at
-    /// the next prompt, and one that vanished degrades it to text again —
-    /// and both fail closed: any refusal selects the text shell, never an
-    /// errored login.
+    /// Whether a graphical session can be launched on this round, and what
+    /// stops it when it cannot.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum Graphical {
+        /// The desktop and login-screen bundles are installed, and a display
+        /// service answers.
+        Available,
+        /// No desktop bundle is installed.
+        NoDesktop,
+        /// No login-screen bundle is installed.
+        NoGreeter,
+        /// Nothing answers the display rendezvous, with the call's refusal.
+        NoDisplay(Errno),
+    }
+
+    impl Graphical {
+        /// A stable label for the log.
+        const fn label(self) -> &'static str {
+            match self {
+                Self::Available => "available",
+                Self::NoDesktop => "no desktop bundle",
+                Self::NoGreeter => "no login screen bundle",
+                Self::NoDisplay(_) => "no display service",
+            }
+        }
+    }
+
+    /// Probe whether a graphical session can be launched on this round: the
+    /// desktop bundle and the login screen that collects its credential are
+    /// installed, **and** a display service is live. Re-probed per round and
+    /// whenever an idle text prompt is told something it rests on moved, so
+    /// a service or bundle that arrives after boot arms a configured
+    /// graphical default, and one that vanished degrades it to text again.
+    /// Every refusal fails closed to the text shell, never an errored login.
     ///
-    /// * **Bundle presence** — a read-only `fs_open` of the desktop
-    ///   bundle's `Run` path through the secured VFS (per-inode
-    ///   authorisation under login's own attested identity; `/System` is
-    ///   world-readable). The descriptor is closed immediately: the probe
-    ///   wants existence, not bytes.
+    /// * **Bundle presence** — a read-only `fs_open` of each bundle's `Run`
+    ///   through the secured VFS (per-inode authorisation under login's own
+    ///   attested identity; `/System` is world-readable). The descriptor is
+    ///   closed immediately: the probe wants existence, not bytes.
     /// * **Display service** — one `Query` call to the reserved
     ///   `DISPLAY_ENDPOINT`. Login holds no seat lease, so a live service
     ///   answers with a typed refusal — but *any* well-formed reply proves
@@ -1379,20 +1559,22 @@ mod program {
     ///   `CAP_IPC_BIND_PRIVILEGED` holder can bind a reserved id), while an
     ///   unbound endpoint fails the call itself with `NotFound`. The probe
     ///   learns nothing about the seat and gains no authority.
-    fn graphical_session_available() -> bool {
-        // Both bundles: the desktop session a login starts, and the login
-        // screen that collects the credential for it. A machine with a
-        // display but no greeter bundle has no graphical login to offer, so
-        // it degrades to text like any other absence.
-        if !bundle_present(DESKTOP_SESSION_PATH) || !bundle_present(GREETER_SERVICE_PATH) {
-            return false;
+    fn graphical_availability() -> Graphical {
+        if !bundle_present(DESKTOP_SESSION_PATH) {
+            return Graphical::NoDesktop;
+        }
+        if !bundle_present(GREETER_SERVICE_PATH) {
+            return Graphical::NoGreeter;
         }
         let request = DisplayRequest::Query {
             seat_id: SEAT_PRIMARY,
         }
         .to_le_bytes();
         let mut reply = [0u8; DISPLAY_MODE_REPLY_LEN];
-        tairix_rt::ipc_call(DISPLAY_ENDPOINT, &request, &mut reply).is_ok()
+        match tairix_rt::ipc_call(DISPLAY_ENDPOINT, &request, &mut reply) {
+            Ok(_) => Graphical::Available,
+            Err(code) => Graphical::NoDisplay(Errno::from_syscall(code)),
+        }
     }
 
     /// Whether `path` can be opened read-only, closed again at once.
@@ -1439,28 +1621,29 @@ mod program {
             authenticator,
             sink,
         };
-        // Re-probed each round: whether a graphical session is possible this
-        // round (both bundles are installed and a display service is live).
-        // It selects a configured graphical default, degrading to text —
-        // never an error — when unavailable.
-        let graphical_available = graphical_session_available();
-        // The same rule the text state machine applies: a graphical session
-        // only when this round can start one and the resolved default asks
-        // for it.
+        // Both re-read each round: a graphical login when this round can
+        // start one and the resolved default asks for it, else text — never
+        // an error.
+        let graphical = graphical_availability();
         let session_default = session_default();
-        if graphical_available && session_default == SessionKind::Graphical {
-            if let Some((server, endpoint)) =
-                server.and_then(|server| server.session.map(|endpoint| (server, endpoint)))
-            {
-                let round = GraphicalRound {
-                    server,
-                    session_endpoint: endpoint,
-                    authenticator,
-                    sink,
-                };
-                if matches!(round.run(db, live, budget), GraphicalOutcome::Completed) {
-                    return true;
-                }
+        let wants_graphical =
+            graphical == Graphical::Available && session_default == SessionKind::Graphical;
+        let session = server.and_then(|server| server.session.map(|endpoint| (server, endpoint)));
+        record_round(
+            sink,
+            wants_graphical && session.is_some(),
+            session_default,
+            graphical,
+        );
+        if let (true, Some((server, endpoint))) = (wants_graphical, session) {
+            let round = GraphicalRound {
+                server,
+                session_endpoint: endpoint,
+                authenticator,
+                sink,
+            };
+            if matches!(round.run(db, live, budget), GraphicalOutcome::Completed) {
+                return true;
             }
         }
         // A background session that died while this console ran text rounds
@@ -1469,8 +1652,13 @@ mod program {
         forget_ended_sessions(live, session_gone, &sink);
         let login = Login::new(LoginConfig {
             max_attempts: MAX_ATTEMPTS,
-            graphical_available,
+            graphical_available: graphical == Graphical::Available,
             session_default,
+            // A text prompt chosen up front gives way to a graphical login
+            // that arrives later. One the graphical round degraded to does
+            // not, or a broken login screen would be retried at every move of
+            // the display.
+            may_give_way: session.is_some() && !wants_graphical,
             view,
             authenticator,
             launcher: &launcher,
@@ -1481,9 +1669,65 @@ mod program {
             // back to a fresh prompt; the audit trail already records the
             // outcome.
             Ok(_) | Err(LoginError::TooManyAttempts | LoginError::SessionLaunch(_)) => true,
+            Err(LoginError::Superseded) => {
+                log(
+                    &sink,
+                    &Event {
+                        level: Level::Info,
+                        id: events::TEXT_ROUND_SUPERSEDED,
+                        message: "login: the text prompt gave way to the graphical login",
+                        fields: &[],
+                    },
+                );
+                true
+            }
             // A dead console cannot prompt again: exit rather than spin; PID 1 supervises and relaunches login.
             Err(LoginError::Console(_)) => false,
         }
+    }
+
+    /// Record the login a round chose, and what kept a graphical one from it.
+    fn record_round(
+        sink: LogSink,
+        graphical_round: bool,
+        session_default: SessionKind,
+        graphical: Graphical,
+    ) {
+        let kind = if graphical_round {
+            SessionKind::Graphical
+        } else {
+            SessionKind::Text
+        };
+        let fields = [
+            Field {
+                key: "login",
+                value: FieldValue::Str(kind.label()),
+            },
+            Field {
+                key: "default",
+                value: FieldValue::Str(session_default.label()),
+            },
+            Field {
+                key: "graphical",
+                value: FieldValue::Str(graphical.label()),
+            },
+            Field {
+                key: "display_error",
+                value: match graphical {
+                    Graphical::NoDisplay(errno) => FieldValue::Error(errno),
+                    _ => FieldValue::Null,
+                },
+            },
+        ];
+        log(
+            &sink,
+            &Event {
+                level: Level::Info,
+                id: events::ROUND_CHOSEN,
+                message: "login: round chose its login",
+                fields: &fields,
+            },
+        );
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -1545,7 +1789,8 @@ mod program {
         let size = tairix_rt::terminal_size(1)
             .map_or(Size::new(25, 80), |s| Size::new(s.rows(), s.cols()));
         let screen = Screen::new(StreamTty, TermType::Xterm256Color, size);
-        let view = CursesView::new(screen, RtStatusSource, RtConsoleMode);
+        let input = RtInputWait::new(sink);
+        let view = CursesView::new(screen, RtStatusSource, RtConsoleMode, &input);
         supervise(
             load_users_db,
             || {

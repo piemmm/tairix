@@ -258,6 +258,10 @@ pub enum IconKind {
     Dns,
     /// Two opposed arrows, for the protocol-options pane.
     TcpIp,
+    /// Three faders at different levels, for the sound devices' pane.
+    SoundDevices,
+    /// A beamed pair of notes, for the desktop's own sounds.
+    SoundEffects,
     /// A painter's palette, for the desktop-theme category.
     Theme,
     /// A dashed rectangle, for choosing an area of a picture.
@@ -399,6 +403,8 @@ impl IconKind {
             "wifi" => Self::WiFi,
             "dns" => Self::Dns,
             "tcp-ip" => Self::TcpIp,
+            "sound-devices" => Self::SoundDevices,
+            "sound-effects" => Self::SoundEffects,
             "theme" => Self::Theme,
             "tool-select" => Self::ToolSelect,
             "tool-pencil" => Self::ToolPencil,
@@ -546,6 +552,8 @@ impl IconKind {
             Self::Microphone => 107,
             Self::VolumeMuted => 108,
             Self::NetworkOffline => 109,
+            Self::SoundDevices => 110,
+            Self::SoundEffects => 111,
         }
     }
 
@@ -642,6 +650,8 @@ impl IconKind {
             Self::WiFi => "wifi",
             Self::Dns => "dns",
             Self::TcpIp => "tcp-ip",
+            Self::SoundDevices => "sound-devices",
+            Self::SoundEffects => "sound-effects",
             Self::Theme => "theme",
             Self::ToolSelect => "tool-select",
             Self::ToolPencil => "tool-pencil",
@@ -815,6 +825,8 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         | IconKind::WiFi
         | IconKind::Dns
         | IconKind::TcpIp
+        | IconKind::SoundDevices
+        | IconKind::SoundEffects
         | IconKind::Theme => {
             return symbol::glyph(kind, color)
                 .unwrap_or_else(|| VectorIcon::new(DESIGN, generic(color)));

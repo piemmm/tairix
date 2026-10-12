@@ -31,6 +31,7 @@ Every `lib/abi` change regenerates the C header
 | G2 | `lib/greeter` — the authentication-surface engine | done |
 | G3 | `greeter.app` service bundle and its service account | done |
 | G4 | `session-v1` broker in `login`; the graphical round; availability | done |
+| G4.4 | An untouched text prompt gives way to a graphical login that becomes available while it waits | done |
 | G5 | Fast user switching: session table, wake mailbox, switch away/back | done |
 | G6 | `ScreenLock` composes `lib/greeter` | done |
 | G7 | Docs and README matrix | done |
@@ -626,7 +627,7 @@ wait-set would spin a core, because the sources the loop is no longer serving
 report ready on every re-park. `run.rs`'s `fade_to_black` drives it instead —
 present, sleep to the next frame on `tairix_rt::park_ns`, step — bounded by
 the fade's own span, and a refused present simply stops the dim (the seat is
-handed on cleared regardless). `SeatPresentation` fixes where the two sit in
+handed on cleared regardless). `SeatDeparture` and `SeatReturn` fix where the two sit in
 a switch: `fade_out` runs only after the authority *accepted* the step-aside
 and before `suspend`, while the seat and frame ring are still up; `fade_in`
 runs after `reconfigure` and before `repaint_all`, so a **resumed** session
@@ -697,6 +698,21 @@ A graphical login is available this round when the greeter bundle is
 installed **and** the desktop bundle is installed **and** a display service
 answers `DISPLAY_ENDPOINT` — the existing probe, extended by one path. All
 three are re-checked per round and every failure degrades to text.
+
+### G4.4 A text round that gives way
+
+A round can outlive the facts it was chosen on: the first round runs as soon
+as the user database is installed, and a display engine that waits on its
+clocks and encoders binds `DISPLAY_ENDPOINT` after it. The text prompt
+therefore parks on one wait-set holding its console's input — a console
+`Stream` member, `docs/src/architecture/syscalls.md` — and the
+`DisplayOutput` and `Mounts` notices. On a notice it re-probes G1.3 and G4.3;
+when the round would now be graphical and nothing is typed at the username
+prompt, the round ends and the next one runs the graphical round. A notice
+that lands mid-typing is weighed at the next untouched prompt. A text round
+the graphical round degraded to (G4.2) never gives way, so a failing greeter
+is not restarted by display moves. A console the wait-set cannot watch keeps
+the plain bounded read.
 
 ## G5. Fast user switching
 

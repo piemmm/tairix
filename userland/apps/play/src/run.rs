@@ -128,7 +128,7 @@ mod program {
         fn watch(keys: KeyRelay, wake: &WorkerWake) -> Result<Self, Errno> {
             let read = wake.read_end().ok_or(Errno::OutOfMemory)?;
             let created = tairix_rt::waitset_create();
-            let set = u64::try_from(created).map_err(|_| Errno::from_syscall(created))?;
+            let set = Errno::syscall_result(created)?;
             for (kind, id, token) in [
                 (WaitSourceKind::Port, keys.port(), KEYS),
                 (WaitSourceKind::Stream, u64::from(read), STATUS),
@@ -638,12 +638,16 @@ mod program {
             | Note::Cut { entry, .. }) = note;
             let file = String::from(self.engine.programme().item(entry).unwrap_or(""));
             match note {
-                Note::Opened { info, .. } => {
+                Note::Opened { info, link, .. } => {
                     self.rate = Some(info.rate.hz());
-                    let _ = StdInfo.write_all(&report::opened(&file, &info));
+                    let _ = StdInfo.write_all(&report::opened(&file, link, &info));
                     if self.verbose && !deferred {
                         self.clear_progress();
-                        write_stderr_line(&format!("play: {file}: {}", report::describe(&info)));
+                        write_stderr_line(&format!(
+                            "play: {}: {}",
+                            report::naming(&file, link),
+                            report::describe(&info)
+                        ));
                     }
                     None
                 }

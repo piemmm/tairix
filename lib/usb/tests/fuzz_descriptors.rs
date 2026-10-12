@@ -557,17 +557,42 @@ fn check_configuration(buf: &[u8]) {
 /// The hub descriptors the engine is served: 4- and 7-port USB 2.0 hubs, one
 /// with every TT Think Time bit set, a `SuperSpeed` hub, and the
 /// configuration-shaped garble a Realtek RTS5411 answered with.
-const HUB_SEEDS: [&[u8]; 4] = [
+const HUB_SEEDS: [&[u8]; 6] = [
     &[9, 0x29, 4, 0x00, 0x00, 0x32, 0x00, 0xFF],
     &[9, 0x29, 7, 0xE0, 0x00, 0x32, 0x64, 0x00, 0xFF],
     &[12, 0x2A, 4, 0x09, 0x00, 0x32, 0x00, 0xFF, 0, 0, 0, 0],
     &[0x09, 0x02, 0x29, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32],
+    // Built-in ports: 2 and 5 of a 9-port hub, 3 of a SuperSpeed one.
+    &[11, 0x29, 9, 0x00, 0x00, 0x32, 0x00, 0x24, 0x00, 0xFF, 0x03],
+    &[12, 0x2A, 4, 0x09, 0x00, 0x32, 0x00, 0xFF, 0, 0, 0x08, 0],
 ];
 
 /// A hub descriptor decodes exactly when it is of the type a hub of its
 /// speed serves and reaches `wHubCharacteristics`; its ports are `bNbrPorts`,
-/// and its think time bits 5:6 of the characteristics, behind a USB 2.0 hub
-/// only.
+/// its think time bits 5:6 of the characteristics behind a USB 2.0 hub only,
+/// and its built-in ports the `DeviceRemovable` bits the reply reaches.
+/// The `DeviceRemovable` bits `answer` carries, bit by bit: port `n` is bit
+/// `n` of the bitmap, a word at bytes 10:11 for a `SuperSpeed` hub and a byte
+/// string from byte 7 otherwise; the reserved bit 0 and any port past the
+/// 31st, or past the reply, are never built in.
+fn fixed_ports(answer: &[u8], ports: u8, superspeed: bool) -> u32 {
+    (1..=ports.min(31)).fold(0, |bits, port| {
+        let bit = 1 << (port % 8);
+        let set = if superspeed {
+            port <= 15 && answer.len() >= 12 && answer[10 + usize::from(port) / 8] & bit != 0
+        } else {
+            answer
+                .get(7 + usize::from(port) / 8)
+                .is_some_and(|&value| value & bit != 0)
+        };
+        if set {
+            bits | 1 << port
+        } else {
+            bits
+        }
+    })
+}
+
 fn check_hub_descriptor(answer: &[u8], superspeed: bool) {
     let served = if superspeed { 0x2A } else { 0x29 };
     let expected = match *answer {
@@ -578,6 +603,7 @@ fn check_hub_descriptor(answer: &[u8], superspeed: bool) {
             } else {
                 u8::try_from((u16::from_le_bytes([low, high]) >> 5) & 0b11).unwrap_or(u8::MAX)
             },
+            fixed_ports: fixed_ports(answer, ports, superspeed),
         }),
         _ => None,
     };

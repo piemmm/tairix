@@ -57,7 +57,8 @@ use tairix_log::Sink;
 use tairix_geometry::Point;
 use tairix_raster::{cast_shadow, Color, ShadowCast, Surface};
 use tairix_reclaim::{
-    working_set_ui_cache, CacheLedger, CachedBytes, PressureGauge, ReclaimCache, Served,
+    working_set_ui_budget, working_set_ui_cache, CacheLedger, CachedBytes, PressureGauge,
+    ReclaimCache, Served,
 };
 
 use crate::badge::badge_picture;
@@ -799,6 +800,12 @@ pub struct ArtworkCache {
 }
 
 impl ArtworkCache {
+    /// Hold the cache to what an output of `fb_bytes` allows, the output
+    /// having changed size: the budget [`artwork_cache`] builds it under.
+    pub fn rescale(&mut self, fb_bytes: usize) {
+        let _ = self.entries.rebudget(working_set_ui_budget(fb_bytes));
+    }
+
     /// An empty cache over the caller's ready-built reclaimable cache.
     ///
     /// The cache is injected rather than defaulted because only the owning

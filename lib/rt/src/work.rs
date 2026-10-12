@@ -359,7 +359,7 @@ impl<S, Req, Ans> Worker<S, Req, Ans, JobQueue<Req, Ans>> {
     /// want of a worker waits for the next pass, so a chain of them cannot
     /// keep the loop from its input and its frame.
     pub fn collect_landed(&self, mut adopt: impl FnMut(Ans)) {
-        let landed = self.held.lock().desk.landed();
+        let landed = self.held.lock().desk.landed_for_collection();
         for _ in 0..landed {
             let Some(answer) = self.collect() else {
                 return;

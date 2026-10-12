@@ -418,7 +418,7 @@ mod program {
 
         fn grant_peer(&mut self, region: u64, endpoint: u64, ticket: u64) -> Result<u64, Errno> {
             let handle = tairix_rt::shm_grant_peer(region, endpoint, ticket);
-            u64::try_from(handle).map_err(|_| Errno::from_syscall(handle))
+            Errno::syscall_result(handle)
         }
 
         fn self_instance(&self) -> ProcId {
@@ -677,23 +677,6 @@ mod program {
             return;
         }
         log_skipped_ports(live.device);
-    }
-
-    /// The capability set the HCD host re-checks up front; the kernel is the
-    /// authority and re-checks every trap. It mirrors the resources the
-    /// matched node carries plus the privilege to publish the interface node
-    /// and stand up its URB transport seam.
-    fn driver_caps() -> CapabilitySet {
-        let mut caps = CapabilitySet::empty();
-        caps.insert(CapabilityId::MMIO_MAP);
-        caps.insert(CapabilityId::MEM_DMA);
-        caps.insert(CapabilityId::IRQ_BIND);
-        caps.insert(CapabilityId::SHM);
-        caps.insert(CapabilityId::IPC_BIND_PRIVILEGED);
-        caps.insert(CapabilityId::HW_EMIT);
-        caps.insert(CapabilityId::LOG_EMIT);
-        caps.insert(CapabilityId::SCHED_REALTIME);
-        caps
     }
 
     /// Bind the URB transport endpoint `id`. Binding it grant-restricted
@@ -1233,12 +1216,25 @@ mod program {
         );
     }
 
+    /// Tell the kernel every device present as the controller came up is
+    /// published — the walk's own and the one re-attach owed a port it could
+    /// not serve — so a device published later arrived on a running machine.
+    /// A refused settle only leaves the device manager to wait out its bound
+    /// for this node.
+    fn settle() {
+        let _ = tairix_rt::hw_node_settle();
+    }
+
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     fn main() -> i32 {
         // Coherent DMA is carved kernel-side, so no architecture-specific
         // cache-maintenance shim is supplied (`coherency = None`).
-        let Ok(host) = RtDriverHost::from_grants_query(driver_caps(), RtGrantSyscalls, None) else {
+        let caps = tairix_drv_bus_usb::REQUIRED_CAPABILITIES
+            .iter()
+            .copied()
+            .collect();
+        let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
             return EXIT_NO_HOST;
         };
         enter_realtime_class();
@@ -1301,6 +1297,8 @@ mod program {
         let mut port_retry = SkippedPortRetry::default();
         if live.device.skipped_port_count() > 0 {
             port_retry.arm(tairix_rt::clock_get());
+        } else {
+            settle();
         }
 
         serve_events(
@@ -1371,6 +1369,9 @@ mod program {
                 let attempted = interfaces.recover(health, live);
                 if retry_due && !attempted && !health.is_failed_closed() {
                     retry_skipped_ports(live, interfaces);
+                }
+                if retry_due {
+                    settle();
                 }
             } else {
                 log_hex_event(

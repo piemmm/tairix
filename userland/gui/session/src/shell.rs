@@ -40,6 +40,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::input::KeyInput;
 use tairix_abi::notify_ipc::NotifyRequest;
+use tairix_abi::sound_cue::SoundEvent;
 use tairix_abi::switchboard_ipc::{NetworkReport, TraySummary};
 use tairix_abi::{AppIdentity, BundleId, Errno, Origin};
 use tairix_browse::{DirectorySource, GridView};
@@ -54,8 +55,8 @@ use tairix_log::{EventId, Field, FieldValue, Level, Sink};
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
 use tairix_taskbar::{
-    icon_cache, AppSlot, Edge, TaskbarConfig, TaskbarRenderer, TaskbarResponse,
-    TransientNotification,
+    arrival_sound, icon_cache, AppSlot, Edge, Raised, TaskbarConfig, TaskbarRenderer,
+    TaskbarResponse, TransientNotification,
 };
 use tairix_theme::{Appearance, CursorSetId, MotionInteraction};
 use tairix_wallpaper::{
@@ -409,6 +410,15 @@ impl DesktopShell {
             #[cfg(test)]
             settled: SettleWork::default(),
         }
+    }
+
+    /// Hold the shell's caches — the desktop's artwork, the bar's glyphs and
+    /// the cursors — to what an output of `fb_bytes` allows, the output
+    /// having changed size: the budgets each was built under.
+    pub fn rescale_caches(&mut self, fb_bytes: usize) {
+        self.artwork.rescale(fb_bytes);
+        self.renderer.rescale_cache(fb_bytes);
+        self.cursor.rescale_cache(fb_bytes);
     }
 
     /// The per-frame shell work run so far, which a test diffs across a
@@ -1981,12 +1991,15 @@ impl DesktopShell {
     }
 
     /// Serve one notification request from the producer the kernel attests
-    /// in `origin`, held to `policy`, re-presenting when the shown set changed.
+    /// in `origin`, held to `policy`, re-presenting when the shown set changed
+    /// and answering the sound a newly shown notification makes.
     ///
     /// A raise the policy refuses is never shown, and withdraws whatever the
     /// same key showed before: the producer asked for that notice to be
     /// replaced. It is answered as accepted, because the producer did nothing
     /// wrong and a refusal would only invite a retry. A clear always applies.
+    /// Only a notification not showing before is heard; an update in place
+    /// is not.
     ///
     /// # Errors
     ///
@@ -1998,34 +2011,40 @@ impl DesktopShell {
         origin: &Origin,
         request: NotifyRequest,
         policy: &NotifyPolicy,
-    ) -> Result<(), Errno> {
+    ) -> Result<Option<SoundEvent>, Errno> {
         let producer = producer_of(origin)?;
         self.notify_sources.note(producer.source);
-        let changed = match request {
+        let (changed, sound) = match request {
             NotifyRequest::Raise {
                 key,
                 severity,
                 title,
                 body,
-            } if policy.admits(producer.source.as_str(), severity) => self
-                .session
-                .taskbar_mut()
-                .raise_notification(TransientNotification::new(
-                    producer,
-                    key,
-                    severity,
-                    title.as_str(),
-                    body.as_str(),
-                ))?,
-            NotifyRequest::Raise { key, .. } | NotifyRequest::Clear { key } => self
-                .session
-                .taskbar_mut()
-                .clear_notification(producer.instance, key),
+            } if policy.admits(producer.source.as_str(), severity) => {
+                let raised =
+                    self.session
+                        .taskbar_mut()
+                        .raise_notification(TransientNotification::new(
+                            producer,
+                            key,
+                            severity,
+                            title.as_str(),
+                            body.as_str(),
+                        ))?;
+                let sound = (raised == Raised::Shown).then(|| arrival_sound(severity));
+                (raised.changed(), sound)
+            }
+            NotifyRequest::Raise { key, .. } | NotifyRequest::Clear { key } => (
+                self.session
+                    .taskbar_mut()
+                    .clear_notification(producer.instance, key),
+                None,
+            ),
         };
         if changed {
             self.present(compositor);
         }
-        Ok(())
+        Ok(sound)
     }
 
     /// Show what the audio service reports on the bar, re-presenting it only

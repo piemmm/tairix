@@ -138,6 +138,21 @@ pub const GENET_COMPATIBLE: &[u8] = b"brcm,bcm2711-genet-v5";
 /// never uses it: it maps only the window its matched node named.
 pub const GENET_REGS_CPU_BASE: u64 = 0xFD58_0000;
 
+/// The capabilities the driver runs with, which its signed manifest requests:
+/// the register window, the frame buffers, the device interrupt, the shared
+/// frame region, the reserved device-channel endpoint, publishing its `netchan`
+/// node, and its readiness beacon.
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::MMIO_MAP,
+    CapabilityId::MEM_DMA,
+    CapabilityId::IRQ_BIND,
+    CapabilityId::SHM,
+    CapabilityId::IPC_ENDPOINT,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::HW_EMIT,
+    CapabilityId::LOG_EMIT,
+];
+
 /// This driver's hardware bind table: the BCM2711 GENET v5 MAC, matched by
 /// its device-tree `compatible` string ([`GENET_COMPATIBLE`]).
 ///
