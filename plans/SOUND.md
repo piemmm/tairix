@@ -2589,8 +2589,12 @@ it crash" into an exact numeric assertion:
 
   The run is deterministic rather than a race: the client ring is sized to
   hold the whole signal, so every frame is queued before the device is
-  clocked and the device cannot run dry however slowly the emulated machine
-  runs. The backend's own lead-in and tail are trimmed before the comparison
+  clocked, and the harness clocks every capturing machine by its
+  instructions at a fixed rate (`-icount shift=0`), so the device's clock
+  stops whenever the guest's does and it cannot run dry however slowly the
+  host runs the guest. A host-paced clock is not enough: the mixer and the
+  driver hold only a few periods ahead, and a starved guest let the USB
+  card's isochronous schedule outrun them. The backend's own lead-in and tail are trimmed before the comparison
   (they are the *host*'s silence, not the guest's) and the signal is built so
   no frame it contains is silent on every channel, which is what makes that
   trim safe.

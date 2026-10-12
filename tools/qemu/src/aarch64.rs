@@ -363,6 +363,21 @@ mod tests {
     }
 
     #[test]
+    fn every_capture_clocks_the_machine_by_its_instructions() {
+        let bare = render(&build_argv(&fixture_spec(1), Path::new("/tmp/k.elf")));
+        assert!(!bare.iter().any(|a| a == "-icount"), "{bare:?}");
+        for card in [SoundCard::Virtio, SoundCard::Hda, SoundCard::Usb] {
+            let spec = fixture_spec(1).with_audio_capture("/tmp/k.wav", card);
+            let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+            let clock = argv
+                .iter()
+                .position(|a| a == "-icount")
+                .expect("a capture is clocked by instructions");
+            assert_eq!(argv[clock + 1], "shift=0");
+        }
+    }
+
+    #[test]
     fn a_usb_speaker_rides_its_own_controller_and_records_past_the_mixing_engine() {
         let spec = fixture_spec(1).with_audio_capture("/tmp/k.wav", SoundCard::Usb);
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));

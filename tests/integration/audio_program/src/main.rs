@@ -11,12 +11,13 @@
 //! # Why it queues everything before starting
 //!
 //! The ring is sized to hold the whole signal, so every frame is written
-//! *before* the device is clocked. The device therefore cannot run dry
-//! however slowly the emulated machine runs: the capture is sample-exact
-//! rather than "sample-exact modulo inserted silence", and the driver's
-//! reported lost-frame tally is exactly zero rather than merely small. A
-//! guest that raced the device would turn a real defect and a slow host into
-//! the same observation.
+//! *before* the device is clocked, and the harness clocks the machine by its
+//! instructions, so the device stops whenever the guest does. The device
+//! therefore cannot run dry however slowly the host runs the guest: the
+//! capture is sample-exact rather than "sample-exact modulo inserted
+//! silence", and the driver's reported lost-frame tally is exactly zero
+//! rather than merely small. A guest that raced the device would turn a real
+//! defect and a slow host into the same observation.
 //!
 //! # The seat run
 //!

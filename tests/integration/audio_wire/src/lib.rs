@@ -10,10 +10,12 @@
 //! # Why the run is deterministic rather than a race
 //!
 //! The ring is sized to hold the **whole** signal, so the guest writes every
-//! frame *before* it starts the device. The device can then never run dry
-//! however slowly the emulated machine runs, which is what lets the
-//! assertion be sample-exact and the reported under-run tally be exactly
-//! zero — a glitch would be a real defect rather than a slow host.
+//! frame *before* it starts the device, and the harness clocks the machine by
+//! its instructions, so the device's clock stops whenever the guest's does.
+//! The device can then never run dry however slowly the host runs the guest,
+//! which is what lets the assertion be sample-exact and the reported
+//! under-run tally be exactly zero — a glitch would be a real defect rather
+//! than a slow host.
 
 #![no_std]
 #![forbid(unsafe_code)]

@@ -816,6 +816,17 @@ impl SoundCard {
 /// The `-audiodev`/`-device` arguments that attach the spec's sound card
 /// behind QEMU's `wav` backend, or nothing when the run asked for no capture.
 ///
+/// A capturing machine is clocked by its instructions (`-icount`). A card and
+/// its controller consume on QEMU's virtual clock, which otherwise follows the
+/// host's: a host that starves the guest of its CPU then runs the card dry
+/// while the guest cannot refill it, and the capture records a host's
+/// slowness as the guest's lost frames. Counted instructions stop the card
+/// whenever the guest stops. The rate is fixed, one instruction a
+/// nanosecond, because `shift=auto` rescales instructions to keep pace with
+/// the host's clock, which is the coupling this removes. Idle time still
+/// passes at the host's pace, so a serial script's typing reaches a guest
+/// that is waiting for it.
+///
 /// One definition for all three ports: the backend's rate, channel count and
 /// sample format are the vertical's own, so the recording needs no conversion
 /// to be compared sample for sample, and `device` names the per-bus flavour
@@ -852,7 +863,7 @@ pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
         tairix_test_audio_wire::RATE_HZ,
         tairix_test_audio_wire::CHANNELS
     );
-    match spec.sound_card {
+    let mut args = match spec.sound_card {
         SoundCard::Virtio => {
             backend.push(geometry);
             vec![
@@ -888,7 +899,9 @@ pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
                 OsString::from("usb-audio,bus=usbaudio.0,audiodev=snd0"),
             ]
         }
-    }
+    };
+    args.extend([OsString::from("-icount"), OsString::from("shift=0")]);
+    args
 }
 
 /// The `-device` arguments for the virtio-input devices `spec` drives — or,

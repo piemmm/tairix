@@ -27,8 +27,9 @@
 //! witness, so the run needs both.
 //!
 //! The run is deterministic rather than a race: the ring is sized to hold the
-//! whole signal, so every frame is queued before the device is clocked and
-//! the device cannot run dry however slowly the emulated machine runs.
+//! whole signal, so every frame is queued before the device is clocked, and
+//! the machine is clocked by its instructions, so the device cannot run dry
+//! however slowly the host runs the guest.
 //!
 //! ## How it differs from a production kernel
 //!
