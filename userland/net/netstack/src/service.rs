@@ -102,6 +102,8 @@ pub fn serve(
         | NetstackRequest::InterfaceRates { .. }
         | NetstackRequest::Sockets { .. }
         | NetstackRequest::BondMembers { .. }
+        | NetstackRequest::Neighbors { .. }
+        | NetstackRequest::Routes { .. }
         | NetstackRequest::ResolverServers
         | NetstackRequest::TimeServers
         | NetstackRequest::StackDefence => CapabilityId::SYSINFO_INTROSPECT,
@@ -150,6 +152,8 @@ pub fn serve(
         | NetstackRequest::InterfaceRates { .. }
         | NetstackRequest::Sockets { .. }
         | NetstackRequest::BondMembers { .. }
+        | NetstackRequest::Neighbors { .. }
+        | NetstackRequest::Routes { .. }
         | NetstackRequest::ResolverServers
         | NetstackRequest::TimeServers
         | NetstackRequest::StackDefence => serve_read(stack, sockets, decoded, response, now),
@@ -248,6 +252,22 @@ fn serve_read(
                 .collect();
             encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
         }
+        NetstackRequest::Neighbors { offset, limit } => {
+            let records: alloc::vec::Vec<_> = stack
+                .neighbor_records(offset, limit)
+                .iter()
+                .map(tairix_abi::net_ipc::NetNeighborRecord::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
+        }
+        NetstackRequest::Routes { offset, limit } => {
+            let records: alloc::vec::Vec<_> = stack
+                .route_records(offset, limit)
+                .iter()
+                .map(tairix_abi::net_ipc::NetRouteRecord::to_le_bytes)
+                .collect();
+            encode_page_reply(&records, NETSTACK_LIST_LIMIT_MAX, response)
+        }
         NetstackRequest::ResolverServers => {
             // The active resolver set is small and closed, so it is served
             // whole in one page (never larger than `MAX_RESOLVER_SERVERS`);
@@ -343,6 +363,8 @@ fn op_field(request: &NetstackRequest) -> Field<'static> {
         NetstackRequest::InterfaceRates { .. } => "interface rates",
         NetstackRequest::Sockets { .. } => "sockets",
         NetstackRequest::BondMembers { .. } => "bond members",
+        NetstackRequest::Neighbors { .. } => "neighbors",
+        NetstackRequest::Routes { .. } => "routes",
         NetstackRequest::ApplyNetworkSettings(_) => "apply network settings",
         NetstackRequest::BindDriver { .. } => "bind driver",
         NetstackRequest::ResolverServers => "resolver servers",

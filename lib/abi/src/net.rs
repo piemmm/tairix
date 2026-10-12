@@ -37,6 +37,8 @@
 //! operation, family, or socket type, a dirty reserved field, or an
 //! over-length payload refuses rather than guessing.
 
+use core::num::NonZeroU8;
+
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::net_ipc::{validate_if_name, NetAddrFamily, IF_NAME_LEN};
 use crate::origin::{Origin, TrustDomain};
@@ -262,6 +264,10 @@ const TYPE_OFFSET: usize = 12;
 const SHUTDOWN_HOW_OFFSET: usize = 12;
 /// Byte offset of the family field (`Socket` only).
 const FAMILY_OFFSET: usize = 13;
+/// Byte offset of the echo hop-limit field (`SendEcho` only). It shares the
+/// byte `Socket` spends on its type, as the shutdown direction does: zero is
+/// the interface's default hop limit.
+const HOP_LIMIT_OFFSET: usize = 12;
 /// Byte offset of the ICMP echo sequence field (`SendEcho` only).
 const SEQUENCE_OFFSET: usize = 14;
 /// Byte offset of the delivery-port field (`Socket` only).
@@ -426,6 +432,11 @@ pub enum SocketRequest<'a> {
         dest: Option<SocketAddr>,
         /// The echo sequence number, echoed back unchanged by the peer.
         sequence: u16,
+        /// The hop limit (TTL) to send with, or [`None`] for the
+        /// interface's default. A probe that runs out of hops on the way
+        /// comes back as an [`EchoOutcome::HopLimitExceeded`] naming the
+        /// router that dropped it.
+        hop_limit: Option<NonZeroU8>,
         /// The echo payload (at most [`SOCKET_MAX_DATAGRAM`] bytes).
         payload: &'a [u8],
     },
@@ -535,10 +546,12 @@ impl<'a> SocketRequest<'a> {
                 socket,
                 dest,
                 sequence,
+                hop_limit,
                 payload,
             } => {
                 put_u16(out, 6, OP_SEND_ECHO);
                 put_u32(out, SOCKET_OFFSET, socket);
+                out[HOP_LIMIT_OFFSET] = hop_limit.map_or(0, NonZeroU8::get);
                 put_u16(out, SEQUENCE_OFFSET, sequence);
                 if let Some(dest) = dest {
                     dest.write(&mut out[ADDR_OFFSET..ADDR_OFFSET + SocketAddr::WIRE_LEN]);
@@ -715,23 +728,22 @@ impl<'a> SocketRequest<'a> {
         }
     }
 
-    /// Decode an [`OP_SEND_ECHO`] header: the handle, the sequence (bytes
-    /// 14..16), an optional destination, and the payload. The socket-type,
-    /// family, and delivery-port fields belong to `Socket` alone and must be
-    /// zero; an echo destination carries no port (ICMP has none), so a
-    /// non-zero port is wire corruption and fails closed.
+    /// Decode an [`OP_SEND_ECHO`] header: the handle, the hop limit (byte
+    /// 12, zero for the default), the sequence (bytes 14..16), an optional
+    /// destination, and the payload. The family and delivery-port fields
+    /// belong to `Socket` alone and must be zero; an echo destination carries
+    /// no port (ICMP has none), so a non-zero port is wire corruption and
+    /// fails closed.
     fn decode_send_echo(
         bytes: &[u8],
         addr_block: &[u8],
         socket: SocketId,
         payload: &'a [u8],
     ) -> Result<Self, Errno> {
-        if bytes[TYPE_OFFSET] != 0
-            || bytes[FAMILY_OFFSET] != 0
-            || read_u64(bytes, DELIVER_OFFSET) != 0
-        {
+        if bytes[FAMILY_OFFSET] != 0 || read_u64(bytes, DELIVER_OFFSET) != 0 {
             return Err(Errno::BadMagic);
         }
+        let hop_limit = NonZeroU8::new(bytes[HOP_LIMIT_OFFSET]);
         let sequence = read_u16(bytes, SEQUENCE_OFFSET);
         // A zeroed address block means "use the connected peer"; anything
         // else is an explicit destination.
@@ -748,6 +760,7 @@ impl<'a> SocketRequest<'a> {
             socket,
             dest,
             sequence,
+            hop_limit,
             payload,
         })
     }
@@ -1151,32 +1164,102 @@ impl<'a> SocketDelivery<'a> {
     }
 }
 
-/// An ICMP/`ICMPv6` echo reply the stack delivers to an
+/// What became of one echo request.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EchoOutcome {
+    /// The destination answered.
+    Reply,
+    /// A router dropped the request as its hop limit ran out (ICMP Time
+    /// Exceeded in transit).
+    HopLimitExceeded,
+    /// The destination, or a router on the way, reported it unreachable;
+    /// `code` is the family's own Destination Unreachable code.
+    Unreachable {
+        /// The ICMP (v4) or `ICMPv6` code.
+        code: u8,
+    },
+    /// The request was larger than a link on the path carries.
+    PacketTooBig {
+        /// The largest packet the reporting link carries, as it stated it.
+        mtu: u32,
+    },
+    /// A router could not process a header field of the request.
+    ParameterProblem {
+        /// The ICMP (v4) or `ICMPv6` code.
+        code: u8,
+        /// The offset of the offending byte in the request, as reported.
+        pointer: u32,
+    },
+}
+
+impl EchoOutcome {
+    fn kind(self) -> u8 {
+        match self {
+            Self::Reply => 0,
+            Self::HopLimitExceeded => 1,
+            Self::Unreachable { .. } => 2,
+            Self::PacketTooBig { .. } => 3,
+            Self::ParameterProblem { .. } => 4,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::Unreachable { code } | Self::ParameterProblem { code, .. } => code,
+            _ => 0,
+        }
+    }
+
+    fn detail(self) -> u32 {
+        match self {
+            Self::PacketTooBig { mtu } => mtu,
+            Self::ParameterProblem { pointer, .. } => pointer,
+            _ => 0,
+        }
+    }
+
+    const fn from_wire(kind: u8, code: u8, detail: u32) -> Result<Self, Errno> {
+        match (kind, code, detail) {
+            (0, 0, 0) => Ok(Self::Reply),
+            (1, 0, 0) => Ok(Self::HopLimitExceeded),
+            (2, code, 0) => Ok(Self::Unreachable { code }),
+            (3, 0, mtu) => Ok(Self::PacketTooBig { mtu }),
+            (4, code, pointer) => Ok(Self::ParameterProblem { code, pointer }),
+            (0..=3, ..) => Err(Errno::BadMagic),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// What became of an ICMP/`ICMPv6` echo request, delivered to an
 /// [`SocketType::IcmpEcho`] socket's async port.
 ///
 /// The stack [`crate::SyscallNumber::IPC_SEND`]s this frame to the port the
 /// client named in [`SocketRequest::Socket`] when a reply arrives whose ICMP
-/// identifier matches the socket's stack-assigned identifier (so a socket
-/// only ever sees replies to its own requests). It identifies the receiving
-/// socket, the source that answered, the echoed sequence number, and the
-/// echoed payload. ICMP has no ports, so — unlike a [`SocketDatagram`] — the
-/// source carries no port; the wire layout reuses that field for the
-/// sequence number.
+/// identifier matches the socket's stack-assigned identifier, or when an ICMP
+/// error arrives quoting one of the socket's own requests — so a socket only
+/// ever hears about its own requests, in one ordered stream. `source` is the
+/// host that answered or the router that reported the error, and `sequence`
+/// is the request's. An error carries no payload. ICMP has no ports, so —
+/// unlike a [`SocketDatagram`] — the source carries no port; the wire layout
+/// reuses that field for the sequence number.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SocketEcho<'a> {
     /// The socket the reply was delivered to.
     pub socket: SocketId,
-    /// The source that sent the reply.
+    /// What became of the request.
+    pub outcome: EchoOutcome,
+    /// The host that answered, or the router that reported the error.
     pub source: SocketAddr,
-    /// The echoed sequence number, matching the originating request.
+    /// The request's sequence number.
     pub sequence: u16,
-    /// The echoed payload.
+    /// The echoed payload; empty unless `outcome` is [`EchoOutcome::Reply`].
     pub payload: &'a [u8],
 }
 
 impl<'a> SocketEcho<'a> {
     /// Byte length of the fixed delivery header preceding the payload.
-    pub const HEADER_LEN: usize = 36;
+    pub const HEADER_LEN: usize = 40;
 
     /// Largest delivery message: the header plus a maximum-size payload.
     pub const MAX_WIRE_LEN: usize = Self::HEADER_LEN + SOCKET_MAX_DATAGRAM;
@@ -1186,10 +1269,12 @@ impl<'a> SocketEcho<'a> {
     /// # Errors
     ///
     /// * [`Errno::LengthOutOfRange`] — the payload exceeds
-    ///   [`SOCKET_MAX_DATAGRAM`].
+    ///   [`SOCKET_MAX_DATAGRAM`], or an error outcome carries one.
     /// * [`Errno::BufferTooSmall`] — `out` cannot hold the message.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
-        if self.payload.len() > SOCKET_MAX_DATAGRAM {
+        if self.payload.len() > SOCKET_MAX_DATAGRAM
+            || (self.outcome != EchoOutcome::Reply && !self.payload.is_empty())
+        {
             return Err(Errno::LengthOutOfRange);
         }
         let total = Self::HEADER_LEN + self.payload.len();
@@ -1201,6 +1286,8 @@ impl<'a> SocketEcho<'a> {
         }
         put_u32(out, 0, SOCKET_ECHO_MAGIC);
         put_u16(out, 4, SOCKET_VERSION_V1);
+        out[6] = self.outcome.kind();
+        out[7] = self.outcome.code();
         put_u32(out, 8, self.socket);
         out[12] = self.source.family.as_u8();
         put_u16(out, 14, self.sequence);
@@ -1211,6 +1298,7 @@ impl<'a> SocketEcho<'a> {
             32,
             u32::try_from(self.payload.len()).map_err(|_| Errno::LengthOutOfRange)?,
         );
+        put_u32(out, 36, self.outcome.detail());
         out[Self::HEADER_LEN..total].copy_from_slice(self.payload);
         Ok(total)
     }
@@ -1223,9 +1311,9 @@ impl<'a> SocketEcho<'a> {
     ///   the declared payload.
     /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved field.
     /// * [`Errno::AbiVersionUnsupported`] — not `netsock-v1`.
-    /// * [`Errno::OutOfRange`] — an unknown family.
+    /// * [`Errno::OutOfRange`] — an unknown family or outcome.
     /// * [`Errno::LengthOutOfRange`] — a declared payload beyond
-    ///   [`SOCKET_MAX_DATAGRAM`].
+    ///   [`SOCKET_MAX_DATAGRAM`], or any payload on an error outcome.
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Errno> {
         if bytes.len() < Self::HEADER_LEN {
             return Err(Errno::BufferTooSmall);
@@ -1236,9 +1324,10 @@ impl<'a> SocketEcho<'a> {
         if read_u16(bytes, 4) != SOCKET_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
-        if read_u16(bytes, 6) != 0 || bytes[13] != 0 {
+        if bytes[13] != 0 {
             return Err(Errno::BadMagic);
         }
+        let outcome = EchoOutcome::from_wire(bytes[6], bytes[7], read_u32(bytes, 36))?;
         let socket = read_u32(bytes, 8);
         let family = NetAddrFamily::from_u8(bytes[12])?;
         let sequence = read_u16(bytes, 14);
@@ -1248,7 +1337,8 @@ impl<'a> SocketEcho<'a> {
             return Err(Errno::BadMagic);
         }
         let payload_len = read_u32(bytes, 32) as usize;
-        if payload_len > SOCKET_MAX_DATAGRAM {
+        if payload_len > SOCKET_MAX_DATAGRAM || (outcome != EchoOutcome::Reply && payload_len != 0)
+        {
             return Err(Errno::LengthOutOfRange);
         }
         let payload = bytes
@@ -1256,6 +1346,7 @@ impl<'a> SocketEcho<'a> {
             .ok_or(Errno::BufferTooSmall)?;
         Ok(Self {
             socket,
+            outcome,
             source: SocketAddr {
                 family,
                 addr,
@@ -1858,12 +1949,14 @@ mod tests {
             socket: 6,
             dest: Some(v4(10, 0, 2, 2, 0)),
             sequence: 42,
+            hop_limit: None,
             payload: b"ping payload",
         });
         round_trip(SocketRequest::SendEcho {
             socket: 6,
             dest: None,
             sequence: 65_535,
+            hop_limit: NonZeroU8::new(1),
             payload: &[],
         });
         round_trip(SocketRequest::SendEcho {
@@ -1874,6 +1967,7 @@ mod tests {
                 port: 0,
             }),
             sequence: 1,
+            hop_limit: NonZeroU8::new(255),
             payload: b"v6 echo",
         });
     }
@@ -1885,6 +1979,7 @@ mod tests {
             socket: 6,
             dest: Some(v4(10, 0, 2, 2, 0)),
             sequence: 3,
+            hop_limit: None,
             payload: b"x",
         };
         let mut buf = [0u8; SocketRequest::HEADER_LEN + 1];
@@ -1904,6 +1999,7 @@ mod tests {
             socket: 6,
             dest: None,
             sequence: 9,
+            hop_limit: None,
             payload: b"x",
         };
         let mut buf = [0u8; SocketRequest::HEADER_LEN + 1];
@@ -2250,6 +2346,7 @@ mod tests {
         // A v6 echo reply carries no port; its sequence rides the port slot.
         let echo = SocketEcho {
             socket: 7,
+            outcome: EchoOutcome::Reply,
             source: SocketAddr {
                 family: NetAddrFamily::V6,
                 addr: [0x20; 16],
@@ -2269,9 +2366,108 @@ mod tests {
     }
 
     #[test]
+    fn an_echo_error_round_trips_without_a_payload_and_fails_closed() {
+        for outcome in [
+            EchoOutcome::HopLimitExceeded,
+            EchoOutcome::Unreachable { code: 3 },
+            EchoOutcome::PacketTooBig { mtu: 1280 },
+            EchoOutcome::ParameterProblem {
+                code: 1,
+                pointer: 40,
+            },
+        ] {
+            let echo = SocketEcho {
+                socket: 9,
+                outcome,
+                source: v4(203, 0, 113, 9, 0),
+                sequence: 17,
+                payload: &[],
+            };
+            let mut out = [0u8; SocketEcho::HEADER_LEN + 1];
+            let n = echo.encode(&mut out).expect("encode");
+            assert_eq!(SocketEcho::parse(&out[..n]), Ok(echo));
+            // An error never carries a payload, on either side of the wire.
+            assert_eq!(
+                SocketEcho {
+                    payload: b"x",
+                    ..echo
+                }
+                .encode(&mut out),
+                Err(Errno::LengthOutOfRange)
+            );
+            let mut smuggled = out;
+            smuggled[32] = 1;
+            assert_eq!(
+                SocketEcho::parse(&smuggled[..=n]),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        let reply = SocketEcho {
+            socket: 9,
+            outcome: EchoOutcome::Reply,
+            source: v4(203, 0, 113, 9, 0),
+            sequence: 17,
+            payload: &[],
+        };
+        let mut out = [0u8; SocketEcho::HEADER_LEN];
+        let n = reply.encode(&mut out).expect("encode");
+        let mut unknown = out;
+        unknown[6] = 5;
+        assert_eq!(SocketEcho::parse(&unknown[..n]), Err(Errno::OutOfRange));
+        let mut coded_reply = out;
+        coded_reply[7] = 1;
+        assert_eq!(SocketEcho::parse(&coded_reply[..n]), Err(Errno::BadMagic));
+        // Only the two outcomes that carry a detail word may set one.
+        let mut detailed_reply = out;
+        detailed_reply[36] = 1;
+        assert_eq!(
+            SocketEcho::parse(&detailed_reply[..n]),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn an_echo_error_keeps_the_mtu_and_pointer_it_was_reported_with() {
+        let mut out = [0u8; SocketEcho::HEADER_LEN];
+        for outcome in [
+            EchoOutcome::PacketTooBig { mtu: u32::MAX },
+            EchoOutcome::ParameterProblem {
+                code: 2,
+                pointer: 0x0102_0304,
+            },
+        ] {
+            let echo = SocketEcho {
+                socket: 1,
+                outcome,
+                source: v4(192, 0, 2, 1, 0),
+                sequence: 5,
+                payload: &[],
+            };
+            let n = echo.encode(&mut out).expect("encode");
+            assert_eq!(SocketEcho::parse(&out[..n]).map(|e| e.outcome), Ok(outcome));
+        }
+    }
+
+    #[test]
+    fn a_send_echo_hop_limit_rides_its_own_byte() {
+        let request = SocketRequest::SendEcho {
+            socket: 6,
+            dest: None,
+            sequence: 2,
+            hop_limit: NonZeroU8::new(7),
+            payload: &[],
+        };
+        let mut buf = [0u8; SocketRequest::HEADER_LEN];
+        let n = request.encode(&mut buf).expect("encode");
+        assert_eq!(buf[HOP_LIMIT_OFFSET], 7);
+        assert_eq!(SocketRequest::from_bytes(&buf[..n]), Ok(request));
+    }
+
+    #[test]
     fn empty_echo_reply_round_trips() {
         let echo = SocketEcho {
             socket: 3,
+            outcome: EchoOutcome::Reply,
             source: v4(198, 51, 100, 1, 0),
             sequence: 1,
             payload: &[],

@@ -45,8 +45,10 @@ use crate::client::{WindowClient, WindowTransport};
 /// rows derives them from this id so the two can never collide.
 pub const QUIT_ROW: u16 = 1;
 
-/// The label the convention gives its *Quit* row.
-const QUIT_LABEL: &str = "Quit";
+/// The label the convention gives its *Quit* row, named once so a consumer
+/// that must find the row (a test driving the menu) reads it rather than a
+/// copy.
+pub const QUIT_LABEL: &str = "Quit";
 
 /// The command-line switch with which the desktop session asks a bundle to run
 /// as a **component of the desktop** rather than as an ordinary application.

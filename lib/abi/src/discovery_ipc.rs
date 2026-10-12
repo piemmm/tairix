@@ -197,7 +197,7 @@ const _: () = assert!(SERVICE_NAME_MAX < SERVICE_FIELD_LEN);
 const _: () = assert!(OFF_ADDRESS + 16 == REQUEST_HEADER_LEN);
 
 /// The transport a service type runs over (RFC 6763 §4.1.2).
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum Transport {
     /// `_tcp`.

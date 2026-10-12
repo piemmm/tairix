@@ -98,6 +98,23 @@ pub enum LimitKind {
     /// exhausting the heap for every other principal; live usage is its
     /// current armed count.
     DirWatches = 7,
+    /// Maximum bytes of kernel memory the process's own message ports and
+    /// call endpoints may reserve for queued messages
+    /// (`docs/src/architecture/resource-limits.md`).
+    ///
+    /// Each endpoint is charged its worst case when it is bound — its
+    /// capacity times its largest message, plus its bookkeeping — because
+    /// any sender may fill it and the bytes then sit in the kernel heap
+    /// until the owner drains them. The charge bounds the count of endpoints
+    /// as well as their depth; live usage is the bytes currently reserved.
+    IpcQueueBytes = 8,
+    /// Maximum number of wait-sets the process may hold.
+    WaitSets = 9,
+    /// Maximum number of members the process may hold registered across all
+    /// of its wait-sets. Each member is kernel memory, and a member watching a
+    /// file holds a registration on its node, so the bound is what stops one
+    /// process's event multiplexing exhausting the heap for every other.
+    WaitSetMembers = 10,
 }
 
 impl LimitKind {
@@ -105,7 +122,7 @@ impl LimitKind {
     ///
     /// Equals one past the largest discriminant; a per-task limit array is
     /// sized by this constant so adding a variant grows the storage in step.
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 11;
 
     /// Every [`LimitKind`] in discriminant order.
     ///
@@ -121,15 +138,17 @@ impl LimitKind {
         Self::Threads,
         Self::FileLocks,
         Self::DirWatches,
+        Self::IpcQueueBytes,
+        Self::WaitSets,
+        Self::WaitSetMembers,
     ];
 
     /// Every [`LimitKind`] in discriminant order, paired with its canonical
     /// `ulimit` name.
     ///
-    /// Single source of truth for [`name`](Self::name), [`from_name`](Self::from_name),
-    /// and [`from_u32`](Self::from_u32), so the spellings
-    /// and the discriminant↔name mapping can never disagree. The names are
-    /// part of the frozen `abi-v1` contract.
+    /// Single source of truth for [`name`](Self::name) and
+    /// [`from_name`](Self::from_name), so the two spellings can never
+    /// disagree. The names are part of the `abi-v1` contract.
     const NAMED: [(Self, &'static str); Self::COUNT] = [
         (Self::AddressSpaceBytes, "address-space-bytes"),
         (Self::OpenStreams, "open-streams"),
@@ -139,12 +158,33 @@ impl LimitKind {
         (Self::Threads, "threads"),
         (Self::FileLocks, "file-locks"),
         (Self::DirWatches, "dir-watches"),
+        (Self::IpcQueueBytes, "ipc-queue-bytes"),
+        (Self::WaitSets, "wait-sets"),
+        (Self::WaitSetMembers, "wait-set-members"),
     ];
 
     /// Raw on-wire discriminant.
     #[must_use]
     pub const fn as_u32(self) -> u32 {
         self as u32
+    }
+
+    /// Whether this resource is measured in bytes rather than counted.
+    #[must_use]
+    pub const fn counts_bytes(self) -> bool {
+        match self {
+            Self::AddressSpaceBytes
+            | Self::StackBytes
+            | Self::PinnedMemoryBytes
+            | Self::IpcQueueBytes => true,
+            Self::OpenStreams
+            | Self::Processes
+            | Self::Threads
+            | Self::FileLocks
+            | Self::DirWatches
+            | Self::WaitSets
+            | Self::WaitSetMembers => false,
+        }
     }
 
     /// Decode a raw discriminant, failing closed on an unassigned value.
@@ -155,16 +195,11 @@ impl LimitKind {
     /// [`LimitKind`] discriminant (validate every input,
     /// fail closed).
     pub const fn from_u32(raw: u32) -> Result<Self, Errno> {
-        match raw {
-            0 => Ok(Self::AddressSpaceBytes),
-            1 => Ok(Self::OpenStreams),
-            2 => Ok(Self::Processes),
-            3 => Ok(Self::StackBytes),
-            4 => Ok(Self::PinnedMemoryBytes),
-            5 => Ok(Self::Threads),
-            6 => Ok(Self::FileLocks),
-            7 => Ok(Self::DirWatches),
-            _ => Err(Errno::OutOfRange),
+        let index = raw as usize;
+        if index < Self::COUNT {
+            Ok(Self::ALL[index])
+        } else {
+            Err(Errno::OutOfRange)
         }
     }
 
@@ -314,7 +349,10 @@ mod tests {
         assert_eq!(LimitKind::Threads.as_u32(), 5);
         assert_eq!(LimitKind::FileLocks.as_u32(), 6);
         assert_eq!(LimitKind::DirWatches.as_u32(), 7);
-        assert_eq!(LimitKind::COUNT, 8);
+        assert_eq!(LimitKind::IpcQueueBytes.as_u32(), 8);
+        assert_eq!(LimitKind::WaitSets.as_u32(), 9);
+        assert_eq!(LimitKind::WaitSetMembers.as_u32(), 10);
+        assert_eq!(LimitKind::COUNT, 11);
     }
 
     #[test]
@@ -331,10 +369,24 @@ mod tests {
     }
 
     #[test]
+    fn exactly_the_byte_resources_count_bytes() {
+        for kind in LimitKind::ALL {
+            assert_eq!(
+                kind.counts_bytes(),
+                kind.name().ends_with("-bytes"),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
     fn names_are_frozen_and_round_trip() {
         assert_eq!(LimitKind::Processes.name(), "processes");
         assert_eq!(LimitKind::Threads.name(), "threads");
         assert_eq!(LimitKind::DirWatches.name(), "dir-watches");
+        assert_eq!(LimitKind::IpcQueueBytes.name(), "ipc-queue-bytes");
+        assert_eq!(LimitKind::WaitSets.name(), "wait-sets");
+        assert_eq!(LimitKind::WaitSetMembers.name(), "wait-set-members");
         for kind in LimitKind::ALL {
             assert_eq!(LimitKind::from_name(kind.name()), Some(kind));
         }

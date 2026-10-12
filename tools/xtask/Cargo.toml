@@ -323,6 +323,9 @@ tairix-view = { path = "../../userland/apps/view", version = "=0.0.0", default-f
 # the control and the choice the shell itself hit-tests, and measures its
 # window from the application's own size and sizing.
 tairix-settings = { path = "../../userland/apps/settings", version = "=0.0.0" }
+# The network map's window size and tier badge hues, read by the netmap
+# vertical's window reconstruction and screendump tier assertion.
+tairix-netmap = { path = "../../userland/apps/netmap", version = "=0.0.0" }
 tairix-geometry = { path = "../../lib/geometry", version = "=0.0.0" }
 # The shared window furniture: a served window's screen footprint is its
 # client surface grown by the band the window manager reserves around it, so
@@ -421,6 +424,11 @@ tairix-test-datetime-elevate-qemu-aarch64 = { path = "../../tests/integration/da
 # The Settings vertical's shared contract: the bundle the guest attributes the
 # launch to, which a unit test pins to the one the capsule's row starts.
 tairix-test-settings-qemu-aarch64 = { path = "../../tests/integration/settings_qemu_aarch64", version = "=0.0.0" }
+# The network-map vertical's shared contract: the bundle the library row
+# launches and the map's comm/exit witness, read by the pointer script so the
+# row it clicks and the process the guest attributes the exit to are one
+# definition.
+tairix-test-netmap-qemu-aarch64 = { path = "../../tests/integration/netmap_qemu_aarch64", version = "=0.0.0" }
 # The WinterSun client vertical's shared contract: the line typed at the shell
 # and the bundles its guest latches, so the script and the PASS gate read one
 # definition.

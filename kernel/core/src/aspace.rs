@@ -3926,7 +3926,7 @@ mod tests {
     #[test]
     fn set_default_limits_feeds_the_fallback_and_set_limit_base() {
         let mut reg = AddressSpaceRegistry::new();
-        let boot_default = LimitSet::with_derived_defaults(128 << 20, 16 << 10, 512);
+        let boot_default = LimitSet::derived_from_memory(1 << 30);
         reg.set_default_limits(boot_default);
         // An unestablished task resolves to the per-boot default …
         assert_eq!(reg.limits(ProcessId(9)), boot_default);

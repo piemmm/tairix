@@ -34,11 +34,16 @@ un motivo fisso quando serve un payload deterministico.
 
 Per impostazione predefinita `ping` invia una richiesta al secondo fino
 all'interruzione; `-c` ne limita il numero. Ogni risposta indica origine,
-numero di sequenza e tempo; una richiesta senza risposta entro il limite
-stampa una riga di scadenza. Il riepilogo finale indica i pacchetti
-trasmessi e ricevuti, la percentuale di perdita e i tempi di andata e
-ritorno minimo, medio e massimo. `-q` mostra solo l'intestazione e il
-riepilogo.
+numero di sequenza e tempo. Quando un router, o l'host stesso, segnala un
+errore relativo a una richiesta — il limite di hop esaurito, la
+destinazione irraggiungibile, il pacchetto troppo grande — una riga `From`
+indica chi lo segnala e il motivo. Una richiesta che non riceve risposta
+entro il limite non stampa nulla. Se nessuna interfaccia può ancora
+trasportare una richiesta, questa attende fino al proprio limite che la
+rete sia pronta. Il riepilogo finale indica i pacchetti trasmessi e
+ricevuti, gli eventuali errori, la percentuale di perdita e i tempi di
+andata e ritorno minimo, medio e massimo con la loro deviazione media.
+`-q` mostra solo l'intestazione e il riepilogo.
 
 Ogni risposta nomina il pari come `nome (indirizzo)` quando l'indirizzo
 ha un record `PTR`, risolto una sola volta per esecuzione con lo stesso

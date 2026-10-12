@@ -92,6 +92,13 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  36 | `log_emit`     | `user_ptr` (record), `len`              | `errno` | `CAP_LOG_EMIT`    | no      |
 |  37 | `hw_emit_node` | `user_ptr` (node), `len`                | `errno` | `CAP_HW_EMIT`     | yes     |
 |  38 | `hw_remove_node` | `u64 node_id`, `u32 flags`            | `errno` | `CAP_HW_EMIT`     | yes     |
+|  39 | `msi_alloc`    | `user_ptr` (vector out), `len`          | `u64` (handle) | `CAP_IRQ_BIND`  | yes     |
+|  40 | `shm_create`   | `len`, `user_ptr` (base out)            | `u64` (handle) | `CAP_SHM`       | yes     |
+|  41 | `shm_map`      | `Handle` (region), `user_ptr` (len out) | `u64` (base)   | `CAP_SHM`       | yes     |
+|  42 | `shm_unmap`    | `u64 base`, `len`                       | `errno`        | —               | no      |
+|  43 | `waitset_create` | —                                     | `Handle` (set) | —               | no      |
+|  44 | `waitset_ctl`  | `Handle` (set), `u32 op`, `u32 kind`, `u64 id`, `u64 token` | `errno` | —     | no      |
+|  45 | `waitset_wait` | `Handle` (set), `u64 timeout_ns`, `user_ptr` (token out) | `errno` | —        | no      |
 |  46 | `fs_open`      | `user_ptr` (path), `len`, `u32 flags`   | `u64` (fd)    | `CAP_FS_ACCESS` | yes   |
 |  47 | `fs_close`     | `u32 fd`                                | `errno`       | — (backing)     | no    |
 |  48 | `fs_read`      | `u32 fd`, `u64 offset`, `user_ptr`, `len` | `u64` (bytes) | — (backing)     | no  |
@@ -122,6 +129,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 |  73 | `pipe_create`  | `user_ptr` (out: two `u32` fds)         | `errno`       | —               | no    |
 |  74 | `fs_set_mode`  | `user_ptr` (path), `len`, `u32 mode`    | `errno`       | `CAP_FS_ACCESS` | yes   |
 |  75 | `port_resolve` | `user_ptr` (name), `len`                | `endpoint`    | —               | no    |
+|  76 | `file_map`     | `u32 fd`, `u64 offset`, `u64 len`       | `u64` (base)  | —               | no    |
+|  77 | `file_unmap`   | `u64 base`, `u64 len`                   | `errno`       | —               | no    |
 |  78 | `pointer_inject` | `u64 seat`, `user_ptr` (record), `len` | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
 |  79 | `pointer_read` | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
 |  80 | `volume_attach` | `user_ptr` (request), `len`            | `errno`       | `CAP_FS_MOUNT`  | yes   |
@@ -185,13 +194,11 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 139 | `foreground_held` | `u32 fd`                             | `u64` (`1` held, `0` not) | `CAP_CONSOLE_READ` | no |
 | 140 | `hw_node_settle` | —                                     | `errno`       | `CAP_HW_EMIT`    | no    |
 | 141 | `console_relocate` | `user_ptr` (out: framebuffer `HwResource`), `len` | `u64` (bytes) | `CAP_MEM_DMA` | yes |
+| 142 | `waitset_close` | `Handle` (set)                         | `errno`       | —                       | no      |
+| 143 | `port_unbind`  | `IpcEndpoint` (own port)                | `errno`       | —                       | yes     |
 
-(Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
-`waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
-`file_unmap` — are defined in `lib/abi/src/syscall.rs`; their rows are not
-yet transcribed into this table. The table in `lib/abi/src/syscalls.rs` is
-the source of truth either way, and `cargo xtask abi-check` is what enforces
-it.)
+The table in `lib/abi/src/syscalls.rs` is the source of truth, and
+`cargo xtask abi-check` is what enforces it.
 
 `notice_read` (no. 124) and `notice_publish` (no. 125) are the system-notice
 pair: the unprivileged, non-blocking read of a machine-wide topic's current
@@ -1354,8 +1361,11 @@ in the meantime simply falls back to registration order.
 
 A wait-set is its creator's **process's**, as are the endpoints, ports, and
 seat leases it may watch: any thread of the process may add to it or wait on
-it, and the process teardown releases it. A park still names the waiting
-thread.
+it, and `waitset_close` (no. 142) or the process teardown releases it. Each
+set counts against the process's `wait-sets` limit and each member against its
+`wait-set-members` limit. A wait another thread has under way on a set that is
+closed ends at its next event or deadline, as an `epoll_wait` on a descriptor
+closed under it does. A park still names the waiting thread.
 
 The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
 member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the
@@ -2411,6 +2421,8 @@ re-validates arguments — the dispatcher does that first.
 | `exit`          | `CapTable::remove(caller.task_id)` then `Scheduler::exit(caller.task_id)`                                     | `NoSuchTask → NotFound`, otherwise `OutOfRange`.                          |
 | `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload` → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
 | `port_admit`    | `PortRegistry::lookup(port)`; the caller must be the port's owner; then `callreg::lookup(server)` and its `owner_instance` handed to `Port::admit`, which discards every queued message another instance sent and which `Port::send` checks under the mailbox lock; senders parked for the room that frees are woken | Unbound port or endpoint → `NotFound`. Another process's port → `PermissionDenied`. |
+| `port_unbind`   | `PortRegistry::lookup(endpoint)` under the registry write lock; the caller must be the port's owner; then `PortRegistry::unregister`, which withdraws its names and destroys it, dropping its queue charge; the senders it recorded as parked for room are woken to find it gone | Unbound port → `NotFound`. Another process's port → `PermissionDenied`. |
+| `waitset_close` | `waitset::close(caller.process(), set)`: removes the owned set, releases its file members after the registry lock drops, and drops the set's charges | Not a set of the caller → `NotFound`. |
 | `ipc_recv`      | `PortRegistry::lookup(endpoint)`; the caller is gated against the port's `required_recv_caps` **before** any message is observed (the same handler-side receive gate `call_recv` applies); then `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Caller lacking a required receive capability → `PermissionDenied` (nothing about the mailbox is revealed, message retained). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |
 | `cap_delegate`  | `CapabilitySet` copied in through `copy_from_user`, then `CapTable::narrow(caller, target, set, audit)`: the caller itself or a live child of it, any other process only with `CAP_USER_ADMIN` | Faulting `set_ptr` / no registered address space → `BadAddress`. A target the caller has no authority over, known or not → `PermissionDenied`. Unknown `target` named by an administrator → `NotFound`. A widening request → `DelegationWiden`. |

@@ -112,6 +112,37 @@ pub fn ip_from_parts(family: NetAddrFamily, addr: [u8; 16]) -> core::net::IpAddr
     }
 }
 
+/// The network `addr` is on under a `prefix`-bit prefix: `addr` with every
+/// host bit cleared. A prefix of zero or wider than 32 bits names no network
+/// and yields the unspecified address.
+#[must_use]
+pub fn ipv4_network(addr: core::net::Ipv4Addr, prefix: u8) -> core::net::Ipv4Addr {
+    if prefix == 0 || prefix > 32 {
+        return core::net::Ipv4Addr::UNSPECIFIED;
+    }
+    let bits = u32::from_be_bytes(addr.octets());
+    core::net::Ipv4Addr::from(bits & (u32::MAX << (32 - u32::from(prefix))))
+}
+
+/// The IPv6 counterpart of [`ipv4_network`], over 128 bits.
+#[must_use]
+pub fn ipv6_network(addr: core::net::Ipv6Addr, prefix: u8) -> core::net::Ipv6Addr {
+    if prefix == 0 || prefix > 128 {
+        return core::net::Ipv6Addr::UNSPECIFIED;
+    }
+    let bits = u128::from_be_bytes(addr.octets());
+    core::net::Ipv6Addr::from(bits & (u128::MAX << (128 - u32::from(prefix))))
+}
+
+/// [`ipv4_network`] or [`ipv6_network`], by `addr`'s family.
+#[must_use]
+pub fn ip_network(addr: core::net::IpAddr, prefix: u8) -> core::net::IpAddr {
+    match addr {
+        core::net::IpAddr::V4(v4) => core::net::IpAddr::V4(ipv4_network(v4, prefix)),
+        core::net::IpAddr::V6(v6) => core::net::IpAddr::V6(ipv6_network(v6, prefix)),
+    }
+}
+
 /// An IP address family as carried on this protocol.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(u8)]
@@ -506,6 +537,28 @@ pub enum NetstackRequest {
         /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
         limit: u16,
     },
+    /// Page every interface's neighbour cache — ARP and IPv6 Neighbour
+    /// Discovery alike (sysinfo broker; `state:net/<iface>/neighbors`). One
+    /// [`NetNeighborRecord`] per entry, in interface-table order. It names
+    /// other hosts' link-layer addresses, so the broker gates it on
+    /// `CAP_SYSINFO_HW`.
+    Neighbors {
+        /// First entry to report.
+        offset: u32,
+        /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
+        limit: u16,
+    },
+    /// Page every interface's routes, including the IPv6 default routers
+    /// learned from Router Advertisements (sysinfo broker;
+    /// `state:net/<iface>/routes`). One [`NetRouteRecord`] per route, in
+    /// interface-table order. System-wide topology, gated
+    /// `CAP_SYSINFO_GLOBAL` at the broker.
+    Routes {
+        /// First route to report.
+        offset: u32,
+        /// Most records to return (`1..=NETSTACK_LIST_LIMIT_MAX`).
+        limit: u16,
+    },
     /// Bind a live NIC driver process's device channel to a new managed
     /// interface (admin surface).
     ///
@@ -618,6 +671,10 @@ const OP_RESOLVER_SERVERS: u16 = 12;
 const OP_STACK_DEFENCE: u16 = 13;
 /// Wire operation discriminant of [`NetstackRequest::TimeServers`].
 const OP_TIME_SERVERS: u16 = 14;
+/// Wire operation discriminant of [`NetstackRequest::Neighbors`].
+const OP_NEIGHBORS: u16 = 15;
+/// Wire operation discriminant of [`NetstackRequest::Routes`].
+const OP_ROUTES: u16 = 16;
 
 impl NetstackRequest {
     /// Encoded size on the wire: magic (4), version (2), op (2), and a
@@ -685,6 +742,12 @@ impl NetstackRequest {
             }
             Self::BondMembers { offset, limit } => {
                 put_paged(&mut out, OP_BOND_MEMBERS, offset, limit);
+            }
+            Self::Neighbors { offset, limit } => {
+                put_paged(&mut out, OP_NEIGHBORS, offset, limit);
+            }
+            Self::Routes { offset, limit } => {
+                put_paged(&mut out, OP_ROUTES, offset, limit);
             }
             Self::BindDriver {
                 endpoint_id,
@@ -791,7 +854,8 @@ impl NetstackRequest {
                     next_hop,
                 })
             }
-            OP_IF_FACTS | OP_IF_STATE | OP_IF_COUNTERS | OP_SOCKETS | OP_BOND_MEMBERS => {
+            OP_IF_FACTS | OP_IF_STATE | OP_IF_COUNTERS | OP_SOCKETS | OP_BOND_MEMBERS
+            | OP_NEIGHBORS | OP_ROUTES => {
                 reserved_zero(bytes, 14)?;
                 let (offset, limit) = paged_offset_limit(bytes)?;
                 Ok(match op {
@@ -799,7 +863,9 @@ impl NetstackRequest {
                     OP_IF_STATE => Self::InterfaceState { offset, limit },
                     OP_IF_COUNTERS => Self::InterfaceCounters { offset, limit },
                     OP_SOCKETS => Self::Sockets { offset, limit },
-                    _ => Self::BondMembers { offset, limit },
+                    OP_BOND_MEMBERS => Self::BondMembers { offset, limit },
+                    OP_NEIGHBORS => Self::Neighbors { offset, limit },
+                    _ => Self::Routes { offset, limit },
                 })
             }
             OP_IF_RATES => {
@@ -1402,16 +1468,7 @@ fn decode_gateway_v6(bytes: &[u8]) -> Result<Option<[u8; 16]>, Errno> {
 /// Whether `gateway` lies in the same IPv4 subnet as `addr` at `prefix`
 /// bits (`prefix` in `1..=32`, guaranteed by the decoder).
 fn ipv4_same_subnet(addr: [u8; 4], gateway: [u8; 4], prefix: u8) -> bool {
-    let host = u32::from_be_bytes(addr);
-    let gw = u32::from_be_bytes(gateway);
-    // `prefix` is 1..=32 here, so `32 - prefix` is 0..=31 and the shift is
-    // in range; a /32 masks to the full address.
-    let mask = if prefix == 32 {
-        u32::MAX
-    } else {
-        u32::MAX << (32 - prefix)
-    };
-    host & mask == gw & mask
+    ipv4_network(addr.into(), prefix) == ipv4_network(gateway.into(), prefix)
 }
 
 /// Largest number of member NICs a single bond aggregates, on the wire.
@@ -2542,6 +2599,289 @@ impl NetBondMemberRecord {
             active: decode_bool(bytes[32])?,
             link_up: decode_bool(bytes[33])?,
             eligible: decode_bool(bytes[34])?,
+        })
+    }
+}
+
+/// Reachability of one neighbour-cache entry (RFC 4861 §7.3.2; ARP entries
+/// move through the same states).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetNeighborState {
+    /// Resolution in progress: no link-layer address yet.
+    Incomplete = 0,
+    /// Confirmed reachable within the reachable window.
+    Reachable = 1,
+    /// Address known, freshness lapsed.
+    Stale = 2,
+    /// Traffic sent to a stale entry; probing briefly deferred.
+    Delay = 3,
+    /// Unicast reachability probes in flight.
+    Probe = 4,
+}
+
+impl NetNeighborState {
+    /// The wire value for this state.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover a state from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no state (fail closed).
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Incomplete),
+            1 => Ok(Self::Reachable),
+            2 => Ok(Self::Stale),
+            3 => Ok(Self::Delay),
+            4 => Ok(Self::Probe),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The state's display name (`incomplete`, `reachable`, …).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Incomplete => "incomplete",
+            Self::Reachable => "reachable",
+            Self::Stale => "stale",
+            Self::Delay => "delay",
+            Self::Probe => "probe",
+        }
+    }
+}
+
+/// One neighbour-cache entry (the response record of the
+/// [`NetstackRequest::Neighbors`] page).
+///
+/// `mac` is present exactly when the entry is resolved: an
+/// [`NetNeighborState::Incomplete`] entry has none, and every other state has
+/// one, so a resolved-but-addressless entry cannot be encoded.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetNeighborRecord {
+    /// The interface whose cache holds the entry, NUL-padded.
+    pub interface: [u8; IF_NAME_LEN],
+    /// The neighbour's address family.
+    pub family: NetAddrFamily,
+    /// The entry's reachability.
+    pub state: NetNeighborState,
+    /// The neighbour's address; V4 uses the first four bytes.
+    pub addr: [u8; 16],
+    /// The neighbour's link-layer address, once resolved.
+    pub mac: Option<[u8; 6]>,
+}
+
+impl NetNeighborRecord {
+    /// Encoded size: interface (16), family (1), state (1), has-mac (1),
+    /// reserved (1), address (16), mac (6), reserved (2).
+    pub const WIRE_LEN: usize = 44;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..16].copy_from_slice(&self.interface);
+        out[16] = self.family.as_u8();
+        out[17] = self.state.as_u8();
+        out[20..36].copy_from_slice(&self.addr);
+        if let Some(mac) = self.mac {
+            out[18] = 1;
+            out[36..42].copy_from_slice(&mac);
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::BadMagic`] — a dirty reserved byte, a V4 address with a
+    ///   dirty tail, or a MAC field carrying bytes it does not claim.
+    /// * [`Errno::OutOfRange`] — an invalid interface name, family, state or
+    ///   has-mac flag, or a MAC present on an incomplete entry (or absent on
+    ///   a resolved one).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[19] != 0 || bytes[42] != 0 || bytes[43] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let mut interface = [0u8; IF_NAME_LEN];
+        interface.copy_from_slice(&bytes[..16]);
+        validate_if_name(&interface)?;
+        let family = NetAddrFamily::from_u8(bytes[16])?;
+        let state = NetNeighborState::from_u8(bytes[17])?;
+        let addr = address(bytes, 20, family)?;
+        let has_mac = decode_bool(bytes[18])?;
+        if has_mac == (state == NetNeighborState::Incomplete) {
+            return Err(Errno::OutOfRange);
+        }
+        let mac = if has_mac {
+            let mut mac = [0u8; 6];
+            mac.copy_from_slice(&bytes[36..42]);
+            Some(mac)
+        } else {
+            if bytes[36..42].iter().any(|&b| b != 0) {
+                return Err(Errno::BadMagic);
+            }
+            None
+        };
+        Ok(Self {
+            interface,
+            family,
+            state,
+            addr,
+            mac,
+        })
+    }
+}
+
+/// Where one route came from.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum NetRouteOrigin {
+    /// Derived from an address assignment: the on-link subnet.
+    Connected = 0,
+    /// Configured statically or learned from a DHCP lease.
+    Static = 1,
+    /// An on-link prefix from a Router Advertisement.
+    RouterAdvertisement = 2,
+    /// A host route installed by an `ICMPv6` Redirect.
+    Redirect = 3,
+    /// An IPv6 default router from a Router Advertisement: the default
+    /// route through that router.
+    DefaultRouter = 4,
+}
+
+impl NetRouteOrigin {
+    /// The wire value for this origin.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover an origin from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] if `value` names no origin (fail closed).
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Connected),
+            1 => Ok(Self::Static),
+            2 => Ok(Self::RouterAdvertisement),
+            3 => Ok(Self::Redirect),
+            4 => Ok(Self::DefaultRouter),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+
+    /// The origin's display name (`connected`, `static`, `ra`, `redirect`,
+    /// `default-router`).
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Static => "static",
+            Self::RouterAdvertisement => "ra",
+            Self::Redirect => "redirect",
+            Self::DefaultRouter => "default-router",
+        }
+    }
+}
+
+/// One route (the response record of the [`NetstackRequest::Routes`] page).
+///
+/// A route with no `next_hop` is on-link. A
+/// [`NetRouteOrigin::DefaultRouter`] route is always the default prefix
+/// through a next hop, so a default router without a router cannot be
+/// encoded.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct NetRouteRecord {
+    /// The interface the route egresses, NUL-padded.
+    pub interface: [u8; IF_NAME_LEN],
+    /// The route's address family (destination and next hop alike).
+    pub family: NetAddrFamily,
+    /// The destination prefix length.
+    pub prefix: u8,
+    /// Where the route came from.
+    pub origin: NetRouteOrigin,
+    /// The destination network; V4 uses the first four bytes.
+    pub dest: [u8; 16],
+    /// The next-hop router, or `None` for an on-link destination.
+    pub next_hop: Option<[u8; 16]>,
+}
+
+impl NetRouteRecord {
+    /// Encoded size: interface (16), family (1), prefix (1), origin (1),
+    /// has-next-hop (1), destination (16), next hop (16).
+    pub const WIRE_LEN: usize = 52;
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        out[..16].copy_from_slice(&self.interface);
+        out[16] = self.family.as_u8();
+        out[17] = self.prefix;
+        out[18] = self.origin.as_u8();
+        out[20..36].copy_from_slice(&self.dest);
+        if let Some(hop) = self.next_hop {
+            out[19] = 1;
+            out[36..52].copy_from_slice(&hop);
+        }
+        out
+    }
+
+    /// Decode from `bytes`, failing closed on a malformed record.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] — `bytes` cannot hold a record.
+    /// * [`Errno::BadMagic`] — a V4 address with a dirty tail, or a next-hop
+    ///   field carrying bytes it does not claim.
+    /// * [`Errno::OutOfRange`] — an invalid interface name, family, origin
+    ///   or flag; a prefix beyond the family's width; or a default-router
+    ///   route that is not the default prefix through a next hop.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut interface = [0u8; IF_NAME_LEN];
+        interface.copy_from_slice(&bytes[..16]);
+        validate_if_name(&interface)?;
+        let family = NetAddrFamily::from_u8(bytes[16])?;
+        let prefix = bytes[17];
+        if prefix > family.max_prefix() {
+            return Err(Errno::OutOfRange);
+        }
+        let origin = NetRouteOrigin::from_u8(bytes[18])?;
+        let dest = address(bytes, 20, family)?;
+        let next_hop = if decode_bool(bytes[19])? {
+            Some(address(bytes, 36, family)?)
+        } else {
+            if bytes[36..52].iter().any(|&b| b != 0) {
+                return Err(Errno::BadMagic);
+            }
+            None
+        };
+        if origin == NetRouteOrigin::DefaultRouter && (prefix != 0 || next_hop.is_none()) {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            interface,
+            family,
+            prefix,
+            origin,
+            dest,
+            next_hop,
         })
     }
 }
@@ -3807,6 +4147,173 @@ mod tests {
         assert_eq!(
             NetstackRequest::from_bytes(&dirty_tail),
             Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn a_network_clears_exactly_the_host_bits() {
+        use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        let host = Ipv4Addr::new(192, 168, 37, 201);
+        assert_eq!(ipv4_network(host, 24), Ipv4Addr::new(192, 168, 37, 0));
+        assert_eq!(ipv4_network(host, 20), Ipv4Addr::new(192, 168, 32, 0));
+        assert_eq!(ipv4_network(host, 32), host);
+        assert_eq!(ipv4_network(host, 0), Ipv4Addr::UNSPECIFIED);
+        assert_eq!(ipv4_network(host, 33), Ipv4Addr::UNSPECIFIED);
+        let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0xab, 0xcd, 1, 2, 3, 4);
+        assert_eq!(
+            ipv6_network(v6, 48),
+            Ipv6Addr::new(0x2001, 0xdb8, 0xab, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(ipv6_network(v6, 128), v6);
+        assert_eq!(ipv6_network(v6, 129), Ipv6Addr::UNSPECIFIED);
+        assert_eq!(
+            ip_network(IpAddr::V4(host), 16),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 0))
+        );
+    }
+
+    #[test]
+    fn neighbor_and_route_requests_round_trip_and_page_fail_closed() {
+        for request in [
+            NetstackRequest::Neighbors {
+                offset: 7,
+                limit: 9,
+            },
+            NetstackRequest::Routes {
+                offset: 3,
+                limit: 1,
+            },
+        ] {
+            let bytes = request.to_le_bytes();
+            assert_eq!(NetstackRequest::from_bytes(&bytes), Ok(request));
+            let mut zero_limit = bytes;
+            zero_limit[12] = 0;
+            zero_limit[13] = 0;
+            assert_eq!(
+                NetstackRequest::from_bytes(&zero_limit),
+                Err(Errno::LengthOutOfRange)
+            );
+            let mut dirty = bytes;
+            dirty[40] = 1;
+            assert_eq!(NetstackRequest::from_bytes(&dirty), Err(Errno::BadMagic));
+        }
+    }
+
+    #[test]
+    fn neighbor_record_round_trips_and_ties_its_mac_to_its_state() {
+        let mut addr = [0u8; 16];
+        addr[..4].copy_from_slice(&[192, 168, 1, 7]);
+        let resolved = NetNeighborRecord {
+            interface: name("eth0"),
+            family: NetAddrFamily::V4,
+            state: NetNeighborState::Reachable,
+            addr,
+            mac: Some([2, 0, 0, 0, 0, 9]),
+        };
+        let bytes = resolved.to_le_bytes();
+        assert_eq!(NetNeighborRecord::from_bytes(&bytes), Ok(resolved));
+
+        let incomplete = NetNeighborRecord {
+            state: NetNeighborState::Incomplete,
+            mac: None,
+            ..resolved
+        };
+        let bytes = incomplete.to_le_bytes();
+        assert_eq!(NetNeighborRecord::from_bytes(&bytes), Ok(incomplete));
+
+        let mut claims_mac = bytes;
+        claims_mac[18] = 1;
+        assert_eq!(
+            NetNeighborRecord::from_bytes(&claims_mac),
+            Err(Errno::OutOfRange)
+        );
+        let mut hidden_mac = bytes;
+        hidden_mac[36] = 0xff;
+        assert_eq!(
+            NetNeighborRecord::from_bytes(&hidden_mac),
+            Err(Errno::BadMagic)
+        );
+        let mut resolved_without_mac = resolved.to_le_bytes();
+        resolved_without_mac[18] = 0;
+        assert_eq!(
+            NetNeighborRecord::from_bytes(&resolved_without_mac),
+            Err(Errno::OutOfRange)
+        );
+        let mut dirty_v4 = resolved.to_le_bytes();
+        dirty_v4[30] = 1;
+        assert_eq!(
+            NetNeighborRecord::from_bytes(&dirty_v4),
+            Err(Errno::BadMagic)
+        );
+        let mut bad_state = resolved.to_le_bytes();
+        bad_state[17] = 5;
+        assert_eq!(
+            NetNeighborRecord::from_bytes(&bad_state),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            NetNeighborRecord::from_bytes(&bytes[..NetNeighborRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn route_record_round_trips_and_holds_a_default_router_to_its_shape() {
+        let mut hop = [0u8; 16];
+        hop[0] = 0xfe;
+        hop[1] = 0x80;
+        hop[15] = 1;
+        let default_router = NetRouteRecord {
+            interface: name("eth0"),
+            family: NetAddrFamily::V6,
+            prefix: 0,
+            origin: NetRouteOrigin::DefaultRouter,
+            dest: [0u8; 16],
+            next_hop: Some(hop),
+        };
+        let bytes = default_router.to_le_bytes();
+        assert_eq!(NetRouteRecord::from_bytes(&bytes), Ok(default_router));
+
+        let mut subnet = [0u8; 16];
+        subnet[..3].copy_from_slice(&[10, 0, 0]);
+        let connected = NetRouteRecord {
+            family: NetAddrFamily::V4,
+            prefix: 24,
+            origin: NetRouteOrigin::Connected,
+            dest: subnet,
+            next_hop: None,
+            ..default_router
+        };
+        let bytes = connected.to_le_bytes();
+        assert_eq!(NetRouteRecord::from_bytes(&bytes), Ok(connected));
+
+        let mut wide = bytes;
+        wide[17] = 33;
+        assert_eq!(NetRouteRecord::from_bytes(&wide), Err(Errno::OutOfRange));
+        let mut hidden_hop = bytes;
+        hidden_hop[40] = 1;
+        assert_eq!(
+            NetRouteRecord::from_bytes(&hidden_hop),
+            Err(Errno::BadMagic)
+        );
+        let mut routerless = default_router.to_le_bytes();
+        routerless[19] = 0;
+        routerless[36..52].fill(0);
+        assert_eq!(
+            NetRouteRecord::from_bytes(&routerless),
+            Err(Errno::OutOfRange)
+        );
+        let mut narrowed = default_router.to_le_bytes();
+        narrowed[17] = 64;
+        assert_eq!(
+            NetRouteRecord::from_bytes(&narrowed),
+            Err(Errno::OutOfRange)
+        );
+        let mut bad_origin = bytes;
+        bad_origin[18] = 9;
+        assert_eq!(
+            NetRouteRecord::from_bytes(&bad_origin),
+            Err(Errno::OutOfRange)
         );
     }
 

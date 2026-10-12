@@ -513,6 +513,8 @@ const STATE_SELECTORS: &[SelectorEntry] = &[
     SelectorEntry::bare("net/<bond>/member-health"),
     SelectorEntry::bare("net/<iface>/address"),
     SelectorEntry::bare("net/<iface>/link"),
+    SelectorEntry::bare("net/<iface>/neighbors"),
+    SelectorEntry::bare("net/<iface>/routes"),
     SelectorEntry::bare("net/resolver/servers"),
     SelectorEntry::bare("net/time/servers"),
 ];

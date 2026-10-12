@@ -39,15 +39,18 @@
 //! * [`for_each_resolver_server`] and [`for_each_time_server`], the
 //!   recursive-resolver and network-time server walks the
 //!   `state:net/resolver/servers` and `state:net/time/servers` reads render.
-//! * [`render_ip`], [`render_server`] and [`render_if_addr`] — the one text
-//!   spelling of a network address every surface prints, so a desktop never
-//!   spells one address two ways.
+//! * [`render_ip`], [`render_server`], [`render_if_addr`], [`render_mac`],
+//!   [`render_route`] and [`render_neighbor`] — the one text spelling of a
+//!   network address every surface prints, so a desktop never spells one
+//!   address two ways.
 //! * [`kstats`] — the shared kernel-statistics fetches (memory pressure,
 //!   reclaim ledger, `ramzip` counters, per-CPU load) consumed by both the
 //!   resolver and the `sysmon` monitor, plus [`for_each_net_interface`] and
 //!   [`for_each_net_bond_member`], the network interface and bond-membership
 //!   walks the resolver's per-name lookups and the shell's
 //!   resource-selector enumeration both run.
+//! * [`for_each_net_neighbor`] and [`for_each_net_route`] — the neighbour-cache
+//!   and routing-table walks a network map reads its topology from.
 //! * [`walk_pages`](list) and the shared [`ListError`], the generic paging
 //!   loop every walk is built on, plus the [`WalkStep`] signal a caller with
 //!   its own bound answers to end a walk early without faking a failure;
@@ -132,6 +135,7 @@ pub mod mount;
 pub mod netaddr;
 pub mod netservers;
 pub mod netsock;
+pub mod nettopo;
 pub mod pressure;
 pub mod process;
 pub mod raid;
@@ -142,6 +146,9 @@ pub mod transport;
 pub mod users;
 pub mod valueread;
 pub mod volume;
+
+#[cfg(test)]
+mod testing;
 
 pub use audio::{
     for_each_audio_device, for_each_audio_stream, render_audio_device, render_audio_stream,
@@ -166,11 +173,14 @@ pub use kstats::{
 };
 pub use list::{field_lossy, walk_pages, walk_pages_with, walk_records, ListError, WalkStep};
 pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
-pub use netaddr::{render_if_addr, render_ip, render_server};
+pub use netaddr::{
+    render_if_addr, render_ip, render_mac, render_neighbor, render_route, render_server,
+};
 pub use netservers::{
     for_each_resolver_server, for_each_time_server, RESOLVER_SERVER_PAGE, TIME_SERVER_PAGE,
 };
 pub use netsock::{for_each_net_socket, NET_SOCKET_PAGE};
+pub use nettopo::{for_each_net_neighbor, for_each_net_route, NET_TOPOLOGY_PAGE};
 pub use process::{
     emit_self_scope_omission, for_each_process, render_process, state_char, PROCESS_HEADER,
     PROCESS_PAGE,
@@ -198,7 +208,8 @@ pub use valueread::{read_value, MAX_VALUE_LEN};
 const _: () = {
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetNeighborRecord, NetRouteRecord,
+        NetServerAddr, NetSocketRecord,
     };
     use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
     use tairix_abi::sysinfo::{
@@ -232,6 +243,8 @@ const _: () = {
     assert!(fits(NET_INTERFACE_PAGE, NetInterfaceRatesRecord::WIRE_LEN));
     assert!(fits(NET_INTERFACE_PAGE, NetBondMemberRecord::WIRE_LEN));
     assert!(fits(NET_SOCKET_PAGE, NetSocketRecord::WIRE_LEN));
+    assert!(fits(NET_TOPOLOGY_PAGE, NetNeighborRecord::WIRE_LEN));
+    assert!(fits(NET_TOPOLOGY_PAGE, NetRouteRecord::WIRE_LEN));
     assert!(fits(RESOLVER_SERVER_PAGE, NetServerAddr::WIRE_LEN));
     assert!(fits(TIME_SERVER_PAGE, NetServerAddr::WIRE_LEN));
     assert!(fits(USER_DIRECTORY_PAGE, UserDirectoryRecord::WIRE_LEN));

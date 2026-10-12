@@ -417,6 +417,7 @@ fn bind_reply_port(ipc: &RwLock<PortRegistry>) {
         CapabilitySet::empty(),
         REPLY_MAX_PAYLOAD,
         REPLY_MAILBOX_CAPACITY,
+        tairix_abi::RLIMIT_INFINITY,
         &SERIAL_SINK,
     ) else {
         qemu_exit::exit_failure(FAIL_PORT);

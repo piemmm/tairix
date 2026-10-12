@@ -1139,3 +1139,47 @@ fn a_name_outside_a_message_reads_only_in_canonical_form() {
         "and a truncation is unterminated"
     );
 }
+
+#[test]
+fn a_wire_name_presents_decoded_or_escaped() {
+    let mut wire = alloc::vec::Vec::new();
+    for label in [&b"printer"[..], b"local"] {
+        wire.push(u8::try_from(label.len()).expect("short"));
+        wire.extend_from_slice(label);
+    }
+    wire.push(0);
+    assert_eq!(alloc::format!("{}", WireName(&wire)), "printer.local");
+    // Octets that do not decode reach the display escaped, never raw.
+    assert_eq!(
+        alloc::format!("{}", WireName(b"\x05ab\x1b")),
+        "\\005ab\\027"
+    );
+}
+
+#[test]
+fn a_display_label_keeps_text_and_escapes_what_hides() {
+    let shown = |bytes: &[u8]| alloc::format!("{}", DisplayLabel(bytes));
+    assert_eq!(shown("Ivan’s MacBook Pro".as_bytes()), "Ivan’s MacBook Pro");
+    assert_eq!(
+        shown(b"Office Printer (2nd floor)"),
+        "Office Printer (2nd floor)"
+    );
+    assert_eq!(
+        shown(b"a\\b"),
+        "a\\\\b",
+        "a backslash is escaped so escapes stay unambiguous"
+    );
+    // A zero-width space, a right-to-left override and a control each show as
+    // their octets, so the label cannot pass for the one without them.
+    assert_eq!(
+        shown("Print\u{200b}er".as_bytes()),
+        "Print\\226\\128\\139er"
+    );
+    assert_eq!(shown("x\u{202e}y".as_bytes()), "x\\226\\128\\174y");
+    assert_eq!(shown(b"bell\x07"), "bell\\007");
+    assert_eq!(
+        shown(b"bad\xff"),
+        "bad\\255",
+        "invalid UTF-8 is escaped octet by octet"
+    );
+}

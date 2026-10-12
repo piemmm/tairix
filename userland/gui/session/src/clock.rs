@@ -48,7 +48,7 @@ use tairix_taskbar::clock::UNSET_LABEL;
 use crate::switchuser::park_within;
 
 /// Nanoseconds in one second.
-const NANOS_PER_SEC: u64 = 1_000_000_000;
+const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// Seconds in one minute.
 const SECS_PER_MIN: i64 = 60;

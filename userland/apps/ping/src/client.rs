@@ -1,22 +1,24 @@
-//! The `ping` engine: send echo requests, collect replies, print each
-//! result and the final statistics.
+//! The `ping` engine: send echo requests, collect what becomes of each, print
+//! each result and the final statistics.
 //!
 //! Pure and host-testable: it drives the injected [`PingIo`] seam (clock,
-//! echo socket, wait/park) and the [`Output`] seam, never a syscall.
+//! echo socket, wait/park) and the [`Output`] seams, never a syscall.
 
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
-use core::fmt::Write as _;
 
+use tairix_abi::net::EchoOutcome;
 use tairix_abi::net_ipc::NetAddrFamily;
-use tairix_abi::time::NANOS_PER_MILLI;
+use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Config, PayloadKind, Target};
 use crate::error::PingError;
 use crate::io::Output;
-use crate::net::PingIo;
+use crate::net::{EchoEvent, PingIo};
+use crate::report::{self, RttStats};
 
 /// The one-line usage banner, printed on a usage error and as the fallback
 /// when the bundled help document is unavailable.
@@ -26,6 +28,10 @@ pub const USAGE: &str = "usage: ping [-c count] [-i interval] [-s size] [-W time
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "ping";
 
+/// Most reporting routers one run remembers the names of; past it, each
+/// further one is looked up whenever it reports.
+const MAX_REMEMBERED_NAMES: usize = 64;
+
 /// The outcome of a completed ping run: enough to choose the exit code.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RunSummary {
@@ -33,6 +39,8 @@ pub struct RunSummary {
     pub transmitted: u32,
     /// Replies received and verified.
     pub received: u32,
+    /// Requests a router or the host reported an error about.
+    pub errors: u32,
 }
 
 impl RunSummary {
@@ -43,35 +51,13 @@ impl RunSummary {
     }
 }
 
-/// Round-trip-time accumulator, integer-only (`no_std`, no float/libm).
-#[derive(Clone, Copy, Debug, Default)]
-struct RttStats {
-    count: u32,
-    min_ns: u64,
-    max_ns: u64,
-    total_ns: u128,
-}
-
-impl RttStats {
-    fn record(&mut self, rtt_ns: u64) {
-        if self.count == 0 || rtt_ns < self.min_ns {
-            self.min_ns = rtt_ns;
-        }
-        if rtt_ns > self.max_ns {
-            self.max_ns = rtt_ns;
-        }
-        self.total_ns += u128::from(rtt_ns);
-        self.count += 1;
-    }
-}
-
 /// Run a parsed `ping` command against the injected seams.
 ///
 /// # Errors
 ///
-/// A [`PingError`] when the socket cannot be opened/connected, a send or
-/// receive fails fatally, or a line cannot be written. A run in which every
-/// request timed out is **not** an error — it completes and returns a
+/// A [`PingError`] when the socket cannot be opened/connected, a receive
+/// fails fatally, or a line cannot be written. A run in which every request
+/// went unanswered is **not** an error — it completes and returns a
 /// [`RunSummary`] with `received == 0` (the caller maps that to exit `1`).
 pub fn run(
     command: Command,
@@ -81,7 +67,6 @@ pub fn run(
     out: &dyn Output,
     err: &dyn Output,
 ) -> Result<RunSummary, PingError> {
-    let _ = err;
     let config = match command {
         Command::Help => {
             let bytes = own_short_help(help, locale, OWN_WORD)
@@ -91,110 +76,169 @@ pub fn run(
         }
         Command::Run(config) => config,
     };
-    ping(&config, io, out)
+    ping(&config, io, out, err)
 }
 
-/// The ping loop proper: send each request, await its reply within the
-/// per-reply timeout, print the result, and print the closing statistics.
-fn ping(config: &Config, io: &mut dyn PingIo, out: &dyn Output) -> Result<RunSummary, PingError> {
-    let target = resolve(config, io)?;
-    io.connect(target.family, target.addr)
-        .map_err(map_connect_error)?;
-
-    let mut payload = vec![0u8; config.size];
-    let start = io.now();
-    let overall_deadline = config.deadline_ns.map(|d| start.saturating_add(d));
-
-    out.write_all(header(config, &target).as_bytes())
-        .map_err(PingError::Output)?;
-
-    let mut summary = RunSummary::default();
-    let mut rtt = RttStats::default();
-    let mut seq: u16 = 0;
-    while config.count.is_none_or(|c| u32::from(seq) < c) {
-        if let Some(deadline) = overall_deadline {
-            if io.now() >= deadline {
-                break;
-            }
-        }
-        seq = seq.wrapping_add(1);
-        // Fresh bytes for every request: an identical payload would let a
-        // de-duplicating link answer from a cache, and the echoed copy is
-        // then a per-packet integrity check as well.
-        fill_payload(config, io, &mut payload);
-        let sent_at = io.now();
-        summary.transmitted += 1;
-        match io.send(seq, &payload) {
-            Ok(()) => {
-                await_reply(
-                    config,
-                    io,
-                    out,
-                    &target,
-                    &payload,
-                    seq,
-                    sent_at,
-                    &mut summary,
-                    &mut rtt,
-                )?;
-            }
-            // NetworkUnreachable while the link is still coming up is worth
-            // reporting but not fatal to the whole run — the next request
-            // may succeed once the interface binds.
-            Err(errno) => {
-                let line = format!("ping: sendto: {errno}\n");
-                if !config.quiet {
-                    out.write_all(line.as_bytes()).map_err(PingError::Output)?;
-                }
-            }
-        }
-        let last = config.count.is_some_and(|c| u32::from(seq) >= c);
-        if !last {
-            io.sleep_until(sent_at.saturating_add(config.interval_ns));
-        }
-    }
-
-    out.write_all(statistics(&target, summary, &rtt, io.now().saturating_sub(start)).as_bytes())
-        .map_err(PingError::Output)?;
-    Ok(summary)
-}
-
-/// Await the reply to `seq` within its timeout, discarding stray or
-/// mismatched replies, and record the outcome.
-#[allow(clippy::too_many_arguments)]
-fn await_reply(
+/// Resolve and connect, then run the requests.
+fn ping(
     config: &Config,
     io: &mut dyn PingIo,
     out: &dyn Output,
-    target: &Target,
-    payload: &[u8],
-    seq: u16,
-    sent_at: u64,
-    summary: &mut RunSummary,
-    rtt: &mut RttStats,
-) -> Result<(), PingError> {
-    let deadline = sent_at.saturating_add(config.timeout_ns);
-    loop {
-        match io.recv(deadline).map_err(PingError::Receive)? {
-            Some(reply) if reply.seq == seq && reply_matches(target, payload, &reply) => {
-                let rtt_ns = io.now().saturating_sub(sent_at);
-                rtt.record(rtt_ns);
-                summary.received += 1;
-                if !config.quiet {
-                    let line = reply_line(&reply, rtt_ns, target.name.as_deref());
-                    out.write_all(line.as_bytes()).map_err(PingError::Output)?;
-                }
-                return Ok(());
+    err: &dyn Output,
+) -> Result<RunSummary, PingError> {
+    let target = resolve(config, io)?;
+    io.connect(target.family, target.addr)
+        .map_err(map_connect_error)?;
+    Run {
+        config,
+        io,
+        out,
+        err,
+        target,
+        summary: RunSummary::default(),
+        rtt: RttStats::default(),
+        names: BTreeMap::new(),
+    }
+    .requests()
+}
+
+/// One run in progress.
+struct Run<'a> {
+    config: &'a Config,
+    io: &'a mut dyn PingIo,
+    out: &'a dyn Output,
+    err: &'a dyn Output,
+    target: Target,
+    summary: RunSummary,
+    rtt: RttStats,
+    /// The names reporting routers resolved to, each looked up once.
+    names: BTreeMap<[u8; 16], Option<String>>,
+}
+
+impl Run<'_> {
+    /// Send each request, await what becomes of it, and print the closing
+    /// statistics.
+    fn requests(mut self) -> Result<RunSummary, PingError> {
+        let mut payload = vec![0u8; self.config.size];
+        let start = self.io.now();
+        let overall_deadline = self.config.deadline_ns.map(|d| start.saturating_add(d));
+        self.print(&header(self.config, &self.target))?;
+        let mut seq: u16 = 0;
+        while self.config.count.is_none_or(|c| u32::from(seq) < c) {
+            if overall_deadline.is_some_and(|deadline| self.io.now() >= deadline) {
+                break;
             }
-            // A stray/old/corrupt reply: keep waiting until the deadline.
-            Some(_) => {}
-            None => {
-                if !config.quiet {
-                    let line = format!("Request timeout for icmp_seq {seq}\n");
-                    out.write_all(line.as_bytes()).map_err(PingError::Output)?;
-                }
-                return Ok(());
+            seq = seq.wrapping_add(1);
+            // Fresh bytes for every request: an identical payload would let a
+            // de-duplicating link answer from a cache, and the echoed copy is
+            // then a per-packet integrity check as well.
+            fill_payload(self.config, self.io, &mut payload);
+            let sent_at = self.io.now();
+            let answer_by = sent_at
+                .saturating_add(self.config.timeout_ns)
+                .min(overall_deadline.unwrap_or(u64::MAX));
+            self.summary.transmitted += 1;
+            match self.send(seq, &payload, answer_by) {
+                Ok(()) => self.await_answer(seq, &payload, sent_at, answer_by)?,
+                Err(errno) => self
+                    .err
+                    .write_all(format!("ping: sendmsg: {errno}\n").as_bytes())
+                    .map_err(PingError::Output)?,
             }
+            let last = self.config.count.is_some_and(|c| u32::from(seq) >= c);
+            if !last {
+                self.io
+                    .sleep_until(sent_at.saturating_add(self.config.interval_ns));
+            }
+        }
+        let elapsed = self.io.now().saturating_sub(start);
+        let closing = report::statistics(&self.target.display, self.summary, &self.rtt, elapsed);
+        self.print(&closing)?;
+        Ok(self.summary)
+    }
+
+    /// Send `seq`. While no interface can carry it, wait for the network to
+    /// change — never on a timer — until `answer_by`.
+    fn send(&mut self, seq: u16, payload: &[u8], answer_by: u64) -> Result<(), Errno> {
+        loop {
+            match self.io.send(seq, payload) {
+                Err(Errno::NetworkUnreachable) if self.io.await_network(answer_by) => {}
+                sent => return sent,
+            }
+        }
+    }
+
+    /// Await what becomes of `seq` until `answer_by`, discarding anything
+    /// about another request, and record it. Nothing at all is a silent loss.
+    fn await_answer(
+        &mut self,
+        seq: u16,
+        payload: &[u8],
+        sent_at: u64,
+        answer_by: u64,
+    ) -> Result<(), PingError> {
+        while let Some(event) = self.io.recv(answer_by).map_err(PingError::Receive)? {
+            if event.seq != seq || event.family != self.target.family {
+                continue;
+            }
+            if event.outcome != EchoOutcome::Reply {
+                self.summary.errors += 1;
+                let line = self.error_line(&event);
+                return self.print_unless_quiet(&line);
+            }
+            if reply_matches(&self.target, payload, &event) {
+                let rtt_ns = self.io.now().saturating_sub(sent_at);
+                self.rtt.record(rtt_ns);
+                self.summary.received += 1;
+                let line = reply_line(&event, rtt_ns, self.target.name.as_deref());
+                return self.print_unless_quiet(&line);
+            }
+        }
+        Ok(())
+    }
+
+    /// iputils' `From <reporter> icmp_seq=<seq> <reason>` line.
+    fn error_line(&mut self, event: &EchoEvent) -> String {
+        let reporter = self.reporter(event.family, event.addr);
+        let reason = report::reason(self.target.family, event.outcome).unwrap_or_default();
+        format!("From {reporter} icmp_seq={} {reason}\n", event.seq)
+    }
+
+    /// A reporter as iputils names it: `name (address)` when it has a name
+    /// and output is not numeric, else the bare address.
+    fn reporter(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> String {
+        let shown = render_addr(family, &addr);
+        if self.config.numeric {
+            return shown;
+        }
+        let name = if addr == self.target.addr {
+            self.target.name.clone()
+        } else if let Some(known) = self.names.get(&addr) {
+            known.clone()
+        } else {
+            let found = self.io.reverse(family, addr);
+            if self.names.len() < MAX_REMEMBERED_NAMES {
+                self.names.insert(addr, found.clone());
+            }
+            found
+        };
+        match name {
+            Some(name) => format!("{name} ({shown})"),
+            None => shown,
+        }
+    }
+
+    fn print(&self, text: &str) -> Result<(), PingError> {
+        self.out
+            .write_all(text.as_bytes())
+            .map_err(PingError::Output)
+    }
+
+    fn print_unless_quiet(&self, text: &str) -> Result<(), PingError> {
+        if self.config.quiet {
+            Ok(())
+        } else {
+            self.print(text)
         }
     }
 }
@@ -225,9 +269,9 @@ fn resolve(config: &Config, io: &mut dyn PingIo) -> Result<Target, PingError> {
 
 /// Map a connect refusal onto the tool's error type, keeping a capability
 /// denial distinguishable from every other cause.
-fn map_connect_error(errno: tairix_abi::Errno) -> PingError {
+fn map_connect_error(errno: Errno) -> PingError {
     match errno {
-        tairix_abi::Errno::PermissionDenied => PingError::Denied,
+        Errno::PermissionDenied => PingError::Denied,
         other => PingError::Socket(other),
     }
 }
@@ -237,8 +281,8 @@ fn map_connect_error(errno: tairix_abi::Errno) -> PingError {
 ///
 /// With the default random payload this is also a per-packet integrity
 /// check: a link that corrupted a byte cannot echo the bytes we drew.
-fn reply_matches(target: &Target, payload: &[u8], reply: &crate::net::EchoReply) -> bool {
-    reply.family == target.family && reply.addr == target.addr && reply.payload == payload
+fn reply_matches(target: &Target, payload: &[u8], reply: &EchoEvent) -> bool {
+    reply.addr == target.addr && reply.payload == payload
 }
 
 /// Fill `payload` for the next request.
@@ -282,7 +326,7 @@ fn header(config: &Config, target: &Target) -> String {
 /// The IP TTL is not surfaced through the echo-socket abstraction, so —
 /// unlike iputils — the line carries no `ttl=` field (a documented
 /// TAIRiX-specific divergence).
-fn reply_line(reply: &crate::net::EchoReply, rtt_ns: u64, name: Option<&str>) -> String {
+fn reply_line(reply: &EchoEvent, rtt_ns: u64, name: Option<&str>) -> String {
     let addr = render_addr(reply.family, &reply.addr);
     let peer = match name {
         Some(name) => format!("{name} ({addr})"),
@@ -295,48 +339,8 @@ fn reply_line(reply: &crate::net::EchoReply, rtt_ns: u64, name: Option<&str>) ->
         bytes,
         peer,
         u32::from(reply.seq),
-        format_ms(rtt_ns),
+        report::reply_time(rtt_ns),
     )
-}
-
-/// The closing statistics block.
-fn statistics(target: &Target, summary: RunSummary, rtt: &RttStats, elapsed_ns: u64) -> String {
-    let mut text = String::new();
-    let _ = writeln!(text, "\n--- {} ping statistics ---", target.display);
-    let loss = if summary.transmitted == 0 {
-        0
-    } else {
-        (u64::from(summary.transmitted - summary.received) * 100) / u64::from(summary.transmitted)
-    };
-    let _ = writeln!(
-        text,
-        "{} packets transmitted, {} received, {}% packet loss, time {}ms",
-        summary.transmitted,
-        summary.received,
-        loss,
-        elapsed_ns / NANOS_PER_MILLI,
-    );
-    if rtt.count > 0 {
-        // Integer average: total / count, both in nanoseconds.
-        let avg_ns = u64::try_from(rtt.total_ns / u128::from(rtt.count)).unwrap_or(u64::MAX);
-        let _ = writeln!(
-            text,
-            "rtt min/avg/max = {}/{}/{} ms",
-            format_ms(rtt.min_ns),
-            format_ms(avg_ns),
-            format_ms(rtt.max_ns),
-        );
-    }
-    text
-}
-
-/// Format a nanosecond duration as milliseconds with three decimals,
-/// integer-only (`X.YYY`).
-fn format_ms(ns: u64) -> String {
-    let whole = ns / NANOS_PER_MILLI;
-    // Microseconds within the millisecond → three fractional digits.
-    let frac = (ns % NANOS_PER_MILLI) / 1_000;
-    format!("{whole}.{frac:03}")
 }
 
 /// Render an address for display.
@@ -348,31 +352,37 @@ fn render_addr(family: NetAddrFamily, addr: &[u8; 16]) -> String {
 mod tests {
     use super::*;
     use crate::command::HostTarget;
-    use crate::net::{EchoReply, ResolveFailure};
     use alloc::collections::VecDeque;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::Errno;
+    use tairix_resolver::TargetFailure;
 
     /// An in-memory `PingIo`: it echoes every sent request unless its `seq`
-    /// is in `drop`, advancing a synthetic monotonic clock by `rtt_step` on
-    /// each delivered reply. `send_err` forces a fatal-ish send error for
-    /// the modelled unreachable-link case.
+    /// is dropped or answered with a scripted error, advancing a synthetic
+    /// monotonic clock by `rtt_step` on each delivered answer.
     struct FakeIo {
         clock: u64,
         rtt_step: u64,
         family: NetAddrFamily,
         addr: [u8; 16],
         drop: Vec<u16>,
-        send_err: Option<Errno>,
-        replies: VecDeque<EchoReply>,
+        /// Requests a router answers with an error instead: the outcome and
+        /// the reporter's address.
+        errors: BTreeMap<u16, (EchoOutcome, [u8; 16])>,
+        /// Send refusals still to come, before sends succeed.
+        send_errs: VecDeque<Errno>,
+        /// Whether the network moves while a send waits for it.
+        network_moves: bool,
+        /// How many times a send waited for the network.
+        network_waits: u32,
+        answers: VecDeque<EchoEvent>,
         /// Scripted resolution outcome; `None` means "does not resolve".
         resolves: Option<(NetAddrFamily, [u8; 16])>,
         /// The failure a `None` resolution reports.
-        resolve_failure: ResolveFailure,
+        resolve_failure: TargetFailure,
         /// Hosts `resolve` was asked about, in order.
         asked: Vec<String>,
-        /// The name a reverse lookup answers with, or `None` for no record.
+        /// The name every reverse lookup answers with, or `None`.
         reverse: Option<String>,
         /// Addresses `reverse` was asked about, in order.
         reversed: Vec<[u8; 16]>,
@@ -384,20 +394,28 @@ mod tests {
         sent: Vec<Vec<u8>>,
     }
 
+    fn v4_addr(octets: [u8; 4]) -> [u8; 16] {
+        let mut addr = [0u8; 16];
+        addr[..4].copy_from_slice(&octets);
+        addr
+    }
+
     impl FakeIo {
         fn v4() -> Self {
-            let mut addr = [0u8; 16];
-            addr[..4].copy_from_slice(&[10, 0, 2, 2]);
+            let addr = v4_addr([10, 0, 2, 2]);
             Self {
                 clock: 1_000,
                 rtt_step: 250_000, // 0.250 ms
                 family: NetAddrFamily::V4,
                 addr,
                 drop: Vec::new(),
-                send_err: None,
-                replies: VecDeque::new(),
+                errors: BTreeMap::new(),
+                send_errs: VecDeque::new(),
+                network_moves: false,
+                network_waits: 0,
+                answers: VecDeque::new(),
                 resolves: Some((NetAddrFamily::V4, addr)),
-                resolve_failure: ResolveFailure::Unknown,
+                resolve_failure: TargetFailure::Unknown,
                 asked: Vec::new(),
                 reverse: None,
                 reversed: Vec::new(),
@@ -413,7 +431,7 @@ mod tests {
             &mut self,
             host: &str,
             _family: Option<NetAddrFamily>,
-        ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure> {
+        ) -> Result<(NetAddrFamily, [u8; 16]), TargetFailure> {
             self.asked.push(host.to_string());
             self.resolves.ok_or(self.resolve_failure)
         }
@@ -446,13 +464,22 @@ mod tests {
         }
 
         fn send(&mut self, seq: u16, payload: &[u8]) -> Result<(), Errno> {
-            self.sent.push(payload.to_vec());
-            if let Some(err) = self.send_err {
+            if let Some(err) = self.send_errs.pop_front() {
                 return Err(err);
             }
-            if !self.drop.contains(&seq) {
-                self.replies.push_back(EchoReply {
+            self.sent.push(payload.to_vec());
+            if let Some(&(outcome, reporter)) = self.errors.get(&seq) {
+                self.answers.push_back(EchoEvent {
                     seq,
+                    outcome,
+                    family: self.family,
+                    addr: reporter,
+                    payload: Vec::new(),
+                });
+            } else if !self.drop.contains(&seq) {
+                self.answers.push_back(EchoEvent {
+                    seq,
+                    outcome: EchoOutcome::Reply,
                     family: self.family,
                     addr: self.addr,
                     payload: payload.to_vec(),
@@ -461,22 +488,27 @@ mod tests {
             Ok(())
         }
 
-        fn recv(&mut self, deadline_ns: u64) -> Result<Option<EchoReply>, Errno> {
-            if let Some(reply) = self.replies.pop_front() {
+        fn await_network(&mut self, deadline_ns: u64) -> bool {
+            self.network_waits += 1;
+            if !self.network_moves {
+                self.clock = self.clock.max(deadline_ns);
+            }
+            self.network_moves
+        }
+
+        fn recv(&mut self, deadline_ns: u64) -> Result<Option<EchoEvent>, Errno> {
+            if let Some(answer) = self.answers.pop_front() {
                 self.clock += self.rtt_step;
-                Ok(Some(reply))
+                Ok(Some(answer))
             } else {
-                // No reply queued: the request was dropped — the wait times
-                // out at the deadline.
+                // Nothing came back: the wait runs out at the deadline.
                 self.clock = self.clock.max(deadline_ns);
                 Ok(None)
             }
         }
 
         fn sleep_until(&mut self, deadline_ns: u64) {
-            if deadline_ns > self.clock {
-                self.clock = deadline_ns;
-            }
+            self.clock = self.clock.max(deadline_ns);
         }
     }
 
@@ -524,13 +556,19 @@ mod tests {
         }
     }
 
+    /// Run `config` against `io`, returning the summary and both streams.
+    fn ping_with(config: &Config, io: &mut FakeIo) -> (RunSummary, String, String) {
+        let out = BufOut::new();
+        let err = BufOut::new();
+        let summary = ping(config, io, &out, &err).expect("run");
+        (summary, out.text(), err.text())
+    }
+
     #[test]
     fn a_reply_from_a_named_peer_shows_the_name_and_the_address() {
         let mut io = FakeIo::v4();
         io.reverse = Some("gateway.example".to_string());
-        let out = BufOut::new();
-        ping(&resolving_config(Some(1)), &mut io, &out).expect("run");
-        let text = out.text();
+        let (_, text, _) = ping_with(&resolving_config(Some(1)), &mut io);
         assert!(
             text.contains("bytes from gateway.example (10.0.2.2): icmp_seq=1"),
             "{text}"
@@ -546,18 +584,15 @@ mod tests {
     fn a_peer_with_no_pointer_record_stays_numeric() {
         let mut io = FakeIo::v4();
         io.reverse = None;
-        let out = BufOut::new();
-        ping(&resolving_config(Some(1)), &mut io, &out).expect("run");
-        assert!(out.text().contains("bytes from 10.0.2.2: icmp_seq=1"));
+        let (_, text, _) = ping_with(&resolving_config(Some(1)), &mut io);
+        assert!(text.contains("bytes from 10.0.2.2: icmp_seq=1"));
     }
 
     #[test]
     fn numeric_output_issues_no_reverse_lookup() {
         let mut io = FakeIo::v4();
         io.reverse = Some("gateway.example".to_string());
-        let out = BufOut::new();
-        ping(&config(Some(1), false), &mut io, &out).expect("run");
-        let text = out.text();
+        let (_, text, _) = ping_with(&config(Some(1), false), &mut io);
         assert!(text.contains("bytes from 10.0.2.2: icmp_seq=1"), "{text}");
         assert!(
             io.reversed.is_empty(),
@@ -568,84 +603,187 @@ mod tests {
     #[test]
     fn all_replies_are_received_and_reported() {
         let mut io = FakeIo::v4();
-        let out = BufOut::new();
-        let summary = ping(&config(Some(3), false), &mut io, &out).expect("run");
+        let (summary, text, _) = ping_with(&config(Some(3), false), &mut io);
         assert_eq!(summary.transmitted, 3);
         assert_eq!(summary.received, 3);
         assert!(summary.any_received());
-        let text = out.text();
         assert!(text.starts_with("PING 10.0.2.2 (10.0.2.2) 4(32) bytes of data."));
         assert_eq!(text.matches("bytes from 10.0.2.2").count(), 3);
         assert!(text.contains("icmp_seq=1"));
         assert!(text.contains("time=0.250 ms"));
         assert!(text.contains("3 packets transmitted, 3 received, 0% packet loss"));
-        assert!(text.contains("rtt min/avg/max = 0.250/0.250/0.250 ms"));
+        assert!(text.contains("rtt min/avg/max/mdev = 0.250/0.250/0.250/0.000 ms"));
     }
 
     #[test]
-    fn a_dropped_request_is_a_timeout_and_counts_as_loss() {
+    fn an_unanswered_request_prints_nothing_and_counts_as_loss() {
         let mut io = FakeIo::v4();
         io.drop = vec![2];
-        let out = BufOut::new();
-        let summary = ping(&config(Some(3), false), &mut io, &out).expect("run");
+        let (summary, text, _) = ping_with(&config(Some(3), false), &mut io);
         assert_eq!(summary.transmitted, 3);
         assert_eq!(summary.received, 2);
-        let text = out.text();
-        assert!(text.contains("Request timeout for icmp_seq 2"));
-        assert!(text.contains("3 packets transmitted, 2 received, 33% packet loss"));
+        assert!(!text.contains("icmp_seq=2"), "{text}");
+        assert!(text.contains("3 packets transmitted, 2 received, 33.3333% packet loss"));
     }
 
     #[test]
     fn quiet_suppresses_per_reply_lines_but_keeps_statistics() {
         let mut io = FakeIo::v4();
-        let out = BufOut::new();
-        ping(&config(Some(2), true), &mut io, &out).expect("run");
-        let text = out.text();
+        let (_, text, _) = ping_with(&config(Some(2), true), &mut io);
         assert!(!text.contains("bytes from"));
         assert!(text.contains("2 packets transmitted, 2 received, 0% packet loss"));
     }
 
     #[test]
-    fn a_send_error_is_reported_and_the_run_completes() {
+    fn a_router_error_prints_a_from_line_and_counts_as_an_error() {
         let mut io = FakeIo::v4();
-        io.send_err = Some(Errno::NetworkUnreachable);
-        let out = BufOut::new();
-        let summary = ping(&config(Some(2), false), &mut io, &out).expect("run completes");
+        let gateway = v4_addr([10, 0, 2, 1]);
+        io.errors
+            .insert(1, (EchoOutcome::Unreachable { code: 1 }, gateway));
+        io.errors
+            .insert(2, (EchoOutcome::HopLimitExceeded, gateway));
+        let (summary, text, _) = ping_with(&config(Some(3), false), &mut io);
+        assert_eq!(summary.errors, 2);
+        assert_eq!(summary.received, 1);
+        assert!(
+            text.contains("From 10.0.2.1 icmp_seq=1 Destination Host Unreachable\n"),
+            "{text}"
+        );
+        assert!(text.contains("From 10.0.2.1 icmp_seq=2 Time to live exceeded\n"));
+        assert!(text.contains("3 packets transmitted, 1 received, +2 errors, 66.6667% packet loss"));
+    }
+
+    #[test]
+    fn a_v6_error_is_reported_in_the_v6_vocabulary() {
+        let mut io = FakeIo::v4();
+        let target = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let router = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        io.family = NetAddrFamily::V6;
+        io.addr = target;
+        io.resolves = Some((NetAddrFamily::V6, target));
+        io.errors
+            .insert(1, (EchoOutcome::PacketTooBig { mtu: 1280 }, router));
+        let (_, text, _) = ping_with(&config(Some(1), false), &mut io);
+        assert!(
+            text.contains("From fe80::1 icmp_seq=1 Packet too big: mtu=1280\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_quiet_run_prints_no_from_line_but_still_counts_the_error() {
+        let mut io = FakeIo::v4();
+        io.errors.insert(
+            1,
+            (EchoOutcome::Unreachable { code: 0 }, v4_addr([10, 0, 2, 1])),
+        );
+        let (summary, text, _) = ping_with(&config(Some(1), true), &mut io);
+        assert_eq!(summary.errors, 1);
+        assert!(!text.contains("From"));
+        assert!(text.contains("+1 errors"));
+    }
+
+    #[test]
+    fn a_reporting_router_is_named_once_however_often_it_reports() {
+        let mut io = FakeIo::v4();
+        io.reverse = Some("edge.example".to_string());
+        let router = v4_addr([10, 0, 2, 1]);
+        for seq in 1..=3 {
+            io.errors
+                .insert(seq, (EchoOutcome::HopLimitExceeded, router));
+        }
+        let (_, text, _) = ping_with(&resolving_config(Some(3)), &mut io);
+        assert_eq!(
+            text.matches("From edge.example (10.0.2.1) icmp_seq=")
+                .count(),
+            3,
+            "{text}"
+        );
+        assert_eq!(
+            io.reversed.iter().filter(|&&addr| addr == router).count(),
+            1,
+            "a router that reports again is not looked up again"
+        );
+    }
+
+    #[test]
+    fn a_send_the_network_cannot_carry_yet_waits_for_it_to_come_up() {
+        let mut io = FakeIo::v4();
+        io.send_errs = VecDeque::from([Errno::NetworkUnreachable]);
+        io.network_moves = true;
+        let (summary, text, errors) = ping_with(&config(Some(1), false), &mut io);
+        assert_eq!(io.network_waits, 1);
+        assert_eq!(
+            summary.received, 1,
+            "the request went out once the network moved"
+        );
+        assert!(text.contains("icmp_seq=1"));
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn a_network_that_never_comes_up_is_reported_on_standard_error() {
+        let mut io = FakeIo::v4();
+        io.send_errs = VecDeque::from([Errno::NetworkUnreachable, Errno::NetworkUnreachable]);
+        let (summary, text, errors) = ping_with(&config(Some(2), false), &mut io);
         assert_eq!(summary.transmitted, 2);
         assert_eq!(summary.received, 0);
         assert!(!summary.any_received());
-        let text = out.text();
-        assert!(text.contains("ping: sendto:"));
+        assert_eq!(errors.matches("ping: sendmsg:").count(), 2, "{errors}");
         assert!(text.contains("2 packets transmitted, 0 received, 100% packet loss"));
         assert!(!text.contains("rtt min/avg/max"));
     }
 
     #[test]
+    fn the_run_deadline_cuts_a_reply_wait_short() {
+        let mut io = FakeIo::v4();
+        io.drop = vec![1];
+        let mut config = config(None, false);
+        config.timeout_ns = 10_000_000_000;
+        config.deadline_ns = Some(2_000_000_000);
+        let (summary, text, _) = ping_with(&config, &mut io);
+        assert_eq!(
+            summary.transmitted, 1,
+            "the deadline passed during the first wait"
+        );
+        assert!(text.contains("time 2000ms"), "{text}");
+    }
+
+    #[test]
     fn a_reply_from_a_wrong_source_is_not_counted() {
         let mut io = FakeIo::v4();
-        // Corrupt the queued reply's source after send by intercepting: use
-        // a drop plus a manually-queued foreign reply.
         io.drop = vec![1];
-        let mut foreign_addr = [0u8; 16];
-        foreign_addr[..4].copy_from_slice(&[10, 0, 2, 99]);
-        io.replies.push_back(EchoReply {
+        io.answers.push_back(EchoEvent {
             seq: 1,
+            outcome: EchoOutcome::Reply,
             family: NetAddrFamily::V4,
-            addr: foreign_addr,
+            addr: v4_addr([10, 0, 2, 99]),
             payload: vec![0, 1, 2, 3],
         });
-        let out = BufOut::new();
-        let summary = ping(&config(Some(1), false), &mut io, &out).expect("run");
-        // The foreign reply is discarded; the request times out.
+        let (summary, _, _) = ping_with(&config(Some(1), false), &mut io);
         assert_eq!(summary.received, 0);
-        assert!(out.text().contains("Request timeout for icmp_seq 1"));
+    }
+
+    #[test]
+    fn an_answer_about_another_request_is_ignored() {
+        let mut io = FakeIo::v4();
+        io.drop = vec![1];
+        io.answers.push_back(EchoEvent {
+            seq: 7,
+            outcome: EchoOutcome::HopLimitExceeded,
+            family: NetAddrFamily::V4,
+            addr: v4_addr([10, 0, 2, 1]),
+            payload: Vec::new(),
+        });
+        let (summary, text, _) = ping_with(&config(Some(1), false), &mut io);
+        assert_eq!(summary.errors, 0);
+        assert!(!text.contains("From"));
     }
 
     #[test]
     fn every_request_carries_fresh_payload_bytes() {
         let mut io = FakeIo::v4();
-        let out = BufOut::new();
-        ping(&config(Some(4), true), &mut io, &out).expect("run");
+        let _ = ping_with(&config(Some(4), true), &mut io);
         assert_eq!(io.sent.len(), 4);
         for (index, payload) in io.sent.iter().enumerate() {
             assert_eq!(payload.len(), 4, "each payload is the requested size");
@@ -664,8 +802,7 @@ mod tests {
         let mut config = config(Some(2), true);
         config.payload = PayloadKind::Pattern(vec![0xab, 0xcd]);
         config.size = 5;
-        let out = BufOut::new();
-        ping(&config, &mut io, &out).expect("run");
+        let _ = ping_with(&config, &mut io);
         for payload in &io.sent {
             assert_eq!(
                 payload.as_slice(),
@@ -680,8 +817,7 @@ mod tests {
         let mut io = FakeIo::v4();
         let mut config = config(Some(1), true);
         config.size = 0;
-        let out = BufOut::new();
-        let summary = ping(&config, &mut io, &out).expect("run");
+        let (summary, _, _) = ping_with(&config, &mut io);
         assert_eq!(summary.received, 1);
         assert_eq!(io.sent, vec![Vec::new()]);
     }
@@ -691,10 +827,8 @@ mod tests {
         let mut io = FakeIo::v4();
         let mut config = config(Some(1), false);
         config.target.host = "gateway.example".to_string();
-        let out = BufOut::new();
-        ping(&config, &mut io, &out).expect("run");
+        let (_, text, _) = ping_with(&config, &mut io);
         assert_eq!(io.asked, vec!["gateway.example".to_string()]);
-        let text = out.text();
         assert!(
             text.starts_with("PING gateway.example (10.0.2.2) 4(32) bytes of data."),
             "the header names the host as typed and the address it resolved to: {text}"
@@ -709,12 +843,13 @@ mod tests {
         let mut config = config(Some(1), false);
         config.target.host = "nope.invalid".to_string();
         let out = BufOut::new();
-        let error = ping(&config, &mut io, &out).expect_err("must not silently succeed");
+        let err = BufOut::new();
+        let error = ping(&config, &mut io, &out, &err).expect_err("must not silently succeed");
         assert_eq!(
             error,
             PingError::Resolve {
                 host: "nope.invalid".to_string(),
-                reason: ResolveFailure::Unknown,
+                reason: TargetFailure::Unknown,
             }
         );
         assert!(io.sent.is_empty(), "nothing is sent when nothing resolved");
@@ -728,17 +863,18 @@ mod tests {
     fn a_literal_of_the_excluded_family_is_reported_as_such() {
         let mut io = FakeIo::v4();
         io.resolves = None;
-        io.resolve_failure = ResolveFailure::FamilyMismatch;
+        io.resolve_failure = TargetFailure::FamilyMismatch;
         let mut config = config(Some(1), false);
         config.target.host = "fe80::1".to_string();
         config.target.family = Some(NetAddrFamily::V4);
         let out = BufOut::new();
-        let error = ping(&config, &mut io, &out).expect_err("must not silently succeed");
+        let err = BufOut::new();
+        let error = ping(&config, &mut io, &out, &err).expect_err("must not silently succeed");
         assert_eq!(
             error,
             PingError::Resolve {
                 host: "fe80::1".to_string(),
-                reason: ResolveFailure::FamilyMismatch,
+                reason: TargetFailure::FamilyMismatch,
             },
             "a wrong-family literal is a distinct diagnosis from an unknown name"
         );
@@ -749,16 +885,9 @@ mod tests {
         let mut io = FakeIo::v4();
         io.connect_err = Some(Errno::PermissionDenied);
         let out = BufOut::new();
-        let error = ping(&config(Some(1), false), &mut io, &out).expect_err("denied");
+        let err = BufOut::new();
+        let error = ping(&config(Some(1), false), &mut io, &out, &err).expect_err("denied");
         assert_eq!(error, PingError::Denied);
         assert!(io.sent.is_empty());
-    }
-
-    #[test]
-    fn format_ms_renders_three_decimals() {
-        assert_eq!(format_ms(0), "0.000");
-        assert_eq!(format_ms(1_000_000), "1.000");
-        assert_eq!(format_ms(1_234_000), "1.234");
-        assert_eq!(format_ms(250_000), "0.250");
     }
 }

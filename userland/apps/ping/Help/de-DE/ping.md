@@ -34,12 +34,17 @@ zufällige Nutzlast zugleich eine Integritätsprüfung pro Paket ist. Mit
 `-p` wird ein festes Muster gewählt, wenn eine deterministische Nutzlast
 gewünscht ist.
 
-Standardmäßig sendet `ping` eine Anfrage pro Sekunde bis zum Abbruch;
-`-c` begrenzt die Anzahl. Jede Antwort nennt Quelle, Sequenznummer und
-Zeit; eine Anfrage ohne Antwort innerhalb des Zeitlimits gibt eine
-Zeitüberschreitungszeile aus. Die Abschlussstatistik nennt gesendete und
-empfangene Pakete, den Verlustanteil sowie die minimale, mittlere und
-maximale Umlaufzeit. `-q` zeigt nur den Kopf und die Statistik.
+Standardmäßig sendet `ping` eine Anfrage pro Sekunde bis zum Abbruch; `-c`
+begrenzt die Anzahl. Jede Antwort nennt Quelle, Sequenznummer und Zeit.
+Meldet ein Router oder der Zielhost selbst einen Fehler zu einer Anfrage –
+das Hop-Limit ist abgelaufen, das Ziel ist unerreichbar, das Paket ist zu
+groß –, nennt eine `From`-Zeile den Melder und den Grund. Eine Anfrage,
+die innerhalb des Zeitlimits keine Antwort erhält, gibt nichts aus. Kann
+noch keine Schnittstelle eine Anfrage tragen, wartet sie bis zu ihrem
+Zeitlimit darauf, dass das Netz bereit ist. Die Abschlussstatistik nennt
+gesendete und empfangene Pakete, etwaige Fehler, den Verlustanteil sowie
+die minimale, mittlere und maximale Umlaufzeit mit ihrer mittleren
+Abweichung. `-q` zeigt nur den Kopf und die Statistik.
 
 Jede Antwort nennt die Gegenstelle als `Name (Adresse)`, wenn die Adresse
 einen `PTR`-Eintrag hat — einmal pro Lauf über denselben Stub-Resolver

@@ -13,13 +13,14 @@ use tairix_abi::driver::net_ring::{
 };
 use tairix_abi::driver::BufferClass;
 use tairix_abi::net::{
-    decode_bind_reply, decode_send_reply, decode_socket_reply, ShutdownHow, SocketAddr,
-    SocketRequest, SocketStreamEvent, SocketType,
+    decode_bind_reply, decode_send_reply, decode_socket_reply, EchoOutcome, ShutdownHow,
+    SocketAddr, SocketId, SocketRequest, SocketStreamEvent, SocketType,
 };
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord, NetBondMode, NetDnsServers,
     NetIfKind, NetInterfaceConfigMsg, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetServerAddr,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config,
+    NetNeighborRecord, NetNeighborState, NetRouteOrigin, NetRouteRecord, NetServerAddr,
     NetSockProto, NetSockState, NetSocketRecord, NetstackRequest, NetworkSettings, IF_NAME_LEN,
     MAX_CONNECTION_BUFFER_BYTES, MIN_CONNECTION_BUFFER_BYTES, NETSTACK_LIST_LIMIT_MAX,
     NETSTACK_MAX_REPLY, NET_BOND_MAX_MEMBERS,
@@ -30,7 +31,8 @@ use tairix_abi::{
 };
 use tairix_log::{Event, EventId, Level, Sink};
 use tairix_net::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
-use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
+use tairix_net::icmp::IcmpErrorKind;
+use tairix_net::stack::{EchoProbe, Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 
 use crate::channel::{FrameService, LocalFrameService};
 use crate::socket::{Delivery, SocketService, PER_SOCKET_OVERHEAD};
@@ -603,6 +605,17 @@ fn managed_stack() -> Netstack {
     stack
 }
 
+/// An echo request to `dest` at the default hop limit.
+fn probe(dest: IpAddr, identifier: u16, sequence: u16, payload: &[u8]) -> EchoProbe<'_> {
+    EchoProbe {
+        dest,
+        identifier,
+        sequence,
+        hop_limit: None,
+        payload,
+    }
+}
+
 fn serve_ok(
     stack: &mut Netstack,
     who: &Caller,
@@ -642,10 +655,7 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
         .expect("iface")
         .stack_mut()
         .send_echo_request(
-            IpAddr::V4(V4_B),
-            0x77,
-            1,
-            b"tairix-netstack",
+            &probe(IpAddr::V4(V4_B), 0x77, 1, b"tairix-netstack"),
             t(2),
             &mut out,
         )
@@ -683,6 +693,136 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
 }
 
 #[test]
+fn neighbor_and_route_reads_report_the_learned_peer_and_the_gateway() {
+    let mut stack = managed_stack();
+    stack
+        .addr_add(name("wan"), NetAddrFamily::V4, 24, v4_bytes(V4_A), t(1))
+        .expect("addr add");
+    stack
+        .route_add(
+            name("wan"),
+            NetAddrFamily::V4,
+            0,
+            [0; 16],
+            Some(v4_bytes(V4_B)),
+        )
+        .expect("default route");
+    let mut region = rings_region();
+    let mut fs = local_service(PeerNet::new(t(2)), &mut region);
+
+    // An echo to the peer resolves it over ARP, populating the cache.
+    let mut out = StackOutput::default();
+    stack
+        .interface_mut(name("wan"))
+        .expect("iface")
+        .stack_mut()
+        .send_echo_request(
+            &probe(IpAddr::V4(V4_B), 0x51, 1, b"neighbors"),
+            t(2),
+            &mut out,
+        )
+        .expect("send echo");
+    push_tx(&mut fs, &out.frames);
+    for _ in 0..4 {
+        stack
+            .service_interface(name("wan"), &mut fs, t(2), ServiceHint::default())
+            .expect("pump");
+    }
+
+    let mut reply = [0u8; NETSTACK_MAX_REPLY];
+    let request = NetstackRequest::Neighbors {
+        offset: 0,
+        limit: 8,
+    };
+    let len = serve_ok(&mut stack, &broker(), &request, &mut reply);
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetNeighborRecord::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
+    let peers: Vec<_> = body
+        .as_chunks::<{ NetNeighborRecord::WIRE_LEN }>()
+        .0
+        .iter()
+        .take(usize::from(count))
+        .map(|chunk| NetNeighborRecord::from_bytes(chunk).expect("record"))
+        .collect();
+    let peer = peers
+        .iter()
+        .find(|record| record.addr == v4_bytes(V4_B))
+        .expect("the resolved peer is listed");
+    assert_eq!(peer.interface, name("wan"));
+    assert_eq!(peer.family, NetAddrFamily::V4);
+    assert_ne!(peer.state, NetNeighborState::Incomplete);
+    assert_eq!(peer.mac, Some(MAC_B.0));
+
+    let request = NetstackRequest::Routes {
+        offset: 0,
+        limit: 8,
+    };
+    let len = serve_ok(&mut stack, &broker(), &request, &mut reply);
+    let (count, body) = decode_page_reply(
+        &reply[..len],
+        NetRouteRecord::WIRE_LEN,
+        NETSTACK_LIST_LIMIT_MAX,
+    )
+    .expect("page");
+    let routes: Vec<_> = body
+        .as_chunks::<{ NetRouteRecord::WIRE_LEN }>()
+        .0
+        .iter()
+        .take(usize::from(count))
+        .map(|chunk| NetRouteRecord::from_bytes(chunk).expect("record"))
+        .collect();
+    assert!(routes.iter().any(|route| route.family == NetAddrFamily::V4
+        && route.prefix == 0
+        && route.next_hop == Some(v4_bytes(V4_B))));
+    assert!(routes
+        .iter()
+        .any(|route| route.origin == NetRouteOrigin::Connected
+            && route.prefix == 24
+            && route.next_hop.is_none()));
+
+    // Paging walks the same flattened sequence.
+    assert_eq!(stack.route_records(0, 1).len(), 1);
+    assert!(stack
+        .route_records(u32::try_from(routes.len()).expect("few routes"), 8)
+        .is_empty());
+}
+
+#[test]
+fn neighbor_and_route_reads_are_denied_without_sysinfo_introspect() {
+    let mut stack = managed_stack();
+    let sink = RecordingSink::new();
+    let mut reply = [0u8; NETSTACK_MAX_REPLY];
+    for request in [
+        NetstackRequest::Neighbors {
+            offset: 0,
+            limit: 8,
+        },
+        NetstackRequest::Routes {
+            offset: 0,
+            limit: 8,
+        },
+    ] {
+        assert_eq!(
+            serve(
+                &mut stack,
+                &socket_service(),
+                &admin(),
+                &sink,
+                &request.to_le_bytes(),
+                &mut reply,
+                t(2),
+            ),
+            Err(Errno::PermissionDenied)
+        );
+    }
+    assert_eq!(sink.ids(), vec![16_002; 2]);
+}
+
+#[test]
 fn loopback_v6_link_local_ping_round_trips_after_dad() {
     let mut stack = managed_stack();
     let mut region = rings_region();
@@ -711,7 +851,7 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
         .interface_mut(name("wan"))
         .expect("iface")
         .stack_mut()
-        .send_echo_request(IpAddr::V6(dest), 0x42, 7, b"ping6", t(3), &mut out)
+        .send_echo_request(&probe(IpAddr::V6(dest), 0x42, 7, b"ping6"), t(3), &mut out)
         .expect("send echo");
     push_tx(&mut fs, &out.frames);
     let mut events = Vec::new();
@@ -1924,14 +2064,12 @@ fn icmp_echo_socket_open_requires_cap_net_raw() {
     assert_eq!(svc.len(), 1);
 }
 
-#[test]
-fn echo_request_is_originated_and_the_reply_is_delivered() {
-    let mut svc = socket_service();
-    let mut stack = routed_stack();
+/// An ICMP echo socket delivering to port 0x6000, connected to `V4_B`: its
+/// handle and its stack-assigned identifier.
+fn connected_echo_socket(svc: &mut SocketService, stack: &mut Netstack) -> (SocketId, u16) {
     let sink = RecordingSink::new();
     let mut ent = seeded_entropy();
     let mut reply = [0u8; 64];
-    // Open an ICMP echo socket delivering to port 0x6000.
     let request = encode_request(&SocketRequest::Socket {
         family: NetAddrFamily::V4,
         sock_type: SocketType::IcmpEcho,
@@ -1939,7 +2077,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
     });
     let out = svc
         .serve(
-            &mut stack,
+            stack,
             &raw_caller(1),
             &sink,
             &mut ent,
@@ -1949,13 +2087,13 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
         )
         .expect("open");
     let id = decode_socket_reply(&reply[..out.len]).expect("id");
-    // Connect to V4_B (an echo peer carries no port).
+    // An echo peer carries no port.
     let request = encode_request(&SocketRequest::Connect {
         socket: id,
         peer: v4_addr(10, 0, 2, 2, 0),
     });
     svc.serve(
-        &mut stack,
+        stack,
         &raw_caller(1),
         &sink,
         &mut ent,
@@ -1968,11 +2106,23 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
     // through the listing record.
     let identifier = svc.socket_records(0, 8)[0].local_port;
     assert_ne!(identifier, 0);
+    (id, identifier)
+}
+
+#[test]
+fn echo_request_is_originated_and_the_reply_is_delivered() {
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = seeded_entropy();
+    let mut reply = [0u8; 64];
+    let (id, identifier) = connected_echo_socket(&mut svc, &mut stack);
     // Send an echo request (sequence 1) to the connected peer.
     let request = encode_request(&SocketRequest::SendEcho {
         socket: id,
         dest: None,
         sequence: 1,
+        hop_limit: None,
         payload: b"ping",
     });
     let out = svc
@@ -2026,6 +2176,71 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
 }
 
 #[test]
+fn an_echo_error_reaches_only_the_socket_whose_request_it_quotes() {
+    let mut svc = socket_service();
+    let mut stack = routed_stack();
+    let (_, identifier) = connected_echo_socket(&mut svc, &mut stack);
+
+    // A router's error about a request to the connected peer reaches the
+    // socket, naming the router, with no payload.
+    let router = IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1));
+    let error = |destination: IpAddr, identifier: u16, kind: IcmpErrorKind| StackEvent::EchoError {
+        reporter: router,
+        destination,
+        identifier,
+        sequence: 4,
+        kind,
+    };
+    let deliveries = svc.deliver(
+        &error(
+            IpAddr::V4(V4_B),
+            identifier,
+            IcmpErrorKind::TimeExceeded { code: 0 },
+        ),
+        name("eth0"),
+    );
+    assert_eq!(deliveries.len(), 1);
+    let echo = tairix_abi::net::SocketEcho::parse(&deliveries[0].datagram).expect("echo");
+    assert_eq!(echo.outcome, EchoOutcome::HopLimitExceeded);
+    assert_eq!(echo.sequence, 4);
+    assert_eq!(&echo.source.addr[..4], &[10, 0, 2, 1]);
+    assert!(echo.payload.is_empty());
+
+    let unreachable = svc.deliver(
+        &error(
+            IpAddr::V4(V4_B),
+            identifier,
+            IcmpErrorKind::DestinationUnreachable { code: 3 },
+        ),
+        name("eth0"),
+    );
+    let echo = tairix_abi::net::SocketEcho::parse(&unreachable[0].datagram).expect("echo");
+    assert_eq!(echo.outcome, EchoOutcome::Unreachable { code: 3 });
+
+    // Nothing reaches the socket from an error about another destination, a
+    // foreign identifier, or a reassembly timeout, which no probe causes.
+    for stray in [
+        error(
+            IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3)),
+            identifier,
+            IcmpErrorKind::TimeExceeded { code: 0 },
+        ),
+        error(
+            IpAddr::V4(V4_B),
+            identifier ^ 0x1,
+            IcmpErrorKind::TimeExceeded { code: 0 },
+        ),
+        error(
+            IpAddr::V4(V4_B),
+            identifier,
+            IcmpErrorKind::TimeExceeded { code: 1 },
+        ),
+    ] {
+        assert!(svc.deliver(&stray, name("eth0")).is_empty());
+    }
+}
+
+#[test]
 fn echo_send_on_an_unconnected_socket_without_dest_is_refused() {
     let mut svc = socket_service();
     let mut stack = routed_stack();
@@ -2053,6 +2268,7 @@ fn echo_send_on_an_unconnected_socket_without_dest_is_refused() {
         socket: id,
         dest: None,
         sequence: 1,
+        hop_limit: None,
         payload: b"ping",
     });
     assert_eq!(

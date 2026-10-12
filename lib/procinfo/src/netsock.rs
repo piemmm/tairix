@@ -66,52 +66,10 @@ pub fn for_each_net_socket(
 mod tests {
     use super::*;
     use crate::request::CallError;
+    use crate::testing::PagedFixture;
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::net_ipc::{NetAddrFamily, NetSockProto, NetSockState};
-    use tairix_abi::sysinfo::{PageRequest, SysinfoRequestHeader};
-
-    /// An in-memory `sysinfod` stand-in answering socket-list queries from a
-    /// fixed record set, decoding the request exactly as the real service
-    /// and returning the reply as packed records (the sysinfo reply shape).
-    struct Fixture {
-        records: Vec<NetSocketRecord>,
-        deny: bool,
-        seen: RefCell<Vec<SysinfoQueryId>>,
-    }
-
-    impl Fixture {
-        fn new(records: Vec<NetSocketRecord>) -> Self {
-            Self {
-                records,
-                deny: false,
-                seen: RefCell::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Transport for Fixture {
-        fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
-            let header = SysinfoRequestHeader::from_bytes(request)?;
-            self.seen.borrow_mut().push(header.query);
-            if self.deny {
-                return Err(Errno::PermissionDenied);
-            }
-            let payload = &request[SysinfoRequestHeader::WIRE_LEN
-                ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = PageRequest::from_bytes(payload)?;
-            let offset = req.offset as usize;
-            if offset >= self.records.len() {
-                return Ok(Vec::new());
-            }
-            let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
-            let mut out = Vec::with_capacity(take * NetSocketRecord::WIRE_LEN);
-            for record in &self.records[offset..offset + take] {
-                out.extend_from_slice(&record.to_le_bytes());
-            }
-            Ok(out)
-        }
-    }
 
     fn sample() -> NetSocketRecord {
         let mut local = [0u8; 16];
@@ -130,7 +88,11 @@ mod tests {
         }
     }
 
-    fn collect(fixture: &Fixture) -> Result<Vec<NetSocketRecord>, ListError> {
+    fn fixture(count: usize) -> PagedFixture {
+        PagedFixture::new((0..count).map(|_| sample().to_le_bytes().to_vec()))
+    }
+
+    fn collect(fixture: &PagedFixture) -> Result<Vec<NetSocketRecord>, ListError> {
         let seen = RefCell::new(Vec::new());
         for_each_net_socket(fixture, |r| {
             seen.borrow_mut().push(*r);
@@ -141,7 +103,7 @@ mod tests {
 
     #[test]
     fn walk_routes_the_socket_query_and_yields_records() {
-        let fixture = Fixture::new(alloc::vec![sample()]);
+        let fixture = fixture(1);
         let got = collect(&fixture).expect("ok");
         assert_eq!(got, alloc::vec![sample()]);
         assert_eq!(
@@ -152,11 +114,7 @@ mod tests {
 
     #[test]
     fn walk_pages_until_a_short_page() {
-        let mut records = Vec::new();
-        for _ in 0..=NET_SOCKET_PAGE {
-            records.push(sample());
-        }
-        let fixture = Fixture::new(records);
+        let fixture = fixture(usize::from(NET_SOCKET_PAGE) + 1);
         let got = collect(&fixture).expect("ok");
         assert_eq!(got.len(), usize::from(NET_SOCKET_PAGE) + 1);
         assert_eq!(fixture.seen.borrow().len(), 2);
@@ -164,14 +122,14 @@ mod tests {
 
     #[test]
     fn a_sink_error_stops_the_walk() {
-        let fixture = Fixture::new(alloc::vec![sample()]);
+        let fixture = fixture(1);
         let result = for_each_net_socket(&fixture, |_| Err(Errno::BufferTooSmall));
         assert_eq!(result, Err(ListError::Sink(Errno::BufferTooSmall)));
     }
 
     #[test]
     fn a_denial_is_surfaced_not_swallowed() {
-        let mut fixture = Fixture::new(alloc::vec![sample()]);
+        let mut fixture = fixture(1);
         fixture.deny = true;
         let result = for_each_net_socket(&fixture, |_| Ok(WalkStep::Continue));
         assert_eq!(result, Err(ListError::Call(CallError::PermissionDenied)));

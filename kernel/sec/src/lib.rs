@@ -25,6 +25,8 @@
 //! * [`captable`] — [`TaskCapabilities`]: per-task intersection of user
 //!   grant and manifest request, with delegation, revocation, and
 //!   signed [`tairix_caps::CapabilityToken`] application.
+//! * [`charge`] — [`ResourceCharges`]: what a process holds against the
+//!   limits on the kernel objects it creates.
 //!
 //! # Out of scope for Stage 2.4 (issue brief)
 //!
@@ -48,6 +50,7 @@
 
 pub mod audit;
 pub mod captable;
+pub mod charge;
 pub mod dma;
 pub mod identity;
 pub mod manifest;
@@ -59,6 +62,7 @@ pub use captable::{
     CapTable, JobGeneration, NoRecord, ProcName, ProcessId, Removed, TaskCapabilities, TaskId,
     ThreadRegisterError, PROC_NAME_MAX,
 };
+pub use charge::{Charge, ResourceCharges};
 pub use dma::{alloc_dma, free_dma, DmaGateError};
 pub use identity::{
     GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,

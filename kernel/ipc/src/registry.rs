@@ -393,6 +393,7 @@ mod tests {
             CapabilitySet::empty(),
             IPC_MESSAGE_MAX_PAYLOAD_LEN,
             8,
+            tairix_abi::RLIMIT_INFINITY,
             sink,
         )
         .expect("unrestricted port creation succeeds")

@@ -2907,3 +2907,115 @@ fn the_consumer_group_bound_fits_beside_the_engines_own_membership() {
         Err(McastError::CapacityExhausted)
     );
 }
+
+const ROUTER_V4: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 1);
+const FAR_V4: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
+
+/// An echo request from `source` to `FAR_V4`, as the IPv4 packet a router
+/// would quote, cut to `quoted` bytes.
+fn quoted_echo_packet(source: Ipv4Addr, quoted: usize) -> Vec<u8> {
+    let echo = IcmpEcho {
+        kind: crate::icmp::EchoKind::Request,
+        identifier: 0x1234,
+        sequence: 9,
+        payload: b"probe payload",
+    };
+    let mut message = vec![0u8; echo.wire_len()];
+    echo.write(IcmpContext::V4, &mut message).expect("fits");
+    let header = Ipv4Header::new(source, FAR_V4, PROTOCOL_ICMP);
+    let mut packet = vec![0u8; IPV4_HEADER_LEN + message.len()];
+    header.write(&mut packet, message.len()).expect("fits");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&message);
+    packet.truncate(quoted);
+    packet
+}
+
+/// A Time Exceeded in transit from the router to `V4_A`, quoting `invoking`.
+fn time_exceeded_frame(invoking: &[u8]) -> Vec<u8> {
+    let error = IcmpError::about(IcmpErrorKind::TimeExceeded { code: 0 }, invoking, false);
+    let mut message = vec![0u8; error.wire_len()];
+    error.write(IcmpContext::V4, &mut message).expect("fits");
+    let header = Ipv4Header::new(ROUTER_V4, V4_A, PROTOCOL_ICMP);
+    let mut packet = vec![0u8; IPV4_HEADER_LEN + message.len()];
+    header.write(&mut packet, message.len()).expect("fits");
+    packet[IPV4_HEADER_LEN..].copy_from_slice(&message);
+    let mut frame = vec![0u8; ETHERNET_HEADER_LEN + packet.len()];
+    write_header(&mut frame, MAC_A, ROUTER_MAC, ETHERTYPE_IPV4).expect("fits");
+    frame[ETHERNET_HEADER_LEN..].copy_from_slice(&packet);
+    frame
+}
+
+#[test]
+fn a_time_exceeded_quoting_our_own_echo_is_reported_to_the_probe() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, Some(ROUTER_V4))
+        .expect("configure A");
+    // RFC 792 guarantees only the header and eight bytes of the quoted data.
+    let invoking = quoted_echo_packet(V4_A, IPV4_HEADER_LEN + 8);
+    let out = a.on_frame_collect(&time_exceeded_frame(&invoking), t(1));
+    assert_eq!(
+        out.events,
+        [StackEvent::EchoError {
+            reporter: IpAddr::V4(ROUTER_V4),
+            destination: IpAddr::V4(FAR_V4),
+            identifier: 0x1234,
+            sequence: 9,
+            kind: IcmpErrorKind::TimeExceeded { code: 0 },
+        }]
+    );
+}
+
+#[test]
+fn an_error_quoting_another_hosts_echo_or_too_little_of_ours_is_no_probes_answer() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, Some(ROUTER_V4))
+        .expect("configure A");
+    for invoking in [
+        quoted_echo_packet(Ipv4Addr::new(10, 0, 2, 99), IPV4_HEADER_LEN + 8),
+        quoted_echo_packet(V4_A, IPV4_HEADER_LEN + 7),
+    ] {
+        let out = a.on_frame_collect(&time_exceeded_frame(&invoking), t(1));
+        assert_eq!(
+            out.events,
+            [StackEvent::IcmpErrorReceived {
+                source: IpAddr::V4(ROUTER_V4),
+                kind: IcmpErrorKind::TimeExceeded { code: 0 },
+            }]
+        );
+    }
+}
+
+#[test]
+fn an_echo_probe_carries_its_hop_limit_in_the_ipv4_ttl() {
+    let mut a = stack(MAC_A, IID_A);
+    a.set_ipv4_config(V4_A, 24, None).expect("configure A");
+    // Prime the neighbour so the request transmits instead of parking.
+    let request = ArpPacket {
+        operation: OP_REQUEST,
+        sender_hardware: MAC_B,
+        sender_protocol: V4_B,
+        target_hardware: MacAddress([0; 6]),
+        target_protocol: V4_A,
+    };
+    let mut arp = [0u8; crate::arp::ARP_PACKET_LEN];
+    request.write(&mut arp).expect("fits");
+    let mut arp_frame = vec![0u8; ETHERNET_HEADER_LEN + arp.len()];
+    write_header(&mut arp_frame, BROADCAST, MAC_B, ETHERTYPE_ARP).expect("fits");
+    arp_frame[ETHERNET_HEADER_LEN..].copy_from_slice(&arp);
+    let _ = a.on_frame_collect(&arp_frame, t(1));
+
+    for (hop_limit, ttl) in [(NonZeroU8::new(3), 3), (None, crate::ipv4::DEFAULT_TTL)] {
+        let probe = EchoProbe {
+            dest: IpAddr::V4(V4_B),
+            identifier: 7,
+            sequence: 1,
+            hop_limit,
+            payload: b"x",
+        };
+        let mut out = StackOutput::default();
+        a.send_echo_request(&probe, t(2), &mut out).expect("send");
+        let frames = tx_bytes(out.frames);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0][ETHERNET_HEADER_LEN + 8], ttl);
+    }
+}

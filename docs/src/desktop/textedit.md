@@ -12,9 +12,11 @@ UTF-8 and control bytes round-trip exactly.
 
 - **Text.** UTF-8 in a monospace grid, measured by `tairix_vt`'s width rule.
   A control byte is drawn as `[x03]`, a byte that is not UTF-8 as `[xC3]`,
-  and a bidirectional or zero-width format character as `[U+202E]`, each in
-  its own syntax colour and each one caret stop — an editor that hides those
-  can be made to show code other than the code that runs. A line longer
+  and every other character that draws nothing on its own — a bidirectional
+  control, a zero-width or format character, a variation selector or tag
+  (`tairix_util::utf8::is_hidden`) — as `[U+202E]`, each in its own syntax
+  colour and each one caret stop — an editor that hides those can be made to
+  show code other than the code that runs. A line longer
   than `MAX_ROW_BYTES` continues on further rows, each scrolled through like
   any other: the document counts the rows its lines take, so the scroll bars
   span rows and columns in pixels and a wheel moves as far as its pixels

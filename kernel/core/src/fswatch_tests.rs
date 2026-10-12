@@ -3,6 +3,9 @@ use super::*;
 use alloc::boxed::Box;
 use alloc::string::String;
 
+use tairix_abi::LimitKind;
+use tairix_kernel_sec::ResourceCharges;
+
 use tairix_reclaim::{FreeMemorySource, PressureBand};
 
 use crate::test_pressure::{free_for, pressured, unpressured};
@@ -268,7 +271,7 @@ fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
                 registry,
                 on(node),
                 0,
-                ProcessId(0xF5_0010),
+                &Arc::new(ResourceCharges::new()),
                 64,
                 Resolved::default(),
             )
@@ -289,7 +292,7 @@ fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
         registry,
         on(SUB.raw()),
         0,
-        ProcessId(0xF5_0011),
+        &Arc::new(ResourceCharges::new()),
         4,
         Resolved::default(),
     )
@@ -586,7 +589,7 @@ fn a_retired_tables_members_report_once() {
             node: DIR.raw(),
         },
         0,
-        ProcessId(0xF5_0012),
+        &Arc::new(ResourceCharges::new()),
         4,
         Resolved::default(),
     )
@@ -690,26 +693,26 @@ fn dir_on(volume: u8) -> FileId {
 #[test]
 fn arming_needs_a_claimed_table_and_counts_against_the_limit() {
     let registry = registry();
-    let process = ProcessId(0xF5_0001);
+    let charges = Arc::new(ResourceCharges::new());
     let at = Resolved::default();
     assert_eq!(
-        ArmedWatch::arm(registry, dir_on(0xE0), 0, process, 8, at).map(|_| ()),
+        ArmedWatch::arm(registry, dir_on(0xE0), 0, &charges, 8, at).map(|_| ()),
         Err(Errno::NotImplemented)
     );
     let claim = registry
         .claim([0xE1; 16], NameMatching::Exact, unpressured())
         .expect("claims");
-    let first = ArmedWatch::arm(registry, dir_on(0xE1), 0, process, 2, at).expect("first");
-    let second = ArmedWatch::arm(registry, dir_on(0xE1), 0, process, 2, at).expect("second");
-    assert_eq!(registry.usage(process), 2);
+    let first = ArmedWatch::arm(registry, dir_on(0xE1), 0, &charges, 2, at).expect("first");
+    let second = ArmedWatch::arm(registry, dir_on(0xE1), 0, &charges, 2, at).expect("second");
+    assert_eq!(charges.held(LimitKind::DirWatches), 2);
     assert_eq!(
-        ArmedWatch::arm(registry, dir_on(0xE1), 0, process, 2, at).map(|_| ()),
+        ArmedWatch::arm(registry, dir_on(0xE1), 0, &charges, 2, at).map(|_| ()),
         Err(Errno::LimitExceeded)
     );
     drop(first);
-    assert_eq!(registry.usage(process), 1);
+    assert_eq!(charges.held(LimitKind::DirWatches), 1);
     drop(second);
-    assert_eq!(registry.usage(process), 0);
+    assert_eq!(charges.held(LimitKind::DirWatches), 0);
     assert!(
         !claim.table().active(),
         "dropping the watches released the journal"
@@ -719,31 +722,31 @@ fn arming_needs_a_claimed_table_and_counts_against_the_limit() {
 #[test]
 fn a_spent_watch_stops_reporting_but_stays_charged() {
     let registry = registry();
-    let process = ProcessId(0xF5_0002);
+    let charges = Arc::new(ResourceCharges::new());
     let _claim = registry
         .claim([0xE2; 16], NameMatching::Exact, unpressured())
         .expect("claims");
     let armed =
-        ArmedWatch::arm(registry, dir_on(0xE2), 0, process, 4, Resolved::default()).expect("arms");
+        ArmedWatch::arm(registry, dir_on(0xE2), 0, &charges, 4, Resolved::default()).expect("arms");
     assert!(armed.position().is_some());
     armed.spend();
     assert!(matches!(armed.take(usize::MAX, false), Ok(None)));
     assert!(armed.position().is_none(), "a spent watch takes no member");
-    assert_eq!(registry.usage(process), 1);
+    assert_eq!(charges.held(LimitKind::DirWatches), 1);
     drop(armed);
-    assert_eq!(registry.usage(process), 0);
+    assert_eq!(charges.held(LimitKind::DirWatches), 0);
 }
 
 #[test]
 fn a_returning_volume_is_watched_through_the_table_it_left() {
     let registry = registry();
-    let process = ProcessId(0xF5_0003);
+    let charges = Arc::new(ResourceCharges::new());
     let claim = registry
         .claim([0xE3; 16], NameMatching::Exact, unpressured())
         .expect("claims");
     let table = Arc::clone(claim.table());
     let armed =
-        ArmedWatch::arm(registry, dir_on(0xE3), 0, process, 4, Resolved::default()).expect("arms");
+        ArmedWatch::arm(registry, dir_on(0xE3), 0, &charges, 4, Resolved::default()).expect("arms");
     let file = FILE.raw();
     let (_, baseline) = registry
         .file_member_add(FileId {

@@ -50,8 +50,8 @@
 //!   `lib/font/assets/`
 //! - `sound-encode` — encodes authored WAV masters into a sound theme's FLAC
 //!   assets in `lib/soundtheme/assets/`, each decoded back sample for sample
-//! - `devids`       — verifies the compact PCI/USB ID-database tables (each
-//!   inside its consuming command bundle's `Resources/`) against the vetted
+//! - `devids`       — verifies the compact PCI, USB and IEEE OUI tables (each
+//!   inside its consuming bundle's `Resources/`) against the vetted
 //!   snapshots in
 //!   `lib/devids/assets/` (`--write` to regenerate; `--fetch` — developer-run
 //!   only, never CI — to import and vet the upstream databases)

@@ -71,7 +71,7 @@ use tairix_procinfo::{for_each_resolver_server, CallError, ListError, Transport,
 #[cfg(all(feature = "program", target_os = "none"))]
 mod rt;
 #[cfg(all(feature = "program", target_os = "none"))]
-pub use rt::{host_address, resolve, reverse_name, RtDnsTransport, RtLinkLookup};
+pub use rt::{host_address, resolve, reverse_name, target_address, RtDnsTransport, RtLinkLookup};
 
 /// Where a lookup is answered.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -303,6 +303,39 @@ pub fn literal_address(host: &str, family: Option<NetAddrFamily>) -> Option<IpAd
     family
         .is_none_or(|wanted| wanted == NetAddrFamily::of(address))
         .then_some(address)
+}
+
+/// Why a command-line host operand named no address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TargetFailure {
+    /// The name does not exist, has no address record of the wanted family,
+    /// or no configured server answered.
+    Unknown,
+    /// The operand *is* an address literal, of the family the command line
+    /// excluded (`-4 ::1`). Told apart because the fix is to drop the
+    /// `-4`/`-6`, not to check the name.
+    FamilyMismatch,
+}
+
+impl core::fmt::Display for TargetFailure {
+    /// `getaddrinfo`'s wording, which a connecting tool prints after the host
+    /// it was given.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "Name or service not known",
+            Self::FamilyMismatch => "Address family for hostname not supported",
+        })
+    }
+}
+
+/// Why `host` named no address under `family`, once resolution found none.
+#[must_use]
+pub fn target_failure(host: &str, family: Option<NetAddrFamily>) -> TargetFailure {
+    if family.is_some() && literal_address(host, None).is_some() {
+        TargetFailure::FamilyMismatch
+    } else {
+        TargetFailure::Unknown
+    }
 }
 
 /// Resolve a command-line host operand to one address, the way every

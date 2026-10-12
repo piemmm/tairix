@@ -12,7 +12,7 @@
 //! a kind plus a single theme colour into a [`VectorIcon`]; the glyphs are
 //! monochrome silhouettes tinted by the caller, so re-theming is data, not
 //! new code. A settings category's or pane's glyph is the symbol its colour
-//! badge carries ([`crate::badge`]).
+//! badge carries ([`crate::badge()`]).
 //!
 //! [`disk_icon`] maps the storage medium a mounted volume reports onto the
 //! drive kind that represents it, so the file manager and the desktop draw
@@ -300,6 +300,34 @@ pub enum IconKind {
     ToolHand,
     /// A magnifier with an empty lens, for magnifying where it is pressed.
     ToolZoom,
+    /// A desktop computer: a monitor on its stand beside a tower.
+    Computer,
+    /// A portable computer: an open lid over its keyboard deck.
+    Laptop,
+    /// A server: three stacked rack units, each with a drive slot and a light.
+    Server,
+    /// A router: a low box of status lights under two antennas.
+    Router,
+    /// A network switch: a row of ports between traffic passing both ways.
+    NetworkSwitch,
+    /// A phone or other handheld.
+    Phone,
+    /// Network-attached storage: a box of drive bays.
+    Nas,
+    /// An embedded, connected device, drawn as a smart bulb.
+    IotDevice,
+    /// A device on the network nothing has yet identified.
+    DeviceUnknown,
+    /// One network segment: hosts tapped onto a shared line.
+    Subnet,
+    /// Linux, drawn as a penguin.
+    OsLinux,
+    /// Windows, drawn as a four-paned window.
+    OsWindows,
+    /// Apple's systems, drawn as the looped square of a Mac's Command key.
+    OsApple,
+    /// Android, drawn as the head of its robot.
+    OsAndroid,
 }
 
 impl IconKind {
@@ -424,6 +452,20 @@ impl IconKind {
             "tool-crop" => Self::ToolCrop,
             "tool-hand" => Self::ToolHand,
             "tool-zoom" => Self::ToolZoom,
+            "computer" => Self::Computer,
+            "laptop" => Self::Laptop,
+            "server" => Self::Server,
+            "router" => Self::Router,
+            "network-switch" => Self::NetworkSwitch,
+            "phone" => Self::Phone,
+            "nas" => Self::Nas,
+            "iot-device" => Self::IotDevice,
+            "device-unknown" => Self::DeviceUnknown,
+            "subnet" => Self::Subnet,
+            "os-linux" => Self::OsLinux,
+            "os-windows" => Self::OsWindows,
+            "os-apple" => Self::OsApple,
+            "os-android" => Self::OsAndroid,
             _ => Self::Generic,
         }
     }
@@ -554,6 +596,20 @@ impl IconKind {
             Self::NetworkOffline => 109,
             Self::SoundDevices => 110,
             Self::SoundEffects => 111,
+            Self::Computer => 112,
+            Self::Laptop => 113,
+            Self::Server => 114,
+            Self::Router => 115,
+            Self::NetworkSwitch => 116,
+            Self::Phone => 117,
+            Self::Nas => 118,
+            Self::IotDevice => 119,
+            Self::DeviceUnknown => 120,
+            Self::Subnet => 121,
+            Self::OsLinux => 122,
+            Self::OsWindows => 123,
+            Self::OsApple => 124,
+            Self::OsAndroid => 125,
         }
     }
 
@@ -671,6 +727,20 @@ impl IconKind {
             Self::ToolCrop => "tool-crop",
             Self::ToolHand => "tool-hand",
             Self::ToolZoom => "tool-zoom",
+            Self::Computer => "computer",
+            Self::Laptop => "laptop",
+            Self::Server => "server",
+            Self::Router => "router",
+            Self::NetworkSwitch => "network-switch",
+            Self::Phone => "phone",
+            Self::Nas => "nas",
+            Self::IotDevice => "iot-device",
+            Self::DeviceUnknown => "device-unknown",
+            Self::Subnet => "subnet",
+            Self::OsLinux => "os-linux",
+            Self::OsWindows => "os-windows",
+            Self::OsApple => "os-apple",
+            Self::OsAndroid => "os-android",
             Self::FolderBack => "folder-back",
             Self::FolderFront => "folder-front",
             Self::Audio => "audio",
@@ -827,7 +897,21 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         | IconKind::TcpIp
         | IconKind::SoundDevices
         | IconKind::SoundEffects
-        | IconKind::Theme => {
+        | IconKind::Theme
+        | IconKind::Computer
+        | IconKind::Laptop
+        | IconKind::Server
+        | IconKind::Router
+        | IconKind::NetworkSwitch
+        | IconKind::Phone
+        | IconKind::Nas
+        | IconKind::IotDevice
+        | IconKind::DeviceUnknown
+        | IconKind::Subnet
+        | IconKind::OsLinux
+        | IconKind::OsWindows
+        | IconKind::OsApple
+        | IconKind::OsAndroid => {
             return symbol::glyph(kind, color)
                 .unwrap_or_else(|| VectorIcon::new(DESIGN, generic(color)));
         }

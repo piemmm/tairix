@@ -13,9 +13,10 @@
 //! multicast except where the RFC allows it — so this host is never an
 //! amplification vector.
 
-use crate::addr::Ipv6Addr;
+use crate::addr::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::checksum::{internet_checksum, Checksum};
-use crate::ipv6::NEXT_HEADER_ICMPV6;
+use crate::ipv4::{IPV4_HEADER_LEN, PROTOCOL_ICMP};
+use crate::ipv6::{IPV6_HEADER_LEN, NEXT_HEADER_ICMPV6};
 
 /// Length of the fixed 4-byte ICMP/`ICMPv6` header (type, code, checksum).
 pub const ICMP_FIXED_HEADER_LEN: usize = 4;
@@ -299,6 +300,34 @@ pub enum IcmpErrorKind {
     },
 }
 
+/// The leading bytes of an echo request every error must quote (RFC 792's
+/// "first 64 bits of the original datagram's data"): type, code, checksum,
+/// identifier and sequence.
+const ECHO_PREFIX_LEN: usize = 8;
+
+/// The echo request an ICMP error quotes ([`IcmpError::quoted_echo`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QuotedEcho {
+    /// The quoted request's source: this host, if the request was ours.
+    pub source: IpAddr,
+    /// Where the quoted request was going.
+    pub destination: IpAddr,
+    /// The quoted echo identifier.
+    pub identifier: u16,
+    /// The quoted echo sequence number.
+    pub sequence: u16,
+}
+
+fn quoted_v4(bytes: &[u8]) -> Ipv4Addr {
+    Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
+}
+
+fn quoted_v6(bytes: &[u8]) -> Ipv6Addr {
+    let mut octets = [0u8; 16];
+    octets.copy_from_slice(bytes);
+    Ipv6Addr::from(octets)
+}
+
 /// ICMP Destination Unreachable code 4: fragmentation needed and DF
 /// set (RFC 792 / RFC 1191).
 const V4_CODE_FRAG_NEEDED: u8 = 4;
@@ -376,6 +405,65 @@ impl<'a> IcmpError<'a> {
         Some(Self {
             kind,
             invoking: rest,
+        })
+    }
+
+    /// The echo request this error is about, when its invoking excerpt is the
+    /// first fragment of one: the quoted IP header (source, destination and
+    /// protocol) and the echo identifier and sequence after it.
+    ///
+    /// The quoted header's checksum is not verified: a router quotes the
+    /// header as it held it, hop limit already spent, so a valid one cannot be
+    /// required. Every field read is bounds-checked; nothing else is believed.
+    #[must_use]
+    pub fn quoted_echo(&self) -> Option<QuotedEcho> {
+        let excerpt = self.invoking;
+        let (source, destination, echo) = match *excerpt.first()? >> 4 {
+            4 => {
+                let header_len = usize::from(excerpt[0] & 0x0F) * 4;
+                let header = excerpt.get(..header_len)?;
+                if header_len < IPV4_HEADER_LEN || header[9] != PROTOCOL_ICMP {
+                    return None;
+                }
+                let fragment_offset = u16::from_be_bytes([header[6], header[7]]) & 0x1FFF;
+                if fragment_offset != 0 {
+                    return None;
+                }
+                let echo = excerpt.get(header_len..header_len + ECHO_PREFIX_LEN)?;
+                if echo[0] != TYPE_ECHO_REQUEST {
+                    return None;
+                }
+                (
+                    IpAddr::V4(quoted_v4(&header[12..16])),
+                    IpAddr::V4(quoted_v4(&header[16..20])),
+                    echo,
+                )
+            }
+            6 => {
+                let header = excerpt.get(..IPV6_HEADER_LEN)?;
+                if header[6] != NEXT_HEADER_ICMPV6 {
+                    return None;
+                }
+                let echo = excerpt.get(IPV6_HEADER_LEN..IPV6_HEADER_LEN + ECHO_PREFIX_LEN)?;
+                if echo[0] != TYPE_V6_ECHO_REQUEST {
+                    return None;
+                }
+                (
+                    IpAddr::V6(quoted_v6(&header[8..24])),
+                    IpAddr::V6(quoted_v6(&header[24..40])),
+                    echo,
+                )
+            }
+            _ => return None,
+        };
+        if echo[1] != 0 {
+            return None;
+        }
+        Some(QuotedEcho {
+            source,
+            destination,
+            identifier: u16::from_be_bytes([echo[4], echo[5]]),
+            sequence: u16::from_be_bytes([echo[6], echo[7]]),
         })
     }
 

@@ -297,7 +297,18 @@ enum NetPeerMode {
     /// `ping` tool sends over the shared IPv6 link-local wire, and its verdict
     /// requires at least one served request (so the guest must actually have
     /// reached it).
-    V6PingResponder,
+    V6EchoPeer,
+    /// A **SLAAC router-advertisement** peer (the `netmap` map vertical): the
+    /// peer emits an autonomous Router Advertisement naming
+    /// [`tairix_test_netstack_wire::SLAAC_PREFIX`] on-link and itself a default
+    /// router, so an unconfigured guest autoconfigures a global address in the
+    /// prefix and installs the peer as its gateway — the routes the map draws
+    /// as its subnet and gateway tiers. It answers neighbour resolution and
+    /// echo but runs no campaign and ends no run (the guest drives its own
+    /// exit), so it is deliberately absent from the completion-gate set in
+    /// [`attach_net_peer`]. Its verdict is `Ok` once it has advertised and seen
+    /// the guest on the wire.
+    V6RouterAdvert,
     /// A **telnet server** peer (the `plans/TELNET.md` vertical): same
     /// deterministic link-local addressing as [`Self::V6LinkLocal`], but the
     /// peer accepts the guest `telnet` client's connection on
@@ -812,7 +823,7 @@ const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 /// How many times [`AUTOLOAD_INPUT_KEY_MARKER`] must appear before typing:
 /// once per autoloaded input-driver instance — the keyboard and the one
 /// pointing device a script drives — so the keyboard's own arming, possibly
-/// the second, is never raced ([`armed_input_drivers`]).
+/// the second, is never raced ([`armed_irq_drivers`]).
 const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 
 /// [`AUTOLOAD_INPUT_ARMED_OCCURRENCES`] for a vertical that drives the
@@ -822,6 +833,16 @@ const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 /// the device set's, not a weaker gate — the keyboard is still armed and
 /// parked on its interrupt before a key is injected.
 const KEYBOARD_ONLY_ARMED_OCCURRENCES: u32 = 1;
+
+/// [`AUTOLOAD_INPUT_ARMED_OCCURRENCES`] for a vertical that also attaches a
+/// NIC: the virtio-net driver is a user-space driver and issues its own
+/// `irq_bind`, so keyboard, pointer and NIC raise the marker three times. The
+/// keyboard's own arming is among them, so waiting for the third never races it.
+const NETMAP_INPUT_ARMED_OCCURRENCES: u32 = AUTOLOAD_INPUT_ARMED_OCCURRENCES + 1;
+
+/// File-name suffix for the network map's single screendump — its window with
+/// the interface, subnet and gateway tiers drawn.
+const NETMAP_MAP_DUMP: &str = "netmap-map";
 
 /// Guest marker keying the second screendump (the served files window on
 /// the booted desktop): the first delivery to that window's own event port
@@ -1361,6 +1382,19 @@ const PING_COMMAND_LINE: &str = "ping -c 3 fe80::2\n";
 /// unanswered run never emits it, so the run times out fail-loud rather than
 /// falsely passing.
 const PING_REPLY_MARKER: &str = "icmp_seq=";
+
+/// Serial marker of `ping`'s closing statistics block, after which the echo
+/// tools vertical types its `traceroute`.
+const PING_DONE_MARKER: &str = "ping statistics ---";
+
+/// The shell command line the echo tools vertical types once `ping` has
+/// finished: a numeric trace to the host peer's link-local address.
+const TRACEROUTE_COMMAND_LINE: &str = "traceroute -n fe80::2\n";
+
+/// What `traceroute` prints for each hop of the echo peer's path — the two
+/// routers the peer plays, then the peer itself — up to whoever answered
+/// first there. Pinned to the shared wire identifiers by a unit test below.
+const TRACE_HOP_MARKERS: [&str; 3] = [" 1  fe80::a1", " 2  fe80::a2", " 3  fe80::2"];
 
 /// The shell command line the `telnet` vertical types at the prompt: a session
 /// to the host peer's link-local address (`fe80::2`, formed from
@@ -7942,43 +7976,35 @@ static TESTS: &[QemuTest] = &[
         ],
         expect: Expect::Pass,
     },
-    // `plans/NETWORK.md` N8b-2b-β: the ICMP-echo (`ping`) vertical.
-    // `tairix-test-netstack-ping-qemu-aarch64` boots the *production* aarch64
-    // pipeline with the encrypted-root disk that carries the **standard**
-    // signed store bundles (so the real `ping` command bundle is present)
-    // **plus** the signed virtio-net driver bundle (`FsDisk::NetToolRootDisk`),
-    // with a virtio-net device attached and the harness-side passive ICMP
-    // echo responder on its `dgram` netdev (`NetPeerMode::V6PingResponder`).
-    // It unlocks the root, authenticates `root`/`root` at the console login,
-    // and runs `ping -c 3 fe80::2` at the shell — the peer's EUI-64-free
-    // link-local formed from `tairix_test_netstack_wire::PEER_IID`. The `ping`
-    // tool opens an ICMP-echo socket (its manifest's `CAP_NET`+`CAP_NET_RAW`,
-    // enforced by the netstack socket dispatcher against the kernel-attested
-    // origin), resolves the peer over ND, and sends three echo requests over
-    // the shared IPv6 link-local wire — retrying through the boot window while
-    // the NIC driver is still autoloading. The peer answers each, so `ping`
-    // prints a `… icmp_seq=… time=… ms` reply line per reply. The serial
-    // `exit` step keys on `icmp_seq=`, which the tool prints **only** on a
-    // genuinely received reply, so an unanswered run never reaches it and
-    // times out fail-loud with the transcript. The guest audit sink arms on
-    // `ping`'s audited `exit` (`sc=exit`, `comm=ping`) and reports PASS on the
-    // next audited `exit` — the shell's, typed only after the `icmp_seq=`
-    // marker appeared — so the received reply provably reached the transcript
-    // before the run ended (the session-ceiling arm-then-exit discipline). The
-    // harness additionally requires the responder to report at least one
-    // served echo request, so neither side can pass alone (a guest that never
-    // reached the peer, or a peer that never answered, both fail). A
-    // 300-second budget covers boot + bounded PBKDF2 + the two-process net
+    // The ICMP echo tools vertical (`plans/NETWORK.md` N8b-2b-β `ping`,
+    // `plans/NETMAP.md` NM-S3 `traceroute`). It boots the production aarch64
+    // pipeline against the net-tool disk — the standard signed store bundles,
+    // so the real `ping` and `traceroute` are present, plus the signed
+    // virtio-net driver — with the echo peer on its `dgram` netdev
+    // (`NetPeerMode::V6EchoPeer`), which answers as the two routers of
+    // `TRACE_ROUTER_IIDS` in front of itself.
+    //
+    // It unlocks the root, authenticates `root`/`root`, and runs
+    // `ping -c 3 fe80::2`: the `exit` path waits on `icmp_seq=`, printed only
+    // for a reply that genuinely arrived. Once `ping`'s statistics print it
+    // runs `traceroute -n fe80::2` and waits for each hop line in turn — the
+    // first router, the second, then the peer — so the run can only finish if
+    // each router's Time Exceeded reached the echo socket and was attributed to
+    // its probe. The guest audit sink arms on both tools' audited exits and
+    // reports PASS on the next — the shell's, typed only after the last hop
+    // printed. The harness also requires the peer's verdict that it served an
+    // echo and answered as both routers, so neither side can pass alone. A
+    // 300-second budget covers boot, bounded PBKDF2 and the two-process net
     // bring-up on QEMU TCG; single CPU like the other full-boot verticals.
     QemuTest {
-        package: "tairix-test-netstack-ping-qemu-aarch64",
-        binary: "tairix-test-netstack-ping-qemu-aarch64",
+        package: "tairix-test-netstack-icmp-qemu-aarch64",
+        binary: "tairix-test-netstack-icmp-qemu-aarch64",
         target: "aarch64-unknown-none",
         cpus: 1,
         timeout: Duration::from_secs(300),
         ram_mib: None,
         disk_sectors: None,
-        netstack_peer: NetPeerMode::V6PingResponder,
+        netstack_peer: NetPeerMode::V6EchoPeer,
         ramfb: false,
         crypto: false,
         fs_disk: FsDisk::NetToolRootDisk,
@@ -7994,7 +8020,11 @@ static TESTS: &[QemuTest] = &[
             ("Username:", Duration::ZERO, SESSION_USERNAME_LINE),
             ("Password", Duration::ZERO, SESSION_PASSWORD_LINE),
             ("root@tairix ~% ", Duration::ZERO, PING_COMMAND_LINE),
-            (PING_REPLY_MARKER, Duration::ZERO, "exit\n"),
+            (PING_REPLY_MARKER, Duration::ZERO, ""),
+            (PING_DONE_MARKER, Duration::ZERO, TRACEROUTE_COMMAND_LINE),
+            (TRACE_HOP_MARKERS[0], Duration::ZERO, ""),
+            (TRACE_HOP_MARKERS[1], Duration::ZERO, ""),
+            (TRACE_HOP_MARKERS[2], Duration::ZERO, "exit\n"),
         ],
         expect: Expect::Pass,
     },
@@ -9922,6 +9952,62 @@ static TESTS: &[QemuTest] = &[
             },
         ],
         pointer_script: Some(settings_pointer_script),
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // `plans/NETMAP.md` NM2c: the network-map vertical. It boots the same
+    // graphical world as the Settings and file-pick verticals, but with a NIC
+    // on the shared wire and a router-advertising peer behind it, so the guest's
+    // one interface autoconfigures a global address and a default route. It
+    // types the unlock passphrase, logs in, starts `desktop`, opens `netmap`
+    // from the program library, and — once the map's window wears the title it
+    // takes on its first read — photographs it, asserting its interface, subnet
+    // and gateway tiers are drawn. *Quit* on the map's icon-bar slot, the last
+    // gesture and the one sent only after the dump is read, ends the guest.
+    //
+    // The keyboard-armed gate waits for the marker's **third** occurrence, not
+    // the second its diskless siblings use: the virtio-net driver is a user-
+    // space driver and issues its own `irq_bind`, so keyboard, pointer and NIC
+    // raise the marker three times, and the keyboard's arming is among them.
+    //
+    // PASS needs the guest's witnesses in order: an `APP_LOADED` naming the map
+    // bundle, the create reply of its window, and the map's own clean exit — the
+    // *Quit* the runner sends only once the dump is read back. A map that failed
+    // before drawing data exits too, but no dump is captured (the host gates it
+    // on the retitle a failed map never reaches), so the tier assertion fails.
+    //
+    // Single CPU and the same 300-second *inactivity* budget its siblings carry.
+    QemuTest {
+        package: "tairix-test-netmap-qemu-aarch64",
+        binary: "tairix-test-netmap-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::V6RouterAdvert,
+        ramfb: true,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                NETMAP_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[ScreendumpPlan {
+            marker: WINDOW_RETITLED_MARKER,
+            occurrences: 1,
+            suffix: NETMAP_MAP_DUMP,
+            assert: assert_netmap_screendump,
+        }],
+        pointer_script: Some(netmap_pointer_script),
         bounded_pointer_script: false,
         x86_64_cpu: None,
         serial: &[],
@@ -16310,6 +16396,193 @@ fn filepick_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     Ok(pen.steps())
 }
 
+/// The three tier hues the map draws, each with the tier it stands for: the
+/// interface tier is Sky, the subnet/network tier Indigo, the gateway/router
+/// tier Orange (`tairix_netmap::node_look`). Finding all three in the map's
+/// window is the proof it drew those tiers from the live system.
+const NETMAP_TIER_HUES: [(tairix_icon::BadgeHue, &str); 3] = [
+    (tairix_icon::BadgeHue::Sky, "interface"),
+    (tairix_icon::BadgeHue::Indigo, "subnet"),
+    (tairix_icon::BadgeHue::Orange, "gateway"),
+];
+
+/// Fewest pixels of a tier's hue that count as that tier drawn. A node plate's
+/// body below its sheen is several hundred pixels, so this clears stray
+/// anti-aliasing while staying well under one plate.
+const NETMAP_MIN_TIER_PIXELS: usize = 80;
+
+/// Largest RGB distance from a hue's ramp at which a pixel still counts as that
+/// hue. A plate's body below its sheen *is* the ramp rasterised, so this only
+/// absorbs 8-bit rounding; the unit tests prove every hue the map draws lies
+/// more than twice this far from every tier's ramp.
+const NETMAP_RAMP_TOLERANCE: f64 = 6.0;
+
+/// The RGB distance from `point` to the segment from `from` to `to`.
+fn distance_to_segment(point: [f64; 3], from: [f64; 3], to: [f64; 3]) -> f64 {
+    let along = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let offset = [point[0] - from[0], point[1] - from[1], point[2] - from[2]];
+    let length2 = along.iter().map(|axis| axis * axis).sum::<f64>();
+    let t = if length2 == 0.0 {
+        0.0
+    } else {
+        (offset.iter().zip(along).map(|(o, a)| o * a).sum::<f64>() / length2).clamp(0.0, 1.0)
+    };
+    point
+        .iter()
+        .zip(from)
+        .zip(along)
+        .map(|((p, f), a)| (p - (f + t * a)).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// `hue`'s ramp as the RGB segment its plates are filled along.
+fn hue_ramp(hue: tairix_icon::BadgeHue) -> ([f64; 3], [f64; 3]) {
+    let (top, bottom) = hue.ramp();
+    let rgb = |c: tairix_raster::Color| [f64::from(c.r), f64::from(c.g), f64::from(c.b)];
+    (rgb(top), rgb(bottom))
+}
+
+/// Whether `pixel` lies on `ramp` ([`hue_ramp`]), within
+/// [`NETMAP_RAMP_TOLERANCE`].
+fn on_ramp(pixel: Rgb, (top, bottom): ([f64; 3], [f64; 3])) -> bool {
+    let point = [f64::from(pixel.0), f64::from(pixel.1), f64::from(pixel.2)];
+    distance_to_segment(point, top, bottom) <= NETMAP_RAMP_TOLERANCE
+}
+
+/// Open `netmap` from the program library, read its window once it wears the
+/// title it takes on its first read, and Quit it from its icon-bar slot.
+///
+/// Every gate is the session's own witness that what the next press aims at is
+/// on screen: the desktop revealed, the library popup, the map's window
+/// wearing its post-first-read title — the honest "real data is drawn" signal,
+/// and the one the dump is gated on, so the runner has read the dump before the
+/// slot is pressed — and the slot's menu drawn. The *Quit* click ends the
+/// guest, and it is the last gesture the script injects.
+fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    use tairix_abi::window_ipc::AppBarClick;
+    use tairix_input::PointerButton;
+    use tairix_qemu::MouseButton;
+    use tairix_taskbar::{AppSlot, TaskbarInput, TaskbarResponse};
+    use tairix_test_netmap_qemu_aarch64::NETMAP_APP_NAME;
+
+    let scale = RECONSTRUCTION_SCALE;
+    let mut shell = reconstructed_shell(&[])?;
+    let bar = shell.session().taskbar().layout(scale);
+    let library_button = rect_centre(bar.library, "Library button")?;
+
+    let mut router = TaskbarInput::new();
+    bar_press(
+        &mut shell,
+        &mut router,
+        library_button,
+        PointerButton::Primary,
+    );
+    let entry_row = library_row_centre(
+        shell.session().taskbar(),
+        scale,
+        &bundle_path(tairix_abi::SYSTEM_APPLICATION_STORE, NETMAP_APP_NAME),
+        "netmap script",
+    )?;
+    bar_press(&mut shell, &mut router, entry_row, PointerButton::Primary);
+
+    // Advance the model to the launched state: the autostarted file manager in
+    // the leading slot, the map beside it carrying the information+Quit menu it
+    // declares, so the slot's menu is reconstructed from the map's own
+    // declaration rather than restated by position.
+    let declared = tairix_window::info_and_quit(0, AppBarClick::RaiseOrOpen)
+        .map_err(|err| format!("netmap script: the map's declaration is invalid: {err:?}"))?;
+    let mut seated = (0..APPBAR_LAUNCHED_SLOT)
+        .map(|_| {
+            AppSlot::new(
+                tairix_desktop_session::FILES_LABEL,
+                tairix_icon::IconKind::AppBundle,
+            )
+        })
+        .collect::<Vec<_>>();
+    seated.push(
+        AppSlot::new(NETMAP_APP_NAME, tairix_icon::IconKind::AppBundle)
+            .with_declaration(declared.menu, declared.click),
+    );
+    shell.session_mut().taskbar_mut().set_apps(seated, scale);
+    let slot = rect_centre(
+        appbar_slot_rect(shell.session().taskbar().theme(), APPBAR_LAUNCHED_SLOT)?,
+        "slot",
+    )?;
+
+    // The *Quit* row of the declared menu, named from the shared label.
+    let request = match bar_press(&mut shell, &mut router, slot, PointerButton::Secondary) {
+        TaskbarResponse::OpenMenu(request) => request,
+        other => {
+            return Err(format!(
+                "netmap script: the slot asked for no menu: {other:?}"
+            ))
+        }
+    };
+    let (_, row) = chain_plate_and_row(
+        request.model,
+        request.placement,
+        tairix_window::QUIT_LABEL,
+        "netmap script",
+    )?;
+    let quit_row = rect_centre(row, "Quit row")?;
+
+    let revealed = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let rest = pointer_rest();
+    let mut pen = PointerPen::pinned_at_origin(revealed, ramfb_screen());
+    pen.click(revealed, 1, MouseButton::Primary, library_button);
+    pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
+    // Off the bar and clear of the window before the frame the dump reads.
+    pen.aim(LIBRARY_SHOWN_MARKER, 1, rest);
+    // The window wears its post-first-read title, so its slot is drawn and the
+    // dump (gated on the same witness) has been read before this fires.
+    pen.click(WINDOW_RETITLED_MARKER, 1, MouseButton::Secondary, slot);
+    pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, quit_row);
+    Ok(pen.steps())
+}
+
+/// Assert the map window drew its interface, subnet and gateway tiers: the
+/// window covers its footprint, and each tier's hue is drawn in its client.
+///
+/// The map is laid out from the live guest's own addresses and routes, so its
+/// exact node positions are not the host's to predict; what is certain is that
+/// the view fits the whole map inside its client. So the assertion counts the
+/// client's pixels on each tier hue's ramp — a plate's body is that ramp
+/// rasterised, and a line is drawn in the hue of the node it leads to — rather
+/// than looking for a node at a reconstructed point. Either is drawn only when
+/// a node of that tier is on the map.
+fn assert_netmap_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let theme = booted_theme();
+    let image = read_screendump(t, path)?;
+    // netmap opens one window at the first cascade slot — nothing else has
+    // opened a served window on this desktop.
+    let layout = served_window_layout(
+        0,
+        tairix_netmap::WIN_WIDTH,
+        tairix_netmap::WIN_HEIGHT,
+        tairix_netmap::WIN_RESIZABLE,
+        &theme,
+    );
+    assert_window_region_covered(t, path, &image, layout.outer, "Network Map")?;
+    let rows = region_pixels(t, path, &image, layout.client, "Network Map body")?;
+    for (hue, tier) in NETMAP_TIER_HUES {
+        let ramp = hue_ramp(hue);
+        let found: usize = rows
+            .iter()
+            .map(|row| row.iter().filter(|&&pixel| on_ramp(pixel, ramp)).count())
+            .sum();
+        if found < NETMAP_MIN_TIER_PIXELS {
+            return Err(format!(
+                "test --qemu ({}): screendump {}: the map draws no {tier} tier \
+                 ({found} pixels of its hue, expected >= {NETMAP_MIN_TIER_PIXELS})",
+                t.package,
+                path.display(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Cascade slot of the one manager window every hand-over activation aims
 /// into: the session's first, since the desktop's own surfaces never go
 /// through the served-window path and the autostarted manager opens none until
@@ -17578,8 +17851,9 @@ fn spawn_net_peer(
             super::netpeer::NetPeer::spawn_tcp_connect(qemu_sock, peer_sock)
         }
         NetPeerMode::V6TcpFlood => super::netpeer::NetPeer::spawn_tcp_flood(qemu_sock, peer_sock),
-        NetPeerMode::V6PingResponder => {
-            super::netpeer::NetPeer::spawn_ping_responder(qemu_sock, peer_sock)
+        NetPeerMode::V6EchoPeer => super::netpeer::NetPeer::spawn_echo_peer(qemu_sock, peer_sock),
+        NetPeerMode::V6RouterAdvert => {
+            super::netpeer::NetPeer::spawn_router_advert(qemu_sock, peer_sock)
         }
         NetPeerMode::V6TelnetServer => super::netpeer::NetPeer::spawn_telnet(qemu_sock, peer_sock),
         NetPeerMode::V6StaticEcho => super::netpeer::NetPeer::spawn_static(qemu_sock, peer_sock),
@@ -17801,7 +18075,7 @@ fn shared_line_input_gates(spec: Spec, binary: &str) -> Spec {
         return spec;
     }
     let spec = spec.with_shared_line_input().with_virtio_mouse();
-    let armed = armed_input_drivers(spec.devices.pointing);
+    let armed = armed_irq_drivers(spec.devices.pointing, !spec.net_devices.is_empty());
     spec.with_keyboard_ready_occurrences(armed)
 }
 
@@ -17873,7 +18147,7 @@ fn attach_pointer_script(t: &QemuTest, mut spec: Spec) -> Result<Spec, String> {
     for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
         spec = spec.with_pointer_step(step.ready_marker, step.ready_occurrences, step.action);
     }
-    let armed = armed_input_drivers(spec.devices.pointing);
+    let armed = armed_irq_drivers(spec.devices.pointing, !spec.net_devices.is_empty());
     spec = spec.with_keyboard_ready_occurrences(armed);
     if t.bounded_pointer_script {
         spec = spec.with_bounded_pointer_script();
@@ -17881,10 +18155,12 @@ fn attach_pointer_script(t: &QemuTest, mut spec: Spec) -> Result<Spec, String> {
     Ok(spec)
 }
 
-/// How many input driver instances arm on a board with a keyboard and
-/// `pointing`: one per virtio-input device.
-fn armed_input_drivers(pointing: tairix_qemu::PointingDevices) -> u32 {
-    1 + u32::from(pointing.mouse) + u32::from(pointing.touchscreen)
+/// How many user-space drivers raise the [`AUTOLOAD_INPUT_KEY_MARKER`]
+/// `irq_bind` marker as they arm: one per virtio-input device (the keyboard
+/// and each device in `pointing`), plus one for a virtio-net NIC when
+/// `has_nic`, whose driver is a user-space driver that binds its line too.
+fn armed_irq_drivers(pointing: tairix_qemu::PointingDevices, has_nic: bool) -> u32 {
+    1 + u32::from(pointing.mouse) + u32::from(pointing.touchscreen) + u32::from(has_nic)
 }
 
 /// Attach `t`'s virtio-net interface(s) to `spec` and start the harness-side
@@ -17976,7 +18252,7 @@ fn attach_net_peer(
             // that would race, and lose to, the reply leaving the machine.
             // The TCP roles are safe with a guest-driven exit instead: the
             // peer has already received the whole transfer before the guest
-            // can conclude, so there is no race to lose. V6PingResponder is
+            // can conclude, so there is no race to lose. V6EchoPeer is
             // guest-active — the guest is the pinger and the last link in its
             // chain is inside the guest itself — so it too keeps a
             // guest-driven exit. Every other single-wire role falls into one
@@ -18434,23 +18710,23 @@ mod tests {
     use tairix_qemu::Outcome;
 
     use super::{
-        appbar_pointer_script, armed_input_drivers, autoload_desktop_pointer_script, build_targets,
+        appbar_pointer_script, armed_irq_drivers, autoload_desktop_pointer_script, build_targets,
         desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
-        handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
-        qemu_job_weight, row_holds_track, screendump_ext, screendump_path, settings_pointer_script,
-        sidecar_path, touch_pointer_script, Expect, FsDisk, PrimePlan, QemuTest, TypedStep,
-        AARCH64_TARGET, APPBAR_SETTLED_MARKER, AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE,
-        AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_KEY_MARKER,
-        BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
-        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES,
-        LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL, LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER,
-        MEMSOAK_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET, SCRIPTED_LIFECYCLE,
-        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, STARTUP_PLAYED_MARKER,
-        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
-        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
-        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
-        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
-        VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
+        handover_pointer_script, login_type_plant, netmap_pointer_script, persist_serial,
+        qemu_host_budget_for, qemu_job_weight, row_holds_track, screendump_ext, screendump_path,
+        settings_pointer_script, sidecar_path, touch_pointer_script, Expect, FsDisk, NetPeerMode,
+        PrimePlan, QemuTest, TypedStep, AARCH64_TARGET, APPBAR_SETTLED_MARKER, AUDIOCUE_LINE,
+        AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
+        AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
+        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
+        KEYBOARD_ONLY_ARMED_OCCURRENCES, LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL,
+        LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER, MEMSOAK_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL,
+        RISCV64_TARGET, SCRIPTED_LIFECYCLE, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
+        STARTUP_PLAYED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
+        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
+        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
+        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
+        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -18564,6 +18840,7 @@ mod tests {
             ("picker delegation", filepick_pointer_script()),
             ("hand-over", handover_pointer_script()),
             ("settings", settings_pointer_script()),
+            ("network map", netmap_pointer_script()),
             ("wintersun client", super::wintersun_pointer_script()),
         ] {
             let steps = script.unwrap_or_else(|e| panic!("{label} script builds: {e}"));
@@ -18581,6 +18858,120 @@ mod tests {
                 ),
                 "{label} script ends on something other than the click its guest exits on"
             );
+        }
+    }
+
+    /// The other hues a map of this machine draws beside its tiers — the local
+    /// host, an unclassified host, a server — which a tier match must never
+    /// take for one.
+    const NETMAP_OTHER_HUES: [tairix_icon::BadgeHue; 3] = [
+        tairix_icon::BadgeHue::Blue,
+        tairix_icon::BadgeHue::Grey,
+        tairix_icon::BadgeHue::Graphite,
+    ];
+
+    /// The exact RGB distance between two segments: the least of the four
+    /// endpoint-to-segment distances and, when it lies inside both, the
+    /// stationary point of the squared distance between them.
+    fn segment_distance(first: ([f64; 3], [f64; 3]), second: ([f64; 3], [f64; 3])) -> f64 {
+        use super::distance_to_segment;
+        let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        let sub = |x: [f64; 3], y: [f64; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+        let ((p0, p1), (q0, q1)) = (first, second);
+        let mut nearest = [
+            distance_to_segment(p0, q0, q1),
+            distance_to_segment(p1, q0, q1),
+            distance_to_segment(q0, p0, p1),
+            distance_to_segment(q1, p0, p1),
+        ]
+        .into_iter()
+        .fold(f64::INFINITY, f64::min);
+        let (dp, dq, between) = (sub(p1, p0), sub(q1, q0), sub(p0, q0));
+        let (pp, pq, qq) = (dot(dp, dp), dot(dp, dq), dot(dq, dq));
+        let (pb, qb) = (dot(dp, between), dot(dq, between));
+        let det = pp * qq - pq * pq;
+        if det > f64::EPSILON {
+            let along_first = (pq * qb - qq * pb) / det;
+            let along_second = (pp * qb - pq * pb) / det;
+            if (0.0..=1.0).contains(&along_first) && (0.0..=1.0).contains(&along_second) {
+                let gap =
+                    [0, 1, 2].map(|i| between[i] + along_first * dp[i] - along_second * dq[i]);
+                nearest = nearest.min(dot(gap, gap).sqrt());
+            }
+        }
+        nearest
+    }
+
+    /// No hue the map draws lies within twice the matching tolerance of a
+    /// tier's ramp, so a pixel can count toward one tier at most, and neither
+    /// theme's surface — the map's background — toward any.
+    #[test]
+    fn the_netmap_tier_ramps_are_told_apart() {
+        use super::{hue_ramp, on_ramp, NETMAP_RAMP_TOLERANCE, NETMAP_TIER_HUES};
+        for (tier, name) in NETMAP_TIER_HUES {
+            let ramp = hue_ramp(tier);
+            let others = NETMAP_TIER_HUES
+                .iter()
+                .map(|(hue, _)| *hue)
+                .chain(NETMAP_OTHER_HUES)
+                .filter(|other| *other != tier);
+            for other in others {
+                let gap = segment_distance(ramp, hue_ramp(other));
+                assert!(
+                    gap > 2.0 * NETMAP_RAMP_TOLERANCE,
+                    "the {name} ramp lies {gap:.1} from {other:?}'s"
+                );
+            }
+            for theme in [tairix_theme::Theme::light(), tairix_theme::Theme::dark()] {
+                let surface = theme.palette().surface;
+                assert!(
+                    !on_ramp((surface.r, surface.g, surface.b), ramp),
+                    "the surface counts toward the {name} tier"
+                );
+            }
+        }
+    }
+
+    /// A plate as the map draws it counts toward its own tier and no other,
+    /// and one plate alone clears the minimum: the assertion passes on a single
+    /// node of a tier and cannot pass on another tier's. The plate's colour is
+    /// its hue's alone, so one glyph serves every tier.
+    #[test]
+    fn a_netmap_plate_counts_toward_its_own_tier_only() {
+        use super::{hue_ramp, on_ramp, NETMAP_MIN_TIER_PIXELS, NETMAP_TIER_HUES};
+        let side = tairix_netmap::NODE_RADIUS * 2;
+        for (tier, name) in NETMAP_TIER_HUES {
+            let plate = tairix_icon::badge(
+                tairix_icon::IconKind::Subnet,
+                tier,
+                tairix_icon::PlateShape::Round,
+                side,
+            )
+            .expect("a plate of a non-zero side");
+            let opaque: Vec<super::Rgb> = plate
+                .pixels()
+                .iter()
+                .filter(|pixel| pixel.a == u8::MAX)
+                .map(|pixel| {
+                    let colour = pixel.unpremultiply();
+                    (colour.r, colour.g, colour.b)
+                })
+                .collect();
+            for (other, other_name) in NETMAP_TIER_HUES {
+                let ramp = hue_ramp(other);
+                let counted = opaque.iter().filter(|&&pixel| on_ramp(pixel, ramp)).count();
+                if other == tier {
+                    assert!(
+                        counted >= NETMAP_MIN_TIER_PIXELS,
+                        "one {name} plate shows only {counted} pixels of its hue"
+                    );
+                } else {
+                    assert_eq!(
+                        counted, 0,
+                        "a {name} plate counts toward the {other_name} tier"
+                    );
+                }
+            }
         }
     }
 
@@ -19578,15 +19969,16 @@ mod tests {
             {
                 pointing.attach_for(step.action);
             }
+            let has_nic = t.netstack_peer != NetPeerMode::None;
             assert_eq!(
                 *occurrences,
-                armed_input_drivers(pointing),
-                "{}: one arming per input driver on a board with {pointing:?}",
+                armed_irq_drivers(pointing, has_nic),
+                "{}: one arming per irq-binding driver on a board with {pointing:?}, nic={has_nic}",
                 t.binary,
             );
         }
         assert_eq!(
-            armed_input_drivers(tairix_qemu::PointingDevices::NONE),
+            armed_irq_drivers(tairix_qemu::PointingDevices::NONE, false),
             KEYBOARD_ONLY_ARMED_OCCURRENCES
         );
     }
@@ -19982,6 +20374,29 @@ mod tests {
             super::PING_COMMAND_LINE
         );
         assert!(super::PING_COMMAND_LINE.ends_with('\n'));
+    }
+
+    /// The echo tools vertical traces the peer's own link-local address, and
+    /// waits for each hop to be answered by the router the peer plays there,
+    /// then by the peer: neither the typed target nor a marker can drift from
+    /// the shared wire identifiers.
+    #[test]
+    fn the_trace_targets_the_peer_and_expects_its_routers_in_order() {
+        use tairix_test_netstack_wire::{link_local, PEER_IID, TRACE_ROUTER_IIDS};
+
+        let peer = link_local(PEER_IID);
+        assert!(super::TRACEROUTE_COMMAND_LINE.contains(&format!("-n {peer}\n")));
+        let path: Vec<_> = TRACE_ROUTER_IIDS
+            .iter()
+            .map(|iid| link_local(*iid))
+            .chain([peer])
+            .collect();
+        assert_eq!(path.len(), super::TRACE_HOP_MARKERS.len());
+        for (hop, (marker, answerer)) in super::TRACE_HOP_MARKERS.iter().zip(&path).enumerate() {
+            assert_eq!(*marker, format!("{:2}  {answerer}", hop + 1));
+        }
+        assert!(!super::TRACEROUTE_COMMAND_LINE.contains(super::TRACE_HOP_MARKERS[2]));
+        assert!(!super::PING_COMMAND_LINE.contains(super::PING_DONE_MARKER));
     }
 
     /// The telnet vertical types the peer's own link-local address as its

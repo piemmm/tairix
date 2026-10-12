@@ -1096,6 +1096,11 @@ where
         }
     }
 
+    /// The soft bound `caller`'s process is held to for `kind`.
+    fn soft_limit(&self, caller: &CallerContext<'_>, kind: LimitKind) -> u64 {
+        self.aspaces.read().limits(caller.process()).get(kind).soft
+    }
+
     /// Whether `caller` holds the per-endpoint grant `ep` demands of its
     /// posters, if it demands one.
     fn passes_endpoint_restriction(
@@ -2314,12 +2319,7 @@ where
         file: FileId,
         range: LockRange,
     ) -> SyscallResult {
-        let limit = self
-            .aspaces
-            .read()
-            .limits(caller.process())
-            .get(LimitKind::FileLocks)
-            .soft;
+        let limit = self.soft_limit(caller, LimitKind::FileLocks);
         let wakes = crate::filelock::release(file, owner, range, limit)
             .map_err(crate::filelock::Refusal::to_errno)?;
         Self::wake_lock_waiters(&wakes);
@@ -9424,6 +9424,7 @@ where
                 .caps
                 .has(tairix_abi::CapabilityId::IPC_BIND_PRIVILEGED)
             && self.seat_registry.holds_live_lease(seat_owner(caller));
+        let queue_limit = self.soft_limit(caller, LimitKind::IpcQueueBytes);
         let endpoint = if seat_attested {
             CallEndpoint::create_seat_attested(
                 EndpointId(endpoint_id),
@@ -9431,6 +9432,7 @@ where
                 send_set,
                 recv_set,
                 limits,
+                queue_limit,
                 self.audit,
             )?
         } else {
@@ -9440,6 +9442,7 @@ where
                 send_set,
                 recv_set,
                 limits,
+                queue_limit,
                 self.audit,
             )?
         };
@@ -10582,7 +10585,17 @@ where
         // kernel-trusted caller's process (never a caller-supplied value),
         // which releases it at teardown, so only its threads can later add
         // to, wait on, or have the set observed.
-        Ok(crate::waitset::create(caller.process().0))
+        let charges = caller.caps.charges();
+        let set = charges.charge(
+            LimitKind::WaitSets,
+            1,
+            self.soft_limit(caller, LimitKind::WaitSets),
+        )?;
+        Ok(crate::waitset::create(
+            caller.process().0,
+            set,
+            charges.empty(LimitKind::WaitSetMembers),
+        ))
     }
 
     // One dispatch owner-checks the resource each wait-set member names
@@ -10921,6 +10934,7 @@ where
                         pacing: member_pacing,
                         table: member_table.clone(),
                     },
+                    self.soft_limit(caller, LimitKind::WaitSetMembers),
                 );
                 if added.is_err() && kind == WaitSourceKind::File {
                     if let Some(table) = &member_table {
@@ -11572,12 +11586,7 @@ where
         let Some(held) = Held::from_mode(mode) else {
             return self.release_file_lock(caller, owner, file, range);
         };
-        let limit = self
-            .aspaces
-            .read()
-            .limits(caller.process())
-            .get(LimitKind::FileLocks)
-            .soft;
+        let limit = self.soft_limit(caller, LimitKind::FileLocks);
         let pid = caller.process();
         let task = caller.task_id.0;
         let cpu = SchedulerArch::current_cpu(self.arch);
@@ -12010,17 +12019,12 @@ where
         if found.dir.is_none() {
             return Err(Errno::NotImplemented);
         }
-        let limit = self
-            .aspaces
-            .read()
-            .limits(caller.process())
-            .get(LimitKind::DirWatches)
-            .soft;
+        let limit = self.soft_limit(caller, LimitKind::DirWatches);
         let watch = crate::fswatch::ArmedWatch::arm(
             fswatch,
             found.dir,
             latency_ns,
-            caller.process(),
+            caller.caps.charges(),
             limit,
             crate::fswatch::Resolved {
                 epochs,
@@ -12700,6 +12704,7 @@ where
             CapabilitySet::empty(),
             max_payload,
             capacity,
+            self.soft_limit(caller, LimitKind::IpcQueueBytes),
             self.audit,
         )?;
 
@@ -12735,6 +12740,32 @@ where
             crate::waitq::port_room_wake_task(task);
         }
         Ok(0)
+    }
+
+    fn port_unbind(&self, caller: &CallerContext<'_>, endpoint: u64) -> SyscallResult {
+        let id = EndpointId(endpoint);
+        let woken = {
+            let mut ipc = self.ipc.write();
+            let port = ipc.lookup(id).ok_or(Errno::NotFound)?;
+            // Only the owner unbinds its port, the gate `ipc_recv` puts on
+            // draining it.
+            if port.owner() != caller.caps.process().0 {
+                return Err(Errno::PermissionDenied);
+            }
+            let woken = port.room_waiters();
+            ipc.unregister(id, self.audit)?;
+            woken
+        };
+        // A sender parked for room learns its destination is gone rather than
+        // waiting for a drain that can never come.
+        for task in woken {
+            crate::waitq::port_room_wake_task(task);
+        }
+        Ok(0)
+    }
+
+    fn waitset_close(&self, caller: &CallerContext<'_>, set: u64) -> SyscallResult {
+        crate::waitset::close(caller.process().0, set).map(|()| 0)
     }
 
     fn fs_chdir(&self, caller: &CallerContext<'_>, path: u64, path_len: usize) -> SyscallResult {
@@ -15663,6 +15694,7 @@ mod tests {
             CapabilitySet::empty(),
             64,
             4,
+            tairix_abi::RLIMIT_INFINITY,
             sink,
         )
         .expect("unrestricted port creation succeeds");
@@ -16571,6 +16603,7 @@ mod tests {
                     max_reply: 16,
                     capacity: 1,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -16996,6 +17029,7 @@ mod tests {
             caps_with(&[CapabilityId::INPUT_READ]),
             64,
             4,
+            tairix_abi::RLIMIT_INFINITY,
             sink,
         )
         .expect("recv-restricted port creation succeeds");
@@ -39928,6 +39962,7 @@ mod tests {
                     max_reply: 128,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -40157,6 +40192,7 @@ mod tests {
                     max_reply: 128,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("restricted endpoint"),
@@ -40802,6 +40838,7 @@ mod tests {
                     max_reply: 128,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("grant-restricted endpoint"),
@@ -41442,6 +41479,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -41536,6 +41574,7 @@ mod tests {
                         max_reply: 64,
                         capacity: 4,
                     },
+                    tairix_abi::RLIMIT_INFINITY,
                     sink,
                 )
                 .expect("endpoint"),
@@ -41625,6 +41664,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -42683,6 +42723,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -42789,6 +42830,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -43010,6 +43052,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -45261,6 +45304,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("endpoint"),
@@ -45348,6 +45392,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("endpoint"),
@@ -45429,6 +45474,7 @@ mod tests {
                         max_reply: 64,
                         capacity: 4,
                     },
+                    tairix_abi::RLIMIT_INFINITY,
                     sink,
                 )
                 .expect("endpoint"),
@@ -45766,6 +45812,162 @@ mod tests {
         ipc.write().teardown_owned_by(0x5704, sink);
     }
 
+    /// `port_bind` charges a port's worst case to the caller's
+    /// `ipc-queue-bytes` limit and refuses one past it; `port_unbind` tears
+    /// down only the caller's own port and returns its charge, freeing both the
+    /// id and the budget.
+    #[test]
+    fn port_bind_is_charged_and_port_unbind_returns_the_charge() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let owner = crate::test_boot::claim_task();
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let stranger = crate::test_boot::claim_peer_task();
+        let stranger_caps = make_caps_record(stranger, &[], sink);
+        let stranger_ctx = CallerContext {
+            task_id: SecTaskId(stranger),
+            caps: &stranger_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let reservation = tairix_kernel_ipc::Port::reservation(64, 4);
+        aspaces.write().set_limit(
+            ProcessId(owner),
+            LimitKind::IpcQueueBytes,
+            ResourceLimit::new(2 * reservation, 2 * reservation).expect("well-formed"),
+        );
+        let held = || caps.charges().held(LimitKind::IpcQueueBytes);
+        let (a, b, c) = (0x5EAD_0101u64, 0x5EAD_0102u64, 0x5EAD_0103u64);
+
+        assert_eq!(h.port_bind(&ctx, a, 64, 4), Ok(0));
+        assert_eq!(h.port_bind(&ctx, b, 64, 4), Ok(0));
+        assert_eq!(held(), 2 * reservation);
+        assert_eq!(h.port_bind(&ctx, c, 64, 4), Err(Errno::LimitExceeded));
+        assert!(
+            ipc.read().lookup(EndpointId(c)).is_none(),
+            "a refused bind leaves nothing bound"
+        );
+        assert_eq!(
+            h.port_bind(&ctx, c, 64, usize::MAX),
+            Err(Errno::LimitExceeded),
+            "an absurd depth is priced, not trusted"
+        );
+
+        assert_eq!(h.port_unbind(&ctx, c), Err(Errno::NotFound));
+        assert_eq!(
+            h.port_unbind(&stranger_ctx, a),
+            Err(Errno::PermissionDenied),
+            "only the owner unbinds its port"
+        );
+        assert!(ipc.read().lookup(EndpointId(a)).is_some());
+        assert_eq!(h.port_unbind(&ctx, a), Ok(0));
+        assert!(ipc.read().lookup(EndpointId(a)).is_none());
+        assert_eq!(held(), reservation, "the unbind returned the charge");
+        assert_eq!(
+            h.port_bind(&ctx, c, 64, 4),
+            Ok(0),
+            "the budget is free again"
+        );
+        assert_eq!(h.port_unbind(&ctx, c), Ok(0));
+        assert_eq!(h.port_bind(&ctx, a, 64, 4), Ok(0), "and so is the id");
+
+        ipc.write().teardown_owned_by(owner, sink);
+        assert_eq!(held(), 0, "teardown returns every charge");
+    }
+
+    /// Each wait-set and each member counts against the caller's `wait-sets`
+    /// and `wait-set-members` limits, refused past them; `waitset_close`
+    /// closes only the caller's own set and returns both charges.
+    #[test]
+    fn wait_sets_and_members_are_charged_and_waitset_close_returns_them() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let owner = crate::test_boot::claim_task();
+        let caps = make_caps_record(owner, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let stranger = crate::test_boot::claim_peer_task();
+        let stranger_caps = make_caps_record(stranger, &[], sink);
+        let stranger_ctx = CallerContext {
+            task_id: SecTaskId(stranger),
+            caps: &stranger_caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let one = |n| ResourceLimit::new(n, n).expect("well-formed");
+        aspaces
+            .write()
+            .set_limit(ProcessId(owner), LimitKind::WaitSets, one(2));
+        aspaces
+            .write()
+            .set_limit(ProcessId(owner), LimitKind::WaitSetMembers, one(1));
+        let held = |kind| caps.charges().held(kind);
+        let port_kind = WaitSourceKind::Port.as_u32();
+        let (p, q) = (0x5EAD_0201u64, 0x5EAD_0202u64);
+        assert_eq!(h.port_bind(&ctx, p, 8, 1), Ok(0));
+        assert_eq!(h.port_bind(&ctx, q, 8, 1), Ok(0));
+
+        let first = h.waitset_create(&ctx).expect("first");
+        let second = h.waitset_create(&ctx).expect("second");
+        assert_eq!(h.waitset_create(&ctx), Err(Errno::LimitExceeded));
+        assert_eq!(
+            h.waitset_ctl(&ctx, first, WS_OP_ADD, port_kind, p, 1),
+            Ok(0)
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, second, WS_OP_ADD, port_kind, q, 2),
+            Err(Errno::LimitExceeded),
+            "the member bound spans every set the process holds"
+        );
+        assert_eq!(held(LimitKind::WaitSets), 2);
+        assert_eq!(held(LimitKind::WaitSetMembers), 1);
+
+        assert_eq!(h.waitset_close(&stranger_ctx, first), Err(Errno::NotFound));
+        assert_eq!(h.waitset_close(&ctx, first), Ok(0));
+        assert_eq!(h.waitset_close(&ctx, first), Err(Errno::NotFound));
+        assert_eq!(held(LimitKind::WaitSets), 1);
+        assert_eq!(
+            held(LimitKind::WaitSetMembers),
+            0,
+            "its member went with it"
+        );
+        assert_eq!(
+            h.waitset_ctl(&ctx, second, WS_OP_ADD, port_kind, q, 2),
+            Ok(0)
+        );
+        let third = h.waitset_create(&ctx).expect("a closed set frees its slot");
+
+        assert_eq!(crate::waitset::release_owned_by(owner), 2);
+        assert!(!crate::waitset::owned_by(owner, third));
+        assert_eq!(held(LimitKind::WaitSets), 0);
+        assert_eq!(held(LimitKind::WaitSetMembers), 0);
+        ipc.write().teardown_owned_by(owner, sink);
+    }
+
     /// Binding a **reserved** well-known endpoint id as a port requires
     /// `CAP_IPC_BIND_PRIVILEGED`, exactly as `call_create` does: an
     /// unprivileged squatter is refused and the id stays unbound; a
@@ -46030,6 +46232,7 @@ mod tests {
             CapabilitySet::empty(),
             64,
             4,
+            tairix_abi::RLIMIT_INFINITY,
             sink,
         )
         .expect("a privileged binder may restrict its senders");
@@ -46982,6 +47185,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("restricted-recv endpoint"),
@@ -47046,6 +47250,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -47127,6 +47332,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -47191,6 +47397,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -47258,6 +47465,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -47392,6 +47600,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 sink,
             )
             .expect("unrestricted endpoint"),
@@ -49854,13 +50063,10 @@ mod tests {
             h.fs_watch_read(&ctx, fd, 0x1100, DirChangeBatch::MIN_BUFFER - 1),
             Err(Errno::BufferTooSmall)
         );
-        assert_eq!(fx.fswatch.usage(ProcessId(fx.owner)), 1);
+        let held = || ctx.caps.charges().held(LimitKind::DirWatches);
+        assert_eq!(held(), 1, "a refused second arm returned its charge");
         assert_eq!(h.fs_close(&ctx, fd), Ok(0));
-        assert_eq!(
-            fx.fswatch.usage(ProcessId(fx.owner)),
-            0,
-            "closing the descriptor released the watch"
-        );
+        assert_eq!(held(), 0, "closing the descriptor released the watch");
     }
 
     /// A change another program makes is reported once and drained as the
@@ -49974,7 +50180,7 @@ mod tests {
         );
         assert_eq!(crate::waitset::release_owned_by(fx.owner), 2);
         assert_eq!(h.fs_close(&ctx, sub), Ok(0));
-        assert_eq!(fx.fswatch.usage(ProcessId(fx.owner)), 0);
+        assert_eq!(ctx.caps.charges().held(LimitKind::DirWatches), 0);
     }
 
     /// Renaming a directory above the watched one moves nothing inside it,

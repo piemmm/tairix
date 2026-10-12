@@ -143,6 +143,29 @@ which the `sysinfod` broker forwards to `netstack`'s capability-gated
 broker read (the `NetstackRequest::BondMembers` operation); they require
 `CAP_SYSINFO_GLOBAL` and are audited, and a non-bond alias fails closed.
 
+## Observing routes and neighbours
+
+An interface's routing table and neighbour cache are addressable the same way —
+TAIRiX's equivalent of `ip route` and `ip neigh`:
+
+- `state:net/<iface>/routes` — every route the interface egresses, each as
+  `dest/prefix [via hop] (origin)`, where the origin is `connected`, `static`
+  (configured or DHCP-learned), `ra` (a Router Advertisement prefix),
+  `redirect`, or `default-router` (the default route through a router an RA
+  named). A DHCP- or RA-learned gateway is visible here.
+- `state:net/<iface>/neighbors` — the ARP and Neighbour Discovery cache, each
+  entry `addr [at mac] (state)`, the state one of RFC 4861's `incomplete`,
+  `reachable`, `stale`, `delay` or `probe`. Reading it refreshes nothing, so a
+  diagnostic never changes which entry eviction takes.
+
+A reading too long for its bound keeps whole entries in order and ends
+`, and N more`; the complete tables are the `NET_ROUTES` and `NET_NEIGHBORS`
+sysinfo queries, which a program pages with `tairix_procinfo`'s
+`for_each_net_route` and `for_each_net_neighbor`. Routes are topology and
+require `CAP_SYSINFO_GLOBAL`; neighbours name other machines' hardware
+addresses, so they require `CAP_SYSINFO_HW` and the reading is marked
+sensitive. Both are audited, and an unknown interface fails closed.
+
 ## Observing the resolver and time servers
 
 The host's two server sets are addressable the same way — TAIRiX's equivalent
@@ -262,8 +285,28 @@ PING gateway.example (10.0.2.2) 56(84) bytes of data.
 
 --- gateway.example ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2003ms
-rtt min/avg/max = 0.388/0.400/0.412 ms
+rtt min/avg/max/mdev = 0.388/0.400/0.412/0.009 ms
 ```
+
+An ICMP error about a request — a router's Time Exceeded, a Destination
+Unreachable, a Packet Too Big — prints iputils' `From` line in the probe
+family's own vocabulary, and the closing block counts the errors:
+
+```
+$ ping -c 2 -n 10.9.9.9
+PING 10.9.9.9 (10.9.9.9) 56(84) bytes of data.
+From 10.0.2.1 icmp_seq=1 Destination Host Unreachable
+From 10.0.2.1 icmp_seq=2 Destination Host Unreachable
+
+--- 10.9.9.9 ping statistics ---
+2 packets transmitted, 0 received, +2 errors, 100% packet loss, time 1001ms
+```
+
+A request with no answer prints nothing, as in iputils; the reply `time=`
+narrows from three decimals to none as the round trip grows past 1, 10 and
+100 ms, and the loss percentage is printed as C's `%g` prints it. A request
+no interface can carry yet waits, up to its timeout, for the stack's network
+notice that one came up, rather than retrying on a timer.
 
 The target is an address literal **or a host name**, resolved through the
 same `lib/resolver` stub resolver `host` and `telnet` use — the
@@ -293,13 +336,54 @@ would spend the reserve for nothing.
   through the echo-socket interface.
 * The peer is reverse-resolved once per run, so a reply line reads
   `<n> bytes from <name> (<address>)` when the address has a `PTR` record
-  and carries the bare address when it does not. `-n` suppresses the lookup
-  entirely: no `PTR` query goes on the wire and every line stays numeric.
+  and carries the bare address when it does not; a reporting router is
+  named the same way, once. `-n` suppresses the lookups entirely: no `PTR`
+  query goes on the wire and every line stays numeric.
   (Not a divergence — iputils behaves the same way; it is listed here
   because the header line keeps the operand as typed rather than the
   resolved name.) The lookup precedes the first request, so on a host whose
   resolver is unreachable it costs that resolution's retry budget before any
   packet leaves — `-n` is the switch for exactly that case.
+
+## `traceroute` — the route to a host
+
+`traceroute` sends ICMP/`ICMPv6` echo requests whose hop limit climbs one hop
+at a time and prints each router that reports a probe's hop limit running
+out, until the host itself answers, in the familiar Linux `traceroute` shape.
+
+```
+$ traceroute -n 192.0.2.1
+traceroute to 192.0.2.1 (192.0.2.1), 30 hops max, 60 byte packets
+ 1  10.0.2.2  0.412 ms  0.388 ms  0.401 ms
+ 2  198.51.100.1  2.104 ms  2.050 ms *
+ 3  192.0.2.1  3.871 ms  3.902 ms  3.866 ms
+```
+
+A probe that draws nothing within the wait prints `*`; the address — and,
+without `-n`, the name — of whoever answered prints whenever it differs from
+the probe before, so a hop that load-balances across routers shows each. A
+router reporting that the path cannot go on marks its probe in the probe
+family's own vocabulary — `!N`, `!H`, `!P`, `!X`, `!S`, `!F-mtu`, `!<code>` —
+and the trace stops at that hop. Several probes are outstanding at once
+(`-N`), so a run of silent hops costs one wait rather than one per probe; a
+hop is still printed only once every hop before it has been. A probe no
+interface can carry yet waits for the stack's network notice, never a timer.
+
+The hop-by-hop method is `lib/net`'s `trace` engine, the one the network map
+drives too, over the same capability-gated echo socket `ping` uses: the stack
+reports each router's Time Exceeded or Unreachable about one of the socket's
+own requests back to it, with the router's address, so the tool sends no raw
+packet. The target resolves through the same shared policy `ping` and
+`telnet` use.
+
+### Deliberate divergences
+
+* ICMP echo is the only probe method — the method `-I` selects. An option
+  selecting UDP or TCP probes (`-U`, `-T`, `--udp`, `--tcp`, `-M`) is refused
+  by name rather than ignored, since its output would describe a different
+  path than the one asked about.
+* `packetlen` is honoured as the probe's total length, headers included, as
+  Linux counts it; its default is 60 for IPv4 and 80 for IPv6.
 
 ## `telnet` — the Network Virtual Terminal client
 

@@ -37,45 +37,52 @@ mod program {
         ShutdownHow, SocketAddr, SocketId, SocketStreamEvent, StreamCloseReason,
     };
     use tairix_abi::net_ipc::NetAddrFamily;
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::notice::NoticeTopic;
+    use tairix_abi::waitset::WaitSourceKind;
     use tairix_abi::{Errno, InputMode, TerminalSize};
     use tairix_help::BundleHelp;
     use tairix_net::IpAddr;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_rt::keys::{KeyRelay, Keys};
-    use tairix_telnet::net::{CloseReason, Endpoint, IoEvent, TelnetIo};
+    use tairix_rt::{PrivatePort, WaitSet};
+    use tairix_telnet::net::{
+        await_handshake, connect_when_reachable, CloseReason, Endpoint, Handshake, IoEvent,
+        TelnetIo,
+    };
     use tairix_telnet::{parse, run, Command, Output, FALLBACK_TERM, USAGE};
 
     /// Wait-set token for the stack's delivery port.
     const DELIVER_TOKEN: u64 = 1;
     /// Wait-set token for the keyboard port.
     const KEYBOARD_TOKEN: u64 = 2;
+    /// Wait-set token for the network-interfaces notice.
+    const NETWORK_TOKEN: u64 = 3;
 
     /// Mailbox depth for each port. Generous headroom so a burst of server
     /// output or fast typing queues rather than back-pressuring its producer;
     /// the connection's own receive window bounds the true in-flight volume.
     const PORT_CAPACITY: usize = 64;
 
-    /// How many times to retry `connect` while the interface is still coming up
-    /// at boot (the NIC driver may not be bound to the stack yet, so the stack
-    /// has no egress and answers `NetworkUnreachable`).
-    const CONNECT_ATTEMPTS: u32 = 200;
+    /// How long `connect` waits for an interface to come up at boot, when the
+    /// NIC driver may not be bound to the stack yet and it answers
+    /// `NetworkUnreachable`.
+    const CONNECT_PATIENCE_NANOS: u64 = 5 * NANOS_PER_SEC;
 
-    /// One-shot park between connect retries and between send back-pressure
-    /// retries — a tickless timed wait, never a busy spin.
-    const RETRY_PARK_NANOS: u64 = 25_000_000;
+    /// The timed park before offering bytes again to a full send buffer: the
+    /// stream protocol reports no room, so this is the one wait with no event.
+    const SEND_RETRY_NANOS: u64 = 25_000_000;
 
     /// Bytes offered per `stream_send` call, so one marshalled request stays
     /// modest however much the operator pasted.
     const SEND_CHUNK: usize = 4096;
 
-    /// One park slice while awaiting the handshake's `Connected` event.
-    const HANDSHAKE_PARK_NANOS: u64 = 100_000_000;
+    /// How long the handshake may take before it is declared dead: generous
+    /// for an emulated link, bounded so a wedged stack fails loud with a
+    /// reason instead of hanging the terminal.
+    const HANDSHAKE_TIMEOUT_NANOS: u64 = 60 * NANOS_PER_SEC;
 
-    /// How many such slices before the handshake is declared dead. Generous for
-    /// a three-way handshake on an emulated link, bounded so a wedged stack
-    /// fails loud with a reason instead of hanging the terminal.
-    const HANDSHAKE_PARKS: u32 = 600;
+    /// Nanoseconds in a second.
+    const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
     /// The conventional fallback grid for a console whose true size the kernel
     /// cannot attest — the terminal-library policy, applied here rather than
@@ -107,12 +114,17 @@ mod program {
     }
 
     /// The production [`TelnetIo`]: the stream socket, the two ports, the
-    /// wait-set both are registered on, and the terminal controls.
+    /// wait-sets they are registered on, and the terminal controls.
     struct RtTelnetIo {
-        /// The wait-set the relay parks on.
-        set: u64,
+        /// The wait-set the relay parks on: the delivery port and the keyboard.
+        set: WaitSet,
+        /// The delivery port alone, for the handshake, which must not wake for
+        /// a keystroke it cannot take yet.
+        handshake: WaitSet,
+        /// The network-interfaces notice, for a connect waiting on the network.
+        network: WaitSet,
         /// The process-private port the stack delivers stream events to.
-        deliver: u64,
+        deliver: PrivatePort,
         /// The keyboard, read on a thread of its own.
         keys: KeyRelay,
         /// The connected socket, when there is one.
@@ -127,19 +139,22 @@ mod program {
         /// Bind the delivery port, create the wait-set, and register it and
         /// the keyboard's on it.
         fn open(bind: Option<SocketAddr>, keys: KeyRelay) -> Result<Self, Errno> {
-            let deliver =
-                tairix_rt::bind_private_port(SocketStreamEvent::MAX_WIRE_LEN, PORT_CAPACITY)?;
-            let set =
-                u64::try_from(tairix_rt::waitset_create()).map_err(|_| Errno::NotImplemented)?;
-            for (port, token) in [(deliver, DELIVER_TOKEN), (keys.port(), KEYBOARD_TOKEN)] {
-                if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Port, port, token)
-                    != 0
-                {
-                    return Err(Errno::NotImplemented);
-                }
-            }
+            let deliver = PrivatePort::bind(SocketStreamEvent::MAX_WIRE_LEN, PORT_CAPACITY)?;
+            let set = WaitSet::create()?;
+            set.add(WaitSourceKind::Port, deliver.id(), DELIVER_TOKEN)?;
+            set.add(WaitSourceKind::Port, keys.port(), KEYBOARD_TOKEN)?;
+            let handshake = WaitSet::create()?;
+            handshake.add(WaitSourceKind::Port, deliver.id(), DELIVER_TOKEN)?;
+            let network = WaitSet::create()?;
+            network.add(
+                WaitSourceKind::SystemNotice,
+                u64::from(NoticeTopic::Network.as_u32()),
+                NETWORK_TOKEN,
+            )?;
             Ok(Self {
                 set,
+                handshake,
+                network,
                 deliver,
                 keys,
                 socket: None,
@@ -150,8 +165,7 @@ mod program {
 
         /// Park until one of the two ports has a message, giving the CPU up.
         fn park(&self) {
-            let mut token = 0u64;
-            let _ = tairix_rt::waitset_wait(self.set, u64::MAX, &mut token);
+            let _ = self.set.wait_until(u64::MAX);
         }
 
         /// Drain one keyboard message, or [`None`] if the mailbox was empty.
@@ -167,7 +181,7 @@ mod program {
         fn drain_network(&mut self) -> Option<Result<IoEvent, Errno>> {
             // Only the stack's own events come back: the receive discards a
             // forged sender unread.
-            let event = tairix_rt::net::stream_recv(self.deliver, &mut self.buf).ok()?;
+            let event = tairix_rt::net::stream_recv(self.deliver.id(), &mut self.buf).ok()?;
             let socket = self.socket?;
             match event {
                 SocketStreamEvent::Data { socket: s, payload } if s == socket => {
@@ -193,20 +207,21 @@ mod program {
         /// Bounded: a stack that answers neither is a wedged stack, and this
         /// must fail loud with a reason rather than hang the terminal.
         fn await_connected(&mut self, socket: SocketId) -> Result<(), Errno> {
-            for _ in 0..HANDSHAKE_PARKS {
-                let Ok(event) = tairix_rt::net::stream_recv(self.deliver, &mut self.buf) else {
-                    park_for(self.set, HANDSHAKE_PARK_NANOS);
-                    continue;
-                };
-                match event {
-                    SocketStreamEvent::Connected { socket: s } if s == socket => return Ok(()),
-                    SocketStreamEvent::Closed { socket: s, .. } if s == socket => {
-                        return Err(Errno::NotConnected);
+            let deadline = tairix_rt::clock_get().saturating_add(HANDSHAKE_TIMEOUT_NANOS);
+            let (deliver, buf, handshake) = (self.deliver.id(), &mut self.buf, &self.handshake);
+            await_handshake(
+                || match tairix_rt::net::stream_recv(deliver, buf) {
+                    Ok(SocketStreamEvent::Connected { socket: s }) if s == socket => {
+                        Some(Handshake::Connected)
                     }
-                    _ => {}
-                }
-            }
-            Err(Errno::TimedOut)
+                    Ok(SocketStreamEvent::Closed { socket: s, .. }) if s == socket => {
+                        Some(Handshake::Refused)
+                    }
+                    Ok(_) => Some(Handshake::Unrelated),
+                    Err(_) => None,
+                },
+                || handshake.wait_until(deadline).map(|woke| woke.is_some()),
+            )
         }
     }
 
@@ -226,7 +241,7 @@ mod program {
         }
 
         fn connect(&mut self, endpoint: Endpoint) -> Result<(), Errno> {
-            let socket = tairix_rt::net::stream_socket(endpoint.family, self.deliver)?;
+            let socket = tairix_rt::net::stream_socket(endpoint.family, self.deliver.id())?;
             if let Some(local) = self.bind {
                 if local.family != endpoint.family {
                     let _ = tairix_rt::net::close(socket);
@@ -242,23 +257,17 @@ mod program {
                 addr: endpoint.addr,
                 port: endpoint.port,
             };
-            let mut attempt = 0u32;
-            loop {
-                match tairix_rt::net::connect(socket, peer) {
-                    Ok(()) => break,
-                    // The stack has no egress until a NIC is bound to it, which
-                    // at boot can be after this program starts. Retrying a
-                    // bounded number of times on a one-shot park is what makes
-                    // `telnet` usable in the first seconds of a session.
-                    Err(Errno::NetworkUnreachable) if attempt < CONNECT_ATTEMPTS => {
-                        attempt += 1;
-                        park_for(self.set, RETRY_PARK_NANOS);
-                    }
-                    Err(errno) => {
-                        let _ = tairix_rt::net::close(socket);
-                        return Err(errno);
-                    }
-                }
+            // The stack has no egress until a NIC is bound to it, which at boot
+            // can be after this program starts: each change to the interfaces
+            // is a reason to try again.
+            let patience = tairix_rt::clock_get().saturating_add(CONNECT_PATIENCE_NANOS);
+            let network = &self.network;
+            if let Err(errno) = connect_when_reachable(
+                || tairix_rt::net::connect(socket, peer),
+                || matches!(network.wait_until(patience), Ok(Some(_))),
+            ) {
+                let _ = tairix_rt::net::close(socket);
+                return Err(errno);
             }
             self.socket = Some(socket);
             if let Err(errno) = self.await_connected(socket) {
@@ -294,9 +303,9 @@ mod program {
             while offset < bytes.len() {
                 let end = (offset + SEND_CHUNK).min(bytes.len());
                 match tairix_rt::net::stream_send(socket, &bytes[offset..end]) {
-                    // A momentarily-full send buffer is retried on a one-shot
-                    // park rather than a spin.
-                    Ok(0) => park_for(self.set, RETRY_PARK_NANOS),
+                    // A momentarily-full send buffer is retried after a timed
+                    // park, which nothing pending can cut short.
+                    Ok(0) => tairix_rt::park_ns(SEND_RETRY_NANOS),
                     Ok(accepted) => offset += accepted as usize,
                     Err(errno) => return Err(errno),
                 }
@@ -334,13 +343,6 @@ mod program {
                 None => Ok(()),
             }
         }
-    }
-
-    /// Park for `nanos` on the process's wait-set: the task gives the CPU up
-    /// until the one-shot timeout elapses or a port becomes ready.
-    fn park_for(set: u64, nanos: u64) {
-        let mut token = 0u64;
-        let _ = tairix_rt::waitset_wait(set, nanos, &mut token);
     }
 
     /// The socket endpoint for a resolved address.

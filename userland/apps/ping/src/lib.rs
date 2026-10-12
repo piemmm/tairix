@@ -70,9 +70,10 @@ pub mod command;
 pub mod error;
 pub mod io;
 pub mod net;
+mod report;
 
 pub use client::{run, RunSummary, USAGE};
 pub use command::{parse, Command, Config, HostTarget, ParseError, PayloadKind, Target};
 pub use error::PingError;
 pub use io::Output;
-pub use net::{EchoReply, PingIo, ResolveFailure};
+pub use net::{EchoEvent, PingIo};

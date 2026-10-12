@@ -643,6 +643,7 @@ mod tests {
                     max_reply: u32::try_from(BLK_COMPLETION_LEN).unwrap(),
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 &SINK,
             )
             .expect("endpoint"),

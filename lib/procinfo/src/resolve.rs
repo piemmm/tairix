@@ -40,6 +40,7 @@
 
 use alloc::format;
 use alloc::string::{String, ToString};
+use core::fmt::Write;
 
 use alloc::vec::Vec;
 use tairix_abi::origin::{Origin, TrustDomain};
@@ -64,12 +65,13 @@ use crate::human::cpu_feature_flags;
 use crate::kstats;
 use crate::kstats::{for_each_net_bond_member, for_each_net_interface};
 use crate::list::{field_lossy, walk_pages_with, ListError, WalkStep};
-use crate::netaddr::{render_if_addr, render_server};
+use crate::netaddr::{render_if_addr, render_mac, render_neighbor, render_route, render_server};
 use crate::netservers::{for_each_resolver_server, for_each_time_server};
+use crate::nettopo::{for_each_net_neighbor, for_each_net_route};
 use crate::request::{call, CallError};
 use crate::resinfo::{
     render_limit_bound, Authorization, InfoValue, Metric, MetricKind, Producer, ResetBehavior,
-    ResourceResponse, ResponsePayload, Sensitivity, Unit,
+    ResourceResponse, ResponsePayload, Sensitivity, Unit, MAX_INFO_VALUE_LEN,
 };
 use crate::transport::Transport;
 
@@ -237,21 +239,20 @@ fn resolve_state(
         // SLAAC/DAD state where it is not simply preferred.
         ["net", iface, "address"] => {
             let record = net_state_for(transport, iface)?;
-            let mut rendered = String::new();
-            for entry in record.addrs.iter().take(record.addr_count as usize) {
-                if !rendered.is_empty() {
-                    rendered.push_str(", ");
-                }
-                rendered.push_str(&render_if_addr(entry));
-            }
-            if rendered.is_empty() {
-                rendered.push_str("none");
-            }
+            let rendered = joined_or_none(
+                record
+                    .addrs
+                    .iter()
+                    .take(record.addr_count as usize)
+                    .map(render_if_addr),
+            );
             (
                 InfoValue::new_str(Sensitivity::Public, &rendered),
                 Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
             )
         }
+        ["net", iface, "routes"] => net_routes_of(transport, iface)?,
+        ["net", iface, "neighbors"] => net_neighbors_of(transport, iface)?,
         // A bond's currently-active transmitting member (active-backup),
         // or `none` in balance mode / while the bond is down. Served by
         // the `netstack` broker's `CAP_SYSINFO_GLOBAL`-gated bond-members
@@ -455,7 +456,7 @@ fn resolve_info_value(
             // The or-pattern fixes `leaf` to one of these three, so the
             // final arm is `kind` and there is no unhandled case.
             let value = match *leaf {
-                "mac" => InfoValue::new_str(Sensitivity::Sensitive, &mac_string(record.mac)),
+                "mac" => InfoValue::new_str(Sensitivity::Sensitive, &render_mac(record.mac)),
                 "mtu" => InfoValue::new_str(Sensitivity::Public, &record.mtu.to_string()),
                 _ => InfoValue::new_str(Sensitivity::Public, record.kind.name()),
             };
@@ -1265,6 +1266,51 @@ fn net_state_for(
     )
 }
 
+/// One resolved reading: its value and the authority it was served under.
+type Reading = (Result<InfoValue, Errno>, Authorization);
+
+/// `iface`'s routes, the IPv6 default routers included, each as
+/// `dest/prefix [via hop] (origin)`.
+///
+/// The interface must exist: the state page proves it under the same gate, so
+/// an unknown alias fails closed rather than reading as one with no routes.
+fn net_routes_of(transport: &dyn Transport, iface: &str) -> Result<Reading, ResolveInfoError> {
+    net_state_for(transport, iface)?;
+    let mut routes = Vec::new();
+    for_each_net_route(transport, |route| {
+        if if_name_matches(&route.interface, iface) {
+            routes.push(render_route(route));
+        }
+        Ok(WalkStep::Continue)
+    })
+    .map_err(|err| map_list_error(SysinfoQueryId::NET_ROUTES, err))?;
+    Ok((
+        InfoValue::new_str(Sensitivity::Public, &joined_or_none(routes)),
+        Authorization::Capability(CapabilityId::SYSINFO_GLOBAL),
+    ))
+}
+
+/// `iface`'s neighbour cache, each `addr [at mac] (state)`.
+///
+/// Other machines' hardware addresses, so the reading is sensitive and sits
+/// under the hardware gate; the facts page proves the interface exists under
+/// that same gate.
+fn net_neighbors_of(transport: &dyn Transport, iface: &str) -> Result<Reading, ResolveInfoError> {
+    net_facts_for(transport, iface)?;
+    let mut neighbors = Vec::new();
+    for_each_net_neighbor(transport, |neighbor| {
+        if if_name_matches(&neighbor.interface, iface) {
+            neighbors.push(render_neighbor(neighbor));
+        }
+        Ok(WalkStep::Continue)
+    })
+    .map_err(|err| map_list_error(SysinfoQueryId::NET_NEIGHBORS, err))?;
+    Ok((
+        InfoValue::new_str(Sensitivity::Sensitive, &joined_or_none(neighbors)),
+        Authorization::Capability(CapabilityId::SYSINFO_HW),
+    ))
+}
+
 /// Every member record whose owning bond alias is `bond`, in the stack's
 /// configured order, over the shared membership walk
 /// ([`for_each_net_bond_member`]).
@@ -1323,14 +1369,37 @@ fn net_time_servers_all(transport: &dyn Transport) -> Result<Vec<NetServerAddr>,
 /// Render a server set as a comma-separated address list in the stack's
 /// order, or `none` when the set is empty.
 fn render_server_addrs(servers: &[NetServerAddr]) -> String {
+    joined_or_none(servers.iter().map(render_server))
+}
+
+/// The items joined with `, `, or `none` when there are none: the one shape
+/// every multi-valued network reading takes.
+///
+/// A reading is bounded by [`MAX_INFO_VALUE_LEN`] and a neighbour cache is not,
+/// so the join keeps whole items in order while they fit and then says how many
+/// it left out, rather than failing the reading or cutting an item in half.
+fn joined_or_none<T: AsRef<str>>(items: impl IntoIterator<Item = T>) -> String {
+    const SEPARATOR: &str = ", ";
+    const ELISION_RESERVE: usize = ", and 4294967295 more".len();
     let mut rendered = String::new();
-    for server in servers {
-        if !rendered.is_empty() {
-            rendered.push_str(", ");
+    let mut elided: u32 = 0;
+    for item in items {
+        let item = item.as_ref();
+        let separator = if rendered.is_empty() { "" } else { SEPARATOR };
+        let fits =
+            rendered.len() + separator.len() + item.len() + ELISION_RESERVE <= MAX_INFO_VALUE_LEN;
+        if elided == 0 && fits {
+            rendered.push_str(separator);
+            rendered.push_str(item);
+        } else {
+            elided = elided.saturating_add(1);
         }
-        rendered.push_str(&render_server(server));
     }
-    if rendered.is_empty() {
+    if elided > 0 {
+        let lead = if rendered.is_empty() { "" } else { ", and " };
+        // Writing into a String cannot fail.
+        let _ = write!(rendered, "{lead}{elided} more");
+    } else if rendered.is_empty() {
         rendered.push_str("none");
     }
     rendered
@@ -1339,11 +1408,7 @@ fn render_server_addrs(servers: &[NetServerAddr]) -> String {
 /// Resolve `info:net/<bond>/members`: the bond's member aliases in
 /// configured order, GLOBAL-gated; a non-bond alias fails closed inside
 /// [`net_bond_members_for`].
-#[allow(clippy::type_complexity)]
-fn bond_members_info(
-    transport: &dyn Transport,
-    bond: &str,
-) -> Result<(Result<InfoValue, Errno>, Authorization), ResolveInfoError> {
+fn bond_members_info(transport: &dyn Transport, bond: &str) -> Result<Reading, ResolveInfoError> {
     let members = net_bond_members_for(transport, bond)?;
     let mut rendered = String::new();
     for member in &members {
@@ -1722,19 +1787,6 @@ fn walk_resolved<R, const N: usize>(
     })
 }
 
-/// Render a MAC address as colon-separated lowercase hex octets.
-fn mac_string(mac: [u8; 6]) -> String {
-    let mut out = String::new();
-    for (index, byte) in mac.iter().enumerate() {
-        if index > 0 {
-            out.push(':');
-        }
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
-        out.push(char::from_digit(u32::from(byte & 0xF), 16).unwrap_or('0'));
-    }
-    out
-}
-
 /// Issue [`SysinfoQueryId::SYSTEM_IDENTITY`] and decode the reply.
 fn query_identity(transport: &dyn Transport) -> Result<SystemIdentity, ResolveInfoError> {
     let reply = call(transport, SysinfoQueryId::SYSTEM_IDENTITY, &[])
@@ -1814,18 +1866,12 @@ fn usage_for(kind: LimitKind, transport: &dyn Transport) -> Result<u64, ResolveI
     Ok(records[kind.as_u32() as usize].usage)
 }
 
-/// The unit a resource's live usage is measured in: bytes for the
-/// byte-denominated resources, a dimensionless count for the rest.
+/// The unit a resource's live usage is measured in.
 fn unit_for_limit(kind: LimitKind) -> Unit {
-    match kind {
-        LimitKind::AddressSpaceBytes | LimitKind::StackBytes | LimitKind::PinnedMemoryBytes => {
-            Unit::Bytes
-        }
-        LimitKind::OpenStreams
-        | LimitKind::Processes
-        | LimitKind::Threads
-        | LimitKind::FileLocks
-        | LimitKind::DirWatches => Unit::Count,
+    if kind.counts_bytes() {
+        Unit::Bytes
+    } else {
+        Unit::Count
     }
 }
 
@@ -1881,10 +1927,12 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve, ResolveInfoError};
+    use super::{joined_or_none, resolve, ResolveInfoError};
     use crate::resinfo::{
-        Authorization, MetricKind, Producer, ResetBehavior, ResponsePayload, Sensitivity, Unit,
+        Authorization, InfoValue, MetricKind, Producer, ResetBehavior, ResponsePayload,
+        Sensitivity, Unit, MAX_INFO_VALUE_LEN,
     };
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
@@ -2152,6 +2200,21 @@ mod tests {
                         ResourceLimit::new(16, 32).expect("well-formed"),
                         2,
                     ),
+                    ResourceLimitRecord::new(
+                        LimitKind::IpcQueueBytes,
+                        ResourceLimit::new(1 << 24, 1 << 24).expect("well-formed"),
+                        65_536,
+                    ),
+                    ResourceLimitRecord::new(
+                        LimitKind::WaitSets,
+                        ResourceLimit::new(256, 256).expect("well-formed"),
+                        6,
+                    ),
+                    ResourceLimitRecord::new(
+                        LimitKind::WaitSetMembers,
+                        ResourceLimit::new(1024, 1024).expect("well-formed"),
+                        9,
+                    ),
                 ],
                 pressure: fixture_pressure(),
                 reclaim: fixture_reclaim(),
@@ -2303,6 +2366,24 @@ mod tests {
                 SysinfoQueryId::NET_BOND_MEMBERS => {
                     let req = PageRequest::from_bytes(payload)?;
                     let records = fixture_bond_members();
+                    let encoders: Vec<_> = records
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::NET_ROUTES => {
+                    let req = PageRequest::from_bytes(payload)?;
+                    let records = fixture_net_routes();
+                    let encoders: Vec<_> = records
+                        .iter()
+                        .map(|record| move || record.to_le_bytes())
+                        .collect();
+                    Ok(Self::page_reply(&encoders, req.offset, req.limit))
+                }
+                SysinfoQueryId::NET_NEIGHBORS => {
+                    let req = PageRequest::from_bytes(payload)?;
+                    let records = fixture_net_neighbors();
                     let encoders: Vec<_> = records
                         .iter()
                         .map(|record| move || record.to_le_bytes())
@@ -3385,6 +3466,81 @@ mod tests {
         ]
     }
 
+    fn alias(text: &[u8]) -> [u8; IF_NAME_LEN] {
+        let mut name = [0u8; IF_NAME_LEN];
+        name[..text.len()].copy_from_slice(text);
+        name
+    }
+
+    /// The routes the fixture serves: `wan`'s connected subnet and default
+    /// route, and one route on another interface the reading must not show.
+    fn fixture_net_routes() -> Vec<tairix_abi::net_ipc::NetRouteRecord> {
+        use tairix_abi::net_ipc::{NetRouteOrigin, NetRouteRecord};
+        let mut subnet = [0u8; 16];
+        subnet[..3].copy_from_slice(&[10, 0, 2]);
+        let mut gateway = [0u8; 16];
+        gateway[..4].copy_from_slice(&[10, 0, 2, 2]);
+        alloc::vec![
+            NetRouteRecord {
+                interface: alias(b"wan"),
+                family: NetAddrFamily::V4,
+                prefix: 24,
+                origin: NetRouteOrigin::Connected,
+                dest: subnet,
+                next_hop: None,
+            },
+            NetRouteRecord {
+                interface: alias(b"wan"),
+                family: NetAddrFamily::V4,
+                prefix: 0,
+                origin: NetRouteOrigin::Static,
+                dest: [0u8; 16],
+                next_hop: Some(gateway),
+            },
+            NetRouteRecord {
+                interface: alias(b"lan"),
+                family: NetAddrFamily::V4,
+                prefix: 16,
+                origin: NetRouteOrigin::Connected,
+                dest: [192, 168, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                next_hop: None,
+            },
+        ]
+    }
+
+    /// The neighbours the fixture serves: one resolved and one still
+    /// resolving on `wan`, and one on another interface.
+    fn fixture_net_neighbors() -> Vec<tairix_abi::net_ipc::NetNeighborRecord> {
+        use tairix_abi::net_ipc::{NetNeighborRecord, NetNeighborState};
+        let mut gateway = [0u8; 16];
+        gateway[..4].copy_from_slice(&[10, 0, 2, 2]);
+        let mut pending = [0u8; 16];
+        pending[..4].copy_from_slice(&[10, 0, 2, 9]);
+        alloc::vec![
+            NetNeighborRecord {
+                interface: alias(b"wan"),
+                family: NetAddrFamily::V4,
+                state: NetNeighborState::Reachable,
+                addr: gateway,
+                mac: Some([0x52, 0x55, 0x0a, 0x00, 0x02, 0x02]),
+            },
+            NetNeighborRecord {
+                interface: alias(b"wan"),
+                family: NetAddrFamily::V4,
+                state: NetNeighborState::Incomplete,
+                addr: pending,
+                mac: None,
+            },
+            NetNeighborRecord {
+                interface: alias(b"lan"),
+                family: NetAddrFamily::V4,
+                state: NetNeighborState::Stale,
+                addr: [192, 168, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                mac: Some([2, 0, 0, 0, 0, 5]),
+            },
+        ]
+    }
+
     /// A stand-in serving a table larger than one page: `count` interface
     /// records named `if0`, `if1`, … and `count` bond members of `bond0`,
     /// paged exactly as the real service pages, counting the pages asked
@@ -3879,6 +4035,69 @@ mod tests {
     }
 
     #[test]
+    fn a_joined_reading_too_long_for_its_bound_keeps_whole_items_and_counts_the_rest() {
+        let items: Vec<String> = (0..64)
+            .map(|i| format!("10.0.0.{i} at 02:00:00:00:00:{i:02x}"))
+            .collect();
+        let rendered = joined_or_none(&items);
+        assert!(rendered.len() <= MAX_INFO_VALUE_LEN);
+        let (shown, tail) = rendered.rsplit_once(", and ").expect("an elision note");
+        let kept: Vec<&str> = shown.split(", ").collect();
+        assert_eq!(
+            kept,
+            items[..kept.len()]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(tail, format!("{} more", items.len() - kept.len()));
+        assert!(InfoValue::new_str(Sensitivity::Sensitive, &rendered).is_ok());
+
+        assert_eq!(joined_or_none(Vec::<String>::new()), "none");
+        assert_eq!(joined_or_none(["a", "b"]), "a, b");
+    }
+
+    #[test]
+    fn state_net_routes_lists_only_that_interfaces_routes_under_the_global_gate() {
+        let fixture = Fixture::new();
+        let routes = resolve_str("state:net/wan/routes", &fixture).expect("ok");
+        assert_eq!(
+            routes.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_GLOBAL)
+        );
+        match routes.payload {
+            ResponsePayload::State(v) => {
+                assert_eq!(
+                    v.value(),
+                    "10.0.2.0/24 (connected), 0.0.0.0/0 via 10.0.2.2 (static)"
+                );
+                assert_eq!(v.sensitivity, Sensitivity::Public);
+            }
+            _ => panic!("expected state value"),
+        }
+    }
+
+    #[test]
+    fn state_net_neighbors_is_sensitive_and_under_the_hardware_gate() {
+        let fixture = Fixture::new();
+        let neighbors = resolve_str("state:net/wan/neighbors", &fixture).expect("ok");
+        assert_eq!(
+            neighbors.authorization,
+            Authorization::Capability(CapabilityId::SYSINFO_HW)
+        );
+        match neighbors.payload {
+            ResponsePayload::State(v) => {
+                assert_eq!(
+                    v.value(),
+                    "10.0.2.2 at 52:55:0a:00:02:02 (reachable), 10.0.2.9 (incomplete)"
+                );
+                assert_eq!(v.sensitivity, Sensitivity::Sensitive);
+            }
+            _ => panic!("expected state value"),
+        }
+    }
+
+    #[test]
     fn state_net_resolver_servers_render_ungated() {
         let fixture = Fixture::new();
         let servers = resolve_str("state:net/resolver/servers", &fixture).expect("ok");
@@ -3947,7 +4166,15 @@ mod tests {
             Err(ResolveInfoError::UnknownSelector)
         );
         assert_eq!(
-            resolve_str("state:net/wan/routes", &fixture),
+            resolve_str("state:net/wan/speed", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("state:net/lan9/routes", &fixture),
+            Err(ResolveInfoError::UnknownSelector)
+        );
+        assert_eq!(
+            resolve_str("state:net/lan9/neighbors", &fixture),
             Err(ResolveInfoError::UnknownSelector)
         );
         assert_eq!(

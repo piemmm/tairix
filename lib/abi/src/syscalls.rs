@@ -3463,6 +3463,42 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::MEM_DMA),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::WAITSET_CLOSE,
+        name: "waitset_close",
+        arg_count: 1,
+        args: [
+            AbiType::Handle,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The handler closes only a set of the caller's own; unaudited like
+        // the create it undoes.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::PORT_UNBIND,
+        name: "port_unbind",
+        arg_count: 1,
+        args: [
+            AbiType::IpcEndpoint,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The handler unbinds only a port of the caller's own, and audits
+        // it like the bind it undoes, so the trail carries both edges.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

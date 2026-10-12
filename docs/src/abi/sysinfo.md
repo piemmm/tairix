@@ -79,6 +79,8 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `AUDIO_DEVICES`         | none                   | no      |
 | `SELF_AUDIO_STREAMS`    | none (self-scoped)     | no      |
 | `GLOBAL_AUDIO_STREAMS`  | `CAP_SYSINFO_GLOBAL`   | yes     |
+| `NET_NEIGHBORS`         | `CAP_SYSINFO_HW`       | yes     |
+| `NET_ROUTES`            | `CAP_SYSINFO_GLOBAL`   | yes     |
 
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my

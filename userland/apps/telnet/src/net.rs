@@ -122,3 +122,134 @@ pub trait TelnetIo {
     /// Any [`Errno`] the close raised.
     fn close(&mut self) -> Result<(), Errno>;
 }
+
+/// What one stream event tells a connect awaiting its handshake.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Handshake {
+    /// The handshake completed.
+    Connected,
+    /// The connection closed before it completed.
+    Refused,
+    /// The event concerns something else.
+    Unrelated,
+}
+
+/// Await a handshake: take events with `next` until one settles it, parking
+/// with `park` whenever none is waiting. `park` answers whether anything
+/// arrived before its deadline, so only the deadline ends the wait, however
+/// often it wakes.
+///
+/// # Errors
+///
+/// [`Errno::NotConnected`] once the connection is refused,
+/// [`Errno::TimedOut`] once `park` reports its deadline passed, or the park's
+/// own failure.
+pub fn await_handshake(
+    mut next: impl FnMut() -> Option<Handshake>,
+    mut park: impl FnMut() -> Result<bool, Errno>,
+) -> Result<(), Errno> {
+    loop {
+        match next() {
+            Some(Handshake::Connected) => return Ok(()),
+            Some(Handshake::Refused) => return Err(Errno::NotConnected),
+            Some(Handshake::Unrelated) => {}
+            None => {
+                if !park()? {
+                    return Err(Errno::TimedOut);
+                }
+            }
+        }
+    }
+}
+
+/// Connect with `connect`, trying again each time `network_changed` reports
+/// the machine's interfaces changed while the network is unreachable; it
+/// answers `false` once its patience runs out.
+///
+/// # Errors
+///
+/// The connect's refusal — [`Errno::NetworkUnreachable`] once no change came
+/// in time.
+pub fn connect_when_reachable(
+    mut connect: impl FnMut() -> Result<(), Errno>,
+    mut network_changed: impl FnMut() -> bool,
+) -> Result<(), Errno> {
+    loop {
+        match connect() {
+            Err(Errno::NetworkUnreachable) if network_changed() => {}
+            done => return done,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_deadline_ends_a_handshake_wait_however_often_it_wakes() {
+        let wakes = core::cell::Cell::new(0u32);
+        let settled = await_handshake(
+            || (wakes.get() == 10_000).then_some(Handshake::Connected),
+            || {
+                wakes.set(wakes.get() + 1);
+                Ok(true)
+            },
+        );
+        assert_eq!(settled, Ok(()));
+        assert_eq!(await_handshake(|| None, || Ok(false)), Err(Errno::TimedOut));
+    }
+
+    #[test]
+    fn a_handshake_is_settled_by_its_own_events_only() {
+        let mut events = [Handshake::Unrelated, Handshake::Refused].into_iter();
+        assert_eq!(
+            await_handshake(|| events.next(), || Ok(true)),
+            Err(Errno::NotConnected)
+        );
+        assert_eq!(
+            await_handshake(|| None, || Err(Errno::NotFound)),
+            Err(Errno::NotFound),
+            "a failed park ends the wait"
+        );
+    }
+
+    #[test]
+    fn a_connect_is_tried_again_only_when_the_network_changes() {
+        let mut attempts = 0u32;
+        let mut changes = 0u32;
+        let connected = connect_when_reachable(
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(Errno::NetworkUnreachable)
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                changes += 1;
+                true
+            },
+        );
+        assert_eq!(connected, Ok(()));
+        assert_eq!((attempts, changes), (3, 2));
+        assert_eq!(
+            connect_when_reachable(|| Err(Errno::NetworkUnreachable), || false),
+            Err(Errno::NetworkUnreachable),
+            "no change in time ends it"
+        );
+        let mut waited = false;
+        assert_eq!(
+            connect_when_reachable(
+                || Err(Errno::AddressUnavailable),
+                || {
+                    waited = true;
+                    true
+                }
+            ),
+            Err(Errno::AddressUnavailable)
+        );
+        assert!(!waited, "any other refusal is the answer at once");
+    }
+}

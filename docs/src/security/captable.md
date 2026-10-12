@@ -178,6 +178,14 @@ scheduler instance (see
 Invariants), so a non-`None` return is an anomaly the caller is
 expected to audit / refuse.
 
+A record carries the process's live accounting as shared cells: its file
+I/O totals and its `ResourceCharges`, what it holds against the limits on
+the kernel objects it creates (`kernel/sec::charge`, see
+[resource limits](../architecture/resource-limits.md)). Every copy of the
+record shares them, and a replacement under the same id adopts them, so a
+record swapped in mid-life can neither restart a total nor hand the process
+its whole budget again while its objects still hold the old one.
+
 `CapTable::remove` returns the evicted record so the caller can zero
 out any sensitive capability material in line with the kernel
 allocator's "zero-on-free for credential-holding memory" requirement

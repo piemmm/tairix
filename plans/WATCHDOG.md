@@ -409,8 +409,8 @@ return-to-user point. The dispatch loop then runs one iteration — re-stamping
 progress, draining the deferred wakes and the console transmit — before
 re-dispatching the task. Crucially this arms **no new timer**: it rides an
 interrupt already firing on the CPU, so the tickless invariant is preserved.
-Latch: `CpuState::force_yield`, cleared by the dispatcher's
-`clear_preempt_pending` so the incoming task earns a fresh guard window. The
+Latch: `CpuState::force_yield`, retired by `dispatcher_step` before every
+dispatch decision so the incoming task earns a fresh guard window. The
 watchdog is not its only issuer: a delivered reschedule IPI takes the same
 latch, because its sender has already decided the target must re-enter its
 dispatcher (work placed on its queue, or the task running there told to die

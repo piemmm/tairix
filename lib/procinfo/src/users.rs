@@ -211,55 +211,18 @@ mod tests {
     };
     use crate::list::ListError;
     use crate::request::CallError;
+    use crate::testing::PagedFixture;
     use crate::transport::Transport;
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
-        GroupDirectoryRecord, PageRequest, SelfAccountRecord, SysinfoQueryId, SysinfoRequestHeader,
+        GroupDirectoryRecord, SelfAccountRecord, SysinfoQueryId, SysinfoRequestHeader,
         UserDirectoryRecord,
     };
     use tairix_abi::Errno;
 
-    /// An in-memory `sysinfod` stand-in answering directory queries from a
-    /// fixed record set, decoding the request exactly as the real service.
-    struct Fixture {
-        records: Vec<UserDirectoryRecord>,
-        malformed: bool,
-        seen: RefCell<usize>,
-    }
-
-    impl Fixture {
-        fn new(records: Vec<UserDirectoryRecord>) -> Self {
-            Self {
-                records,
-                malformed: false,
-                seen: RefCell::new(0),
-            }
-        }
-    }
-
-    impl Transport for Fixture {
-        fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
-            let header = SysinfoRequestHeader::from_bytes(request)?;
-            assert_eq!(header.query, SysinfoQueryId::USER_DIRECTORY);
-            *self.seen.borrow_mut() += 1;
-            if self.malformed {
-                return Ok(alloc::vec![0u8; UserDirectoryRecord::WIRE_LEN + 1]);
-            }
-            let payload = &request[SysinfoRequestHeader::WIRE_LEN
-                ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = PageRequest::from_bytes(payload)?;
-            let offset = req.offset as usize;
-            if offset >= self.records.len() {
-                return Ok(Vec::new());
-            }
-            let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
-            let mut out = Vec::with_capacity(take * UserDirectoryRecord::WIRE_LEN);
-            for record in &self.records[offset..offset + take] {
-                out.extend_from_slice(&record.to_le_bytes());
-            }
-            Ok(out)
-        }
+    fn users(records: &[UserDirectoryRecord]) -> PagedFixture {
+        PagedFixture::new(records.iter().map(|r| r.to_le_bytes().to_vec()))
     }
 
     fn record(uid: u32, name: &[u8]) -> UserDirectoryRecord {
@@ -272,7 +235,7 @@ mod tests {
         for uid in 0..=u32::from(USER_DIRECTORY_PAGE) {
             records.push(record(uid, b"u"));
         }
-        let fixture = Fixture::new(records);
+        let fixture = users(&records);
         let seen = RefCell::new(0usize);
         for_each_user(&fixture, |_| {
             *seen.borrow_mut() += 1;
@@ -281,13 +244,16 @@ mod tests {
         .expect("ok");
         assert_eq!(*seen.borrow(), usize::from(USER_DIRECTORY_PAGE) + 1);
         // A full page plus a short page: two requests.
-        assert_eq!(*fixture.seen.borrow(), 2);
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::USER_DIRECTORY; 2]
+        );
     }
 
     #[test]
     fn malformed_reply_fails_closed() {
-        let mut fixture = Fixture::new(alloc::vec![record(0, b"root")]);
-        fixture.malformed = true;
+        let mut fixture = users(&[record(0, b"root")]);
+        fixture.reply = Some(alloc::vec![0u8; UserDirectoryRecord::WIRE_LEN + 1]);
         let outcome = for_each_user(&fixture, |_| Ok(WalkStep::Continue));
         assert_eq!(
             outcome,
@@ -306,7 +272,7 @@ mod tests {
 
     #[test]
     fn user_names_collects_pairs_and_degrades_to_empty_on_failure() {
-        let fixture = Fixture::new(alloc::vec![record(0, b"root"), record(1000, b"alice")]);
+        let fixture = users(&[record(0, b"root"), record(1000, b"alice")]);
         let names = user_names(&fixture);
         assert_eq!(names.len(), 2);
         assert_eq!(names[0].0, 0);
@@ -318,7 +284,7 @@ mod tests {
 
     #[test]
     fn user_name_resolves_listed_uid_and_reports_absent_and_failure() {
-        let fixture = Fixture::new(alloc::vec![record(0, b"root"), record(1000, b"alice")]);
+        let fixture = users(&[record(0, b"root"), record(1000, b"alice")]);
         assert_eq!(
             user_name(&fixture, 1000).expect("ok").as_deref(),
             Some("alice")
@@ -331,36 +297,22 @@ mod tests {
         );
     }
 
-    /// An in-memory `sysinfod` stand-in answering the group directory and
-    /// the self-account read from fixed state.
-    struct GroupFixture {
-        groups: Vec<GroupDirectoryRecord>,
-        account: Option<SelfAccountRecord>,
+    fn groups(records: &[GroupDirectoryRecord]) -> PagedFixture {
+        PagedFixture::new(records.iter().map(|r| r.to_le_bytes().to_vec()))
     }
 
-    impl Transport for GroupFixture {
+    /// A `sysinfod` stand-in answering the self-account read, with a record
+    /// or with none.
+    struct AccountFixture(Option<SelfAccountRecord>);
+
+    impl Transport for AccountFixture {
         fn query(&self, request: &[u8]) -> Result<Vec<u8>, Errno> {
             let header = SysinfoRequestHeader::from_bytes(request)?;
-            let payload = &request[SysinfoRequestHeader::WIRE_LEN
-                ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            if header.query == SysinfoQueryId::SELF_ACCOUNT {
-                return Ok(self
-                    .account
-                    .map(|record| record.to_le_bytes().to_vec())
-                    .unwrap_or_default());
-            }
-            assert_eq!(header.query, SysinfoQueryId::GROUP_DIRECTORY);
-            let req = PageRequest::from_bytes(payload)?;
-            let offset = req.offset as usize;
-            if offset >= self.groups.len() {
-                return Ok(Vec::new());
-            }
-            let take = core::cmp::min(self.groups.len() - offset, req.limit as usize);
-            let mut out = Vec::with_capacity(take * GroupDirectoryRecord::WIRE_LEN);
-            for record in &self.groups[offset..offset + take] {
-                out.extend_from_slice(&record.to_le_bytes());
-            }
-            Ok(out)
+            assert_eq!(header.query, SysinfoQueryId::SELF_ACCOUNT);
+            Ok(self
+                .0
+                .map(|record| record.to_le_bytes().to_vec())
+                .unwrap_or_default())
         }
     }
 
@@ -385,14 +337,11 @@ mod tests {
 
     #[test]
     fn group_walk_pages_until_short_and_collects_pairs() {
-        let mut groups = Vec::new();
+        let mut records = Vec::new();
         for gid in 0..=u32::from(GROUP_DIRECTORY_PAGE) {
-            groups.push(group(gid, b"g"));
+            records.push(group(gid, b"g"));
         }
-        let fixture = GroupFixture {
-            groups,
-            account: None,
-        };
+        let fixture = groups(&records);
         let seen = RefCell::new(0usize);
         for_each_group(&fixture, |_| {
             *seen.borrow_mut() += 1;
@@ -401,10 +350,7 @@ mod tests {
         .expect("ok");
         assert_eq!(*seen.borrow(), usize::from(GROUP_DIRECTORY_PAGE) + 1);
 
-        let fixture = GroupFixture {
-            groups: alloc::vec![group(0, b"system"), group(100, b"storage")],
-            account: None,
-        };
+        let fixture = groups(&[group(0, b"system"), group(100, b"storage")]);
         let names = group_names(&fixture);
         assert_eq!(names.len(), 2);
         assert_eq!(names[1], (100, alloc::string::String::from("storage")));
@@ -415,19 +361,13 @@ mod tests {
 
     #[test]
     fn the_self_account_read_answers_a_record_an_absence_and_a_failure_apart() {
-        let fixture = GroupFixture {
-            groups: Vec::new(),
-            account: Some(fixture_account()),
-        };
+        let fixture = AccountFixture(Some(fixture_account()));
         let record = self_account(&fixture).expect("ok").expect("a record");
         assert_eq!(record.name_bytes(), b"alice");
         assert_eq!(record.supplementary_gids(), &[100]);
 
         // No record is `None`, distinguishable from a failure.
-        let empty = GroupFixture {
-            groups: Vec::new(),
-            account: None,
-        };
+        let empty = AccountFixture(None);
         assert_eq!(self_account(&empty).expect("ok"), None);
         assert_eq!(
             self_account(&Failing),
@@ -452,7 +392,7 @@ mod tests {
 
     #[test]
     fn user_name_keeps_the_first_of_a_duplicated_uid() {
-        let fixture = Fixture::new(alloc::vec![record(7, b"first"), record(7, b"second")]);
+        let fixture = users(&[record(7, b"first"), record(7, b"second")]);
         assert_eq!(
             user_name(&fixture, 7).expect("ok").as_deref(),
             Some("first")

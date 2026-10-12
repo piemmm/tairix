@@ -1468,20 +1468,21 @@ the whole is too large for one change and each leaves the tree working.
   netstack open-gate/send/deliver, engine loss/quiet/verify).
 
 ##### N8b-2b-β — the live two-process QEMU vertical `[x]`
-- `tairix-test-netstack-ping-qemu-aarch64` boots the production aarch64
-  pipeline over the net-only-driver encrypted-root disk carrying the
-  **system command store** (so the real `ping` bundle is present — no test
-  fixture) plus the signed virtio-net driver (`FsDisk::PingRootDisk`), with a
-  virtio-net device and the harness-side **passive ICMP echo responder**
-  (`NetPeerMode::V6PingResponder` → `netpeer::run_ping_responder`: no
-  campaign; `Stack::on_frame` answers ND + echo requests; verdict = ≥1
-  `EchoRequestServed`). The serial script unlocks, logs in `root`/`root`, and
-  runs `ping -c 3 fe80::2` (the peer's `link_local(PEER_IID)`, pinned by a
-  host test). The guest bin arms on the tool's audited `exit` (`comm=ping`)
-  and PASSes on the shell's next `exit`, typed only after an `icmp_seq=` reply
-  line — a token `ping` prints only on a genuinely received reply — so an
-  unanswered run times out fail-loud; the responder must also report a served
-  request, so neither side passes alone.
+- `tairix-test-netstack-icmp-qemu-aarch64` boots the production aarch64
+  pipeline over the net-tool encrypted-root disk carrying the system command
+  store (so the real `ping` and `traceroute` bundles are present — no test
+  fixture) plus the signed virtio-net driver, with a virtio-net device and the
+  harness-side echo peer (`NetPeerMode::V6EchoPeer` →
+  `netpeer::run_echo_peer`: no campaign; `Stack::on_frame` answers ND and
+  echo requests, and a probe whose hop limit runs out short of the peer is
+  answered as the router of `TRACE_ROUTER_IIDS` it reached; verdict = ≥1
+  `EchoRequestServed` and an answer as each router). The serial script
+  unlocks, logs in `root`/`root`, runs `ping -c 3 fe80::2`, waits for an
+  `icmp_seq=` reply line, then runs `traceroute -n fe80::2` and waits for each
+  hop line in turn (both pinned to the wire identifiers by host tests). The
+  guest bin arms on both tools' audited exits and PASSes on the shell's next
+  `exit`, typed only after the peer's own hop printed, so an unanswered run
+  times out fail-loud, and the peer's verdict means neither side passes alone.
 - **`CAP_NET_RAW` joins the administrator ceiling** (`tairix_users::
   ADMINISTRATIVE_SET`): the `ping` manifest requests it for its ICMP-echo
   socket (netstack gates the open on it), and reaching below the transport
@@ -2603,10 +2604,13 @@ never a `/proc` shape, never text scraping. The selector vocabulary follows
   `CAP_SYSINFO_HW`-class policy review, not open by default.
 - **`state:net/<iface>/…`** — current mutable state: `link` (up/down,
   negotiated speed/duplex), `address` (the bound v4/v6 address set +
-  SLAAC state), `routes`, and for a bond `active-member` and per-member
-  health. `state:` reads are capability-checked; state **changes** go
-  through the typed `CAP_NET_ADMIN` admin IPC only (ALIAS §6.4 — never a
-  writable pseudo-file).
+  SLAAC state), `routes`, `neighbors`, and for a bond `active-member` and
+  per-member health. `state:` reads are capability-checked; state
+  **changes** go through the typed `CAP_NET_ADMIN` admin IPC only (ALIAS
+  §6.4 — never a writable pseudo-file). The `routes` and `neighbors`
+  members (and the traceroute ICMP-error delivery path a mapping tool
+  needs) are delivered by `plans/NETMAP.md` (NM-S1, NM-S2, NM-S3), which
+  owns that stack surface because it is its only consumer today.
 - **`stats:net/<iface>/…`** — live metrics with the ALIAS §6.3 metadata
   (kind/unit/source/time/window/reset_behavior): `rx.bytes`, `rx.packets`,
   `tx.bytes`, `tx.packets`, `rx.errors`, `tx.errors`, `rx.dropped`,

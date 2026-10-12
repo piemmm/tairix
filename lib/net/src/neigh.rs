@@ -159,6 +159,25 @@ struct Entry {
     attempts: u8,
 }
 
+impl Entry {
+    /// The entry as an observer sees it: its RFC 4861 state and its
+    /// link-layer address, which exists exactly when it is resolved.
+    fn observed(&self) -> (NeighborState, Option<MacAddress>) {
+        match self.phase {
+            Phase::Incomplete => (NeighborState::Incomplete, None),
+            Phase::Resolved { mac, reach } => {
+                let state = match reach {
+                    Reach::Reachable => NeighborState::Reachable,
+                    Reach::Stale => NeighborState::Stale,
+                    Reach::Delay => NeighborState::Delay,
+                    Reach::Probe => NeighborState::Probe,
+                };
+                (state, Some(mac))
+            }
+        }
+    }
+}
+
 /// The bounded, provider-agnostic neighbour cache.
 ///
 /// See the [module docs](self) for the driving contract. The intended
@@ -216,17 +235,18 @@ impl NeighborTable {
     /// diagnostic read never changes which entry eviction takes.
     #[must_use]
     pub fn entry(&self, ip: IpAddr) -> Option<(NeighborState, Option<MacAddress>)> {
-        self.entries.peek(&ip).map(|entry| match entry.phase {
-            Phase::Incomplete => (NeighborState::Incomplete, None),
-            Phase::Resolved { mac, reach } => {
-                let state = match reach {
-                    Reach::Reachable => NeighborState::Reachable,
-                    Reach::Stale => NeighborState::Stale,
-                    Reach::Delay => NeighborState::Delay,
-                    Reach::Probe => NeighborState::Probe,
-                };
-                (state, Some(mac))
-            }
+        self.entries.peek(&ip).map(Entry::observed)
+    }
+
+    /// Every entry's address, state, and cached link-layer address, from least
+    /// to most recently used.
+    ///
+    /// Like [`entry`](Self::entry) an observation: it refreshes nothing, so a
+    /// diagnostic walk never changes which entry eviction takes.
+    pub fn iter(&self) -> impl Iterator<Item = (IpAddr, NeighborState, Option<MacAddress>)> + '_ {
+        self.entries.iter_lru().map(|(ip, entry)| {
+            let (state, mac) = entry.observed();
+            (*ip, state, mac)
         })
     }
 

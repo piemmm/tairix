@@ -276,7 +276,8 @@ const TOKEN: u64 = NANOS_PER_SEC as u64;
 impl TokenBucket {
     /// A bucket allowing bursts of `burst` events, refilled at
     /// `per_second` events per second. Zero values fail closed: a zero
-    /// burst or rate allows nothing.
+    /// burst allows nothing, and a zero rate allows the first burst and is
+    /// never refilled.
     #[must_use]
     pub fn new(burst: u32, per_second: u32) -> Self {
         Self {
@@ -292,7 +293,9 @@ impl TokenBucket {
     pub fn allow(&mut self, now: Duration64) -> bool {
         let now = nanos(now);
         let elapsed = now.saturating_sub(self.last);
-        self.last = now;
+        // A clock read out of order earns nothing: refilling later from the
+        // earlier instant would count the same interval twice.
+        self.last = self.last.max(now);
         let refill = u64::try_from(elapsed)
             .unwrap_or(u64::MAX)
             .saturating_mul(self.per_second);

@@ -31,7 +31,7 @@ use tairix_wintersun_rules::clock::TickRate;
 use crate::budget::FRAME_NS;
 
 /// Nanoseconds in a second.
-const NS_PER_SEC: u64 = 1_000_000_000;
+const NS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// The most elapsed time one advance will replay.
 ///

@@ -49,10 +49,14 @@ frozen from the first release.
   process may hold pinned — exempt from the compressed `ramzip` tier —
   through `mem_pin`, `plans/STRESSTEST.md` ST2), `FileLocks` (the byte-range
   lock records it may hold — see [Advisory file locking](../filesystem/locking.md)),
-  and `DirWatches` (the directory watches it may hold — see
-  [Directory watches](../filesystem/watch.md)). Discriminants never move; a
-  new resource takes the next free discriminant and bumps
-  `LimitKind::COUNT`.
+  `DirWatches` (the directory watches it may hold — see
+  [Directory watches](../filesystem/watch.md)), `IpcQueueBytes` (the kernel
+  memory its message ports and call endpoints may reserve for queued
+  messages), `WaitSets` (the wait-sets it may hold) and `WaitSetMembers` (the
+  members it may register across them). Discriminants never move; a new
+  resource takes the next free discriminant and bumps `LimitKind::COUNT`.
+  `LimitKind::counts_bytes` says which are measured in bytes, so no consumer
+  keeps its own list.
 - **`ResourceLimit { soft, hard }`** is the soft/hard pair, each a `u64`.
   `RLIMIT_INFINITY` (`u64::MAX`) means "no ceiling imposed", leaving the
   resource governed only by the discovered, growable default policy. The
@@ -95,15 +99,31 @@ silently diverge, and by default a stack may grow to the whole span.
 default is the registry-held set the boot path derives from discovered
 hardware and installs once (`AddressSpaceRegistry::set_default_limits`),
 which every fallback, `rlimit_get`, and spawn inheritance then reads — one
-definition, no second code path. Today's one derived bound is the
-pinned-memory budget: `default_pinned_limit_bytes` grants each process one
-eighth of the discovered installed RAM (soft and hard), so a monitor-scale
-process always fits while a single `CAP_MEM_PIN` holder can never exempt
-more than a fraction of the machine from pressure management — the
-capability gates *who* may pin, the derived limit bounds *how much*, and
-raising it past the derived hard bound takes `CAP_RLIMIT_RAISE` like any
-other hard raise. A boot that never learned the installed total keeps the
-compile-time floor rather than fabricating a zero bound.
+definition, no second code path. `LimitSet::derived_from_memory` derives every
+hardware-sized bound from the installed RAM, soft and hard:
+
+| Kind | Default |
+|---|---|
+| `PinnedMemoryBytes` | RAM / 8 |
+| `FileLocks` | one record per 64 KiB, at least 256 |
+| `DirWatches` | one watch per 2 MiB, at least 64 |
+| `IpcQueueBytes` | RAM / 16, at least 16 MiB |
+| `WaitSets` | one set per 256 KiB, at least 256 |
+| `WaitSetMembers` | one member per 32 KiB, at least 1024 |
+
+Each keeps one process to a small fraction of the machine while scaling with
+it, the floors keep the smallest board usable, and raising a bound past its
+derived hard bound takes `CAP_RLIMIT_RAISE` like any other hard raise. A boot
+that never learned the installed total keeps the compile-time floor rather
+than fabricating a zero bound.
+
+The count-and-byte kinds a kernel object is charged to — `DirWatches`,
+`IpcQueueBytes`, `WaitSets`, `WaitSetMembers` — are held in one
+`ResourceCharges` per process (`kernel/sec`), atomics on the capability
+record every syscall already holds, which every copy of the record shares and
+a record replacement carries over. A charge is taken when its object is made
+and travels with it, so dropping the object returns it: no teardown path can
+forget to, and a check-and-charge takes no lock.
 
 - **`rlimit_get`** validates `kind` against the closed `LimitKind` set, reads
   the caller's *own* effective limit, and copies it out through the validated
@@ -165,10 +185,25 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   by a live pin.
 - **`DirWatches` on `fs_watch`.** Each armed watch is charged to the arming
   process and released when its open file description closes; a watch past
-  the soft bound is refused with `LimitExceeded` and arms nothing. The default is
-  `max(64, RAM / 2 MiB)` — a watch's kernel cost is a journal bounded at
-  32 KiB, so the figure scales the reach of a process with the machine — and
-  the live usage `sysinfo limits` reports for `dir-watches` is the count held.
+  the soft bound is refused with `LimitExceeded` and arms nothing. A watch's
+  kernel cost is a journal bounded at 32 KiB, so the default scales the reach
+  of a process with the machine.
+- **`IpcQueueBytes` on `port_bind` and `call_create`.** An endpoint is charged
+  its worst case when it is bound — its capacity times its largest message
+  (for a call endpoint the larger of request and reply, since a call holds one
+  at a time), plus its bookkeeping — because any sender may fill it, and the
+  bytes then sit in the kernel heap until the owner drains them. The check
+  runs after the bounds are validated and the bind is authorised, so a
+  malformed request is still `LengthOutOfRange`; a bind past the soft bound is
+  refused with `LimitExceeded` and binds nothing. The charge also bounds how
+  many endpoints a process holds. `port_unbind` and the owner's exit return it.
+- **`WaitSets` and `WaitSetMembers` on `waitset_create` and `waitset_ctl`.**
+  Each set and each member is one unit; a set or a member past its soft bound
+  is refused with `LimitExceeded`. `waitset_close` and the owner's exit return
+  both, and removing a member returns its unit.
+
+The live usage `sysinfo limits` reports for each charged kind is what the
+process holds now.
 
 The remaining `LimitKind`s (`OpenStreams`, `Processes`) carry their
 soft/hard bounds and inherit correctly, but their *consuming-path*
@@ -216,7 +251,8 @@ ulimit [-a] [-H | -S] [<resource> [<value>]]
 `<resource>` is one of the canonical `LimitKind` names
 (`LimitKind::name`): `address-space-bytes`, `open-streams`, `processes`,
 `stack-bytes`, `pinned-memory-bytes`, `threads`, `file-locks`,
-`dir-watches`. An unknown resource, an unknown flag, a malformed value, or a
+`dir-watches`, `ipc-queue-bytes`, `wait-sets`, `wait-set-members`. An unknown
+resource, an unknown flag, a malformed value, or a
 soft bound set above its hard ceiling is rejected without touching the
 kernel (fail closed, `AGENTS.md` §2.1/§2.9); the store is never written on a
 rejected request.

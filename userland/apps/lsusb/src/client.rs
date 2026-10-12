@@ -124,7 +124,7 @@ pub fn run(
     command: Command,
     locale: Option<&str>,
     transport: &dyn Transport,
-    database: Option<&DevIds<'_>>,
+    database: Option<&DevIds<&[u8]>>,
     help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), LsusbError> {
@@ -194,7 +194,7 @@ fn selected(options: &Options, device: &Device) -> bool {
 fn push_identity(
     line: &mut String,
     device: &Device,
-    database: Option<&DevIds<'_>>,
+    database: Option<&DevIds<&[u8]>>,
     unnamed: &mut u64,
 ) {
     // `write!` to a `String` cannot fail; the results are discarded on
@@ -221,7 +221,7 @@ fn push_identity(
 /// interface, in bus order.
 fn render_class(
     class24: u32,
-    database: Option<&DevIds<'_>>,
+    database: Option<&DevIds<&[u8]>>,
     depth: usize,
     out: &dyn Output,
 ) -> Result<(), LsusbError> {
@@ -275,7 +275,7 @@ fn render_tree(
     options: &Options,
     nodes: &[HwNode],
     devices: &[Device],
-    database: Option<&DevIds<'_>>,
+    database: Option<&DevIds<&[u8]>>,
     out: &dyn Output,
     unnamed: &mut u64,
 ) -> Result<(), LsusbError> {
@@ -509,7 +509,7 @@ C 03  Human Interface Device
         let transport = Fixture { reply };
         let table = fixture_table();
         let database = if with_db {
-            Some(DevIds::parse(DbKind::Usb, &table).expect("fixture table decodes"))
+            Some(DevIds::parse(DbKind::Usb, table.as_slice()).expect("fixture table decodes"))
         } else {
             None
         };

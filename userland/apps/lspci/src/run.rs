@@ -36,43 +36,16 @@ mod program {
     extern crate alloc;
 
     use alloc::format;
-    use alloc::vec::Vec;
 
-    use tairix_abi::fs::OpenFlags;
-    use tairix_abi::{Errno, BUNDLE_SUFFIX, SYSTEM_COMMAND_STORE};
-    use tairix_devids::{DbKind, DevIds, MAX_SOURCE_BYTES};
+    use tairix_abi::Errno;
+    use tairix_devids::{DbKind, DevIds};
     use tairix_help::BundleHelp;
     use tairix_lspci::{parse, run, Output, USAGE};
     use tairix_procinfo::IpcTransport;
     use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
-    use tairix_rt::File;
 
     /// The command word this bundle is named by.
     const OWN_WORD: &str = "lspci";
-
-    /// Load the bundle's own compiled `pci.ids` table,
-    /// `/System/Commands/lspci.app/Resources/pci.ids.bin`, through the
-    /// kernel-authorised `fs_*` syscalls. The path is spelled from the one
-    /// shared `lib/abi` store definition, so it cannot drift from where the
-    /// image builder plants the resource. The read is bounded: a "table"
-    /// larger than the import pipeline could ever emit is refused whole.
-    ///
-    /// # Errors
-    ///
-    /// A short, human-readable reason (open failure, read failure, or an
-    /// over-long file); the caller reports it and degrades to numeric ids.
-    fn load_table() -> Result<Vec<u8>, alloc::string::String> {
-        let path =
-            format!("{SYSTEM_COMMAND_STORE}/{OWN_WORD}{BUNDLE_SUFFIX}/Resources/pci.ids.bin");
-        let file = File::open(path.as_bytes(), OpenFlags::READ)
-            .map_err(|ret| format!("cannot open {path}: {}", Errno::from_syscall(ret)))?;
-        let bytes = tairix_rt::read_fd_to_end(file.fd(), MAX_SOURCE_BYTES)
-            .map_err(|ret| format!("cannot read {path}: {}", Errno::from_syscall(ret)))?;
-        if bytes.len() > MAX_SOURCE_BYTES {
-            return Err(format!("{path} exceeds the table size bound"));
-        }
-        Ok(bytes)
-    }
 
     /// The production standard-output stream: the listing goes to fd 1 and
     /// the naming advisory to fd 3 (best-effort). The tool names only
@@ -121,7 +94,7 @@ mod program {
         // The bundle's own lookup table. A load or validation failure is a
         // lost naming aid, not a lost inventory: the reason goes to standard
         // error and the listing renders numeric ids.
-        let table_bytes = match load_table() {
+        let table_bytes = match tairix_devids::bundled::load(DbKind::Pci, OWN_WORD) {
             Ok(bytes) => Some(bytes),
             Err(why) => {
                 write_stderr_line(&format!(
@@ -135,7 +108,7 @@ mod program {
                 Ok(db) => Some(db),
                 Err(err) => {
                     write_stderr_line(&format!(
-                        "lspci: device names unavailable (invalid table: {err:?}); listing numeric ids"
+                        "lspci: device names unavailable (invalid table: {err}); listing numeric ids"
                     ));
                     None
                 }

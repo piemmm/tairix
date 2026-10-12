@@ -209,6 +209,8 @@ const NUM_PORT_RESOLVE: u64 = SyscallNumber::PORT_RESOLVE.as_u16() as u64;
 const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
 /// `port_admit` syscall number (as above).
 const NUM_PORT_ADMIT: u64 = SyscallNumber::PORT_ADMIT.as_u16() as u64;
+const NUM_PORT_UNBIND: u64 = SyscallNumber::PORT_UNBIND.as_u16() as u64;
+const NUM_WAITSET_CLOSE: u64 = SyscallNumber::WAITSET_CLOSE.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
 const NUM_WALL_TIME_SET: u64 = SyscallNumber::WALL_TIME_SET.as_u16() as u64;
@@ -457,9 +459,10 @@ pub extern "C" fn sys_ipc_recv(
 /// `port_bind`: bind an asynchronous IPC message port owned by the
 /// calling task (`SyscallNumber::PORT_BIND`) — the receive half of
 /// `tairix_sys_ipc_send`/`tairix_sys_ipc_recv`. `max_payload` and `capacity`
-/// are fail-closed bounds the kernel re-checks; a reserved well-known id
-/// requires `TAIRIX_CAP_IPC_BIND_PRIVILEGED`, and an id already bound is
-/// refused. The port is torn down when its owner exits. Returns a
+/// are bounds the kernel re-checks, the port's worst case is charged to the
+/// caller's `ipc-queue-bytes` limit, a reserved well-known id requires
+/// `TAIRIX_CAP_IPC_BIND_PRIVILEGED`, and an id already bound is refused. The
+/// port is torn down by [`sys_port_unbind`] or when its owner exits. Returns a
 /// `TAIRIX_E_*` code.
 #[must_use]
 #[export_name = "tairix_sys_port_bind"]
@@ -485,6 +488,17 @@ pub extern "C" fn sys_port_admit(port: u64, server: u64) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; both
     // arguments are plain scalars the kernel validates.
     unsafe { ret_i32(raw_syscall(NUM_PORT_ADMIT, [port, server, 0, 0, 0, 0])) }
+}
+
+/// `port_unbind`: tear down a port the caller bound
+/// (`SyscallNumber::PORT_UNBIND`), discarding what it still queues. A port
+/// another process owns is refused. Returns a `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_port_unbind"]
+pub extern "C" fn sys_port_unbind(endpoint: u64) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the argument
+    // is a plain scalar the kernel validates.
+    unsafe { ret_i32(raw_syscall(NUM_PORT_UNBIND, [endpoint, 0, 0, 0, 0, 0])) }
 }
 
 /// `cap_query`: report whether the caller holds capability `cap`
@@ -2674,6 +2688,17 @@ pub extern "C" fn sys_waitset_create() -> u64 {
     unsafe { raw_syscall(NUM_WAITSET_CREATE, NO_ARGS) }
 }
 
+/// `waitset_close`: close a wait-set the caller created
+/// (`SyscallNumber::WAITSET_CLOSE`), releasing its members. Returns a
+/// `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_waitset_close"]
+pub extern "C" fn sys_waitset_close(set: u64) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the handle is
+    // re-checked against the caller kernel-side.
+    unsafe { ret_i32(raw_syscall(NUM_WAITSET_CLOSE, [set, 0, 0, 0, 0, 0])) }
+}
+
 /// `waitset_ctl`: add or remove a member of wait-set `set`
 /// (`SyscallNumber::WAITSET_CTL`). Returns a `TAIRIX_E_*` code.
 ///
@@ -3707,6 +3732,8 @@ mod tests {
         (NUM_FS_ATTR_REMOVE, "fs_attr_remove", 4),
         (NUM_PORT_BIND, "port_bind", 3),
         (NUM_PORT_ADMIT, "port_admit", 2),
+        (NUM_PORT_UNBIND, "port_unbind", 1),
+        (NUM_WAITSET_CLOSE, "waitset_close", 1),
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 3),
         (NUM_POINTER_READ, "pointer_read", 3),
@@ -3893,6 +3920,20 @@ mod tests {
         assert_eq!(number, NUM_PORT_ADMIT);
         assert_eq!(&args[..2], &[0x5EAD_0002, 0x5EAD_0003]);
         assert_eq!(&args[2..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn the_release_calls_marshal_the_one_handle_they_release() {
+        let (number, args) = capture(0, || {
+            let _ = sys_port_unbind(0x5EAD_0004);
+        });
+        assert_eq!(number, NUM_PORT_UNBIND);
+        assert_eq!(args, [0x5EAD_0004, 0, 0, 0, 0, 0]);
+        let (number, args) = capture(0, || {
+            let _ = sys_waitset_close(7);
+        });
+        assert_eq!(number, NUM_WAITSET_CLOSE);
+        assert_eq!(args, [7, 0, 0, 0, 0, 0]);
     }
 
     #[test]

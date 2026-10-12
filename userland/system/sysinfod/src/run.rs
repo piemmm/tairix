@@ -55,9 +55,9 @@ mod program {
     use tairix_abi::driver::audio::StreamDirection;
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
-        NetStackDefenceCounters, NetstackRequest, NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX,
-        NETSTACK_MAX_REPLY,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetNeighborRecord, NetRouteRecord,
+        NetServerAddr, NetSocketRecord, NetStackDefenceCounters, NetstackRequest,
+        NETSTACK_ENDPOINT, NETSTACK_LIST_LIMIT_MAX, NETSTACK_MAX_REPLY,
     };
     use tairix_abi::raid_admin::{
         RaidArrayRecord, RaidControlOp, RaidMemberRecord, RAID_CONTROL_ENDPOINT,
@@ -369,6 +369,14 @@ mod program {
             page_netstack(&NetstackBondMembersPage, self.most_bytes)
         }
 
+        fn net_neighbors(&self, _caller: &Caller) -> Result<Vec<NetNeighborRecord>, Errno> {
+            page_netstack(&NetstackNeighborsPage, self.most_bytes)
+        }
+
+        fn net_routes(&self, _caller: &Caller) -> Result<Vec<NetRouteRecord>, Errno> {
+            page_netstack(&NetstackRoutesPage, self.most_bytes)
+        }
+
         fn net_resolver_servers(&self, _caller: &Caller) -> Result<Vec<NetServerAddr>, Errno> {
             page_netstack(&NetstackResolverServersPage, self.most_bytes)
         }
@@ -596,6 +604,32 @@ mod program {
         }
         fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
             NetBondMemberRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The neighbour-cache page.
+    struct NetstackNeighborsPage;
+    impl NetstackPage for NetstackNeighborsPage {
+        type Record = NetNeighborRecord;
+        const RECORD_LEN: usize = NetNeighborRecord::WIRE_LEN;
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest {
+            NetstackRequest::Neighbors { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetNeighborRecord::from_bytes(chunk)
+        }
+    }
+
+    /// The routes page.
+    struct NetstackRoutesPage;
+    impl NetstackPage for NetstackRoutesPage {
+        type Record = NetRouteRecord;
+        const RECORD_LEN: usize = NetRouteRecord::WIRE_LEN;
+        fn request(&self, offset: u32, limit: u16) -> NetstackRequest {
+            NetstackRequest::Routes { offset, limit }
+        }
+        fn decode(chunk: &[u8]) -> Result<Self::Record, Errno> {
+            NetRouteRecord::from_bytes(chunk)
         }
     }
 

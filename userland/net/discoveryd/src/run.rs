@@ -45,7 +45,7 @@ mod program {
     use tairix_log::{Event, EventId, Field, Level};
     use tairix_net::mdns::{GROUP_V4, GROUP_V6, PORT};
     use tairix_net::IpAddr;
-    use tairix_rt::LogSink;
+    use tairix_rt::{LogSink, PrivatePort};
     use tairix_sandbox::rt::{
         serve_session_stdio, session_worker_role, RtSessionLauncher, SessionMembers,
     };
@@ -337,11 +337,10 @@ mod program {
             return 0;
         }
 
-        let Ok(deliver) =
-            tairix_rt::bind_private_port(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY)
-        else {
+        let Ok(port) = PrivatePort::bind(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY) else {
             return unavailable("the delivery port could not be bound");
         };
+        let deliver = port.id();
         let v4 = listen(NetAddrFamily::V4, IpAddr::V4(GROUP_V4), deliver);
         let v6 = listen(NetAddrFamily::V6, IpAddr::V6(GROUP_V6), deliver);
         let (v4_state, v6_state) = (describe(&v4), describe(&v6));

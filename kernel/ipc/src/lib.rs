@@ -66,3 +66,14 @@ pub use notify::{NotificationChannel, NotificationFlags};
 pub use port::{EndpointId, Message, Port};
 pub use registry::PortRegistry;
 pub use shmem::{SharedMemory, ShmemHandle, ShmemId, ShmemMapping};
+
+/// The kernel memory an endpoint may come to hold: its own bookkeeping of
+/// `endpoint` bytes, plus `capacity` queued entries of `entry` bytes each
+/// carrying up to `max_payload` bytes. Saturates rather than wrapping, so an
+/// absurd bound is charged as more than any limit allows.
+fn queue_reservation(endpoint: usize, entry: usize, max_payload: u64, capacity: usize) -> u64 {
+    let bytes = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+    bytes(capacity)
+        .saturating_mul(max_payload.saturating_add(bytes(entry)))
+        .saturating_add(bytes(endpoint))
+}

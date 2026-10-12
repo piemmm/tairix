@@ -42,6 +42,7 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # connecting tool uses — never a second copy of "what does this operand mean".
 # The socket-backed transport is behind its `program` feature.
 tairix-resolver = { path = "../../../lib/resolver", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, the standard-stream

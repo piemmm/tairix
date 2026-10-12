@@ -46,6 +46,17 @@ fn control_invalid_and_hidden_characters_are_drawn_as_tokens() {
 }
 
 #[test]
+fn every_character_that_draws_nothing_is_a_token() {
+    let document = doc(&["a\u{34f}b\u{fe0f}c\u{17b4}d\u{e0100}e".as_bytes()]);
+    assert_eq!(
+        drawn(&document, 0, 8),
+        "a[U+034F]b[U+FE0F]c[U+17B4]d[U+E0100]e",
+        "a joiner, a variation selector, an inherent vowel and a tag-range \
+         selector would each let a document hold what it does not show"
+    );
+}
+
+#[test]
 fn tabs_advance_to_their_stops_and_wide_characters_take_two_cells() {
     let document = doc(&["a\tb\u{4e2d}c\t".as_bytes()]);
     let columns: Vec<(usize, usize)> = units(&document, 0, 4)

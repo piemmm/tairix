@@ -62,7 +62,7 @@ pub fn run(
     command: Command,
     locale: Option<&str>,
     transport: &dyn Transport,
-    database: Option<&DevIds<'_>>,
+    database: Option<&DevIds<&[u8]>>,
     help: &dyn HelpSource,
     out: &dyn Output,
 ) -> Result<(), LspciError> {
@@ -205,7 +205,7 @@ fn push_identity(
     line: &mut String,
     options: &Options,
     function: &Function<'_>,
-    database: Option<&DevIds<'_>>,
+    database: Option<&DevIds<&[u8]>>,
     unnamed: &mut u64,
 ) {
     // The 24-bit PCI class code: base class, sub-class, programming
@@ -264,7 +264,7 @@ fn render_tree(
     options: &Options,
     view: &TreeView<'_>,
     functions: &[Function<'_>],
-    database: Option<&DevIds<'_>>,
+    database: Option<&DevIds<&[u8]>>,
     out: &dyn Output,
     unnamed: &mut u64,
 ) -> Result<(), LspciError> {
@@ -375,11 +375,8 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
         }
         Some(HwResourceKind::LinkAddress) => match resource.link_address_octets() {
             Some(mac) => {
-                let _ = write!(
-                    line,
-                    "Link address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                );
+                line.push_str("Link address ");
+                line.push_str(&tairix_procinfo::render_mac(mac));
             }
             // An all-zero address carries no identity; list the resource
             // without inventing one.
@@ -765,7 +762,7 @@ C 02  Network controller
         let transport = Fixture { reply };
         let table = fixture_table();
         let database = if with_db {
-            Some(DevIds::parse(DbKind::Pci, &table).expect("fixture table decodes"))
+            Some(DevIds::parse(DbKind::Pci, table.as_slice()).expect("fixture table decodes"))
         } else {
             None
         };

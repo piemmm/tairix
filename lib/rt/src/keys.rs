@@ -18,11 +18,12 @@
 //! relay: a keystroke read under the cooked one would already be echoed and
 //! held to the end of its line.
 
-use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::{Errno, Origin, ORIGIN_WIRE_LEN, STDIN};
 
 use crate::io::{Read, Stdin};
 use crate::thread::Thread;
+use crate::{PrivatePort, WaitSet};
 
 /// Largest read the reader makes, and so the mailbox's message size with its
 /// tag: a terminal delivers keystrokes a few at a time, and a paste arrives in
@@ -51,8 +52,11 @@ pub enum Keys<'a> {
 
 /// The reader thread's mailbox: add [`Self::port`] to a wait-set as a
 /// [`WaitSourceKind::Port`] member and [`Self::take`] when it reports.
+///
+/// Dropping the relay unbinds the mailbox, which ends the reader at its next
+/// post.
 pub struct KeyRelay {
-    port: u64,
+    port: PrivatePort,
     pid: u64,
     buf: [u8; KEY_CHUNK + 1],
 }
@@ -67,10 +71,11 @@ impl KeyRelay {
     /// wait-sets, or the thread.
     pub fn start() -> Result<Self, Errno> {
         let pid = crate::self_origin().map_err(Errno::from_syscall)?.pid();
-        let port = crate::bind_private_port(KEY_CHUNK + 1, KEY_CAPACITY)?;
-        let room = watching(WaitSourceKind::PortRoom, port)?;
+        let port = PrivatePort::bind(KEY_CHUNK + 1, KEY_CAPACITY)?;
+        let room = watching(WaitSourceKind::PortRoom, port.id())?;
         let hands = watching(WaitSourceKind::Foreground, u64::from(STDIN))?;
-        Thread::spawn(move || read_keys(port, room, hands))?.detach();
+        let mailbox = port.id();
+        Thread::spawn(move || read_keys(mailbox, &room, &hands))?.detach();
         Ok(Self {
             port,
             pid,
@@ -81,7 +86,7 @@ impl KeyRelay {
     /// The mailbox the reader posts to.
     #[must_use]
     pub const fn port(&self) -> u64 {
-        self.port
+        self.port.id()
     }
 
     /// Take the oldest message this process's reader sent, discarding any
@@ -89,7 +94,7 @@ impl KeyRelay {
     pub fn take(&mut self) -> Option<Keys<'_>> {
         let mut sender = [0u8; ORIGIN_WIRE_LEN];
         let len = loop {
-            let len = crate::ipc_recv(self.port, &mut self.buf, &mut sender).ok()?;
+            let len = crate::ipc_recv(self.port.id(), &mut self.buf, &mut sender).ok()?;
             if read_message(self.buf.get(..len)?, &sender, self.pid).is_some() {
                 break len;
             }
@@ -116,7 +121,7 @@ fn read_message<'a>(
 
 /// The reader: block in a read of standard input, forward what arrived, and
 /// on a refusal for want of the foreground wait for the hands to change.
-fn read_keys(port: u64, room: u64, hands: u64) {
+fn read_keys(port: u64, room: &WaitSet, hands: &WaitSet) {
     let mut buf = [0u8; KEY_CHUNK + 1];
     buf[0] = TAG_TYPED;
     loop {
@@ -129,7 +134,7 @@ fn read_keys(port: u64, room: u64, hands: u64) {
             }
             Err(err) if err.errno() == Some(Errno::NotForeground) => {
                 let mut token = 0;
-                if crate::waitset_wait(hands, u64::MAX, &mut token) != 0 {
+                if crate::waitset_wait(hands.handle(), u64::MAX, &mut token) != 0 {
                     break;
                 }
             }
@@ -140,19 +145,16 @@ fn read_keys(port: u64, room: u64, hands: u64) {
 }
 
 /// A wait-set holding one member.
-fn watching(kind: WaitSourceKind, id: u64) -> Result<u64, Errno> {
-    let created = crate::waitset_create();
-    let set = Errno::syscall_result(created)?;
-    match crate::waitset_ctl(set, WaitSetOp::Add, kind, id, TOKEN) {
-        0 => Ok(set),
-        refused => Err(Errno::from_syscall(refused)),
-    }
+fn watching(kind: WaitSourceKind, id: u64) -> Result<WaitSet, Errno> {
+    let set = WaitSet::create()?;
+    set.add(kind, id, TOKEN)?;
+    Ok(set)
 }
 
 /// Post `message`, parking for mailbox room rather than dropping a keystroke;
 /// `false` once the send is refused for anything but room, which no wait for
 /// room can lift.
-fn post(room: u64, port: u64, message: &[u8]) -> bool {
+fn post(room: &WaitSet, port: u64, message: &[u8]) -> bool {
     loop {
         let sent = crate::ipc_send(port, message);
         if sent >= 0 {
@@ -160,7 +162,7 @@ fn post(room: u64, port: u64, message: &[u8]) -> bool {
         }
         let mut token = 0;
         if Errno::from_syscall(sent) != Errno::WouldBlock
-            || crate::waitset_wait(room, u64::MAX, &mut token) != 0
+            || crate::waitset_wait(room.handle(), u64::MAX, &mut token) != 0
         {
             return false;
         }

@@ -153,6 +153,7 @@ plan's ledger. A `blocked` row names its blocker.
 | ZEROCONF | mDNS / DNS-SD discovery: `discoveryd`, the `lib/discovery` client and `dns-sd` (`plans/ZEROCONF.md`) | in progress |
 | TELNET | The `telnet` client (`plans/TELNET.md`) | blocked: T2 needs a TLS stream transport over `lib/crypto` |
 | SSH | The SSH client, server and tools (`plans/SSH.md`) | in progress |
+| NETMAP | `netmap.app`, the network map and inventory, and the neighbour/route/traceroute read seams it needs (`plans/NETMAP.md`) | in progress |
 
 ### Userland, services and applications
 
@@ -256,7 +257,8 @@ README requires this file to name them:
 | Module | Callers |
 |---|---|
 | `argv` | `useradd`, `usermod`, `groupadd`, `passwd`, `mount` |
-| `cfloat`, `cnum` | `seq`, `printf` |
+| `cfloat` | `seq`, `printf`, `ping` |
+| `cnum` | `seq`, `printf` |
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`) |
@@ -267,6 +269,7 @@ README requires this file to name them:
 | `mathf` | `lib/audio`, `lib/colour`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `cinder`, WinterSun, the desktop session's screensavers |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `utf8` | `lib/syntax`, `wc`, TextEdit |
+| `seconds` | `ping`, `traceroute` |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
 | `size` | `du`, `df` |
 | `space` | `lib/raytrace`, the desktop session's retro games screensaver |

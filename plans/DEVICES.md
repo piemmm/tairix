@@ -172,14 +172,17 @@ adding it updates `AGENTS.md` §3 and `PLAN.md` in the same change, §6):
   class triple, plus the usb.ids auxiliary tables only if a consumer
   renders them — no speculative surface, §2.3). An unknown id is `None`;
   the caller renders the numeric form (fail closed, never fabricate).
-- **Data placement.** Each command bundle carries its own database file
+- **Data placement.** Each consuming bundle carries its own database file
   as a bundle resource (§16.5 self-containment): `lspci.app/Resources/
-  pci.ids.bin` and `lsusb.app/Resources/usb.ids.bin`, laid onto the
-  image from the generated tables by the image builder through the same
-  discovered-from-disk path as `Help/` trees — never `include_bytes!`
+  pci.ids.bin`, `lsusb.app/Resources/usb.ids.bin`, and the network map's
+  `netmap.app/Resources/oui.ids.bin` (`plans/NETMAP.md` NM-F), laid onto
+  the image from the generated tables by the image builder through the
+  same discovered-from-disk path as `Help/` trees — never `include_bytes!`
   into a binary (help/data-on-volume rule, §16.5) and never a second
   copy of the tables in the tree. `lib/devids` is the one source of the
-  encode + decode + lookup; the two `.bin` files are generated artefacts.
+  encode + decode + lookup and of the bounded `bundled::load` every
+  consumer reads its table through; the `.bin` files are generated
+  artefacts.
 
 ### 1.3 The `lspci` command app (`userland/apps/lspci`)
 

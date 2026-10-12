@@ -336,6 +336,11 @@ impl DefaultRouterList {
         self.routers.is_empty()
     }
 
+    /// Every live router's address, in the order they were learned.
+    pub fn iter(&self) -> impl Iterator<Item = Ipv6Addr> + '_ {
+        self.routers.iter().map(|router| router.addr)
+    }
+
     /// Forget every learned router, keeping the capacity bound. Used
     /// when IPv6 is administratively disabled on the interface.
     pub fn clear(&mut self) {

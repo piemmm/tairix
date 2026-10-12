@@ -2,7 +2,8 @@
 //!
 //! [`RtDiscovery`] binds a process-private port for its session's doorbell
 //! and parks on it through a wait-set, so a program waiting for answers
-//! sleeps until the service rings — never a poll. A doorbell is believed only
+//! sleeps until the service rings — never a poll — and releases both with the
+//! session. A doorbell is believed only
 //! from the discovery service's kernel-attested account and only for this
 //! session: the port is an inbox anyone holding its id may post to.
 //!
@@ -15,8 +16,10 @@ use tairix_abi::discovery_ipc::{
     decode_doorbell, from_discovery_service, Entry, Families, Query, DISCOVERY_ENDPOINT,
     DOORBELL_LEN,
 };
-use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::{Errno, Origin, ORIGIN_WIRE_LEN};
+
+use tairix_rt::{PrivatePort, WaitSet};
 
 use crate::{DiscoveryError, Held, OwnedAnswer, Session, Transport, Waited};
 
@@ -39,8 +42,8 @@ impl Transport for RtTransport {
 /// A session with the doorbell it is woken by.
 pub struct RtDiscovery {
     session: Session<RtTransport>,
-    port: u64,
-    set: u64,
+    set: WaitSet,
+    port: PrivatePort,
 }
 
 impl RtDiscovery {
@@ -53,25 +56,15 @@ impl RtDiscovery {
     /// service's refusal, or [`DiscoveryError::Transport`] when the port or
     /// wait-set cannot be made.
     pub fn open() -> Result<Self, DiscoveryError> {
-        let port = tairix_rt::bind_private_port(DOORBELL_LEN, DOORBELL_CAPACITY)
+        let port = PrivatePort::bind(DOORBELL_LEN, DOORBELL_CAPACITY)
             .map_err(DiscoveryError::Transport)?;
-        let created = tairix_rt::waitset_create();
-        let set = u64::try_from(created)
-            .map_err(|_| DiscoveryError::Transport(Errno::from_syscall(created)))?;
-        let added = tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            port,
-            DOORBELL_TOKEN,
-        );
-        if added != 0 {
-            return Err(DiscoveryError::Transport(Errno::from_syscall(added)));
-        }
+        let set = WaitSet::create().map_err(DiscoveryError::Transport)?;
+        set.add(WaitSourceKind::Port, port.id(), DOORBELL_TOKEN)
+            .map_err(DiscoveryError::Transport)?;
         Ok(Self {
-            session: Session::open(RtTransport, port)?,
-            port,
+            session: Session::open(RtTransport, port.id())?,
             set,
+            port,
         })
     }
 
@@ -93,19 +86,12 @@ impl RtDiscovery {
         each: &mut dyn FnMut(&Entry<'_>),
     ) -> Result<Waited, DiscoveryError> {
         loop {
-            let now = tairix_rt::clock_get();
-            let timeout = match until {
-                Some(until) if until <= now => return Ok(Waited::TimedOut),
-                Some(until) => until - now,
-                None => u64::MAX,
-            };
-            let mut token = 0u64;
-            let waited = tairix_rt::waitset_wait(self.set, timeout, &mut token);
-            if waited != 0 {
-                return match Errno::from_syscall(waited) {
-                    Errno::TimedOut => Ok(Waited::TimedOut),
-                    errno => Err(DiscoveryError::Transport(errno)),
-                };
+            let rang = self
+                .set
+                .wait_until(until.unwrap_or(u64::MAX))
+                .map_err(DiscoveryError::Transport)?;
+            if rang.is_none() {
+                return Ok(Waited::TimedOut);
             }
             if self.drain_doorbells() {
                 while self.session.collect(each)? {}
@@ -119,7 +105,7 @@ impl RtDiscovery {
         let mut rung = false;
         let mut frame = [0u8; DOORBELL_LEN];
         let mut sender = [0u8; ORIGIN_WIRE_LEN];
-        while let Ok(len) = tairix_rt::ipc_recv(self.port, &mut frame, &mut sender) {
+        while let Ok(len) = tairix_rt::ipc_recv(self.port.id(), &mut frame, &mut sender) {
             let genuine =
                 Origin::from_bytes(&sender).is_ok_and(|origin| from_discovery_service(&origin));
             rung |= genuine && decode_doorbell(&frame[..len]) == Ok(self.session.id());

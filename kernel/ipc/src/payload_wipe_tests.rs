@@ -139,6 +139,7 @@ fn endpoint(id: u64, sink: &RecordingSink) -> CallEndpoint {
             max_reply: PAYLOAD_CAP,
             capacity: 8,
         },
+        tairix_abi::RLIMIT_INFINITY,
         sink,
     )
     .expect("unrestricted endpoint")
@@ -297,6 +298,7 @@ fn port_message_leaves_no_plaintext_in_freed_heap() {
         CapabilitySet::empty(),
         PAYLOAD_CAP,
         4,
+        tairix_abi::RLIMIT_INFINITY,
         &sink,
     )
     .expect("unrestricted port");

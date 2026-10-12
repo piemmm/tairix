@@ -215,3 +215,72 @@ fn error_allowed_applies_rfc_4443_rules() {
         ..allowed_base()
     }));
 }
+
+/// An echo request as the IPv6 packet a router would quote.
+fn quoted_v6_echo(next_header: u8, echo_type: u8) -> alloc::vec::Vec<u8> {
+    let mut packet = alloc::vec![0u8; crate::ipv6::IPV6_HEADER_LEN + 8];
+    packet[0] = 0x60;
+    packet[6] = next_header;
+    packet[8..24].copy_from_slice(&Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).octets());
+    packet[24..40].copy_from_slice(&Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 9).octets());
+    let echo = &mut packet[crate::ipv6::IPV6_HEADER_LEN..];
+    echo[0] = echo_type;
+    echo[4..6].copy_from_slice(&0xBEEFu16.to_be_bytes());
+    echo[6..8].copy_from_slice(&3u16.to_be_bytes());
+    packet
+}
+
+fn error_about(invoking: &[u8]) -> IcmpError<'_> {
+    IcmpError {
+        kind: IcmpErrorKind::TimeExceeded { code: 0 },
+        invoking,
+    }
+}
+
+#[test]
+fn an_ipv6_quote_names_its_echo() {
+    let packet = quoted_v6_echo(crate::ipv6::NEXT_HEADER_ICMPV6, TYPE_V6_ECHO_REQUEST);
+    assert_eq!(
+        error_about(&packet).quoted_echo(),
+        Some(QuotedEcho {
+            source: crate::addr::IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+            destination: crate::addr::IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 9)),
+            identifier: 0xBEEF,
+            sequence: 3,
+        })
+    );
+}
+
+#[test]
+fn a_quote_that_is_not_an_echo_requests_first_bytes_names_none() {
+    // Another upper protocol, an echo reply, and a short excerpt.
+    assert_eq!(
+        error_about(&quoted_v6_echo(17, TYPE_V6_ECHO_REQUEST)).quoted_echo(),
+        None
+    );
+    assert_eq!(
+        error_about(&quoted_v6_echo(
+            crate::ipv6::NEXT_HEADER_ICMPV6,
+            TYPE_V6_ECHO_REPLY
+        ))
+        .quoted_echo(),
+        None
+    );
+    let packet = quoted_v6_echo(crate::ipv6::NEXT_HEADER_ICMPV6, TYPE_V6_ECHO_REQUEST);
+    assert_eq!(error_about(&packet[..packet.len() - 1]).quoted_echo(), None);
+    assert_eq!(error_about(&[]).quoted_echo(), None);
+
+    // A non-first IPv4 fragment carries no ICMP header to read.
+    let mut v4 = alloc::vec![0u8; crate::ipv4::IPV4_HEADER_LEN + 8];
+    v4[0] = 0x45;
+    v4[6] = 0x00;
+    v4[7] = 0x10;
+    v4[9] = crate::ipv4::PROTOCOL_ICMP;
+    v4[crate::ipv4::IPV4_HEADER_LEN] = TYPE_ECHO_REQUEST;
+    assert_eq!(error_about(&v4).quoted_echo(), None);
+    v4[7] = 0;
+    assert!(error_about(&v4).quoted_echo().is_some());
+    // An IHL below the minimum header is no header.
+    v4[0] = 0x44;
+    assert_eq!(error_about(&v4).quoted_echo(), None);
+}

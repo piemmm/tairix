@@ -31,12 +31,17 @@ com os enviados, pelo que uma carga aleatória serve também de verificação
 de integridade por pacote. Use `-p` para um padrão fixo quando o que se
 pretende é uma carga determinista.
 
-Por predefinição, `ping` envia um pedido por segundo até ser
-interrompido; `-c` limita a quantidade. Cada resposta indica a origem, o
-número de sequência e o tempo; um pedido sem resposta dentro do prazo
-imprime uma linha de expiração. O resumo final indica os pacotes
-transmitidos e recebidos, a percentagem de perda e os tempos de ida e
-volta mínimo, médio e máximo. `-q` mostra apenas o cabeçalho e o resumo.
+Por predefinição, `ping` envia um pedido por segundo até ser interrompido;
+`-c` limita a quantidade. Cada resposta indica a origem, o número de
+sequência e o tempo. Quando um router, ou o próprio anfitrião, comunica um
+erro sobre um pedido — o limite de saltos esgotou-se, o destino está
+inalcançável, o pacote é demasiado grande —, uma linha `From` indica quem
+o comunicou e o motivo. Um pedido que não obtém resposta dentro do prazo
+não imprime nada. Se nenhuma interface puder ainda transportar um pedido,
+este aguarda até ao seu prazo que a rede fique disponível. O resumo final
+indica os pacotes transmitidos e recebidos, os erros, a percentagem de
+perda e os tempos de ida e volta mínimo, médio e máximo com o seu desvio
+médio. `-q` mostra apenas o cabeçalho e o resumo.
 
 Cada resposta nomeia o par como `nome (endereço)` quando o endereço tem
 um registo `PTR`, resolvido uma só vez por execução pelo mesmo

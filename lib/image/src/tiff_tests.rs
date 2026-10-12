@@ -1392,6 +1392,32 @@ fn a_tile_off_a_sixteen_pixel_boundary_is_refused() {
     assert_eq!(refusal(page), DecodeError::TiffInvalidTileGeometry);
 }
 
+/// A palette page whose tile is larger than the limits is refused on the
+/// tile's own extent, before any unit buffer is reserved for it. The picture
+/// (`20`x`7`) fits the limits, so a palette decode that checked only the
+/// output — as this one once did — would go on to reserve a unit buffer of
+/// `tile_width ÷ 8` × `tile_rows` bytes: for the tile a fuzzer found
+/// (`0x8000_0010` wide), four gibibytes before anything was refused.
+#[test]
+fn a_palette_tile_past_the_limits_is_refused_before_reserving_its_unit() {
+    let over = limits().max_width() / 16 * 16 + 16;
+    let page = PageSpec::new()
+        .tag(TAG_IMAGE_WIDTH, LONG, &[20])
+        .tag(TAG_IMAGE_LENGTH, LONG, &[7])
+        .tag(TAG_BITS_PER_SAMPLE, SHORT, &[1])
+        .tag(TAG_COMPRESSION, SHORT, &[u32::from(COMPRESSION_NONE)])
+        .tag(TAG_PHOTOMETRIC, SHORT, &[u32::from(PHOTOMETRIC_PALETTE)])
+        .tag(TAG_SAMPLES_PER_PIXEL, SHORT, &[1])
+        .tag(TAG_COLOUR_MAP, SHORT, &[0u32; 6])
+        // A 16-multiple so the tile geometry itself is valid; one tile past
+        // the limit so it is the extent, not the shape, that refuses it.
+        .tag(TAG_TILE_WIDTH, LONG, &[over])
+        .tag(TAG_TILE_LENGTH, LONG, &[16])
+        .tiled()
+        .units(vec![vec![0u8; 8]]);
+    assert_eq!(refusal(page), DecodeError::WidthExceedsLimit);
+}
+
 #[test]
 fn separate_planes_are_refused_where_the_unit_cannot_carry_them() {
     let jpeg = grey(8, 8, tiny_jpeg(8, 8))

@@ -109,6 +109,7 @@ pub fn create_driver_store_endpoint<S: Sink + ?Sized>(
             max_reply: DRIVER_STORE_MAX_REPLY,
             capacity: DRIVER_STORE_CAPACITY,
         },
+        tairix_abi::RLIMIT_INFINITY,
         audit,
     )
 }

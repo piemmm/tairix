@@ -14,20 +14,15 @@
 //! # Default policy
 //!
 //! Until a principal imposes a tighter ceiling, every resource is governed
-//! by the discovered, growable default policy — *not* by a hard-wired
-//! `const` ceiling. L2 expresses "no ceiling imposed here" as
-//! [`ResourceLimit::UNLIMITED`] ([`LimitSet::DEFAULT`]); the actual
-//! capacity a task can reach is bounded by the growable kernel structures,
-//! which L3 sizes from the discovered hardware. The one exception with a
-//! real default today is the per-task stack: its default bound
-//! ([`DEFAULT_STACK_LIMIT_BYTES`]) equals the reserved user-stack span the
-//! spawn layout places, so the settable limit and the structural span
-//! coincide until a principal tightens (or, under
-//! `CAP_RLIMIT_RAISE`, raises) it. A future discovered-hardware default
-//! policy slots in by tightening [`LimitSet::DEFAULT`] (or deriving it per
-//! boot); every consumer reads it through this one definition, and
-//! inheritance already intersects against it so a child can never widen
-//! past it.
+//! by a default derived from the discovered hardware — *not* by a hard-wired
+//! `const` ceiling. [`LimitSet::DEFAULT`] is the compile-time floor: every
+//! resource [`ResourceLimit::UNLIMITED`] except the per-task stack, whose
+//! bound ([`DEFAULT_STACK_LIMIT_BYTES`]) equals the reserved user-stack span
+//! the spawn layout places. The boot path replaces it once with
+//! [`LimitSet::derived_from_memory`], which sizes every kernel-object and
+//! pinned-memory bound from the installed RAM; every consumer reads that one
+//! definition, and inheritance intersects against it so a child can never
+//! widen past it.
 //!
 //! This is a *capacity* facility. It must never loosen the fixed
 //! security/format bounds on untrusted input; those stay fixed and
@@ -60,7 +55,7 @@ pub const DEFAULT_STACK_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 /// than a fraction of the machine from pressure management — the
 /// capability gates *who* may pin, this bounds *how much*. The boot path
 /// installs the derived bound as the per-boot default limit set
-/// ([`LimitSet::with_derived_defaults`]), so every task inherits it through
+/// ([`LimitSet::derived_from_memory`]), so every task inherits it through
 /// the ordinary never-widen intersection and `ulimit`/`rlimit_get`
 /// report it honestly; raising it past the derived hard bound takes
 /// `CAP_RLIMIT_RAISE` like any other hard raise.
@@ -69,61 +64,83 @@ pub const fn default_pinned_limit_bytes(installed_memory_bytes: u64) -> u64 {
     installed_memory_bytes / 8
 }
 
-/// The smallest `LimitKind::FileLocks` bound the derived policy will hand
-/// out, so even the smallest board leaves room for real coordination
-/// between a handful of participants rather than a bound nothing fits in.
-const MIN_FILE_LOCK_RECORDS: u64 = 256;
-
-/// The default `LimitKind::FileLocks` policy: how many advisory byte-range
-/// lock records one process may hold on a machine with
-/// `installed_memory_bytes` of discovered RAM.
-///
-/// A lock record is kernel heap a process asks for, and it can ask without
-/// locking a new byte — unlocking the middle of a held range splits one
-/// record into two — so an unbounded default is how one process exhausts
-/// the kernel heap for every other principal. Sized from the discovered
-/// hardware rather than a hard-wired ceiling: one record per 64 KiB of RAM
-/// keeps the worst-case per-process footprint near a thousandth of memory
-/// while still admitting the thousands of row-granularity locks a database
-/// legitimately holds (16384 on a 1 GiB board), and a small board scales
-/// down to a documented floor (256 records) instead of inheriting a figure
-/// it cannot afford.
-///
-/// The boot path installs the derived bound as the per-boot default
-/// ([`LimitSet::with_derived_defaults`]), so every task inherits it through
-/// the ordinary never-widen intersection, `ulimit` reports it honestly, and
-/// raising it past the derived hard bound takes `CAP_RLIMIT_RAISE` like any
-/// other hard raise.
-#[must_use]
-pub const fn default_file_lock_records(installed_memory_bytes: u64) -> u64 {
-    let derived = installed_memory_bytes / (64 * 1024);
-    if derived < MIN_FILE_LOCK_RECORDS {
-        MIN_FILE_LOCK_RECORDS
+/// A count policy derived from discovered RAM: one unit per
+/// `bytes_per_unit` of `installed_memory_bytes`, never below `floor`, so a
+/// large machine scales up and the smallest board still gets a bound real
+/// programs fit in.
+const fn derived_bound(installed_memory_bytes: u64, bytes_per_unit: u64, floor: u64) -> u64 {
+    let derived = installed_memory_bytes / bytes_per_unit;
+    if derived < floor {
+        floor
     } else {
         derived
     }
 }
 
-/// The smallest `LimitKind::DirWatches` bound the derived policy hands out:
-/// room for a file manager's windows and a desktop on the smallest board.
+/// The smallest `LimitKind::FileLocks` bound: room for real coordination
+/// between a handful of participants.
+const MIN_FILE_LOCK_RECORDS: u64 = 256;
+
+/// The default `LimitKind::FileLocks` policy: one lock record per 64 KiB of
+/// RAM (16384 on a 1 GiB board).
+///
+/// Unlocking the middle of a held range splits one record into two, so a
+/// process can manufacture records without locking a new byte; the bound
+/// keeps its worst case near a thousandth of memory while admitting the
+/// row-granularity locks a database holds.
+#[must_use]
+pub const fn default_file_lock_records(installed_memory_bytes: u64) -> u64 {
+    derived_bound(installed_memory_bytes, 64 << 10, MIN_FILE_LOCK_RECORDS)
+}
+
+/// The smallest `LimitKind::DirWatches` bound: room for a file manager's
+/// windows and a desktop on the smallest board.
 const MIN_DIR_WATCHES: u64 = 64;
 
-/// The default `LimitKind::DirWatches` policy: how many directory watches one
-/// process may hold armed on a machine with `installed_memory_bytes` of RAM.
+/// The default `LimitKind::DirWatches` policy: one watch per 2 MiB of RAM.
 ///
 /// A watch can pin its directory's change journal at
 /// [`crate::fswatch::JOURNAL_BYTES`] while its watcher leaves it undrained,
-/// so one watch per 2 MiB of RAM keeps a process's worst case at a
-/// sixty-fourth of memory — and journals hold nothing at all under memory
-/// pressure. A small board scales down to a documented floor.
+/// so the bound keeps a process's worst case at a sixty-fourth of memory —
+/// and journals hold nothing at all under memory pressure.
 #[must_use]
 pub const fn default_dir_watches(installed_memory_bytes: u64) -> u64 {
-    let derived = installed_memory_bytes / (2 << 20);
-    if derived < MIN_DIR_WATCHES {
-        MIN_DIR_WATCHES
-    } else {
-        derived
-    }
+    derived_bound(installed_memory_bytes, 2 << 20, MIN_DIR_WATCHES)
+}
+
+/// The smallest `LimitKind::IpcQueueBytes` bound: several times what the
+/// busiest system service reserves, so the smallest board still runs it.
+const MIN_IPC_QUEUE_BYTES: u64 = 16 << 20;
+
+/// The default `LimitKind::IpcQueueBytes` policy: a sixteenth of RAM.
+///
+/// An endpoint is charged its worst case, and any sender can make that case
+/// real, so the bound is what keeps one process from parking a large share of
+/// the kernel heap in queues; the busiest service reserves a few MiB.
+#[must_use]
+pub const fn default_ipc_queue_bytes(installed_memory_bytes: u64) -> u64 {
+    derived_bound(installed_memory_bytes, 16, MIN_IPC_QUEUE_BYTES)
+}
+
+/// The smallest `LimitKind::WaitSets` bound.
+const MIN_WAIT_SETS: u64 = 256;
+
+/// The default `LimitKind::WaitSets` policy: one set per 256 KiB of RAM
+/// (4096 on a 1 GiB board), far past the handful an event loop holds.
+#[must_use]
+pub const fn default_wait_sets(installed_memory_bytes: u64) -> u64 {
+    derived_bound(installed_memory_bytes, 256 << 10, MIN_WAIT_SETS)
+}
+
+/// The smallest `LimitKind::WaitSetMembers` bound.
+const MIN_WAIT_SET_MEMBERS: u64 = 1024;
+
+/// The default `LimitKind::WaitSetMembers` policy: one member per 32 KiB of
+/// RAM (32768 on a 1 GiB board), keeping a process's members near a
+/// hundredth of memory while a server multiplexes thousands of sources.
+#[must_use]
+pub const fn default_wait_set_members(installed_memory_bytes: u64) -> u64 {
+    derived_bound(installed_memory_bytes, 32 << 10, MIN_WAIT_SET_MEMBERS)
 }
 
 /// One task's effective resource limits: a [`ResourceLimit`] for every
@@ -146,7 +163,7 @@ impl LimitSet {
     /// The *operative* per-boot default is the registry-held set
     /// ([`crate::aspace::AddressSpaceRegistry::default_limits`]), which the
     /// boot path derives from discovered hardware (the pinned-memory and
-    /// file-lock bounds via [`Self::with_derived_defaults`]) and which falls
+    /// file-lock bounds via [`Self::derived_from_memory`]) and which falls
     /// back to this constant wherever no derivation applies.
     ///
     /// Every resource except the stack is [`ResourceLimit::UNLIMITED`]: L2
@@ -166,33 +183,50 @@ impl LimitSet {
         Self { limits }
     };
 
-    /// The per-boot default set: [`Self::DEFAULT`] with every bound the boot
-    /// path derives from discovered hardware written in (soft and hard).
+    /// The per-boot default set: [`Self::DEFAULT`] with every bound derived
+    /// from `installed_memory_bytes` written in, soft and hard.
     ///
-    /// Built once at boot ([`default_pinned_limit_bytes`],
-    /// [`default_file_lock_records`], [`default_dir_watches`]) and installed
-    /// as the registry default,
-    /// so every task — including inheritance's never-widen intersection —
-    /// runs under the derived bounds without a second code path.
+    /// Installed once at boot as the registry default, so every task —
+    /// inheritance's never-widen intersection included — runs under the
+    /// derived bounds without a second code path.
     #[must_use]
-    pub const fn with_derived_defaults(
-        pinned_bytes: u64,
-        file_lock_records: u64,
-        dir_watches: u64,
-    ) -> Self {
+    pub const fn derived_from_memory(installed_memory_bytes: u64) -> Self {
+        let derived = [
+            (
+                LimitKind::PinnedMemoryBytes,
+                default_pinned_limit_bytes(installed_memory_bytes),
+            ),
+            (
+                LimitKind::FileLocks,
+                default_file_lock_records(installed_memory_bytes),
+            ),
+            (
+                LimitKind::DirWatches,
+                default_dir_watches(installed_memory_bytes),
+            ),
+            (
+                LimitKind::IpcQueueBytes,
+                default_ipc_queue_bytes(installed_memory_bytes),
+            ),
+            (
+                LimitKind::WaitSets,
+                default_wait_sets(installed_memory_bytes),
+            ),
+            (
+                LimitKind::WaitSetMembers,
+                default_wait_set_members(installed_memory_bytes),
+            ),
+        ];
         let mut out = Self::DEFAULT;
-        out.limits[LimitKind::PinnedMemoryBytes.as_u32() as usize] = ResourceLimit {
-            soft: pinned_bytes,
-            hard: pinned_bytes,
-        };
-        out.limits[LimitKind::FileLocks.as_u32() as usize] = ResourceLimit {
-            soft: file_lock_records,
-            hard: file_lock_records,
-        };
-        out.limits[LimitKind::DirWatches.as_u32() as usize] = ResourceLimit {
-            soft: dir_watches,
-            hard: dir_watches,
-        };
+        let mut i = 0;
+        while i < derived.len() {
+            let (kind, bound) = derived[i];
+            out.limits[kind.as_u32() as usize] = ResourceLimit {
+                soft: bound,
+                hard: bound,
+            };
+            i += 1;
+        }
         out
     }
 
@@ -274,8 +308,10 @@ pub fn authorize_set(
 #[cfg(test)]
 mod tests {
     use super::{
-        authorize_set, default_dir_watches, default_file_lock_records, default_pinned_limit_bytes,
-        LimitSet, DEFAULT_STACK_LIMIT_BYTES, MIN_DIR_WATCHES, MIN_FILE_LOCK_RECORDS,
+        authorize_set, default_dir_watches, default_file_lock_records, default_ipc_queue_bytes,
+        default_pinned_limit_bytes, default_wait_set_members, default_wait_sets, LimitSet,
+        DEFAULT_STACK_LIMIT_BYTES, MIN_DIR_WATCHES, MIN_FILE_LOCK_RECORDS, MIN_IPC_QUEUE_BYTES,
+        MIN_WAIT_SETS, MIN_WAIT_SET_MEMBERS,
     };
     use tairix_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
@@ -300,17 +336,28 @@ mod tests {
         assert_eq!(default_dir_watches(64 << 20), MIN_DIR_WATCHES);
         assert_eq!(default_dir_watches(0), MIN_DIR_WATCHES);
 
-        let set = LimitSet::with_derived_defaults(128 << 20, 16 << 10, 512);
-        let pinned = set.get(LimitKind::PinnedMemoryBytes);
-        assert_eq!(pinned.soft, 128 << 20);
-        assert_eq!(pinned.hard, 128 << 20);
-        assert!(pinned.is_well_formed());
-        let locks = set.get(LimitKind::FileLocks);
-        assert_eq!(locks.soft, 16 << 10);
-        assert_eq!(locks.hard, 16 << 10);
-        assert!(locks.is_well_formed());
-        let watches = set.get(LimitKind::DirWatches);
-        assert_eq!((watches.soft, watches.hard), (512, 512));
+        // A sixteenth of RAM for queued IPC, with a floor the busiest service
+        // fits in.
+        assert_eq!(default_ipc_queue_bytes(1 << 30), 64 << 20);
+        assert_eq!(default_ipc_queue_bytes(64 << 20), MIN_IPC_QUEUE_BYTES);
+        // One wait-set per 256 KiB and one member per 32 KiB, each floored.
+        assert_eq!(default_wait_sets(1 << 30), 4096);
+        assert_eq!(default_wait_sets(16 << 20), MIN_WAIT_SETS);
+        assert_eq!(default_wait_set_members(1 << 30), 32 << 10);
+        assert_eq!(default_wait_set_members(16 << 20), MIN_WAIT_SET_MEMBERS);
+
+        let set = LimitSet::derived_from_memory(1 << 30);
+        for (kind, bound) in [
+            (LimitKind::PinnedMemoryBytes, 128 << 20),
+            (LimitKind::FileLocks, 16 << 10),
+            (LimitKind::DirWatches, 512),
+            (LimitKind::IpcQueueBytes, 64 << 20),
+            (LimitKind::WaitSets, 4096),
+            (LimitKind::WaitSetMembers, 32 << 10),
+        ] {
+            let limit = set.get(kind);
+            assert_eq!((limit.soft, limit.hard), (bound, bound), "{kind:?}");
+        }
         // Every other kind keeps the compile-time floor.
         assert_eq!(
             set.get(LimitKind::StackBytes),
@@ -393,7 +440,7 @@ mod tests {
         // A parent with no pinned bound of its own is capped by the
         // per-boot derived default; a parent already tighter keeps its
         // tighter bound — inheritance never widens either way.
-        let boot_default = LimitSet::with_derived_defaults(128 << 20, 16 << 10, 512);
+        let boot_default = LimitSet::derived_from_memory(1 << 30);
         let child = LimitSet::inherit(&LimitSet::DEFAULT, &boot_default);
         assert_eq!(
             child.get(LimitKind::PinnedMemoryBytes),

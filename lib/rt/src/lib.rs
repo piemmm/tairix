@@ -442,6 +442,8 @@ const NUM_FS_ATTR_REMOVE: u64 = SyscallNumber::FS_ATTR_REMOVE.as_u16() as u64;
 const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
 /// `port_admit` syscall number (as above).
 const NUM_PORT_ADMIT: u64 = SyscallNumber::PORT_ADMIT.as_u16() as u64;
+const NUM_PORT_UNBIND: u64 = SyscallNumber::PORT_UNBIND.as_u16() as u64;
+const NUM_WAITSET_CLOSE: u64 = SyscallNumber::WAITSET_CLOSE.as_u16() as u64;
 /// `ipc_recv` syscall number (as above).
 const NUM_IPC_RECV: u64 = SyscallNumber::IPC_RECV.as_u16() as u64;
 
@@ -1278,63 +1280,25 @@ pub fn boot_session() -> BootSession {
     BootSession::from_u64(raw).unwrap_or_default()
 }
 
-/// Yield-loop until `now()` reaches `deadline_ns` — the **degraded
-/// fallback** of [`ClockDelay`]'s [`delay_us`](tairix_abi::Delay::delay_us),
-/// used only when the kernel refuses the sleep wait-set ([`sleep_waitset`])
-/// so a timed park is unavailable: it reads the monotonic clock through
-/// `now` and surrenders the CPU through `yield_fn` between reads, keeping
-/// the timed contract without a hard spin. A deadline already in the past
-/// returns immediately without yielding. The generic seams keep the loop
-/// host-testable against a deterministic clock without issuing a real trap.
-fn spin_until_ns(deadline_ns: u64, mut now: impl FnMut() -> u64, mut yield_fn: impl FnMut()) {
-    while now() < deadline_ns {
-        yield_fn();
-    }
-}
-
 /// Park, off-CPU, until `now()` reaches `deadline_ns`.
 ///
-/// The core of [`ClockDelay`]'s [`delay_us`](tairix_abi::Delay::delay_us):
-/// between clock reads it blocks through `park` (a kernel timed park for
-/// the remaining nanoseconds), so the task sleeps instead of yielding in a
-/// loop. A spurious early wake re-parks for the remainder; a deadline
-/// already in the past returns immediately without parking. The generic
-/// seams keep the loop host-testable against a deterministic clock.
-fn park_until_ns(deadline_ns: u64, mut now: impl FnMut() -> u64, mut park: impl FnMut(u64)) {
+/// Between clock reads it blocks through `park`, a timed park for the
+/// remaining nanoseconds, so a spurious early wake parks again for the
+/// remainder; a deadline already in the past returns without parking. `park`
+/// answering `false` ends the wait early, for a park that can no longer
+/// block. The seams keep the loop host-testable against a deterministic
+/// clock.
+fn park_until_ns(
+    deadline_ns: u64,
+    mut now: impl FnMut() -> u64,
+    mut park: impl FnMut(u64) -> bool,
+) {
     loop {
         let reading = now();
-        if reading >= deadline_ns {
+        if reading >= deadline_ns || !park(deadline_ns - reading) {
             return;
         }
-        park(deadline_ns - reading);
     }
-}
-
-/// The process's lazily created sleep wait-set handle, stored plus one so
-/// `0` means "not yet created". A wait-set with **no members** parked with a
-/// timeout is a pure kernel timed park: no member can ever become ready, so
-/// `waitset_wait` blocks the task until the deadline elapses. Cached per
-/// process so a delay costs one syscall, not a create per call.
-static SLEEP_WAITSET_PLUS_ONE: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
-
-/// The process's sleep wait-set (created on first use), or `None` when the
-/// kernel refuses one — the caller then degrades to the cooperative
-/// yield wait rather than losing the timed contract.
-fn sleep_waitset() -> Option<u64> {
-    use core::sync::atomic::Ordering;
-    let cached = SLEEP_WAITSET_PLUS_ONE.load(Ordering::Relaxed);
-    if cached != 0 {
-        return Some(cached - 1);
-    }
-    let set = waitset_create();
-    if set < 0 {
-        return None;
-    }
-    #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
-    let set = set as u64;
-    SLEEP_WAITSET_PLUS_ONE.store(set + 1, Ordering::Relaxed);
-    Some(set)
 }
 
 /// Nanoseconds in one microsecond — the [`ClockDelay`] conversion factor.
@@ -1343,35 +1307,22 @@ const NANOS_PER_MICRO: u64 = 1_000;
 /// Park, off the CPU, for at least `duration_ns` nanoseconds.
 ///
 /// The runtime's one timed park, and the timed counterpart of
-/// [`park_forever`]: the task blocks on the process's memberless sleep
-/// wait-set, so the kernel's one-shot timer wakes it — no yield loop and no
-/// periodic wakes, and a spurious early wake re-parks for the remainder. A
-/// zero duration returns without parking. Only when the kernel refuses a
-/// wait-set does it degrade to the cooperative yield wait, which keeps the
-/// timed contract rather than shortening it.
-///
-/// [`ClockDelay`]'s driver-facing `delay_us` is this same park; anything
-/// that already holds a nanosecond span — an animation's next frame, a
-/// timed retry — waits here directly rather than rounding through
-/// microseconds.
+/// [`park_forever`]: a futex wait on a word nothing wakes, so the kernel's
+/// one-shot timer wakes the task — no yield loop, no periodic wakes, and no
+/// kernel object a limit could refuse. A zero duration returns without
+/// parking. Anything that already holds a nanosecond span — an animation's
+/// next frame, a timed retry, [`ClockDelay`]'s `delay_us` — waits here.
 pub fn park_ns(duration_ns: u64) {
-    // Compute the deadline from the clock the wait re-checks, saturating so
-    // a reading near `u64::MAX` can never wrap the deadline below `now`
-    // (which would return instantly); the monotonic clock realistically
-    // never approaches that, but the wait must not silently shorten.
     let deadline = clock_get().saturating_add(duration_ns);
-    match sleep_waitset() {
-        Some(set) => park_until_ns(deadline, clock_get, |remaining_ns| {
-            // The set has no members, so this is a pure timed park; the
-            // outer loop re-checks the clock, so an early return (a
-            // torn-down set) still honours the deadline.
-            let mut token = 0u64;
-            let _ = waitset_wait(set, remaining_ns, &mut token);
-        }),
-        // The kernel refused a wait-set (handle exhaustion): degrade to the
-        // cooperative yield wait rather than shortening the timed contract.
-        None => spin_until_ns(deadline, clock_get, yield_now),
-    }
+    let word = core::sync::atomic::AtomicU32::new(0);
+    park_until_ns(deadline, clock_get, |remaining_ns| {
+        // SAFETY: `word` is a naturally aligned `u32` of this frame, live for
+        // the whole wait, and the kernel only reads it.
+        let ret = unsafe { futex_wait(word.as_ptr() as usize as u64, 0, remaining_ns) };
+        // The timeout, or a stray wake of this address, parks again; any
+        // refusal — the thread being torn down — would only repeat at once.
+        ret == 0 || Errno::try_from_syscall(ret) == Some(Errno::TimedOut)
+    });
 }
 
 /// The userland [`Delay`](tairix_abi::Delay) implementation: timed waits and
@@ -3146,36 +3097,94 @@ pub fn port_admit(port: u64, server: u64) -> Result<(), Errno> {
     Ok(())
 }
 
-/// Bind a fresh, process-private message port and return its id.
+/// Tear down a port this process bound (`SyscallNumber::PORT_UNBIND`),
+/// discarding whatever it still queues and returning what it was charged
+/// against the `ipc-queue-bytes` limit.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] for an unbound port, and [`Errno::PermissionDenied`]
+/// for a port another process owns.
+pub fn port_unbind(port: u64) -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke; the argument is a plain
+    // scalar the kernel validates, and no user memory is named.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the status encoding (0, else -errno).
+    let ret = unsafe { raw_syscall(NUM_PORT_UNBIND, [port, 0, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    Ok(())
+}
+
+/// A process-private message port, unbound when dropped.
 ///
 /// The port registry is machine-wide, so a fixed well-known id would let
 /// whichever process bound it first — a long-lived one above all — deny this
 /// one its messages for the rest of the boot. A CSPRNG-drawn unreserved id has
 /// no such contention: a sender learns it from this process, never by name.
-/// Zero and reserved ids are skipped rather than attempted, and a bounded
-/// budget fails closed.
-///
-/// # Errors
-///
-/// The random source's refusal, or [`tairix_abi::Errno::AddressInUse`] once
-/// the budget is spent.
-pub fn bind_private_port(max_payload: usize, capacity: usize) -> Result<u64, tairix_abi::Errno> {
+#[derive(Debug)]
+pub struct PrivatePort(u64);
+
+impl PrivatePort {
+    /// Bind a fresh port taking messages of up to `max_payload` bytes, at most
+    /// `capacity` of them queued.
+    ///
+    /// # Errors
+    ///
+    /// The random source's refusal, the bind's own refusal (a port past the
+    /// `ipc-queue-bytes` limit, malformed bounds), or [`Errno::AddressInUse`]
+    /// once every drawn id clashed.
+    pub fn bind(max_payload: usize, capacity: usize) -> Result<Self, Errno> {
+        draw_private_port(
+            || {
+                let mut bytes = [0u8; 8];
+                random_fill(&mut bytes)?;
+                Ok(u64::from_le_bytes(bytes))
+            },
+            |id| match port_bind(id, max_payload, capacity) {
+                ret if ret < 0 => Err(Errno::from_syscall(ret)),
+                _ => Ok(()),
+            },
+        )
+        .map(Self)
+    }
+
+    /// The port's id, which senders name.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Drop for PrivatePort {
+    fn drop(&mut self) {
+        let _ = port_unbind(self.0);
+    }
+}
+
+/// Bind the first drawn id that is neither zero nor reserved. Only a clash
+/// draws again, within a bounded budget; any other refusal is the answer.
+fn draw_private_port(
+    mut draw: impl FnMut() -> Result<u64, Errno>,
+    mut bind: impl FnMut(u64) -> Result<(), Errno>,
+) -> Result<u64, Errno> {
     // The id space is 64 bits wide and the live set is a handful of ports,
-    // so a clash is vanishingly unlikely; this budget covers it without ever
+    // so a clash is vanishingly unlikely; the budget covers it without ever
     // becoming a retry-until-it-works loop.
     const ATTEMPTS: usize = 8;
     for _ in 0..ATTEMPTS {
-        let mut bytes = [0u8; 8];
-        random_fill(&mut bytes)?;
-        let id = u64::from_le_bytes(bytes);
+        let id = draw()?;
         if id == 0 || tairix_abi::ipc::is_reserved_endpoint(id) {
             continue;
         }
-        if port_bind(id, max_payload, capacity) >= 0 {
-            return Ok(id);
+        match bind(id) {
+            Ok(()) => return Ok(id),
+            Err(Errno::AlreadyExists) => {}
+            Err(err) => return Err(err),
         }
     }
-    Err(tairix_abi::Errno::AddressInUse)
+    Err(Errno::AddressInUse)
 }
 
 /// Receive the oldest delivered message from a port this task bound
@@ -4748,6 +4757,93 @@ pub fn waitset_create() -> i64 {
     ret as i64
 }
 
+/// Close a wait-set this process created (`SyscallNumber::WAITSET_CLOSE`),
+/// releasing its members and returning what the set and its members were
+/// charged against the `wait-sets` and `wait-set-members` limits.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] for a handle naming no set of this process.
+pub fn waitset_close(set: u64) -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke; the handle is a plain
+    // scalar the kernel re-checks against the caller.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the status encoding (0, else -errno).
+    let ret = unsafe { raw_syscall(NUM_WAITSET_CLOSE, [set, 0, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    Ok(())
+}
+
+/// A wait-set this process created, closed when dropped.
+#[derive(Debug)]
+pub struct WaitSet(u64);
+
+impl WaitSet {
+    /// Create an empty wait-set.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal — [`Errno::LimitExceeded`] past the `wait-sets`
+    /// limit.
+    pub fn create() -> Result<Self, Errno> {
+        Errno::syscall_result(waitset_create()).map(Self)
+    }
+
+    /// The set's handle, which [`waitset_wait`] names.
+    #[must_use]
+    pub const fn handle(&self) -> u64 {
+        self.0
+    }
+
+    /// Add a member observing `id` of `kind`, reported as `token`.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal: a resource the caller does not hold, a duplicate,
+    /// or [`Errno::LimitExceeded`] past the `wait-set-members` limit.
+    pub fn add(&self, kind: WaitSourceKind, id: u64, token: u64) -> Result<(), Errno> {
+        match waitset_ctl(self.0, WaitSetOp::Add, kind, id, token) {
+            0 => Ok(()),
+            refused => Err(Errno::from_syscall(refused)),
+        }
+    }
+
+    /// Park until a member is ready or the monotonic clock reaches
+    /// `deadline_ns` ([`u64::MAX`] for never), answering the ready member's
+    /// token, or [`None`] once the deadline is due.
+    ///
+    /// # Errors
+    ///
+    /// The wait itself failing.
+    pub fn wait_until(&self, deadline_ns: u64) -> Result<Option<u64>, Errno> {
+        let timeout_ns = if deadline_ns == u64::MAX {
+            u64::MAX
+        } else {
+            let now = clock_get();
+            if now >= deadline_ns {
+                return Ok(None);
+            }
+            deadline_ns - now
+        };
+        let mut token = 0u64;
+        match waitset_wait(self.0, timeout_ns, &mut token) {
+            0 => Ok(Some(token)),
+            failed => match Errno::from_syscall(failed) {
+                Errno::TimedOut => Ok(None),
+                other => Err(other),
+            },
+        }
+    }
+}
+
+impl Drop for WaitSet {
+    fn drop(&mut self) {
+        let _ = waitset_close(self.0);
+    }
+}
+
 /// Add or remove a member of a wait-set (`SyscallNumber::WAITSET_CTL`;
 /// `plans/USB.md` U3a3).
 ///
@@ -4844,19 +4940,18 @@ pub fn waitset_wait(set: u64, timeout_ns: u64, token_out: &mut u64) -> i64 {
 /// reason rather than falling back to a spin.
 #[must_use = "park_forever returning means the park failed; the caller must exit fail-loud"]
 pub fn park_forever() -> i64 {
-    let set = waitset_create();
-    if set < 0 {
-        return set;
-    }
-    #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel-minted handle.
-    let set = set as u64;
+    let ret = waitset_create();
+    let Ok(handle) = u64::try_from(ret) else {
+        return ret;
+    };
+    let set = WaitSet(handle);
     let mut token = 0u64;
     loop {
         // An empty membership with no timeout parks indefinitely; the kernel
         // absorbs spurious wakes internally. A `0` return (a ready member on
         // an empty set) is impossible by construction, so any return at all
         // is surfaced to the caller as the park having failed.
-        let ret = waitset_wait(set, u64::MAX, &mut token);
+        let ret = waitset_wait(set.handle(), u64::MAX, &mut token);
         if ret != 0 {
             return ret;
         }
@@ -8003,42 +8098,31 @@ mod tests {
     }
 
     #[test]
-    fn spin_until_ns_returns_immediately_for_a_past_deadline() {
-        // A deadline already reached must not yield even once (no needless reschedule).
-        let mut yields = 0u32;
-        spin_until_ns(100, || 100, || yields += 1);
-        assert_eq!(yields, 0);
-        // Strictly-past as well.
-        spin_until_ns(50, || 100, || yields += 1);
-        assert_eq!(yields, 0);
-    }
-
-    #[test]
-    fn spin_until_ns_yields_until_the_clock_reaches_the_deadline() {
-        // The clock advances by 250 ns per read; the loop must yield until it
-        // is at least the 1_000 ns deadline, then stop.
-        let clock = core::cell::Cell::new(0u64);
-        let now = || {
-            let t = clock.get();
-            clock.set(t + 250);
-            t
-        };
-        let mut yields = 0u32;
-        spin_until_ns(1_000, now, || yields += 1);
-        // Reads at 0,250,500,750 are below the deadline (4 yields); the read
-        // at 1_000 stops the loop.
-        assert_eq!(yields, 4);
-    }
-
-    #[test]
     fn park_until_ns_returns_immediately_for_a_past_deadline() {
         // A deadline already reached must not park even once (no needless
         // kernel round-trip).
         let mut parks = 0u32;
-        park_until_ns(100, || 100, |_| parks += 1);
+        let mut park = |_| {
+            parks += 1;
+            true
+        };
+        park_until_ns(100, || 100, &mut park);
+        park_until_ns(50, || 100, &mut park);
         assert_eq!(parks, 0);
-        park_until_ns(50, || 100, |_| parks += 1);
-        assert_eq!(parks, 0);
+    }
+
+    #[test]
+    fn park_until_ns_stops_when_the_park_can_no_longer_block() {
+        let mut parks = 0u32;
+        park_until_ns(
+            1_000,
+            || 0,
+            |_| {
+                parks += 1;
+                false
+            },
+        );
+        assert_eq!(parks, 1, "a refused park is not retried against the clock");
     }
 
     #[test]
@@ -8056,6 +8140,7 @@ mod tests {
                 // The first wake is spurious (the clock is only half way);
                 // the second reaches the deadline.
                 clock.set(if clock.get() == 0 { 400 } else { 1_000 });
+                true
             },
         );
         assert_eq!(granted.into_inner(), alloc::vec![1_000, 600]);
@@ -8216,16 +8301,109 @@ mod tests {
     }
 
     #[test]
+    fn only_a_clash_draws_another_private_port_id() {
+        let mut ids = [0, 7, 9, 11].into_iter();
+        let mut tried = alloc::vec::Vec::new();
+        let bound = draw_private_port(
+            || Ok(ids.next().unwrap_or(13)),
+            |id| {
+                tried.push(id);
+                if id == 7 {
+                    Err(Errno::AlreadyExists)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(bound, Ok(9));
+        assert_eq!(tried, [7, 9], "zero is skipped and a clash draws again");
+
+        let mut attempts = 0;
+        assert_eq!(
+            draw_private_port(
+                || Ok(5),
+                |_| {
+                    attempts += 1;
+                    Err(Errno::LimitExceeded)
+                }
+            ),
+            Err(Errno::LimitExceeded),
+            "a refusal that is no clash is the answer, never retried or renamed"
+        );
+        assert_eq!(attempts, 1);
+        assert_eq!(
+            draw_private_port(|| Ok(5), |_| Err(Errno::AlreadyExists)),
+            Err(Errno::AddressInUse),
+            "a budget of clashes fails closed"
+        );
+    }
+
+    #[test]
+    fn a_wait_until_a_past_deadline_answers_without_parking() {
+        let set = WaitSet(4);
+        let (number, _) = capture(500, || assert_eq!(set.wait_until(500), Ok(None)));
+        assert_eq!(number, NUM_CLOCK_GET, "only the clock was read");
+        let (number, args) = capture(0, || assert_eq!(set.wait_until(u64::MAX), Ok(Some(0))));
+        assert_eq!(number, NUM_WAITSET_WAIT);
+        assert_eq!(args[1], u64::MAX, "no deadline waits without a timeout");
+        seam::arm(refusal(Errno::TimedOut));
+        assert_eq!(set.wait_until(u64::MAX), Ok(None));
+        seam::arm(refusal(Errno::NotFound));
+        assert_eq!(set.wait_until(u64::MAX), Err(Errno::NotFound));
+    }
+
+    #[test]
+    fn an_owned_port_and_wait_set_are_released_when_dropped() {
+        let (number, args) = capture(0, || drop(PrivatePort(0x5EAD_0008)));
+        assert_eq!(number, NUM_PORT_UNBIND);
+        assert_eq!(args[0], 0x5EAD_0008);
+        let (number, args) = capture(0, || drop(WaitSet(6)));
+        assert_eq!(number, NUM_WAITSET_CLOSE);
+        assert_eq!(args[0], 6);
+    }
+
+    #[test]
+    fn a_timed_park_is_a_futex_wait_needing_no_wait_set() {
+        // The armed clock reads 5, so the park asks for the whole window; the
+        // same register then answers the wait as a non-timeout, which ends it.
+        let (number, args) = capture(5, || park_ns(100));
+        assert_eq!(number, NUM_FUTEX_WAIT);
+        assert_eq!(args[1], 0, "the word the wait expects");
+        assert_eq!(args[2], 100, "the whole remaining window");
+        assert_eq!(args[0] % 4, 0, "a naturally aligned word");
+    }
+
+    #[test]
+    fn the_release_calls_name_the_one_handle_they_release() {
+        let (number, args) = capture(0, || assert_eq!(port_unbind(0x5EAD_0007), Ok(())));
+        assert_eq!(number, NUM_PORT_UNBIND);
+        assert_eq!(args, [0x5EAD_0007, 0, 0, 0, 0, 0]);
+        let (number, args) = capture(0, || assert_eq!(waitset_close(3), Ok(())));
+        assert_eq!(number, NUM_WAITSET_CLOSE);
+        assert_eq!(args, [3, 0, 0, 0, 0, 0]);
+        seam::arm(refusal(Errno::NotFound));
+        assert_eq!(waitset_close(3), Err(Errno::NotFound));
+        seam::arm(refusal(Errno::PermissionDenied));
+        assert_eq!(port_unbind(3), Err(Errno::PermissionDenied));
+    }
+
+    #[test]
     fn a_private_port_is_never_bound_unless_its_id_was_drawn() {
         // A refused draw fails closed before any bind is attempted.
         seam::arm(refusal(Errno::EntropyNotReady));
-        assert_eq!(bind_private_port(64, 4), Err(Errno::EntropyNotReady));
+        assert_eq!(
+            PrivatePort::bind(64, 4).map(|port| port.id()),
+            Err(Errno::EntropyNotReady)
+        );
         let (number, _) = seam::last_call().expect("the draw trapped");
         assert_eq!(number, NUM_RANDOM_GET);
         // The seam reports a full draw but writes nothing, so every id comes
         // back zero: zero is skipped, never bound, and the budget runs out.
         seam::arm(8);
-        assert_eq!(bind_private_port(64, 4), Err(Errno::AddressInUse));
+        assert_eq!(
+            PrivatePort::bind(64, 4).map(|port| port.id()),
+            Err(Errno::AddressInUse)
+        );
         let (number, _) = seam::last_call().expect("the draws trapped");
         assert_eq!(number, NUM_RANDOM_GET, "no bind was ever attempted");
     }

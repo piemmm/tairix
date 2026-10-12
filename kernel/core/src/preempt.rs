@@ -29,13 +29,11 @@
 //!   indefinitely. The shared return to user mode then looks once more
 //!   with interrupts masked ([`settle_before_user`]), so neither latch
 //!   set after that decision waits for the next interrupt.
-//! * **Clear** — the dispatcher calls `clear_preempt_pending`
-//!   immediately before switching a task in: the scheduler has just made
-//!   a fresh decision (and re-armed the one-shot for a contended CPU),
-//!   which supersedes any tick latched before the switch. This is what
-//!   keeps a user-mode tick — which already preempts immediately through
-//!   the ports' user-mode preempt point — from also triggering a
-//!   spurious yield on the resumed task's next syscall.
+//! * **Retire** — every dispatch decision is made through
+//!   [`dispatcher_step`], which retires both latches before the policy
+//!   decides: the decision supersedes whatever the outgoing task left, so
+//!   a user-mode tick that already preempted it cannot also yield the task
+//!   switched in next.
 //!
 //! A tick is latched whether the one-shot fired for a preemption quantum
 //! or for a blocking-wait wakeup: both mean the scheduler may have newly
@@ -115,7 +113,7 @@
 
 use core::sync::atomic::Ordering;
 
-use tairix_kernel_sched_api::CpuId;
+use tairix_kernel_sched_api::{CpuId, SchedResult, SchedulerArch, SchedulerPolicy, StepOutcome};
 use tairix_sync::once::OnceCell;
 
 use crate::cpu_state;
@@ -378,21 +376,33 @@ pub fn yield_if_owed() -> bool {
     current_cpu().is_some_and(honour_latches)
 }
 
-/// Discard any tick latched on `cpu` before the scheduler's current
-/// dispatch decision.
+/// Make one dispatch decision on `cpu`: retire both reschedule latches the
+/// outgoing task left, then step `scheduler`.
 ///
-/// Called by the dispatcher immediately before switching a task in: the
-/// decision (and the freshly re-armed one-shot) supersedes a tick that
-/// fired before the switch, so the incoming task starts its quantum
-/// without inheriting a stale reschedule obligation. An out-of-range
-/// `cpu` is a no-op.
-pub(crate) fn clear_preempt_pending(cpu: CpuId) {
+/// Retiring first means a latch set before the decision cannot yield the task
+/// it switches in — that task starts its quantum, and its monopoly-guard
+/// window, clean — while one set after it is honoured: a wake placed here, or
+/// a quantum the policy armed inside the step that expires before the task
+/// reaches user mode. Retiring any later, in the task shim, would erase
+/// exactly those. The kernel's dispatch loop makes every decision through
+/// here, as must any harness loop standing in for it.
+///
+/// # Errors
+/// Whatever the policy's [`SchedulerPolicy::step`] reports.
+pub fn dispatcher_step<A, P>(scheduler: &P, cpu: CpuId) -> SchedResult<StepOutcome>
+where
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+{
+    retire_reschedule_latches(cpu);
+    scheduler.step(cpu)
+}
+
+/// Retire both of `cpu`'s reschedule latches. An out-of-range `cpu` is a
+/// no-op.
+fn retire_reschedule_latches(cpu: CpuId) {
     if let Some(state) = cpu_state::get(cpu) {
         state.preempt_pending.store(false, Ordering::Release);
-        // The dispatcher has just made a fresh decision, so a monopoly
-        // yield requested against the task it is switching away from is
-        // superseded too: the incoming task starts clean and earns its own
-        // monopoly-guard window from this point.
         state.force_yield.store(false, Ordering::Release);
     }
 }
@@ -595,10 +605,10 @@ mod tests {
     }
 
     #[test]
-    fn clearing_supersedes_a_latched_tick() {
+    fn retiring_supersedes_a_latched_tick() {
         let cpu = crate::test_boot::claim_cpu();
         note_preempt_tick(cpu);
-        clear_preempt_pending(cpu);
+        retire_reschedule_latches(cpu);
         assert!(!take_preempt_pending(cpu));
     }
 
@@ -616,7 +626,7 @@ mod tests {
         let beyond = u32::try_from(crate::cpu_state::TEST_CPUS).expect("test CPU count fits u32");
         note_preempt_tick(beyond);
         assert!(!take_preempt_pending(beyond));
-        clear_preempt_pending(beyond);
+        retire_reschedule_latches(beyond);
         note_preempt_tick(u32::MAX);
         assert!(!take_preempt_pending(u32::MAX));
     }
@@ -716,15 +726,67 @@ mod tests {
         );
     }
 
-    /// The dispatcher's `clear_preempt_pending` supersedes a forced yield
-    /// requested against the outgoing task, so the incoming task starts its
-    /// monopoly-guard window clean.
     #[test]
-    fn clearing_supersedes_a_forced_yield() {
+    fn retiring_supersedes_a_forced_yield() {
         let cpu = crate::test_boot::claim_cpu();
         request_forced_yield(cpu);
-        clear_preempt_pending(cpu);
+        retire_reschedule_latches(cpu);
         assert!(!take_forced_yield(cpu));
+    }
+
+    fn scheduler_on(cpu: CpuId) -> crate::sched::Scheduler<crate::test_arch::TestArch> {
+        let arch = std::sync::Arc::new(crate::test_arch::TestArch::on_cpu(cpu));
+        crate::sched::Scheduler::new(crate::sched::SchedulerConfig::defaults_for(cpu + 1), arch)
+            .expect("scheduler builds")
+    }
+
+    /// The regression for a harness loop that stepped the policy without
+    /// retiring: an IPI taken while the CPU idled force-yielded the next task
+    /// it dispatched, so a stream of them kept a task from ever reaching user
+    /// mode.
+    #[test]
+    fn a_dispatch_decision_retires_the_latches_left_before_it() {
+        let cpu = crate::test_boot::claim_cpu();
+        let scheduler = scheduler_on(cpu);
+        let inherited = std::sync::Arc::new(core::sync::atomic::AtomicBool::new(true));
+        let seen = std::sync::Arc::clone(&inherited);
+        scheduler
+            .spawn(cpu, crate::sched::Priority::Normal, move |_| {
+                let forced = take_forced_yield(cpu);
+                let tick = take_preempt_pending(cpu);
+                seen.store(forced || tick, Ordering::SeqCst);
+                tairix_kernel_sched_api::TaskAction::Exit
+            })
+            .expect("task admitted");
+        note_preempt_tick(cpu);
+        request_forced_yield(cpu);
+        assert!(matches!(
+            dispatcher_step(&scheduler, cpu),
+            Ok(StepOutcome::Ran(_))
+        ));
+        assert!(
+            !inherited.load(Ordering::SeqCst),
+            "the task switched in must not inherit either latch"
+        );
+    }
+
+    #[test]
+    fn a_latch_set_after_the_decision_is_honoured() {
+        let cpu = crate::test_boot::claim_cpu();
+        let scheduler = scheduler_on(cpu);
+        scheduler
+            .spawn(cpu, crate::sched::Priority::Normal, move |_| {
+                request_forced_yield(cpu);
+                note_preempt_tick(cpu);
+                tairix_kernel_sched_api::TaskAction::Exit
+            })
+            .expect("task admitted");
+        assert!(matches!(
+            dispatcher_step(&scheduler, cpu),
+            Ok(StepOutcome::Ran(_))
+        ));
+        assert!(take_forced_yield(cpu));
+        assert!(take_preempt_pending(cpu));
     }
 
     /// A forced yield fires even with no competitor and no latched tick —

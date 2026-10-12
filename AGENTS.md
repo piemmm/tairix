@@ -628,7 +628,7 @@ tairix/
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
 │   ├── curses/          # First-party curses / TUI screen-model library.
 │   ├── cursor/          # Shared pointer cursors.
-│   ├── devids/          # PCI/USB ID-database engine.
+│   ├── devids/          # Hardware-identity databases: PCI, USB, IEEE OUI.
 │   ├── devmatch/        # Deterministic hardware-node <-> driver bind-table match.
 │   ├── disasm/          # Instruction decoders for the four Tier-1 ISAs.
 │   ├── discovery/       # Link-local service discovery client (discovery-v1).
@@ -1659,6 +1659,7 @@ You are not exempt from any rule above. In addition:
     | I2C: the shared-memory transfer protocol, target channels, the BSC and DesignWare/LPSS controllers, HID over I2C | `plans/I2C.md` |
     | ACPI's namespace: the namespace node, region access, the AML interpreter bus driver, device publication from `_CRS`/`_DSM`/`_PRT`, power-off and events | `plans/ACPI.md` |
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |
+    | Network discovery/inventory/mapping: `netmap.app`, and the neighbour-cache, routing-table/gateway and traceroute ICMP-error read seams it adds to the stack | `plans/NETMAP.md` |
     | Dynamic address configuration: the DHCPv4 client (RFC 2131/2132) engine and its stack integration | `plans/DHCP.md` |
     | The interactive network terminal client: the `telnet` command, its Network Virtual Terminal option negotiation, and the terminal relay | `plans/TELNET.md` |
     | Name resolution: the DNS stub resolver (RFC 1035/RFC 5452) engine and its socket integration | `plans/DNS.md` |

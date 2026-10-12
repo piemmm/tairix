@@ -133,6 +133,11 @@
 //!   discipline (poll floor, one request in flight, rotation, backoff,
 //!   Kiss-o'-Death). The clock *policy* that drives it — whether a machine
 //!   should sync at all — is `lib/timesync`, not here.
+//! - [`trace`] — hop-by-hop path tracing (the traceroute method) over
+//!   hop-limited echo probes: a pure state machine that numbers and paces the
+//!   probes, settles each from its echo outcome or deadline, and ends the
+//!   path at the destination or a terminal error. `traceroute` and `netmap`
+//!   drive the one definition.
 //!
 //! # Security
 //!
@@ -178,6 +183,7 @@ pub mod tcp;
 #[cfg(test)]
 mod test_support;
 mod timeutil;
+pub mod trace;
 pub mod txoffload;
 pub mod udp;
 

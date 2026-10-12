@@ -386,6 +386,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 4,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 &sink,
             )
             .expect("unrestricted endpoint"),
@@ -504,6 +505,7 @@ mod tests {
                 CapabilitySet::empty(),
                 CapabilitySet::empty(),
                 limits,
+                tairix_abi::RLIMIT_INFINITY,
                 &sink,
             )
             .expect("a privileged bind"),

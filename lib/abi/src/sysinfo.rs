@@ -682,6 +682,28 @@ impl SysinfoQueryId {
     /// and whether it is recording, is theirs.
     pub const GLOBAL_AUDIO_STREAMS: Self = Self(49);
 
+    /// List every interface's neighbour cache, ARP and IPv6 Neighbour
+    /// Discovery alike: one
+    /// [`NetNeighborRecord`](crate::net_ipc::NetNeighborRecord) per entry
+    /// (interface, address, reachability, and link-layer address once
+    /// resolved), paged by a [`PageRequest`]. The surface
+    /// `state:net/<iface>/neighbors` reads.
+    ///
+    /// Requires `CAP_SYSINFO_HW` and is audited: it names the link-layer
+    /// addresses of other hosts on every attached segment — hardware identity
+    /// of machines that are not this one, and a census of who is on the link.
+    pub const NET_NEIGHBORS: Self = Self(50);
+
+    /// List every interface's routes, the IPv6 default routers learned from
+    /// Router Advertisements included: one
+    /// [`NetRouteRecord`](crate::net_ipc::NetRouteRecord) per route, paged
+    /// by a [`PageRequest`]. The surface `state:net/<iface>/routes` reads, and
+    /// the one place a DHCP- or RA-learned gateway is visible.
+    ///
+    /// Requires `CAP_SYSINFO_GLOBAL` and is audited: it is system-wide
+    /// topology, the same class as [`Self::NET_INTERFACE_STATE`].
+    pub const NET_ROUTES: Self = Self(51);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -1253,6 +1275,18 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::GLOBAL_AUDIO_STREAMS,
         name: "global_audio_streams",
+        required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_NEIGHBORS,
+        name: "net_neighbors",
+        required_capability: Some(CapabilityId::SYSINFO_HW),
+        audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::NET_ROUTES,
+        name: "net_routes",
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
     },
@@ -7015,6 +7049,21 @@ mod tests {
             let spec = spec_for(query).unwrap();
             assert_eq!(spec.required_capability, gate);
             assert_eq!(spec.audit, gate.is_some());
+        }
+    }
+
+    /// Neighbours name other machines' hardware addresses, so they sit under
+    /// the hardware gate; routes are topology, under the global one.
+    #[test]
+    fn the_neighbor_and_route_queries_are_gated_and_audited() {
+        for (query, id, gate) in [
+            (SysinfoQueryId::NET_NEIGHBORS, 50, CapabilityId::SYSINFO_HW),
+            (SysinfoQueryId::NET_ROUTES, 51, CapabilityId::SYSINFO_GLOBAL),
+        ] {
+            assert_eq!(query.as_u16(), id);
+            let spec = spec_for(query).unwrap();
+            assert_eq!(spec.required_capability, Some(gate));
+            assert!(spec.audit);
         }
     }
 

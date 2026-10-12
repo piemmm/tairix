@@ -5,9 +5,10 @@
 //! [`DnsTransport`](tairix_net::dns::DnsTransport) over the `netsock-v1` UDP
 //! datagram socket (`tairix_rt::net`): it draws query ids from a generator
 //! keyed once from the kernel CSPRNG, binds a process-private delivery
-//! port ([`tairix_rt::bind_private_port`] — the kernel's port registry is
+//! port ([`tairix_rt::PrivatePort`] — the kernel's port registry is
 //! machine-wide, so a fixed id would let one long-lived client deny
-//! resolution to every other process for the boot),
+//! resolution to every other process for the boot), released with the
+//! transport,
 //! opens the datagram socket for a server's address family on demand with a
 //! CSPRNG-drawn ephemeral source port (the RFC 5452 source-port randomisation
 //! the socket layer contributes), sends each encoded query, and parks on the
@@ -34,7 +35,7 @@ use tairix_abi::discovery_ipc::Families;
 use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketId};
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_abi::time::Duration64;
-use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::Errno;
 use tairix_discovery::DiscoveryError;
 use tairix_net::addr::IpAddr;
@@ -43,6 +44,7 @@ use tairix_net::dns::{
 };
 use tairix_procinfo::IpcTransport;
 use tairix_rng::{FastRng, RandU64};
+use tairix_rt::{PrivatePort, WaitSet};
 
 use crate::{nothing, pointer_name, resolve_name, resolve_pointer, LinkLookup, ResolveError};
 
@@ -138,11 +140,10 @@ pub struct RtDnsTransport {
 /// The monotonic clock, an on-demand UDP datagram socket per address family,
 /// and the delivery-port park.
 struct Sockets {
-    /// This transport's process-private delivery port
-    /// ([`tairix_rt::bind_private_port`]).
-    deliver: u64,
     /// The wait-set the delivery port is registered with; `wait` parks on it.
-    set: u64,
+    set: WaitSet,
+    /// This transport's process-private delivery port.
+    deliver: PrivatePort,
     /// The IPv4 datagram socket, opened on the first query to a v4 server.
     v4: Option<SocketId>,
     /// The IPv6 datagram socket, opened on the first query to a v6 server.
@@ -166,25 +167,13 @@ impl RtDnsTransport {
     /// port cannot be bound, or the wait-set cannot be created or armed.
     pub fn open() -> Result<Self, Errno> {
         let rng = FastRng::keyed_by(tairix_rt::random_fill)?;
-        let deliver = tairix_rt::bind_private_port(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY)?;
-        let set = tairix_rt::waitset_create();
-        let Ok(set) = u64::try_from(set) else {
-            return Err(Errno::from_syscall(set));
-        };
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            deliver,
-            DELIVER_TOKEN,
-        ) != 0
-        {
-            return Err(Errno::NotImplemented);
-        }
+        let deliver = PrivatePort::bind(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY)?;
+        let set = WaitSet::create()?;
+        set.add(WaitSourceKind::Port, deliver.id(), DELIVER_TOKEN)?;
         Ok(Self {
             sockets: Sockets {
-                deliver,
                 set,
+                deliver,
                 v4: None,
                 v6: None,
                 scratch: tairix_util::fallible::filled(SocketDatagram::MAX_WIRE_LEN, 0u8)
@@ -275,7 +264,7 @@ impl Sockets {
         if let Some(socket) = *cached {
             return Ok(socket);
         }
-        let socket = tairix_rt::net::socket(family, self.deliver)?;
+        let socket = tairix_rt::net::socket(family, self.deliver.id())?;
         // A local port of 0 asks the stack for a CSPRNG-drawn ephemeral port
         // — the RFC 5452 source-port randomisation that widens an off-path
         // spoofer's search space beyond the query id alone.
@@ -293,7 +282,7 @@ impl Sockets {
     /// the stack posts a datagram or the one-shot timer elapses.
     fn park(&self, nanos: u64) {
         let mut token = 0u64;
-        let _ = tairix_rt::waitset_wait(self.set, nanos, &mut token);
+        let _ = tairix_rt::waitset_wait(self.set.handle(), nanos, &mut token);
     }
 }
 
@@ -330,7 +319,7 @@ impl DnsTransport for Sockets {
             }
             // Only the stack's own deliveries come back: the receive
             // discards a forged sender before the engine could see it.
-            match tairix_rt::net::recv(self.deliver, &mut self.scratch) {
+            match tairix_rt::net::recv(self.deliver.id(), &mut self.scratch) {
                 Ok(SocketDelivery::Datagram(datagram)) => {
                     let len = datagram.payload.len().min(buf.len());
                     buf[..len].copy_from_slice(&datagram.payload[..len]);
@@ -390,6 +379,19 @@ pub fn host_address(host: &str, family: Option<NetAddrFamily>) -> Option<IpAddr>
         return Some(address);
     }
     RtDnsTransport::open().ok()?.host_address(host, family)
+}
+
+/// Resolve a command-line target operand like [`host_address`], saying why
+/// when it names no address.
+///
+/// # Errors
+///
+/// The [`crate::TargetFailure`] the tool reports after the host it was given.
+pub fn target_address(
+    host: &str,
+    family: Option<NetAddrFamily>,
+) -> Result<IpAddr, crate::TargetFailure> {
+    host_address(host, family).ok_or_else(|| crate::target_failure(host, family))
 }
 
 /// Turn a resolver [`IpAddr`] into the `netsock-v1` destination

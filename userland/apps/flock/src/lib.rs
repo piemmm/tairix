@@ -87,7 +87,7 @@ pub const EXIT_NOT_EXECUTABLE: i32 = 126;
 pub const DEFAULT_CONFLICT_CODE: i32 = 1;
 
 /// Nanoseconds in one second, for the `-w` operand's conversion.
-const NANOS_PER_SECOND: u64 = 1_000_000_000;
+const NANOS_PER_SECOND: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// The largest `-w` operand accepted, in whole seconds.
 ///

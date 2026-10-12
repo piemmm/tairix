@@ -16,11 +16,12 @@ use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, McastFilter, N
 use tairix_abi::driver::net_channel::RxFilterPolicy;
 use tairix_abi::driver::net_ring::{FrameOffload, FrameRings};
 use tairix_abi::net_ipc::{
-    validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord,
-    NetBondMode, NetCounters, NetIfAddr, NetIfKind, NetInterfaceConfigMsg,
+    address_parts, validate_if_name, NetAddrFamily, NetAddrState, NetBondConfigMsg,
+    NetBondMemberRecord, NetBondMode, NetCounters, NetIfAddr, NetIfKind, NetInterfaceConfigMsg,
     NetInterfaceCountersRecord, NetInterfaceFactsRecord, NetInterfaceRatesRecord,
-    NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetServerAddr, NetworkSettings,
-    IF_NAME_LEN, MAX_RESOLVER_SERVERS, NET_IF_MAX_ADDRS,
+    NetInterfaceStateRecord, NetIpv4Config, NetIpv6Config, NetNeighborRecord, NetNeighborState,
+    NetRouteOrigin, NetRouteRecord, NetServerAddr, NetworkSettings, IF_NAME_LEN,
+    MAX_RESOLVER_SERVERS, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::{Duration64, Errno, MAX_TIME_SERVERS};
 use tairix_hash::HashSeed;
@@ -28,10 +29,11 @@ use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_net::bond::{flow_hash, Bond, BondConfig, BondEvent, BondMode, MemberId};
 use tairix_net::iface::{eui64_interface_id, AddrError, TempAddrSource};
 use tairix_net::internet_checksum;
+use tairix_net::neigh::NeighborState;
 use tairix_net::rate::{RateCounters, RateMeter, RateSelector};
 use tairix_net::stack::{
-    RxMeta, SendError, Stack, StackConfig, StackEvent, StackOutput, TxFrame, TxOffload,
-    MULTICAST_GROUPS_AVAILABLE,
+    EchoProbe, RouteKind, RxMeta, SendError, Stack, StackConfig, StackEvent, StackOutput, TxFrame,
+    TxOffload, MULTICAST_GROUPS_AVAILABLE,
 };
 use tairix_net::tcp::TcpSegmentMeta;
 
@@ -1032,10 +1034,7 @@ impl Netstack {
     ///   destination, a usable source address, or an up link.
     pub fn originate_echo(
         &mut self,
-        dest: IpAddr,
-        identifier: u16,
-        sequence: u16,
-        payload: &[u8],
+        probe: &EchoProbe<'_>,
         now: Duration64,
     ) -> Result<FrameBatch, Errno> {
         let mut deferred: Option<Errno> = None;
@@ -1047,13 +1046,10 @@ impl Netstack {
         } = self;
         let peer_hash_key = *peer_hash_key;
         for iface in interfaces.iter_mut() {
-            match iface
-                .stack
-                .send_echo_request(dest, identifier, sequence, payload, now, out)
-            {
+            match iface.stack.send_echo_request(probe, now, out) {
                 Ok(()) => {
                     let frames = core::mem::take(&mut out.frames);
-                    let flow = flow_of(peer_hash_key, dest, identifier, sequence);
+                    let flow = flow_of(peer_hash_key, probe.dest, probe.identifier, probe.sequence);
                     if let Some(tag) = egress_tag(&iface.role, iface.name, flow) {
                         return Ok(alloc::vec![(tag, frames)]);
                     }
@@ -2216,7 +2212,121 @@ impl Netstack {
         }
         records
     }
+
+    /// Every interface's neighbour-cache entries, ARP and Neighbour Discovery
+    /// alike, flattened in interface-table order then the cache's recency
+    /// order, from the `offset`th entry and at most `limit` records (the
+    /// [`NetstackRequest::Neighbors`](tairix_abi::net_ipc::NetstackRequest::Neighbors)
+    /// page). A read refreshes no entry, so listing the cache never changes
+    /// which one eviction takes.
+    #[must_use]
+    pub fn neighbor_records(&self, offset: u32, limit: u16) -> Vec<NetNeighborRecord> {
+        self.interfaces
+            .iter()
+            .flat_map(|iface| {
+                iface.stack.neighbors().iter().map(move |(ip, state, mac)| {
+                    let (family, addr) = address_parts(ip);
+                    NetNeighborRecord {
+                        interface: iface.name,
+                        family,
+                        state: neighbor_state(state),
+                        addr,
+                        mac: mac.map(|mac| mac.0),
+                    }
+                })
+            })
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect()
+    }
+
+    /// Every interface's routes — IPv4, IPv6, and the IPv6 default route
+    /// through each router a Router Advertisement named — flattened in
+    /// interface-table order, from the `offset`th route and at most `limit`
+    /// records (the
+    /// [`NetstackRequest::Routes`](tairix_abi::net_ipc::NetstackRequest::Routes)
+    /// page).
+    #[must_use]
+    pub fn route_records(&self, offset: u32, limit: u16) -> Vec<NetRouteRecord> {
+        self.interfaces
+            .iter()
+            .flat_map(|iface| {
+                let stack = &iface.stack;
+                let v4 = stack.routes_v4().iter().map(move |route| {
+                    route_record(
+                        iface.name,
+                        IpAddr::V4(route.prefix.addr()),
+                        route.prefix.prefix_len(),
+                        route.next_hop.map(IpAddr::V4),
+                        route_origin(route.metadata),
+                    )
+                });
+                let v6 = stack.routes_v6().iter().map(move |route| {
+                    route_record(
+                        iface.name,
+                        IpAddr::V6(route.prefix.addr()),
+                        route.prefix.prefix_len(),
+                        route.next_hop.map(IpAddr::V6),
+                        route_origin(route.metadata),
+                    )
+                });
+                let routers = stack.default_routers().iter().map(move |router| {
+                    route_record(
+                        iface.name,
+                        IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                        0,
+                        Some(IpAddr::V6(router)),
+                        NetRouteOrigin::DefaultRouter,
+                    )
+                });
+                v4.chain(v6).chain(routers)
+            })
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect()
+    }
 }
+
+/// The wire form of an engine neighbour state.
+fn neighbor_state(state: NeighborState) -> NetNeighborState {
+    match state {
+        NeighborState::Incomplete => NetNeighborState::Incomplete,
+        NeighborState::Reachable => NetNeighborState::Reachable,
+        NeighborState::Stale => NetNeighborState::Stale,
+        NeighborState::Delay => NetNeighborState::Delay,
+        NeighborState::Probe => NetNeighborState::Probe,
+    }
+}
+
+/// The wire form of an engine route's origin.
+fn route_origin(kind: RouteKind) -> NetRouteOrigin {
+    match kind {
+        RouteKind::Connected => NetRouteOrigin::Connected,
+        RouteKind::Static => NetRouteOrigin::Static,
+        RouteKind::RaOnLink => NetRouteOrigin::RouterAdvertisement,
+        RouteKind::Redirect => NetRouteOrigin::Redirect,
+    }
+}
+
+/// One route record; destination and next hop share the destination's family.
+fn route_record(
+    interface: [u8; IF_NAME_LEN],
+    dest: IpAddr,
+    prefix: u8,
+    next_hop: Option<IpAddr>,
+    origin: NetRouteOrigin,
+) -> NetRouteRecord {
+    let (family, dest) = address_parts(dest);
+    NetRouteRecord {
+        interface,
+        family,
+        prefix,
+        origin,
+        dest,
+        next_hop: next_hop.map(|hop| address_parts(hop).1),
+    }
+}
+
 /// Map the engine's monotonic stack counters onto the four accumulators
 /// the [`RateMeter`] takes throughput rates over.
 fn rate_counters_of(stack: &Stack) -> RateCounters {

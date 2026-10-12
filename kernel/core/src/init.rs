@@ -49,9 +49,7 @@ use crate::dispatch_slot::AlreadyInstalledError;
 use crate::peerwatch::PeerWatch;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 use crate::random::{BootReserve, RandomReserve};
-use crate::rlimit::{
-    default_dir_watches, default_file_lock_records, default_pinned_limit_bytes, LimitSet,
-};
+use crate::rlimit::LimitSet;
 use crate::spawn::{InitSpawn, InitSpawnCtx};
 use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx, SpawnCredential};
 
@@ -1323,13 +1321,6 @@ fn run_dispatch_loop<A: KernelArch>(
         // long idle park (which would be a false soft- or hard-lockup
         // report).
         crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Active);
-        // Retire any reschedule obligation left by the task that just
-        // suspended before the policy makes its next decision. CFQ arms
-        // the incoming task's one-shot inside `step`; clearing later in
-        // the task shim would erase a timer that expired between that arm
-        // and the switch to user mode, leaving a CPU-bound task with no
-        // armed timer and no pending reschedule.
-        crate::preempt::clear_preempt_pending(cpu);
         // Kernel-activity breadcrumb: this CPU is entering the scheduler
         // step (task pick + context switch). A CPU that wedges here reports
         // `k_site=dispatch`, distinguishing a scheduler/run-queue stall from
@@ -1339,7 +1330,7 @@ fn run_dispatch_loop<A: KernelArch>(
             crate::watchdog::KernelBreadcrumb::Dispatch,
             0,
         );
-        let outcome = scheduler.step(cpu);
+        let outcome = crate::preempt::dispatcher_step(scheduler, cpu);
         // A user task can suspend back to this dispatcher directly from a
         // timer exception. Native exception entry masks device interrupts,
         // and that per-CPU mask is not part of the task context, so the
@@ -2367,22 +2358,15 @@ fn run_phases<A: KernelArch>(
         mastering,
     }));
 
-    // Derive the per-boot resource-limit default from the discovered
-    // installed-memory total: the pinned-memory budget (`mem_pin`,
-    // `plans/STRESSTEST.md` ST2) scales with the machine instead of a
-    // hard-wired ceiling, and every task — the boot floor and all its
-    // descendants — inherits it through the registry's one default. A
-    // boot that never learned the total keeps the compile-time floor
-    // rather than fabricating a zero bound that would refuse every pin.
+    // The per-boot limits scale with the machine, and every task inherits
+    // them through the registry's one default. A boot that never learned the
+    // total keeps the compile-time floor rather than fabricating a zero bound
+    // that would refuse every pin.
     if installed_memory_bytes != 0 {
         state
             .aspaces
             .write()
-            .set_default_limits(LimitSet::with_derived_defaults(
-                default_pinned_limit_bytes(installed_memory_bytes),
-                default_file_lock_records(installed_memory_bytes),
-                default_dir_watches(installed_memory_bytes),
-            ));
+            .set_default_limits(LimitSet::derived_from_memory(installed_memory_bytes));
     }
 
     // Hand the arch port a `'static` reference to the freshly

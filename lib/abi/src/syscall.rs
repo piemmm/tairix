@@ -658,7 +658,10 @@ impl SyscallNumber {
     /// Binding a **restricted-sender** endpoint (non-empty `send_caps`)
     /// requires [`crate::CapabilityId::IPC_BIND_PRIVILEGED`], enforced before any state is touched; an id already bound fails
     /// closed with [`crate::Errno::AlreadyExists`] so the kernel never
-    /// re-points a live endpoint. The endpoint is owned by
+    /// re-points a live endpoint. The endpoint's worst case — `capacity`
+    /// calls of the larger payload — is charged to the creator's
+    /// [`crate::LimitKind::IpcQueueBytes`] limit, and a bind past it fails
+    /// closed with [`crate::Errno::LimitExceeded`]. The endpoint is owned by
     /// the creating task and torn down (in-flight callers released
     /// fail-closed) when that task exits. A build with no
     /// call-endpoint registry wired fails closed with
@@ -929,7 +932,11 @@ impl SyscallNumber {
     /// never a per-wait array — and the set grows on demand rather than
     /// capping the number of sources at a fixed ceiling. Needs no capability:
     /// the set observes only resources the caller already holds, each
-    /// owner-checked when it is added.
+    /// owner-checked when it is added. Each set counts against the caller's
+    /// [`crate::LimitKind::WaitSets`] limit and each member against its
+    /// [`crate::LimitKind::WaitSetMembers`], so a set past either fails closed
+    /// with [`crate::Errno::LimitExceeded`]; [`Self::WAITSET_CLOSE`] returns
+    /// both.
     pub const WAITSET_CREATE: Self = Self(43);
 
     /// Add or remove a member of a wait-set created with
@@ -1742,9 +1749,11 @@ impl SyscallNumber {
     /// Bind an asynchronous IPC message port owned by the calling task.
     ///
     /// Arguments: `endpoint: u64` (the port id senders will name),
-    /// `max_payload: usize`, `capacity: usize` (both fail-closed bounds:
-    /// the payload cap is limited by the global ABI message ceiling and
-    /// the capacity bounds the kernel memory one port may pin). The port
+    /// `max_payload: usize`, `capacity: usize` (the payload cap is limited by
+    /// the global ABI message ceiling, and the port's worst case — `capacity`
+    /// messages of `max_payload` bytes — is charged to the caller's
+    /// [`crate::LimitKind::IpcQueueBytes`] limit, a bind past it failing
+    /// closed with [`crate::Errno::LimitExceeded`]). The port
     /// accepts [`Self::IPC_SEND`]s from any capable sender — each message
     /// carries its sender's kernel-attested [`crate::Origin`], so the
     /// owner authenticates senders on receive — and is drained only by
@@ -1754,8 +1763,8 @@ impl SyscallNumber {
     /// requires `CAP_IPC_BIND_PRIVILEGED`, exactly as
     /// [`Self::CALL_CREATE`] does, so a squatter cannot claim a service
     /// rendezvous; an id already bound fails closed with
-    /// [`crate::Errno::AlreadyExists`]. The port is torn down when its
-    /// owner exits.
+    /// [`crate::Errno::AlreadyExists`]. The port is torn down by
+    /// [`Self::PORT_UNBIND`] or when its owner exits.
     pub const PORT_BIND: Self = Self(88);
 
     /// Read the kernel's boot-static machine summary
@@ -2850,6 +2859,30 @@ impl SyscallNumber {
     /// [`Errno::OutOfMemory`], [`Errno::OutOfRange`]).
     pub const CONSOLE_RELOCATE: Self = Self(141);
 
+    /// Close a wait-set the caller created with [`Self::WAITSET_CREATE`],
+    /// releasing its members and returning what the set and its members were
+    /// charged against the caller's limits.
+    ///
+    /// Arguments: `set: u64`, the set's handle. Returns `0`, or `-errno`:
+    /// [`crate::Errno::NotFound`] for a handle naming no set of the caller.
+    /// A wait another of the caller's threads has under way on the set ends
+    /// at its next event or deadline, as an `epoll_wait` on a descriptor
+    /// closed under it does. Ungated and not audited, like the create it
+    /// undoes.
+    pub const WAITSET_CLOSE: Self = Self(142);
+
+    /// Tear down a port the caller bound with [`Self::PORT_BIND`], discarding
+    /// any messages still queued and returning what it was charged against
+    /// the caller's [`crate::LimitKind::IpcQueueBytes`] limit.
+    ///
+    /// Arguments: `endpoint: u64`, the port's id. Returns `0`, or `-errno`:
+    /// [`crate::Errno::NotFound`] for an id naming no port, and
+    /// [`crate::Errno::PermissionDenied`] for a port another process owns. A
+    /// sender parked for room in the port is woken to find it gone, and the
+    /// id is free to bind again. Ungated — the caller unbinds only its own
+    /// port — and audited like the bind it undoes.
+    pub const PORT_UNBIND: Self = Self(143);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3135,6 +3168,11 @@ mod tests {
         assert_eq!(SyscallNumber::FS_WATCH.as_u16(), 136);
         assert_eq!(SyscallNumber::FS_WATCH_READ.as_u16(), 137);
         assert_eq!(SyscallNumber::PORT_ADMIT.as_u16(), 138);
+        assert_eq!(SyscallNumber::FOREGROUND_HELD.as_u16(), 139);
+        assert_eq!(SyscallNumber::HW_NODE_SETTLE.as_u16(), 140);
+        assert_eq!(SyscallNumber::CONSOLE_RELOCATE.as_u16(), 141);
+        assert_eq!(SyscallNumber::WAITSET_CLOSE.as_u16(), 142);
+        assert_eq!(SyscallNumber::PORT_UNBIND.as_u16(), 143);
     }
 
     #[test]

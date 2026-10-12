@@ -1,8 +1,11 @@
 //! Unit tests for the one address rendering every surface prints.
 
-use super::{render_if_addr, render_ip, render_server};
+use super::{render_if_addr, render_ip, render_mac, render_neighbor, render_route, render_server};
 
-use tairix_abi::net_ipc::{NetAddrFamily, NetAddrState, NetIfAddr, NetServerAddr};
+use tairix_abi::net_ipc::{
+    NetAddrFamily, NetAddrState, NetIfAddr, NetNeighborRecord, NetNeighborState, NetRouteOrigin,
+    NetRouteRecord, NetServerAddr, IF_NAME_LEN,
+};
 
 /// A V6 slot holding `groups`.
 fn v6(groups: [u16; 8]) -> [u8; 16] {
@@ -128,4 +131,57 @@ fn an_interface_address_carries_its_prefix_and_only_a_notable_state() {
         state: NetAddrState::Deprecated,
     };
     assert_eq!(render_if_addr(&deprecated), "fe80::1/64 (deprecated)");
+}
+
+#[test]
+fn a_mac_renders_as_lowercase_colon_separated_octets() {
+    assert_eq!(
+        render_mac([0x02, 0xAB, 0x00, 0x0f, 0xC0, 0xFF]),
+        "02:ab:00:0f:c0:ff"
+    );
+}
+
+#[test]
+fn a_route_renders_its_destination_next_hop_and_origin() {
+    let on_link = NetRouteRecord {
+        interface: [0u8; IF_NAME_LEN],
+        family: NetAddrFamily::V6,
+        prefix: 64,
+        origin: NetRouteOrigin::RouterAdvertisement,
+        dest: v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0]),
+        next_hop: None,
+    };
+    assert_eq!(render_route(&on_link), "2001:db8::/64 (ra)");
+    let default_router = NetRouteRecord {
+        prefix: 0,
+        origin: NetRouteOrigin::DefaultRouter,
+        dest: [0u8; 16],
+        next_hop: Some(v6([0xfe80, 0, 0, 0, 0, 0, 0, 1])),
+        ..on_link
+    };
+    assert_eq!(
+        render_route(&default_router),
+        "::/0 via fe80::1 (default-router)"
+    );
+}
+
+#[test]
+fn a_neighbor_renders_its_mac_only_once_resolved() {
+    let resolved = NetNeighborRecord {
+        interface: [0u8; IF_NAME_LEN],
+        family: NetAddrFamily::V4,
+        state: NetNeighborState::Delay,
+        addr: v4([192, 168, 7, 1]),
+        mac: Some([2, 0, 0, 0, 0, 1]),
+    };
+    assert_eq!(
+        render_neighbor(&resolved),
+        "192.168.7.1 at 02:00:00:00:00:01 (delay)"
+    );
+    let resolving = NetNeighborRecord {
+        state: NetNeighborState::Incomplete,
+        mac: None,
+        ..resolved
+    };
+    assert_eq!(render_neighbor(&resolving), "192.168.7.1 (incomplete)");
 }

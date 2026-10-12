@@ -200,6 +200,19 @@ fn default_router_selection_prefers_reachable_then_rotates() {
 }
 
 #[test]
+fn default_router_iter_lists_the_live_routers_without_selecting() {
+    let mut list = DefaultRouterList::new(4);
+    let now = Duration64::from_secs(1);
+    assert_eq!(list.iter().count(), 0);
+    list.update(ROUTER_A, 1800, now);
+    list.update(ROUTER_B, 1800, now);
+    let listed: alloc::vec::Vec<_> = list.iter().collect();
+    assert_eq!(listed, [ROUTER_A, ROUTER_B]);
+    list.update(ROUTER_A, 0, now);
+    assert_eq!(list.iter().collect::<alloc::vec::Vec<_>>(), [ROUTER_B]);
+}
+
+#[test]
 fn default_router_list_is_bounded() {
     let mut list = DefaultRouterList::new(1);
     let now = Duration64::from_secs(1);

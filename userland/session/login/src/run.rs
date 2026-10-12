@@ -207,8 +207,7 @@ mod program {
         }
 
         fn watch() -> Result<u64, Errno> {
-            let created = tairix_rt::waitset_create();
-            let set = u64::try_from(created).map_err(|_| Errno::from_syscall(created))?;
+            let set = Errno::syscall_result(tairix_rt::waitset_create())?;
             let members = [
                 (
                     WaitSourceKind::Stream,

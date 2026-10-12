@@ -70,9 +70,10 @@ kernel-attested sender is the network stack's own service account
 (`NETSTACK_UID`, checked by `from_network_stack`) and discard anything else
 unread (fail closed). Authenticating the account rather than whichever
 process posted first means a forger cannot win the first post, and a
-restarted stack is still believed. The port itself is bound through
-`tairix_rt::bind_private_port`, a CSPRNG-drawn process-private id, so no
-other process can squat on it before the client binds. The wrappers add no
+restarted stack is still believed. The port itself is a
+`tairix_rt::PrivatePort`, a CSPRNG-drawn process-private id unbound when the
+client drops it, so no other process can squat on it before the client binds
+and none is left behind after. The wrappers add no
 authority — every capability and input check stays kernel- and stack-side.
 
 ## The microkernel-honest transport
@@ -239,11 +240,14 @@ only ever receives replies to its own requests and cannot observe another's.
 `Connect` records a default peer address (an echo peer carries no port, so
 the port field must be `0`). `SendEcho` originates one echo request: the
 caller chooses the `sequence`, the stack fills in the identifier, and the
-payload follows the header. Inbound `StackEvent::EchoReply`s are
-demultiplexed to the echo socket whose identifier matches (and, when
-connected, whose peer matches the source) and delivered as a `SocketEcho`
-frame (magic `"NSKE"`) to the socket's delivery port. The IP time-to-live is
-not surfaced through this socket, so the `ping` tool prints no `ttl=` field.
+payload follows the header, and an optional hop limit caps how far it may
+travel. Inbound `StackEvent::EchoReply`s are demultiplexed to the echo socket
+whose identifier matches (and, when connected, whose peer matches the
+source); an ICMP error quoting one of the socket's own requests (and, when
+connected, naming its peer as the quoted destination) reaches it the same
+way. Both arrive as a `SocketEcho` frame (magic `"NSKE"`) on the socket's
+delivery port, in one ordered stream. The IP time-to-live is not surfaced
+through this socket, so the `ping` tool prints no `ttl=` field.
 
 The client links `tairix_rt::net::icmp_echo_socket` / `connect` /
 `send_echo` and drains replies with `recv_echo` (which, like `recv`, takes
@@ -254,10 +258,11 @@ is an administrative act (the Unix `CAP_NET_RAW`/setuid-`ping` model), so
 (`tairix_users::ADMINISTRATIVE_SET`); a program still receives it only if its
 own signed manifest requests it (`ping`), intersected with that ceiling.
 Ordinary transport use stays baseline `CAP_NET`. The whole echo path — open,
-neighbour resolution, request, reply demux — is proven live by the
-`netstack_ping_qemu_aarch64` two-process QEMU vertical (`plans/NETWORK.md`
-N8b-2b-β): a guest `ping` answered by a host passive ICMP echo responder over
-the shared IPv6 link-local wire.
+neighbour resolution, request, reply demux, and the ICMP errors routers send
+about a request — is proven live by the `netstack_icmp_qemu_aarch64`
+two-process QEMU vertical (`plans/NETWORK.md` N8b-2b-β, `plans/NETMAP.md`
+NM-S3): a guest `ping` and `traceroute` answered by a host echo peer that also
+plays two routers in front of itself, over the shared IPv6 link-local wire.
 
 ## Delivery (`SocketDatagram` / `SocketLinkEvent` / `SocketEcho`)
 
@@ -284,9 +289,13 @@ edges are never lost to a full port: the stack remembers what each socket was
 last told and tells it the rest once the port has room. `SocketDelivery::parse`
 tells the two datagram-socket frames apart by magic, and `tairix_rt::net::recv`
 returns it. A `SocketEcho` is the equivalent
-36-byte-header frame for an echo socket: the receiving
-`SocketId`, the source `SocketAddr` (no port), the echoed sequence number,
-and the echoed payload. The client decodes either after `ipc_recv`.
+40-byte-header frame for an echo socket: the receiving `SocketId`, what
+became of the request (`EchoOutcome`: a reply, a hop limit exceeded, a
+Destination Unreachable code, a Packet Too Big with its MTU, or a Parameter
+Problem with its code and pointer), the source `SocketAddr` (no port — the
+host that answered or the router that reported), the request's sequence
+number, and, for a reply alone, the echoed payload. The client decodes
+either after `ipc_recv`.
 
 ## Fail-closed decoding
 

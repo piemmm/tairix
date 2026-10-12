@@ -88,6 +88,8 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `AUDIO_DEVICES`          | none                 | no      | packed `AudioDeviceDescriptor`s     |
 | `SELF_AUDIO_STREAMS`     | none (self-scoped)   | no      | packed `StreamDescriptor`s          |
 | `GLOBAL_AUDIO_STREAMS`   | `CAP_SYSINFO_GLOBAL` | yes     | packed `StreamDescriptor`s          |
+| `NET_NEIGHBORS`          | `CAP_SYSINFO_HW`     | yes     | packed `NetNeighborRecord`s         |
+| `NET_ROUTES`             | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetRouteRecord`s            |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
 self-regulation reads a process makes about its own resource use: the

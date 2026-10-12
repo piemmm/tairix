@@ -20,11 +20,9 @@
 //! inherited descriptors, never a console device, and holds no ambient
 //! authority (the ICMP echo socket is capability-gated stack-side).
 //!
-//! The payload generator is deliberately the *fast* non-cryptographic
-//! xoshiro256++, seeded once from the kernel CSPRNG: bulk uncompressible
-//! bytes are not a security surface, so drawing every payload from the
-//! CSPRNG would spend the reserve for nothing, and rolling a private
-//! generator is forbidden — `lib/rng` owns both.
+//! The payload comes from `lib/rng`'s fast `ChaCha12` generator, keyed once
+//! from the kernel CSPRNG: drawing every payload from the CSPRNG itself would
+//! spend the reserve for nothing, and a private generator is forbidden.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -40,37 +38,15 @@ mod program {
 
     use alloc::format;
     use alloc::string::String;
-    use alloc::vec;
 
-    use tairix_abi::net::{SocketAddr, SocketEcho, SocketId};
-    use tairix_abi::net_ipc::NetAddrFamily;
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_ping::{
-        parse, run, Command, EchoReply, Output, PingError, PingIo, ResolveFailure, USAGE,
-    };
+    use tairix_ping::{parse, run, Command, EchoEvent, Output, PingError, PingIo, USAGE};
+    use tairix_resolver::TargetFailure;
     use tairix_rng::{FastRng, RandU64};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-
-    /// Delivery-port mailbox depth. Generous headroom so a burst of replies
-    /// queues rather than back-pressuring the stack.
-    const DELIVER_CAPACITY: usize = 16;
-
-    /// Wait-set token for the delivery port (one source, so any non-zero
-    /// token identifies it).
-    const DELIVER_TOKEN: u64 = 1;
-
-    /// One park slice while blocking for the next reply: the tool gives the
-    /// CPU up and is woken when the stack posts a reply or this one-shot
-    /// timer elapses — never a busy poll.
-    const RECV_PARK_NANOS: u64 = 20_000_000;
-
-    /// Attempts to retry a send that failed `NetworkUnreachable` (the link
-    /// is still coming up at boot), and the park between them.
-    const SEND_RETRIES: u32 = 200;
-    /// One-shot park between send retries (a tickless timed wait).
-    const SEND_RETRY_PARK_NANOS: u64 = 25_000_000;
+    use tairix_rt::net::EchoSocket;
 
     /// The production standard-output stream.
     struct RtOutput;
@@ -90,54 +66,28 @@ mod program {
         }
     }
 
-    /// The production [`PingIo`]: the monotonic clock, the ICMP echo socket,
-    /// and the wait-set park, over the `tairix-rt` syscall wrappers.
+    /// The production [`PingIo`]: the monotonic clock and the shared echo
+    /// socket, over the `tairix-rt` syscall wrappers.
     struct RtPingIo {
         /// The echo socket, opened by `connect` once the target resolved.
-        socket: Option<SocketId>,
-        /// The process-private port the stack delivers echo replies to.
-        deliver: u64,
-        set: u64,
-        /// The receive scratch buffer (reused across replies).
-        buf: alloc::vec::Vec<u8>,
+        socket: Option<EchoSocket>,
         /// The payload generator, seeded once from the kernel CSPRNG.
         rng: FastRng,
     }
 
     impl RtPingIo {
-        /// Bind the delivery port, arm the wait-set, and seed the payload
-        /// generator. The socket itself is opened by
+        /// Seed the payload generator. The socket itself is opened by
         /// [`PingIo::connect`](tairix_ping::PingIo::connect), once the target
-        /// has resolved and its family is known.
+        /// has resolved.
         fn open() -> Result<Self, PingError> {
-            let deliver = tairix_rt::bind_private_port(SocketEcho::MAX_WIRE_LEN, DELIVER_CAPACITY)
-                .map_err(PingError::Socket)?;
-            // A negative result is the kernel's `-errno`, never a handle.
-            let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
-                return Err(PingError::Socket(Errno::NotImplemented));
-            };
-            if tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Port,
-                deliver,
-                DELIVER_TOKEN,
-            ) != 0
-            {
-                return Err(PingError::Socket(Errno::NotImplemented));
-            }
             Ok(Self {
                 socket: None,
-                deliver,
-                set,
-                buf: vec![0u8; SocketEcho::MAX_WIRE_LEN],
                 rng: seed_generator()?,
             })
         }
 
-        fn park(&self, nanos: u64) {
-            let mut token = 0u64;
-            let _ = tairix_rt::waitset_wait(self.set, nanos, &mut token);
+        fn socket(&self) -> Result<&EchoSocket, Errno> {
+            self.socket.as_ref().ok_or(Errno::NotConnected)
         }
     }
 
@@ -155,20 +105,8 @@ mod program {
             &mut self,
             host: &str,
             family: Option<NetAddrFamily>,
-        ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure> {
-            // The literal-first, family-preference policy is the shared one,
-            // so `ping` and `telnet` cannot disagree about a host operand. A
-            // literal needs no query, which is what makes `ping <address>`
-            // work with no resolver configured.
-            if let Some(address) = tairix_resolver::host_address(host, family) {
-                return Ok(tairix_abi::net_ipc::address_parts(address));
-            }
-            // An operand that *is* a literal, merely of the excluded family,
-            // gets its own diagnosis: the fix is to drop the `-4`/`-6`.
-            if family.is_some() && tairix_resolver::literal_address(host, None).is_some() {
-                return Err(ResolveFailure::FamilyMismatch);
-            }
-            Err(ResolveFailure::Unknown)
+        ) -> Result<(NetAddrFamily, [u8; 16]), TargetFailure> {
+            tairix_resolver::target_address(host, family).map(tairix_abi::net_ipc::address_parts)
         }
 
         fn reverse(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Option<String> {
@@ -176,21 +114,7 @@ mod program {
         }
 
         fn connect(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Result<(), Errno> {
-            let socket = tairix_rt::net::icmp_echo_socket(family, self.deliver)?;
-            // An echo peer carries no port. Connecting records the default
-            // peer (so the stack filters replies to it) and assigns the
-            // socket's ICMP identifier; it performs no routing, so it never
-            // fails on a link that is still coming up.
-            let peer = SocketAddr {
-                family,
-                addr,
-                port: 0,
-            };
-            if let Err(errno) = tairix_rt::net::connect(socket, peer) {
-                let _ = tairix_rt::net::close(socket);
-                return Err(errno);
-            }
-            self.socket = Some(socket);
+            self.socket = Some(EchoSocket::connect(ip_from_parts(family, addr))?);
             Ok(())
         }
 
@@ -203,55 +127,29 @@ mod program {
         }
 
         fn send(&mut self, seq: u16, payload: &[u8]) -> Result<(), Errno> {
-            let socket = self.socket.ok_or(Errno::NotConnected)?;
-            let mut last = Errno::NetworkUnreachable;
-            for _ in 0..SEND_RETRIES {
-                match tairix_rt::net::send_echo(socket, None, seq, payload) {
-                    Ok(()) => return Ok(()),
-                    // The interface may not be bound yet at boot; park and
-                    // retry rather than record a spurious loss.
-                    Err(Errno::NetworkUnreachable) => {
-                        last = Errno::NetworkUnreachable;
-                        self.park(SEND_RETRY_PARK_NANOS);
-                    }
-                    Err(other) => return Err(other),
-                }
-            }
-            Err(last)
+            self.socket()?.send(seq, None, payload)
         }
 
-        fn recv(&mut self, deadline_ns: u64) -> Result<Option<EchoReply>, Errno> {
-            loop {
-                if tairix_rt::clock_get() >= deadline_ns {
-                    return Ok(None);
-                }
-                // Only the stack's own replies come back: the receive
-                // discards a forged sender unread.
-                match tairix_rt::net::recv_echo(self.deliver, &mut self.buf) {
-                    Ok(echo) => return Ok(Some(owned_reply(&echo))),
-                    // The mailbox is momentarily empty: park until the stack
-                    // posts a reply or the one-shot timer elapses.
-                    Err(Errno::WouldBlock) => self.park(RECV_PARK_NANOS),
-                    Err(other) => return Err(other),
-                }
-            }
+        fn await_network(&mut self, deadline_ns: u64) -> bool {
+            self.socket()
+                .is_ok_and(|socket| socket.await_network(deadline_ns))
+        }
+
+        fn recv(&mut self, deadline_ns: u64) -> Result<Option<EchoEvent>, Errno> {
+            self.socket
+                .as_mut()
+                .ok_or(Errno::NotConnected)?
+                .recv_until(deadline_ns, |echo| EchoEvent {
+                    seq: echo.sequence,
+                    outcome: echo.outcome,
+                    family: echo.source.family,
+                    addr: echo.source.addr,
+                    payload: echo.payload.to_vec(),
+                })
         }
 
         fn sleep_until(&mut self, deadline_ns: u64) {
-            while tairix_rt::clock_get() < deadline_ns {
-                let remaining = deadline_ns - tairix_rt::clock_get();
-                self.park(remaining);
-            }
-        }
-    }
-
-    /// Copy a borrowed [`SocketEcho`] into an owned [`EchoReply`].
-    fn owned_reply(echo: &SocketEcho<'_>) -> EchoReply {
-        EchoReply {
-            seq: echo.sequence,
-            family: echo.source.family,
-            addr: echo.source.addr,
-            payload: echo.payload.to_vec(),
+            tairix_rt::park_ns(deadline_ns.saturating_sub(tairix_rt::clock_get()));
         }
     }
 
@@ -265,8 +163,8 @@ mod program {
             &mut self,
             _host: &str,
             _family: Option<NetAddrFamily>,
-        ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure> {
-            Err(ResolveFailure::Unknown)
+        ) -> Result<(NetAddrFamily, [u8; 16]), TargetFailure> {
+            Err(TargetFailure::Unknown)
         }
         fn reverse(&mut self, _family: NetAddrFamily, _addr: [u8; 16]) -> Option<String> {
             None
@@ -281,7 +179,10 @@ mod program {
         fn send(&mut self, _seq: u16, _payload: &[u8]) -> Result<(), Errno> {
             Err(Errno::NotImplemented)
         }
-        fn recv(&mut self, _deadline_ns: u64) -> Result<Option<EchoReply>, Errno> {
+        fn await_network(&mut self, _deadline_ns: u64) -> bool {
+            false
+        }
+        fn recv(&mut self, _deadline_ns: u64) -> Result<Option<EchoEvent>, Errno> {
             Ok(None)
         }
         fn sleep_until(&mut self, _deadline_ns: u64) {}

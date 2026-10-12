@@ -76,8 +76,14 @@ cog), `Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`,
 their own: `About` (an `i` in a ring, beside the viewer's `Info` command),
 `Startup` (an arrow entering a door), `Caching` (a memory chip), `DateTime` (a
 clock face), `Ethernet` (a network plug), `WiFi` (the wireless fan), `Dns` (a
-signpost) and `TcpIp` (two opposed arrows) — and a `Generic` fallback
-diamond. A category never draws the tray reading or the single thing it stands
+signpost) and `TcpIp` (two opposed arrows) — the network map's device kinds
+(`Computer`, `Laptop`, `Server`, `Router`, `NetworkSwitch`, `Phone`, `Nas`,
+`IotDevice` — a smart bulb — `DeviceUnknown` — a question mark in an empty
+outline — and `Subnet`, three hosts tapped onto one line) and its
+operating-system emblems (`OsLinux`, a penguin; `OsAndroid`, the Android
+robot's head; `OsWindows`, a four-paned window; `OsApple`, the looped square of
+a Mac's Command key, for macOS and iOS alike), drawn as symbols with no badge
+plate of their own — and a `Generic` fallback diamond. A category never draws the tray reading or the single thing it stands
 beside (`Volume`, `Bell`, `Network`, `User`, `Disk`): each is drawn as a
 badge, below.
 `IconKind::for_asset` resolves a theme asset identifier to a kind and
@@ -123,6 +129,17 @@ menu row draws in its own colour — is the symbol alone, never a tinted plate.
 
 The badge is retained by `ArtworkCache` exactly as a glyph mask is, once per
 `(kind, side)`, and handed out as ready-coloured `IconPicture::Artwork`.
+
+`badge(kind, hue, shape, side)` is that same renderer for a caller that
+chooses the hue and the plate — a `PlateShape::Square` like a category's, or a
+`PlateShape::Round` disc. The network map stands every node on one, in the hue
+of what the node is, so its colours come from the one closed set and keep the
+same contrast floor; `BadgeHue::middle()` is the shade a line drawn in a hue
+takes. A kind with no symbol stands on its plate alone.
+
+The Android robot is reproduced or modified from work created and shared by
+Google and used according to terms described in the Creative Commons 3.0
+Attribution License.
 
 An **application bundle's own** icon, which every app must ship
 (`plans/APPS.md` §14), is authored as a raster master: a lit, shaded picture of

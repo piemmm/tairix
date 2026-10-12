@@ -80,7 +80,7 @@ fn exercise_decode(bytes: &[u8]) {
 }
 
 /// Probe every lookup surface, including boundary ids.
-fn exercise_lookups(ids: &DevIds<'_>) {
+fn exercise_lookups<B: AsRef<[u8]>>(ids: &DevIds<B>) {
     for id in [0u16, 1, 0x8086, 0xffff] {
         let _ = ids.vendor(id);
         let _ = ids.device(id, id);

@@ -29,10 +29,11 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::ipc::IPC_MESSAGE_MAX_PAYLOAD_LEN;
-use tairix_abi::{Errno, Origin, ProcId};
+use tairix_abi::{Errno, LimitKind, Origin, ProcId};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_kernel_sec::Charge;
 use tairix_log::{Field, Sink};
 use tairix_util::fmt::{format_hex_bytes, format_hex_u64, format_u64, format_usize};
 
@@ -142,9 +143,25 @@ pub struct Port {
     /// than in a registry keyed by endpoint so occupancy and the parties
     /// waiting on it cannot drift apart.
     room_waiters: tairix_sync::SpinLock<Vec<u64>>,
+    /// What the owner is charged for the queue this port may come to hold,
+    /// returned when the port is dropped.
+    _queue_charge: Charge,
 }
 
 impl Port {
+    /// The kernel memory a port with these bounds may come to hold — its
+    /// bookkeeping and a full mailbox of largest messages — and so what its
+    /// owner is charged against its `ipc-queue-bytes` limit.
+    #[must_use]
+    pub fn reservation(max_payload: u32, mailbox_capacity: usize) -> u64 {
+        crate::queue_reservation(
+            size_of::<Self>(),
+            size_of::<Message>(),
+            u64::from(max_payload),
+            mailbox_capacity,
+        )
+    }
+
     /// Create a new capability-checked port.
     ///
     /// `creator` must already hold every capability listed in
@@ -167,10 +184,17 @@ impl Port {
     ///   bind authority described above.
     /// * [`Errno::LengthOutOfRange`] if `max_payload >
     ///   IPC_MESSAGE_MAX_PAYLOAD_LEN` or `mailbox_capacity == 0`.
+    /// * [`Errno::LimitExceeded`] if the port's
+    ///   [`reservation`](Self::reservation) would carry the creator past
+    ///   `queue_limit`, its `ipc-queue-bytes` limit.
     ///
     /// On any failure exactly one
     /// [`AuditEvent::PortCreateDenied`] is emitted; on success exactly
     /// one [`AuditEvent::PortCreated`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "identity, authority, two bounds and the owner's budget are independent"
+    )]
     pub fn create<S: Sink + ?Sized>(
         id: EndpointId,
         creator: &TaskCapabilities,
@@ -178,6 +202,7 @@ impl Port {
         required_recv_caps: CapabilitySet,
         max_payload: u32,
         mailbox_capacity: usize,
+        queue_limit: u64,
         audit: &S,
     ) -> Result<Self, Errno> {
         let mut id_buf = [0u8; 16];
@@ -209,6 +234,18 @@ impl Port {
             return Err(Errno::PermissionDenied);
         }
 
+        let queue_charge = match creator.charges().charge(
+            LimitKind::IpcQueueBytes,
+            Self::reservation(max_payload, mailbox_capacity),
+            queue_limit,
+        ) {
+            Ok(charge) => charge,
+            Err(err) => {
+                record(audit, AuditEvent::PortCreateDenied, &[id_field]);
+                return Err(err);
+            }
+        };
+
         record(audit, AuditEvent::PortCreated, &[id_field]);
 
         Ok(Self {
@@ -226,6 +263,7 @@ impl Port {
                 refusal_recorded: false,
             }),
             room_waiters: tairix_sync::SpinLock::new(Vec::new()),
+            _queue_charge: queue_charge,
         })
     }
 
@@ -661,12 +699,80 @@ mod tests {
             CapabilitySet::empty(),
             IPC_MESSAGE_MAX_PAYLOAD_LEN + 1,
             8,
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
         .expect("oversize is refused");
         assert_eq!(err, Errno::LengthOutOfRange);
         assert!(sink.ids().contains(&AuditEvent::PortCreateDenied.id().0));
+    }
+
+    fn port_on(
+        creator: &TaskCapabilities,
+        id: u64,
+        queue_limit: u64,
+        sink: &RecordingSink,
+    ) -> Result<Port, Errno> {
+        Port::create(
+            EndpointId(id),
+            creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            64,
+            4,
+            queue_limit,
+            sink,
+        )
+    }
+
+    #[test]
+    fn create_charges_the_creator_its_worst_case_until_the_port_drops() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let reservation = Port::reservation(64, 4);
+        assert!(
+            reservation >= 4 * 64,
+            "a full mailbox of largest messages is charged"
+        );
+        let held = || creator.charges().held(LimitKind::IpcQueueBytes);
+        let first = port_on(&creator, 0x11, 2 * reservation, &sink).expect("fits");
+        let second = port_on(&creator, 0x12, 2 * reservation, &sink).expect("fits");
+        assert_eq!(held(), 2 * reservation);
+        assert_eq!(
+            port_on(&creator, 0x13, 2 * reservation, &sink).map(|p| p.id()),
+            Err(Errno::LimitExceeded)
+        );
+        assert_eq!(held(), 2 * reservation, "a refused port takes nothing");
+        let denied = AuditEvent::PortCreateDenied.id().0;
+        assert_eq!(sink.ids().iter().filter(|&&id| id == denied).count(), 1);
+        drop(first);
+        assert_eq!(held(), reservation);
+        drop(second);
+        assert_eq!(held(), 0);
+    }
+
+    #[test]
+    fn a_malformed_bound_is_refused_as_malformed_before_it_is_priced() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let err = Port::create(
+            EndpointId(0x14),
+            &creator,
+            CapabilitySet::empty(),
+            CapabilitySet::empty(),
+            IPC_MESSAGE_MAX_PAYLOAD_LEN + 1,
+            4,
+            0,
+            &sink,
+        )
+        .err();
+        assert_eq!(err, Some(Errno::LengthOutOfRange));
+        assert_eq!(
+            Port::reservation(IPC_MESSAGE_MAX_PAYLOAD_LEN, usize::MAX),
+            u64::MAX,
+            "an absurd depth saturates to more than any limit allows"
+        );
     }
 
     #[test]
@@ -680,6 +786,7 @@ mod tests {
             CapabilitySet::empty(),
             128,
             0,
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -699,6 +806,7 @@ mod tests {
             required_recv,
             128,
             8,
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -721,6 +829,7 @@ mod tests {
             CapabilitySet::empty(),
             128,
             8,
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -742,6 +851,7 @@ mod tests {
             CapabilitySet::empty(),
             128,
             8,
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("authorised");
@@ -764,6 +874,7 @@ mod tests {
             CapabilitySet::empty(),
             32,
             4,
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("open port");
@@ -956,6 +1067,7 @@ mod tests {
             CapabilitySet::empty(),
             16,
             2,
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("open");

@@ -34,10 +34,15 @@ patrón fijo cuando lo que se quiere es una carga determinista.
 
 De forma predeterminada `ping` envía una solicitud por segundo hasta
 interrumpirse; `-c` acota la cantidad. Cada respuesta indica el origen, el
-número de secuencia y el tiempo; una solicitud sin respuesta dentro del
-plazo muestra una línea de expiración. El resumen final indica los
-paquetes transmitidos y recibidos, el porcentaje de pérdida y los tiempos
-de ida y vuelta mínimo, medio y máximo. `-q` solo muestra la cabecera y el
+número de secuencia y el tiempo. Cuando un router, o el propio host,
+informa de un error sobre una solicitud —se agotó su límite de saltos, el
+destino es inalcanzable, el paquete es demasiado grande—, una línea `From`
+nombra a quien informa y el motivo. Una solicitud que no obtiene respuesta
+dentro del plazo no muestra nada. Si ninguna interfaz puede llevar aún una
+solicitud, esta espera hasta su plazo a que la red esté disponible. El
+resumen final indica los paquetes transmitidos y recibidos, los errores,
+el porcentaje de pérdida y los tiempos de ida y vuelta mínimo, medio y
+máximo con su desviación media. `-q` solo muestra la cabecera y el
 resumen.
 
 Cada respuesta nombra al par como `nombre (dirección)` cuando la

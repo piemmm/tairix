@@ -39,7 +39,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define TAIRIX_SYSINFO_QUERY_NAME_MAX 20u
 #define TAIRIX_SYSINFO_QUERY_RECORD_LEN 26u
-#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1300u
+#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1352u
 #define TAIRIX_SYSINFO_LOAD_FIXED_SHIFT 11u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
@@ -93,6 +93,8 @@
 #define TAIRIX_SYSINFO_QUERY_AUDIO_DEVICES ((uint16_t)47u)
 #define TAIRIX_SYSINFO_QUERY_SELF_AUDIO_STREAMS ((uint16_t)48u)
 #define TAIRIX_SYSINFO_QUERY_GLOBAL_AUDIO_STREAMS ((uint16_t)49u)
+#define TAIRIX_SYSINFO_QUERY_NET_NEIGHBORS ((uint16_t)50u)
+#define TAIRIX_SYSINFO_QUERY_NET_ROUTES ((uint16_t)51u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define TAIRIX_PROCESS_STATE_RUNNABLE ((uint8_t)0u)
@@ -187,7 +189,7 @@
 #define TAIRIX_PAGE_REQUEST_FRESH 0u
 
 /* Byte length of a full RESOURCE_LIMITS response: one record per LimitKind. */
-#define TAIRIX_SYSINFO_RESOURCE_LIMITS_REPORT_LEN 256u
+#define TAIRIX_SYSINFO_RESOURCE_LIMITS_REPORT_LEN 352u
 
 /* Envelope prefixing every sysinfo request; encoded little-endian on the wire. */
 typedef struct tairix_sysinfo_request_header {

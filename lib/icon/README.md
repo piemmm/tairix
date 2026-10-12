@@ -44,8 +44,15 @@ over a resolution-independent design grid, so the same glyph is
   category's hue, drawn at the exact side its slot asks for.
   `builtin_picture(kind, side)` answers the badge for a category and the
   glyph mask for every other kind; `glyph_mask` of a category is its symbol.
-  The symbols (a private `symbol` module) are SVG path data built through
-  `lib/svg`'s one flattener and stroker.
+  `badge(kind, hue, shape, side)` is the same renderer for a caller choosing
+  its own hue and a square or round `PlateShape`, as the network map does for
+  every node, and `BadgeHue::middle` the shade a line in a hue takes. The
+  symbols (a private `symbol` module) are SVG path data built through
+  `lib/svg`'s one flattener and stroker; they include the network map's device
+  kinds and its operating-system emblems (`OsLinux`, `OsWindows`, `OsApple`,
+  `OsAndroid` — the Android robot is reproduced or modified from work created
+  and shared by Google and used according to terms described in the Creative
+  Commons 3.0 Attribution License).
 - The drive kinds are `Disk` (the generic drive), `DiskHard`,
   `DiskSolidState`, and `DiskUsb`; they share one built-in disk glyph.
   `disk_icon(medium)` maps the `BlkDeviceClass` a mounted volume reports —

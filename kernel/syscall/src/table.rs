@@ -2988,6 +2988,26 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Close the caller's wait-set `set` (`waitset_close`), returning what it
+    /// and its members were charged.
+    ///
+    /// The implementation refuses a handle naming no set of the caller with
+    /// [`Errno::NotFound`]. The default implementation fails closed with
+    /// [`Errno::NotImplemented`].
+    fn waitset_close(&self, _caller: &CallerContext<'_>, _set: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Tear down the caller's port `endpoint` (`port_unbind`), returning what
+    /// it was charged.
+    ///
+    /// The implementation refuses a port the caller does not own, so a
+    /// process unbinds only its own. The default implementation fails closed
+    /// with [`Errno::NotImplemented`].
+    fn port_unbind(&self, _caller: &CallerContext<'_>, _endpoint: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Map `len` bytes of open file `fd`, starting at the page-aligned
     /// file byte `offset`, into the caller's own address space as a
     /// demand-paged, read-only private mapping, returning its base
@@ -4181,6 +4201,8 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[1])?;
                 self.handlers.console_relocate(caller, args.0[0], len)
             }
+            SyscallNumber::WAITSET_CLOSE => self.handlers.waitset_close(caller, args.0[0]),
+            SyscallNumber::PORT_UNBIND => self.handlers.port_unbind(caller, args.0[0]),
             SyscallNumber::PORT_RESOLVE => {
                 // args[0] is the non-null name `UserPtr`
                 // (dispatcher-checked); args[1] is the name length in
@@ -5900,6 +5922,16 @@ mod tests {
 
         fn foreground_held(&self, _c: &CallerContext<'_>, _fd: u32) -> SyscallResult {
             self.record("foreground_held");
+            Ok(0)
+        }
+
+        fn waitset_close(&self, _c: &CallerContext<'_>, _set: u64) -> SyscallResult {
+            self.record("waitset_close");
+            Ok(0)
+        }
+
+        fn port_unbind(&self, _c: &CallerContext<'_>, _endpoint: u64) -> SyscallResult {
+            self.record("port_unbind");
             Ok(0)
         }
 

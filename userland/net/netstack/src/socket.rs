@@ -78,9 +78,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_abi::net::{
-    encode_bind_reply, encode_send_reply, encode_socket_reply, ShutdownHow, SocketAddr,
-    SocketDatagram, SocketEcho, SocketId, SocketLinkEvent, SocketRequest, SocketStreamEvent,
-    SocketType, StreamCloseReason, SOCKET_MAX_DATAGRAM, SOCKET_PRIVILEGED_PORT_MAX,
+    encode_bind_reply, encode_send_reply, encode_socket_reply, EchoOutcome, ShutdownHow,
+    SocketAddr, SocketDatagram, SocketEcho, SocketId, SocketLinkEvent, SocketRequest,
+    SocketStreamEvent, SocketType, StreamCloseReason, SOCKET_MAX_DATAGRAM,
+    SOCKET_PRIVILEGED_PORT_MAX,
 };
 use tairix_abi::net_ipc::{
     address_parts, ip_from_parts, NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord,
@@ -94,7 +95,8 @@ use tairix_hash::{BuildSipHash13, HashSeed};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_net::addr::{Ecn, IpAddr, Ipv4Addr};
 use tairix_net::checksum::Pseudo;
-use tairix_net::stack::StackEvent;
+use tairix_net::icmp::IcmpErrorKind;
+use tairix_net::stack::{EchoProbe, StackEvent};
 use tairix_net::tcp::conn::{ResetReason, State, Tcb, TcpConfig};
 use tairix_net::tcp::listen::{CookieSecret, ListenConfig, Listener, ListenerStats, Peer};
 use tairix_net::tcp::{TcpSegment, TcpSegmentMeta};
@@ -736,9 +738,11 @@ impl SocketService {
                 socket,
                 dest,
                 sequence,
+                hop_limit,
                 payload,
             } => self.send_echo(
-                interfaces, entropy, audit, owner, socket, dest, sequence, payload, now, response,
+                interfaces, entropy, audit, owner, socket, dest, sequence, hop_limit, payload, now,
+                response,
             ),
         }
     }
@@ -1290,7 +1294,10 @@ impl SocketService {
     /// the socket's stack-owned ICMP identifier on first use. The caller
     /// chooses the `sequence`; the identifier is never caller-controlled, so
     /// a socket only ever receives replies to its own requests.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the dispatcher's shared context plus the request's own fields, each used once"
+    )]
     fn send_echo(
         &mut self,
         interfaces: &mut Netstack,
@@ -1300,6 +1307,7 @@ impl SocketService {
         socket: SocketId,
         dest: Option<SocketAddr>,
         sequence: u16,
+        hop_limit: Option<core::num::NonZeroU8>,
         payload: &[u8],
         now: Duration64,
         response: &mut [u8],
@@ -1326,7 +1334,14 @@ impl SocketService {
         // The identifier is the socket's globally-unique local id; assign
         // it on first send so replies demux to exactly this socket.
         let identifier = self.ensure_local_port(entropy, index)?;
-        match interfaces.originate_echo(ip_of(target), identifier, sequence, payload, now) {
+        let probe = EchoProbe {
+            dest: ip_of(target),
+            identifier,
+            sequence,
+            hop_limit,
+            payload,
+        };
+        match interfaces.originate_echo(&probe, now) {
             Ok(tx) => {
                 let len = status_reply(response)?.len;
                 Ok(SocketReply {
@@ -2088,68 +2103,101 @@ impl SocketService {
     /// `arrival` raised to the sockets that should receive it, returning an
     /// encoded delivery per matching socket: a [`SocketDatagram`] for a
     /// [`StackEvent::UdpDatagram`], or a [`SocketEcho`] for a
-    /// [`StackEvent::EchoReply`]. Any other event yields nothing.
+    /// [`StackEvent::EchoReply`] or [`StackEvent::EchoError`]. Any other event
+    /// yields nothing.
     #[must_use]
     pub fn deliver(&self, event: &StackEvent, arrival: [u8; IF_NAME_LEN]) -> Vec<Delivery> {
         match event {
             StackEvent::UdpDatagram { .. } => self.deliver_datagram(event, arrival),
-            StackEvent::EchoReply { .. } => self.deliver_echo(event),
+            StackEvent::EchoReply {
+                source,
+                identifier,
+                sequence,
+                payload,
+            } => self
+                .deliver_echo(
+                    *identifier,
+                    *source,
+                    *source,
+                    EchoOutcome::Reply,
+                    *sequence,
+                    payload,
+                )
+                .into_iter()
+                .collect(),
+            StackEvent::EchoError {
+                reporter,
+                destination,
+                identifier,
+                sequence,
+                kind,
+            } => echo_outcome(*kind)
+                .and_then(|outcome| {
+                    self.deliver_echo(
+                        *identifier,
+                        *destination,
+                        *reporter,
+                        outcome,
+                        *sequence,
+                        &[],
+                    )
+                })
+                .into_iter()
+                .collect(),
             _ => Vec::new(),
         }
     }
 
-    /// Route one [`StackEvent::EchoReply`] to the echo socket whose
-    /// stack-assigned identifier matches the reply's, filtered to the
-    /// connected peer when one is set.
-    fn deliver_echo(&self, event: &StackEvent) -> Vec<Delivery> {
-        let StackEvent::EchoReply {
-            source,
-            identifier,
+    /// Deliver what became of one echo request to the echo socket whose
+    /// stack-assigned identifier it carries: at most one socket, because the
+    /// identifier is unique in its family. `peer` is the host the request
+    /// went to (the reply's source, or an error's quoted destination), which a
+    /// connected socket requires to be its own peer; `source` is who
+    /// answered.
+    fn deliver_echo(
+        &self,
+        identifier: u16,
+        peer: IpAddr,
+        source: IpAddr,
+        outcome: EchoOutcome,
+        sequence: u16,
+        payload: &[u8],
+    ) -> Option<Delivery> {
+        let (peer_family, peer_bytes) = address_parts(peer);
+        let (src_family, src_bytes) = address_parts(source);
+        if peer_family != src_family {
+            return None;
+        }
+        let entry = &self.sockets[self.demux_index(src_family, identifier)?];
+        let Proto::Echo(echo) = &entry.proto else {
+            return None;
+        };
+        if entry.family != src_family {
+            return None;
+        }
+        if echo.peer.is_some_and(|connected| {
+            connected.family != peer_family || connected.addr != peer_bytes
+        }) {
+            return None;
+        }
+        let echo_msg = SocketEcho {
+            socket: entry.id,
+            outcome,
+            source: SocketAddr {
+                family: src_family,
+                addr: src_bytes,
+                port: 0,
+            },
             sequence,
             payload,
-        } = event
-        else {
-            return Vec::new();
         };
-        let (src_family, src_bytes) = address_parts(*source);
-        let mut out = Vec::new();
-        // The identifier lives in `local_port` and is unique in its family,
-        // so at most one socket matches — a reply never crosses sockets.
-        if let Some(entry) = self
-            .demux_index(src_family, *identifier)
-            .map(|i| &self.sockets[i])
-        {
-            let Proto::Echo(echo) = &entry.proto else {
-                return out;
-            };
-            if entry.family != src_family {
-                return out;
-            }
-            if let Some(peer) = echo.peer {
-                if peer.family != src_family || peer.addr != src_bytes {
-                    return out;
-                }
-            }
-            let echo_msg = SocketEcho {
-                socket: entry.id,
-                source: SocketAddr {
-                    family: src_family,
-                    addr: src_bytes,
-                    port: 0,
-                },
-                sequence: *sequence,
-                payload,
-            };
-            let mut buf = alloc::vec![0u8; SocketEcho::HEADER_LEN + payload.len()];
-            if let Ok(len) = echo_msg.encode(&mut buf) {
-                buf.truncate(len);
-                out.push(Delivery {
-                    deliver_port: entry.deliver_port,
-                    datagram: buf,
-                });
-            }
-        }
-        out
+        let mut buf = alloc::vec![0u8; SocketEcho::HEADER_LEN + payload.len()];
+        let len = echo_msg.encode(&mut buf).ok()?;
+        buf.truncate(len);
+        Some(Delivery {
+            deliver_port: entry.deliver_port,
+            datagram: buf,
+        })
     }
 
     /// Route one [`StackEvent::UdpDatagram`] to the datagram sockets that
@@ -3000,6 +3048,21 @@ fn refuse(audit: &dyn Sink, message: &str, err: Errno) -> Result<SocketReply, Er
 }
 
 /// The IP address a [`SocketAddr`] denotes.
+/// What an ICMP error about an echo request means to the socket that sent
+/// it. A reassembly timeout is about fragments, not a probe in transit, so it
+/// is no answer to one.
+fn echo_outcome(kind: IcmpErrorKind) -> Option<EchoOutcome> {
+    match kind {
+        IcmpErrorKind::TimeExceeded { code: 0 } => Some(EchoOutcome::HopLimitExceeded),
+        IcmpErrorKind::TimeExceeded { .. } => None,
+        IcmpErrorKind::DestinationUnreachable { code } => Some(EchoOutcome::Unreachable { code }),
+        IcmpErrorKind::PacketTooBig { mtu } => Some(EchoOutcome::PacketTooBig { mtu }),
+        IcmpErrorKind::ParameterProblem { code, pointer } => {
+            Some(EchoOutcome::ParameterProblem { code, pointer })
+        }
+    }
+}
+
 fn ip_of(addr: SocketAddr) -> IpAddr {
     ip_from_parts(addr.family, addr.addr)
 }

@@ -159,6 +159,10 @@ static PIN_BOUND_ARG: [u8; DEC_MAX] = dec_bytes(PIN_BOUND_BYTES);
 static WITHIN_ARG: [u8; DEC_MAX] = dec_bytes(WITHIN_BYTES);
 /// [`OVER_BYTES`] as a decimal argument-vector value.
 static OVER_ARG: [u8; DEC_MAX] = dec_bytes(OVER_BYTES);
+/// [`MIGRATION_ENDPOINT`] as a decimal argument-vector value.
+static MIGRATION_ENDPOINT_ARG: [u8; DEC_MAX] = dec_bytes(MIGRATION_ENDPOINT);
+/// [`IPC_ROUNDS`] as a decimal argument-vector value.
+static IPC_ROUNDS_ARG: [u8; DEC_MAX] = dec_bytes(IPC_ROUNDS);
 
 /// Liveness budget for the cooperative driver loops, sized generously for
 /// QEMU TCG. In the single-CPU `drive_process` loop, where the process
@@ -198,6 +202,11 @@ const FAIL_SECONDARY: NonZeroU16 = fail_point!(18);
 const FAIL_NO_MIGRATION: NonZeroU16 = fail_point!(19);
 /// The direct physical map could not be installed over the board's RAM.
 const FAIL_PHYSMAP: NonZeroU16 = fail_point!(20);
+/// The endpoint served a different number of calls than the role makes.
+const FAIL_ROUNDS: NonZeroU16 = fail_point!(21);
+/// The caller migrated more than [`MAX_MIGRATIONS`] times.
+#[cfg(migration_smp)]
+const FAIL_BOUNCED: NonZeroU16 = fail_point!(22);
 /// Base finisher for a non-zero parent exit; the parent's diagnostic exit
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
@@ -254,6 +263,18 @@ static IRQ_CONTROLLER: UnsupportedController = UnsupportedController;
 
 /// Private call endpoint used only by the migration fixture role.
 const MIGRATION_ENDPOINT: u64 = 0x4d49_4752_4154_4501;
+
+/// Blocking calls the migration role makes on [`MIGRATION_ENDPOINT`].
+const IPC_ROUNDS: u64 = 64;
+
+/// Most fresh-CPU observations of the caller the four-vCPU run tolerates.
+///
+/// Each round blocks once, and a wake landing on the paused source is stolen
+/// once, so a caller seen on new CPUs far more often than its rounds is being
+/// bounced between dispatchers rather than running. Failing here turns that
+/// livelock into a prompt failure instead of a silent stall.
+#[cfg(migration_smp)]
+const MAX_MIGRATIONS: u64 = 4 * IPC_ROUNDS;
 
 fn note(id: EventId, message: &'static str) {
     log(
@@ -508,8 +529,9 @@ fn leak_subsystems(counter_hz: u64) -> Subsystems {
 }
 
 /// Register the private migration endpoint and spawn its event-driven echo
-/// server as a real scheduler kthread.
-fn install_echo_server(sys: &Subsystems) {
+/// server as a real scheduler kthread, returning the count of replies it has
+/// posted.
+fn install_echo_server(sys: &Subsystems) -> Arc<AtomicU64> {
     let empty = CapabilitySet::empty();
     let creator = TaskCapabilities::derive(
         ProcessId(0x4d49_4752),
@@ -528,6 +550,7 @@ fn install_echo_server(sys: &Subsystems) {
             max_reply: 8,
             capacity: 8,
         },
+        tairix_abi::RLIMIT_INFINITY,
         &SERIAL_SINK,
     ) {
         Ok(endpoint) => Arc::new(endpoint),
@@ -539,6 +562,8 @@ fn install_echo_server(sys: &Subsystems) {
     let server_id = Arc::new(AtomicU64::new(0));
     let body_id = Arc::clone(&server_id);
     let body_endpoint = Arc::clone(&endpoint);
+    let replies = Arc::new(AtomicU64::new(0));
+    let body_replies = Arc::clone(&replies);
     let server = spawn_kthread(
         sys.sched,
         ContextSwitchHal::new(),
@@ -558,6 +583,7 @@ fn install_echo_server(sys: &Subsystems) {
                                 Ok(poster) => poster,
                                 Err(_) => qemu_exit::exit_failure(FAIL_SERVER),
                             };
+                        body_replies.fetch_add(1, Ordering::Relaxed);
                         tairix_kernel_core::waitq::call_wake_task(poster);
                     }
                     RecvCall::Empty => {
@@ -573,6 +599,7 @@ fn install_echo_server(sys: &Subsystems) {
         qemu_exit::exit_failure(FAIL_SERVER);
     };
     server_id.store(server, Ordering::Release);
+    replies
 }
 
 /// Drive CPU 0 until the kernel-parented `pid` exits and return its code.
@@ -583,7 +610,7 @@ fn drive_process(sys: &Subsystems, wait: &KernelProcessWait<Aarch64BinArch>, pid
     // the signed pid the wait ABI carries is exact.
     let pid = pid.cast_signed();
     for _ in 0..MAX_STEPS {
-        let _ = sys.sched.step(BOOT_CPU);
+        let _ = tairix_kernel_core::dispatcher_step(sys.sched, BOOT_CPU);
         let _ = tairix_kernel_core::waitq::drain_pending_wakes();
         match wait.poll(ProcessId(0), pid, WaitFlags::empty()) {
             Ok(reaped) => match reaped.status {
@@ -646,27 +673,24 @@ extern "C" fn migration_secondary(cpu: CpuId) -> ! {
             unsafe { exceptions::enable_irq() };
             continue;
         }
-        let outcome = scheduler.step(cpu);
+        let outcome = tairix_kernel_core::dispatcher_step(scheduler, cpu);
         if matches!(outcome, Ok(StepOutcome::Idle)) {
             // Tickless idle park under the production park/wake protocol
-            // (`kernel_core::init::run_dispatch_loop`): mask IRQ taking,
-            // then — under the mask — drain any flagged wake and re-check
-            // both for ready work (a placement IPI landing during the step
-            // enqueued a just-woken task here) and a fresh pause request,
-            // and `wfi` only if still genuinely idle. A placement or release
-            // IPI landing in the check->park window stays pending-but-masked
-            // and wakes the `wfi`, so a readied task can never be stranded
-            // on this sleeping CPU (the lost-wakeup that stalled this
-            // vertical under the full matrix). Restore taking afterwards so
-            // the pending IPI dispatches.
+            // (`kernel_core::init::run_dispatch_loop`): mask IRQ taking, then
+            // re-check under the mask for a flagged wake, ready work here, a
+            // pause request, and work stranded where nothing runs it — what a
+            // controller kick asks this CPU to steal — and `wfi` only if none
+            // holds. An IPI landing in the check->park window stays pending
+            // and wakes the `wfi`, so none is lost.
             //
             // SAFETY: `mask_irq`/`enable_irq` toggle `DAIF.I` only; vectors
             // + GICv2 are live on this CPU.
             unsafe { exceptions::mask_irq() };
             let woke = tairix_kernel_core::waitq::drain_pending_wakes();
             let ready = scheduler.has_ready_work(cpu).unwrap_or(false);
-            let paused = SMP_PAUSED.load(Ordering::Acquire) & (1u32 << cpu) != 0;
-            if !(woke || ready || paused) {
+            let pause = SMP_PAUSED.load(Ordering::Acquire);
+            let paused = pause & (1u32 << cpu) != 0;
+            if !(woke || ready || paused || stranded(scheduler, pause)) {
                 // SAFETY: `wfi` wakes on a pending-but-masked interrupt (the
                 // scheduler's placement IPI when work lands here, a device
                 // IRQ, or the controller's release IPI); no lock is held.
@@ -681,6 +705,16 @@ extern "C" fn migration_secondary(cpu: CpuId) -> ! {
             let _ = tairix_kernel_core::waitq::drain_pending_wakes();
         }
     }
+}
+
+/// Whether ready work waits on a CPU that dispatches nothing in the migration
+/// phase — the boot CPU driving the controller, or a paused source — or on the
+/// overflow list only a step drains.
+#[cfg(migration_smp)]
+fn stranded(sched: &Scheduler<Aarch64BinArch>, paused: u32) -> bool {
+    (0..CPU_COUNT)
+        .filter(|&cpu| cpu == BOOT_CPU || paused & (1u32 << cpu) != 0)
+        .any(|cpu| sched.has_ready_work(cpu).unwrap_or(false))
 }
 
 /// Start CPUs 1..3 and wait until their dispatch loops are live.
@@ -735,7 +769,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     if tairix_kernel_core::waitq::install_wait_arch(wait_arch).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }
-    install_echo_server(&sys);
+    let replies = install_echo_server(&sys);
 
     // The scheduler-side process-wait producer: records every parent/child
     // link the production spawn paths register and backs the production
@@ -840,16 +874,15 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         qemu_exit::exit_failure(fail_code(FAIL_EXIT_BASE, parent_code));
     }
 
-    let ipc_pid = match init_ctx.spawn_driver_process(
+    let Ok(ipc_pid) = init_ctx.spawn_driver_process(
         "/bin/mp-ipc",
         PROGRAM_RXE,
         CapabilitySet::empty(),
         &[],
-        &[b"mp", b"ipc"],
+        &[b"mp", b"ipc", &MIGRATION_ENDPOINT_ARG, &IPC_ROUNDS_ARG],
         None,
-    ) {
-        Ok(pid) => pid,
-        Err(_) => qemu_exit::exit_failure(FAIL_SPAWN),
+    ) else {
+        qemu_exit::exit_failure(FAIL_SPAWN);
     };
 
     #[cfg(not(migration_smp))]
@@ -862,37 +895,29 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let poll_pid = ipc_pid.cast_signed();
         let mut observed = 0u32;
         let mut last_cpu = None;
-        let mut migrations = 0u32;
+        let mut migrations = 0u64;
+        let mut last_reply = replies.load(Ordering::Relaxed);
+        let mut was_stranded = false;
         let mut exit_code = None;
-        // Give up only on a genuine stall — a run of controller iterations in
-        // which the child made no progress at all — never after a fixed count
-        // of total iterations. This loop spins on the boot CPU while the child
-        // advances on the secondaries, so a total-iteration budget would
-        // measure how fast this loop spins relative to the child, a ratio the
-        // host sets arbitrarily by how it schedules the four vCPU threads; a
-        // busy or unevenly co-scheduled host could then exhaust it before a
-        // healthy child finishes. Counting only consecutive no-progress
-        // iterations makes the give-up independent of host load: any sign the
-        // child is still advancing — a drained wake answering its blocking
-        // IPC, the child seen running on a secondary, or a fresh forced
-        // migration — resets the guard, so a slow-but-live run waits as long
-        // as it needs and only a truly wedged child is declared deadlocked.
+        // Progress is a posted reply, and only a run of iterations posting none
+        // gives up: a total would measure this loop's spin rate against the
+        // secondaries, which the host's scheduling of the vCPU threads sets.
         let mut guard = StallGuard::new(MAX_STEPS);
         loop {
-            let mut progressed = tairix_kernel_core::waitq::drain_pending_wakes();
-            let mut running_cpu = None;
-            for cpu in 1..CPU_COUNT {
-                if sys.sched.current_task(cpu) == Some(ipc_pid) {
-                    observed |= 1u32 << cpu;
-                    running_cpu = Some(cpu);
-                    break;
-                }
-            }
+            let _ = tairix_kernel_core::waitq::drain_pending_wakes();
+            let reply = replies.load(Ordering::Relaxed);
+            let progressed = reply != last_reply;
+            last_reply = reply;
+            let running_cpu =
+                (1..CPU_COUNT).find(|&cpu| sys.sched.current_task(cpu) == Some(ipc_pid));
             if let Some(cpu) = running_cpu {
-                progressed = true;
+                observed |= 1u32 << cpu;
                 if last_cpu != Some(cpu) {
                     if let Some(previous) = last_cpu {
                         migrations += 1;
+                        if migrations > MAX_MIGRATIONS {
+                            qemu_exit::exit_failure(FAIL_BOUNCED);
+                        }
                         SMP_PAUSED.fetch_and(!(1u32 << previous), Ordering::AcqRel);
                         SchedulerArch::send_ipi(sys.arch, previous);
                     }
@@ -900,14 +925,20 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
                     last_cpu = Some(cpu);
                 }
             }
-            // Wake every unpaused secondary so one of them steals the ready
-            // caller after its currently observed source dispatcher pauses.
+            // A reschedule IPI force-yields whatever its target is running, so
+            // the dispatching secondaries are kicked once, when work they must
+            // steal appears where nothing would run it. Their idle check sees
+            // that work under the mask, so the one kick cannot be lost.
             let paused = SMP_PAUSED.load(Ordering::Acquire);
-            for cpu in 1..CPU_COUNT {
-                if paused & (1u32 << cpu) == 0 {
-                    SchedulerArch::send_ipi(sys.arch, cpu);
+            let stranded_now = stranded(sys.sched, paused);
+            if stranded_now && !was_stranded {
+                for cpu in 1..CPU_COUNT {
+                    if paused & (1u32 << cpu) == 0 {
+                        SchedulerArch::send_ipi(sys.arch, cpu);
+                    }
                 }
             }
+            was_stranded = stranded_now;
             match wait_producer.poll(ProcessId(0), poll_pid, WaitFlags::empty()) {
                 Ok(reaped) => match reaped.status {
                     WaitStatus::Exited(code) => {
@@ -932,6 +963,9 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
 
     if ipc_code != 0 {
         qemu_exit::exit_failure(fail_code(FAIL_IPC_CONTROL, ipc_code));
+    }
+    if replies.load(Ordering::Relaxed) != IPC_ROUNDS {
+        qemu_exit::exit_failure(FAIL_ROUNDS);
     }
 
     #[cfg(migration_smp)]

@@ -49,6 +49,13 @@ pub const GUEST_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x00, 0x00, 0x15];
 /// [`GUEST_MAC`] rendered as the QEMU `mac=` device-string value.
 pub const GUEST_MAC_STR: &str = "52:54:00:00:00:15";
 
+/// Interface identifiers of the routers the echo peer plays in front of
+/// itself: a probe whose hop limit is 1 runs out at the first, 2 at the
+/// second, and anything higher reaches the peer — so `traceroute` sees a
+/// three-hop path to it.
+pub const TRACE_ROUTER_IIDS: [[u8; 8]; 2] =
+    [[0, 0, 0, 0, 0, 0, 0, 0xA1], [0, 0, 0, 0, 0, 0, 0, 0xA2]];
+
 /// Echo identifier of the peer's inbound campaign; the guest's engine
 /// mirrors it back and the peer verifies the reflection.
 pub const PEER_ECHO_ID: u16 = 0x5EED;
@@ -687,6 +694,18 @@ pub const DHCP6_LEASED_V6: Ipv6Addr = Ipv6Addr::new(0xFD6A, 0, 0, 0, 0, 0, 0, 0x
 /// renewal (T1 = lease/2), so the run exercises acquisition and steady-state
 /// reachability, not renewal timing.
 pub const DHCP6_LEASE_SECS: u32 = 3600;
+
+/// Prefix length of the SLAAC router-advertisement vertical's shared on-link
+/// `/64` ([`SLAAC_PREFIX`]).
+pub const SLAAC_PREFIX_LEN: u8 = 64;
+
+/// The on-link, **autonomous** prefix the router-advertisement peer (the
+/// `netmap` map vertical) advertises (`2001:db8::/64`, the RFC 3849
+/// documentation prefix, so it cannot be confused with the Unique-Local
+/// prefixes the DHCP and static verticals use). An unconfigured guest forms a
+/// SLAAC global address in it and installs the peer as its default router, so
+/// the map draws a global subnet and a gateway.
+pub const SLAAC_PREFIX: Ipv6Addr = Ipv6Addr::new(0x2001, 0x0DB8, 0, 0, 0, 0, 0, 0);
 
 /// The `/System/Settings/Network/network.conf` the aarch64 DHCPv6 vertical
 /// plants on its read-only `/System` volume.

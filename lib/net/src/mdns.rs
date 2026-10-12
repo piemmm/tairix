@@ -347,11 +347,11 @@ pub struct TxtStrings<'a> {
 }
 
 impl<'a> TxtStrings<'a> {
-    /// Walk a run of length-prefixed strings that is not (yet) a whole
-    /// record — the rdata a DNS-SD builder reads back mid-build. Total on
-    /// any slice, so it carries no invariant [`TxtRecord::new`] has not
-    /// already established.
-    pub(crate) fn over(octets: &'a [u8]) -> Self {
+    /// Walk the length-prefixed strings of any `TXT` rdata — one a peer sent
+    /// as well as one a builder reads back mid-build. Total on any slice: a
+    /// string that runs past the end ends the walk.
+    #[must_use]
+    pub fn over(octets: &'a [u8]) -> Self {
         Self { octets, pos: 0 }
     }
 }

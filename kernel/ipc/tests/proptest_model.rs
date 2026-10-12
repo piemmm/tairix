@@ -98,6 +98,7 @@ fn authorised_port() -> Port {
         CapabilitySet::empty(),
         MAX_PAYLOAD,
         MAILBOX_CAPACITY,
+        tairix_abi::RLIMIT_INFINITY,
         &NullSink,
     )
     .expect("authorised creator binds the port")

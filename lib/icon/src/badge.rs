@@ -1,5 +1,6 @@
-//! A settings category's or pane's colour badge: its symbol in white on a
-//! plate of its own hue.
+//! A colour badge: a symbol in white on a plate of one hue — a settings
+//! category's or pane's rounded square, or the disc a network map stands a
+//! node on.
 //!
 //! A reader finds a category by colour before they read its name, so the hue
 //! is part of the icon's identity rather than a tint a theme applies — the
@@ -20,15 +21,45 @@ use crate::glyph::IconKind;
 use crate::symbol::{self, Outline, Placement, DESIGN, SYMBOL_GRID, UNIT};
 use crate::vector::VectorIcon;
 
-/// The fraction of the plate's side the symbol is drawn at.
-const SYMBOL_FRACTION: f64 = 0.7;
-
-/// The plate: a square whose corners ease into its sides rather than meeting
+/// The square plate: its corners ease into its sides rather than meeting
 /// them at a circle's tangent, on the symbol grid.
-const PLATE: Outline = Outline::Path(
+const SQUARE: Outline = Outline::Path(
     "M6 0H18C22.3 0 24 1.7 24 6V18C24 22.3 22.3 24 18 24H6C1.7 24 0 22.3 0 18V6\
      C0 1.7 1.7 0 6 0Z",
 );
+
+/// The round plate, filling the symbol grid.
+const DISC: Outline = Outline::Circle {
+    centre: (SYMBOL_GRID / 2.0, SYMBOL_GRID / 2.0),
+    radius: SYMBOL_GRID / 2.0,
+};
+
+/// The outline a badge's plate is cut to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub enum PlateShape {
+    /// The rounded square a settings category stands on.
+    Square,
+    /// A disc.
+    Round,
+}
+
+impl PlateShape {
+    fn outline(self) -> Outline {
+        match self {
+            Self::Square => SQUARE,
+            Self::Round => DISC,
+        }
+    }
+
+    /// The fraction of the plate's side its symbol is drawn at: smaller on a
+    /// disc, whose sides curve in toward the symbol's corners.
+    fn symbol_fraction(self) -> f64 {
+        match self {
+            Self::Square => 0.7,
+            Self::Round => 0.62,
+        }
+    }
+}
 
 /// How far the light catching the plate's upper face reaches down it.
 const SHEEN_REACH: f64 = 0.6;
@@ -44,7 +75,7 @@ const INK: Color = Color::rgba(255, 255, 255, 255);
 /// A closed set, so a category is given one of a few hues that read apart from
 /// each other rather than a colour of its own: kin categories share one, the
 /// way the input devices all stand on grey.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum BadgeHue {
     /// Neutral steel: the machine's own parts.
     Grey,
@@ -92,6 +123,18 @@ impl BadgeHue {
             Self::Orange => (Color::rgb(0xff, 0x8a, 0x3d), Color::rgb(0xd2, 0x52, 0x0a)),
         }
     }
+
+    /// The plate's middle shade: the colour it is seen as, and the one a line
+    /// drawn in its hue takes.
+    #[must_use]
+    pub const fn middle(self) -> Color {
+        let (top, bottom) = self.ramp();
+        Color::rgb(
+            top.r.midpoint(bottom.r),
+            top.g.midpoint(bottom.g),
+            top.b.midpoint(bottom.b),
+        )
+    }
 }
 
 impl IconKind {
@@ -133,21 +176,30 @@ impl IconKind {
     }
 }
 
-/// `kind`'s badge at `side` pixels, or `None` for a kind that is not one.
+/// `kind`'s own badge at `side` pixels, or `None` for a kind that is not one.
+pub(crate) fn badge_picture(kind: IconKind, side: u32) -> Option<Surface> {
+    badge(kind, kind.badge()?, PlateShape::Square, side)
+}
+
+/// `kind`'s symbol in white on a plate of `hue` cut to `shape`, at `side`
+/// pixels: the badge a settings category wears, for a caller that chooses the
+/// hue — a network map colours a host by what it is. `None` for a zero side.
 ///
 /// The plate is filled once at the exact side: nothing abuts it, so it has no
 /// seam to resolve, and its flat edges fall on the slot's pixel boundaries.
 /// Only the symbol, whose parts meet one another, goes through the
-/// seam-resolving supersample of [`Surface::layered`]. A symbol that cannot be
-/// built — a defect in the compiled-in table, which the tests build whole —
-/// leaves the plate standing alone, so a category still shows its own colour.
-pub(crate) fn badge_picture(kind: IconKind, side: u32) -> Option<Surface> {
-    let (top, bottom) = kind.badge()?.ramp();
+/// seam-resolving supersample of [`Surface::layered`]. A kind with no symbol,
+/// or one that cannot be built — a defect in the compiled-in table, which the
+/// tests build whole — leaves the plate standing alone, so the colour still
+/// shows.
+#[must_use]
+pub fn badge(kind: IconKind, hue: BadgeHue, shape: PlateShape, side: u32) -> Option<Surface> {
+    let (top, bottom) = hue.ramp();
     if side == 0 {
         return None;
     }
     let px_per_unit = f64::from(side) / SYMBOL_GRID;
-    let outline = symbol::flatten(&[PLATE], symbol::flatness_at(px_per_unit))?;
+    let outline = symbol::flatten(&[shape.outline()], symbol::flatness_at(px_per_unit))?;
     let plain = downward(&[(0.0, top), (1.0, bottom)]);
     // The light on the upper face folds into the plate's own ramp: its top
     // edge lifted toward white, and the plain ramp again where the light ends.
@@ -162,20 +214,21 @@ pub(crate) fn badge_picture(kind: IconKind, side: u32) -> Option<Surface> {
     if !picture.draw_artwork(&[Node::Fill(plate)], DESIGN) {
         return None;
     }
+    let fraction = shape.symbol_fraction();
     if let Some(ink) =
-        ink(kind, px_per_unit * SYMBOL_FRACTION).and_then(|symbol| symbol.rasterise(side))
+        ink(kind, fraction, px_per_unit * fraction).and_then(|symbol| symbol.rasterise(side))
     {
         picture.blit(0, 0, &ink);
     }
     Some(picture)
 }
 
-/// `kind`'s symbol in white where its badge stands it, flattened for a picture
-/// `px_per_unit` pixels to the symbol unit.
-fn ink(kind: IconKind, px_per_unit: f64) -> Option<VectorIcon> {
+/// `kind`'s symbol in white drawn `fraction` of its plate's side, flattened
+/// for a picture `px_per_unit` pixels to the symbol unit.
+fn ink(kind: IconKind, fraction: f64, px_per_unit: f64) -> Option<VectorIcon> {
     let layers = symbol::layers(
         symbol::marks(kind)?,
-        Placement::centred(SYMBOL_FRACTION),
+        Placement::centred(fraction),
         &Paint::Solid(INK),
         symbol::flatness_at(px_per_unit),
     )?;

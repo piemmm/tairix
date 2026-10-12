@@ -153,7 +153,7 @@ holding a task and a bound delivery port doing nothing.
 Every nonce and jitter value comes from one generator keyed from the kernel
 CSPRNG at start-up. A service the kernel cannot key exits with its reason
 recorded rather than send a predictable nonce, and the delivery port it binds
-is process-private (`tairix_rt::bind_private_port`), so no other process can
+is process-private (`tairix_rt::PrivatePort`), so no other process can
 squat it; the socket layer discards any datagram the network stack did not
 send.
 

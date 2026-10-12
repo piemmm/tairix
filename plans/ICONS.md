@@ -556,6 +556,19 @@ badge kind of its own too, never its category's borrowed.
   (`Network`, `Volume`, `Bell`) or the single thing it gathers (`User`,
   `Disk`), and the About pane's `i` in a ring is its own kind rather than the
   viewer's `Info` command.
+- **A symbol need not be a badge.** A kind drawn only as a tinted glyph may be
+  authored as a symbol too, for the same exact-side rendering: the network
+  map's device kinds (`Computer`, `Laptop`, `Server`, `Router`,
+  `NetworkSwitch`, `Phone`, `Nas`, `IotDevice`, `DeviceUnknown`, `Subnet`) and
+  its operating-system emblems (`OsLinux`, `OsWindows`, `OsApple`,
+  `OsAndroid`, `plans/NETMAP.md` NM-ICONS) are symbols whose built-in picture
+  has no plate. Only a badge kind's built-in picture is ready-coloured.
+- **A caller may stand a symbol on a plate of its own choosing.** `badge(kind,
+  hue, shape, side)` is the one renderer for every plate, square or round, so a
+  surface that colours by its own meaning — the network map, a node in the hue
+  of what it is — draws through the same ramp, sheen, ink and contrast floor a
+  settings category does, never a second plate path. A kind with no symbol
+  stands on its plate alone, so the colour is never lost.
 
 ## 15. What this plan deliberately does not cover
 

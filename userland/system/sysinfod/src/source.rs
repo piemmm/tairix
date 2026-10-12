@@ -16,8 +16,8 @@ use tairix_abi::audio::{AudioDeviceDescriptor, StreamDescriptor};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
-    NetStackDefenceCounters,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetNeighborRecord, NetRouteRecord,
+    NetServerAddr, NetSocketRecord, NetStackDefenceCounters,
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
@@ -404,6 +404,24 @@ pub trait SysinfoSource {
     /// the owned list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging.
     fn net_bond_members(&self, caller: &Caller) -> Result<Vec<NetBondMemberRecord>, Errno>;
+
+    /// Return every interface's neighbour-cache entries, ARP and Neighbour
+    /// Discovery alike, in the stack's interface-table order.
+    ///
+    /// Reached only after the `CAP_SYSINFO_HW` gate has passed: the entries
+    /// name other hosts' link-layer addresses. The source forwards to the
+    /// `netstack` broker read; [`crate::serve`] applies the paging.
+    fn net_neighbors(&self, caller: &Caller) -> Result<Vec<NetNeighborRecord>, Errno>;
+
+    /// Return every interface's routes, the IPv6 default routers included,
+    /// in the stack's interface-table order.
+    ///
+    /// Reached only after the `CAP_SYSINFO_GLOBAL` gate has passed:
+    /// system-wide topology, the boundary of
+    /// [`net_interface_state`](Self::net_interface_state). The source
+    /// forwards to the `netstack` broker read; [`crate::serve`] applies the
+    /// paging.
+    fn net_routes(&self, caller: &Caller) -> Result<Vec<NetRouteRecord>, Errno>;
 
     /// Return the host's active recursive-resolver server set: the
     /// aggregated, deduplicated DHCP-learned ∪ statically-configured DNS

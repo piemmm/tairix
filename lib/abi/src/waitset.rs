@@ -9,10 +9,13 @@
 //! number of sources at a fixed ceiling, and the wait syscall passes only the
 //! set handle — never a per-wait array.
 //!
-//! The three syscalls that drive a wait-set are
+//! The syscalls that drive a wait-set are
 //! [`crate::SyscallNumber::WAITSET_CREATE`] (mint the object),
-//! [`crate::SyscallNumber::WAITSET_CTL`] (add/remove a member), and
-//! [`crate::SyscallNumber::WAITSET_WAIT`] (block until a member is ready).
+//! [`crate::SyscallNumber::WAITSET_CTL`] (add/remove a member),
+//! [`crate::SyscallNumber::WAITSET_WAIT`] (block until a member is ready), and
+//! [`crate::SyscallNumber::WAITSET_CLOSE`] (release it). Sets and their members
+//! count against the owner's [`crate::LimitKind::WaitSets`] and
+//! [`crate::LimitKind::WaitSetMembers`] limits.
 //! This module defines the two small scalar enumerations those syscalls carry
 //! as arguments; the rest of the contract is the syscall arguments themselves,
 //! so there is no packed wire format here (the values cross the syscall

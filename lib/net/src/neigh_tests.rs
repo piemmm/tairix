@@ -276,3 +276,31 @@ fn advance_is_idempotent_between_deadlines() {
     // The same instant again: the retransmission is not yet due.
     assert!(t.advance(secs(0)).is_empty());
 }
+
+#[test]
+fn iter_reports_every_entry_as_entry_does_and_refreshes_nothing() {
+    let mut t = table(3);
+    assert_eq!(t.lookup(ip(1), secs(0)), LookupResult::Pending);
+    t.learn(ip(2), MAC_A);
+    t.learn(ip(3), MAC_B);
+
+    let walked: alloc::vec::Vec<_> = t.iter().collect();
+    assert_eq!(
+        walked,
+        [
+            (ip(1), NeighborState::Incomplete, None),
+            (ip(2), NeighborState::Stale, Some(MAC_A)),
+            (ip(3), NeighborState::Stale, Some(MAC_B)),
+        ]
+    );
+    for (address, state, mac) in &walked {
+        assert_eq!(t.entry(*address), Some((*state, *mac)));
+    }
+
+    // A walk is an observation: the least recently used resolved entry is
+    // still the one a new binding evicts.
+    let _ = t.iter().count();
+    t.learn(ip(4), MAC_A);
+    assert_eq!(t.entry(ip(2)), None);
+    assert!(t.entry(ip(3)).is_some());
+}

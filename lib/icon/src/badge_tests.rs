@@ -4,9 +4,9 @@ extern crate std;
 
 use tairix_colour::legibility::contrast_hundredths;
 use tairix_colour::Rgb;
-use tairix_raster::{Color, Pixel, Surface};
+use tairix_raster::{Pixel, Surface};
 
-use super::BadgeHue;
+use super::{badge, BadgeHue, PlateShape};
 use crate::artwork::{builtin_picture, glyph_mask};
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
@@ -54,10 +54,11 @@ fn every_settings_row_is_a_badge_with_its_own_symbol() {
         "one badge per settings category and disclosed pane"
     );
     for kind in ICON_KINDS {
-        assert_eq!(
-            kind.badge().is_some(),
-            marks(kind).is_some(),
-            "{kind:?}: a badge and its symbol come together"
+        // A symbol may also be a plain glyph with no plate (a device on the
+        // network map); a badge is never drawn without one.
+        assert!(
+            kind.badge().is_none() || marks(kind).is_some(),
+            "{kind:?}: a badge carries its own symbol"
         );
         assert_eq!(
             IconPicture::builtin(kind, &Surface::new(1, 1).expect("a surface"))
@@ -167,12 +168,7 @@ fn every_symbol_stands_clear_of_its_plate() {
         BadgeHue::Orange,
     ];
     for hue in hues {
-        let (top, bottom) = hue.ramp();
-        let mid = Color::rgb(
-            top.r.midpoint(bottom.r),
-            top.g.midpoint(bottom.g),
-            top.b.midpoint(bottom.b),
-        );
+        let mid = hue.middle();
         let ratio = contrast_hundredths(Rgb::WHITE, Rgb::new(mid.r, mid.g, mid.b));
         assert!(
             ratio >= 300,
@@ -210,4 +206,33 @@ fn a_category_wears_its_kins_hue() {
     // power group's, the wired link the connections' blue.
     assert_eq!(IconKind::Startup.badge(), IconKind::Power.badge());
     assert_eq!(IconKind::Ethernet.badge(), IconKind::Networking.badge());
+}
+
+/// A disc leaves the corners a rounded square fills, and either plate wears
+/// the hue its caller chose rather than the kind's own.
+#[test]
+fn a_badge_takes_the_shape_and_hue_its_caller_chose() {
+    let side = 48;
+    let round = badge(IconKind::Router, BadgeHue::Orange, PlateShape::Round, side).unwrap();
+    let square = badge(IconKind::Router, BadgeHue::Blue, PlateShape::Square, side).unwrap();
+    assert_eq!(round.get(5, 5).unwrap().a, 0, "outside the disc");
+    assert_eq!(
+        square.get(5, 5).unwrap().a,
+        255,
+        "inside the rounded square"
+    );
+    for (picture, warm) in [(&round, true), (&square, false)] {
+        let edge = picture.get(side / 2, 2).unwrap();
+        assert_eq!(edge.a, 255);
+        assert_eq!(edge.r > edge.b, warm, "{edge:?}");
+    }
+    assert!(badge(IconKind::Router, BadgeHue::Grey, PlateShape::Round, 0).is_none());
+}
+
+/// A kind with no symbol still shows its plate, so the colour is never lost.
+#[test]
+fn a_kind_without_a_symbol_stands_on_its_plate_alone() {
+    assert!(marks(IconKind::AppBundle).is_none());
+    let plate = badge(IconKind::AppBundle, BadgeHue::Teal, PlateShape::Round, 32).unwrap();
+    assert_eq!(plate.get(16, 16).unwrap().a, 255);
 }

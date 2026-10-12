@@ -1552,14 +1552,28 @@ const fn output_size(page: &Page<'_>) -> (u32, u32) {
 /// a picture past `limits`, a tile past them — a tile's extent is not bounded
 /// by the picture, since nothing in the format caps one — or a tile layout or
 /// palette that does not read. Answers the conversion its samples take.
-fn admit(page: &Page<'_>, limits: &DecodeLimits) -> Result<Convert, DecodeError> {
+fn admit<'p, 'a>(
+    page: &'p Page<'a>,
+    limits: &DecodeLimits,
+) -> Result<Admitted<'p, 'a>, DecodeError> {
     let (width, height) = output_size(page);
     limits.check(width, height)?;
     if page.codec != Codec::Jpeg {
         limits.check(page.grid.columns, page.grid.rows)?;
         page.layout(page.grid.rows)?;
     }
-    Convert::for_page(page)
+    Ok(Admitted {
+        page,
+        convert: Convert::for_page(page)?,
+    })
+}
+
+/// A page [`admit`] checked against the limits: its picture and each whole
+/// unit fit them, so a walk may reserve a unit's scratch. Only `admit` makes
+/// one, so no walk can reach a page it did not check.
+struct Admitted<'p, 'a> {
+    page: &'p Page<'a>,
+    convert: Convert,
 }
 
 /// Decode one page into a straight-alpha RGBA image.
@@ -1569,7 +1583,7 @@ fn decode_page(
     limits: &DecodeLimits,
     scratch: &mut Scratch,
 ) -> Result<RasterImage, DecodeError> {
-    let convert = admit(page, limits)?;
+    let admitted = admit(page, limits)?;
     let (out_width, out_height) = output_size(page);
     let out_len = usize::try_from(
         u64::from(out_width)
@@ -1579,11 +1593,11 @@ fn decode_page(
     )
     .map_err(|_| DecodeError::DimensionsOverflow)?;
     let mut out = fallible::filled(out_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
-    walk_units(file, page, limits, scratch, |walked| {
+    walk_units(file, &admitted, limits, scratch, |walked| {
         if let Walked::Unit(unit) = walked {
             for y in 0..unit.covered {
                 for x in 0..unit.columns {
-                    let pixel = unit.rgba(page, &convert, x, y)?;
+                    let pixel = unit.rgba(page, &admitted.convert, x, y)?;
                     let (dx, dy) = page.orientation.place(
                         unit.origin.0 + x,
                         unit.origin.1 + y,
@@ -1610,7 +1624,7 @@ fn stream_page(
     scratch: &mut Scratch,
     target: (u32, u32),
 ) -> Result<RasterImage, DecodeError> {
-    let convert = admit(page, limits)?;
+    let admitted = admit(page, limits)?;
     let (width, height) = output_size(page);
     let order = if page.orientation.place(0, 0, width, height).1 == 0 {
         RowOrder::TopDown
@@ -1635,12 +1649,12 @@ fn stream_page(
         .ok_or(DecodeError::DimensionsOverflow)?;
     let mut band = fallible::filled(band_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
     let mut push = |row: &[u8]| reducer.push_row(row).map_err(crate::reduction_refused);
-    walk_units(file, page, limits, scratch, |walked| match walked {
+    walk_units(file, &admitted, limits, scratch, |walked| match walked {
         Walked::Unit(unit) => {
             for y in 0..unit.covered {
                 let line = if banded { y as usize } else { 0 } * row_bytes;
                 for x in 0..unit.columns {
-                    let pixel = unit.rgba(page, &convert, x, y)?;
+                    let pixel = unit.rgba(page, &admitted.convert, x, y)?;
                     let (dx, _) =
                         page.orientation
                             .place(unit.origin.0 + x, unit.origin.1 + y, width, height);
@@ -1737,15 +1751,16 @@ enum Walked<'b> {
     Band { rows: u32 },
 }
 
-/// Decompress every unit of `page`, a band of units across at a time,
-/// handing each to `visit` and announcing the end of each band.
+/// Decompress every unit of the admitted page, a band of units across at a
+/// time, handing each to `visit` and announcing the end of each band.
 fn walk_units(
     file: &[u8],
-    page: &Page<'_>,
+    admitted: &Admitted<'_, '_>,
     limits: &DecodeLimits,
     scratch: &mut Scratch,
     mut visit: impl FnMut(Walked<'_>) -> Result<(), DecodeError>,
 ) -> Result<(), DecodeError> {
+    let page = admitted.page;
     let Scratch {
         unit: buffer,
         shuffle,
@@ -1760,7 +1775,6 @@ fn walk_units(
             .ok_or(DecodeError::TiffTruncated)?,
         _ => &[][..],
     };
-    // The page was admitted, so its tiles fit the limits the picture did.
     if !jpeg {
         let widest = page.layout(page.grid.rows)?;
         let scratch_len = usize::try_from(widest.planes)
@@ -2456,12 +2470,12 @@ impl NativePages {
         };
         let geometry = |_| DecodeError::DimensionsOverflow;
         let picture = if page.indexed() {
+            let admitted = admit(&page, limits)?;
             let (width, height) = output_size(&page);
-            limits.check(width, height)?;
             let len = usize::try_from(u64::from(width) * u64::from(height))
                 .map_err(|_| DecodeError::DimensionsOverflow)?;
             let mut indices = fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?;
-            walk_units(file, &page, limits, &mut self.scratch, |walked| {
+            walk_units(file, &admitted, limits, &mut self.scratch, |walked| {
                 let Walked::Unit(unit) = walked else {
                     return Ok(());
                 };
@@ -2484,7 +2498,11 @@ impl NativePages {
                 }
                 Ok(())
             })?;
-            let map = Palette::read(&page.ifd, page.samples.bits)?;
+            let map = admitted
+                .convert
+                .palette
+                .as_ref()
+                .ok_or(DecodeError::TiffMissingTag)?;
             let palette = fallible::collected(
                 map.entries.len(),
                 map.entries

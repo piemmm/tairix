@@ -1,0 +1,15 @@
+# Signed-AppInfo manifest source for the `traceroute` command app
+# (plans/NETMAP.md NM-S3). The capability list is the bundle's request,
+# intersected with the launching user's grants. CAP_CONSOLE_WRITE covers the
+# inherited standard streams; CAP_FS_ACCESS reads the bundle's own Help/
+# documents; CAP_NET originates transport traffic and the resolver's queries;
+# CAP_NET_RAW opens the ICMP/ICMPv6 echo socket the probes go through (the
+# stack re-checks it and audits the open, fail-closed).
+id = "os.tairix.traceroute"
+name = "traceroute"
+title = "Traceroute"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_NET_RAW"]
+# This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
+library-icon = "traceroute.png"

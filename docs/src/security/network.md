@@ -19,6 +19,7 @@ model, the defences, and the audit event-id registry for network events.
 | Unprivileged origination of raw/spoofed traffic | Sockets are capabilities, not ambient authority: a socket is a kernel-brokered IPC channel obtained through the versioned socket ABI and gated per operation — outbound transport under `CAP_NET`, binding a privileged (well-known) port under `CAP_NET_BIND_PRIVILEGED`, raw access under `CAP_NET_RAW`. |
 | Forged caller identity | `netstack` derives every caller's identity from the kernel-attested `Origin` (`call_peer_origin`), never from a claimed field; the capability is checked before any state is touched, and the receiver does not re-check. |
 | Cross-principal socket / peer disclosure | The system-wide socket listing (`NET_SOCKETS`), the per-interface counter/rate queries, and the bond-topology listing (`NET_BOND_MEMBERS`) name other principals' sockets, peers, and the link-aggregation layout, so they require `CAP_SYSINFO_GLOBAL` and are audited; there is no `/proc/net` and no unprivileged path to another principal's sockets. |
+| Segment reconnaissance (a census of every host on the link and its hardware address) | The neighbour cache is readable only as the `NET_NEIGHBORS` query, which requires `CAP_SYSINFO_HW` and is audited, and the routing table only as `NET_ROUTES` under `CAP_SYSINFO_GLOBAL`; neither is an unprivileged read, unlike `/proc/net/arp`. |
 | Silent failure hiding an attack in progress | Every refusal is a typed error and an audited event (below); the socket listing fails loud rather than returning an empty table (§24), and the defence counters surface a DoS in progress. |
 | Reflected or eavesdropped multicast DNS (a host turned amplifier; a second listener hearing the segment's answers) | The multicast DNS port and groups are reserved to the discovery service's account; any other principal's bind, connect, or send claiming them is refused `SOCKET_DENIED`. The service relays only datagrams the stack found on-link, answers a peer directly only once per datagram relayed from it, and paces group traffic per interface (`docs/src/userland/discoveryd.md`). |
 | A principal's state outliving it (sockets and memberships held for a dead process) | `netstack` and `discoveryd` watch every principal they hold state for through the kernel's peer-exit watch, and release all of it when the principal exits. |
@@ -36,8 +37,12 @@ The network capabilities are deliberately coarse and few (§5.2):
 - `CAP_NET_ADMIN` — the interface admin surface (address/route add, NIC
   channel bind).
 - `CAP_SYSINFO_GLOBAL` — the system-wide, cross-principal introspection
-  queries (`NET_SOCKETS`, per-interface counters and rates, and the bond
-  member/health listing `NET_BOND_MEMBERS`), audited.
+  queries (`NET_SOCKETS`, per-interface counters and rates, the bond
+  member/health listing `NET_BOND_MEMBERS`, and the routing table
+  `NET_ROUTES`), audited.
+- `CAP_SYSINFO_HW` — hardware identity: the interface facts, and the
+  neighbour cache `NET_NEIGHBORS`, which names the link-layer address of every
+  host on each attached segment, audited.
 - `CAP_NET_DISCOVER_ALL` — browse or resolve any link-local service type, and
   enumerate every type, without a per-application grant. Held by the
   administrator ceiling; an application otherwise browses only the types its
@@ -102,11 +107,12 @@ unreachable — retried, fail-soft). `netstack` holds no filesystem
 capability, so this split (devmgr reads, netstack enforces) keeps the
 parser sandbox filesystem-free (`plans/NETWORK.md` §0, N9b-2).
 
-The socket-listing, counter/rate, and bond-member queries are
-additionally audited by the `sysinfod` broker under their `sysinfo-v1`
+The socket-listing, counter/rate, bond-member, route and neighbour queries
+are additionally audited by the `sysinfod` broker under their `sysinfo-v1`
 query names (`net_sockets`, `net_interface_stats`, `net_interface_rates`,
-`net_bond_members`), so a privileged read of another principal's network
-state always leaves a record.
+`net_bond_members`, `net_routes`, `net_neighbors`), so a privileged read of
+another principal's network state, or a census of who is on the link, always
+leaves a record.
 
 ## Out of scope
 

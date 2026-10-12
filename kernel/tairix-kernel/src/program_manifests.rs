@@ -1379,13 +1379,11 @@ mod tests {
         CapabilityId::SYSINFO_GLOBAL,
     ];
 
-    // The `ping` tool (plans/NETWORK.md N8b-2b): console write for its
-    // output/diagnostics, filesystem access to read its own bundle Help/
-    // payload, and `CAP_NET` + `CAP_NET_RAW` to open the ICMP/ICMPv6 echo
-    // socket it pings with (the stack re-checks both and audits the open).
-    // Not an embedded spawn-floor program, so the list lives only in this
-    // pin.
-    const PING_TOOL_REQUEST: &[CapabilityId] = &[
+    // The echo-probing tools, `ping` and `traceroute`: console write for
+    // their output, filesystem access for their own bundle Help/ payload, and
+    // `CAP_NET` + `CAP_NET_RAW` for the ICMP/ICMPv6 echo socket they probe
+    // with (the stack re-checks both and audits the open).
+    const ECHO_PROBE_TOOL_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
         CapabilityId::NET,
@@ -1472,6 +1470,24 @@ mod tests {
     // one. They ship purely as discovered on-disk bundles, so no `spawn_layout`
     // row or manifest constant exists for them.
     const WINDOWED_APP_REQUEST: &[CapabilityId] = &[CapabilityId::CONSOLE_WRITE, CapabilityId::SHM];
+
+    // The network map `netmap` (plans/NETMAP.md): the windowed application's
+    // pair, plus `CAP_FS_ACCESS` to read the table of hardware makers its
+    // bundle ships in `Resources/`, `CAP_SYSINFO_GLOBAL` for the interface
+    // state and routing table, `CAP_SYSINFO_HW` for interface and neighbour
+    // hardware addresses, `CAP_NET` for the reverse DNS that names hosts, and
+    // `CAP_NET_DISCOVER_ALL` to enumerate and browse every advertised service
+    // type. Under a narrower ceiling the map states what it cannot read and
+    // draws the rest.
+    const NETMAP_REQUEST: &[CapabilityId] = &[
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+        CapabilityId::NET,
+        CapabilityId::NET_DISCOVER_ALL,
+        CapabilityId::SHM,
+        CapabilityId::SYSINFO_GLOBAL,
+        CapabilityId::SYSINFO_HW,
+    ];
 
     // The game `wintersun` (plans/WINTERSUN.md): the windowed application's
     // pair, plus `CAP_FS_ACCESS` to read the figure preset its bundle ships in
@@ -1633,9 +1649,10 @@ mod tests {
             SANDBOXED_DOCUMENT_APP_REQUEST,
         ),
         ("mv", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("netmap", ProgramKind::Application, NETMAP_REQUEST),
         ("netstack", ProgramKind::Service, NETSTACK_MANIFEST),
         ("passwd", ProgramKind::Command, USERS_TOOL_MANIFEST),
-        ("ping", ProgramKind::Command, PING_TOOL_REQUEST),
+        ("ping", ProgramKind::Command, ECHO_PROBE_TOOL_REQUEST),
         ("play", ProgramKind::Command, PLAY_TOOL_REQUEST),
         ("printf", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("ps", ProgramKind::Command, PS_MANIFEST),
@@ -1667,6 +1684,7 @@ mod tests {
         ("terminal", ProgramKind::Application, TERMINAL_REQUEST),
         ("timed", ProgramKind::Service, TIMED_MANIFEST),
         ("top", ProgramKind::Command, TOP_MANIFEST),
+        ("traceroute", ProgramKind::Command, ECHO_PROBE_TOOL_REQUEST),
         ("true", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("unlink", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("unmount", ProgramKind::Command, UNMOUNT_TOOL_REQUEST),

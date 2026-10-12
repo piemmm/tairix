@@ -30,11 +30,16 @@ so a random payload is also a per-packet integrity check. Use `-p` for a
 fixed pattern when a deterministic payload is what is wanted.
 
 By default `ping` sends one request per second until interrupted; `-c`
-bounds the count. Each reply prints the source, sequence number, and
-time; a request with no reply within the timeout prints a timeout line.
-The closing block reports the packets transmitted and received, the loss
-percentage, and the minimum, average, and maximum round-trip times. `-q`
-prints only the header and the statistics.
+bounds the count. Each reply prints the source, sequence number, and time.
+When a router, or the host itself, reports an error about a request — its
+hop limit ran out, the destination is unreachable, the packet is too big —
+a `From` line names the reporter and the reason. A request that draws no
+answer within the timeout prints nothing. If no interface can carry a
+request yet, it waits up to its timeout for the network to come up. The
+closing block reports the packets transmitted and received, any errors,
+the loss percentage, and the minimum, average, and maximum round-trip
+times with their mean deviation. `-q` prints only the header and the
+statistics.
 
 Each reply names the peer as `name (address)` when the address has a
 `PTR` record, resolved once for the run through the same stub resolver;

@@ -13,7 +13,9 @@
 
 use alloc::string::{String, ToString};
 
-use tairix_abi::net_ipc::{NetAddrFamily, NetAddrState, NetIfAddr, NetServerAddr};
+use tairix_abi::net_ipc::{
+    NetAddrFamily, NetAddrState, NetIfAddr, NetNeighborRecord, NetRouteRecord, NetServerAddr,
+};
 
 /// One address of `family`, held in the sixteen-byte slot both wire
 /// records use (a V4 address occupies the first four bytes).
@@ -45,6 +47,56 @@ pub fn render_if_addr(entry: &NetIfAddr) -> String {
         NetAddrState::Deprecated => " (deprecated)",
     });
     out
+}
+
+/// A link-layer address as colon-separated lowercase hex octets.
+#[must_use]
+pub fn render_mac(mac: [u8; 6]) -> String {
+    let mut out = String::with_capacity(17);
+    for (index, byte) in mac.iter().enumerate() {
+        if index > 0 {
+            out.push(':');
+        }
+        out.push(hex_digit(byte >> 4));
+        out.push(hex_digit(byte & 0xF));
+    }
+    out
+}
+
+/// One route as `dest/prefix`, then ` via hop` when it has a next hop, then
+/// its origin in parentheses: `0.0.0.0/0 via 10.0.0.1 (static)`.
+#[must_use]
+pub fn render_route(route: &NetRouteRecord) -> String {
+    let mut out = render_ip(route.family, &route.dest);
+    out.push('/');
+    out.push_str(&route.prefix.to_string());
+    if let Some(hop) = &route.next_hop {
+        out.push_str(" via ");
+        out.push_str(&render_ip(route.family, hop));
+    }
+    out.push_str(" (");
+    out.push_str(route.origin.name());
+    out.push(')');
+    out
+}
+
+/// One neighbour as `addr at mac (state)`, or `addr (incomplete)` before it
+/// has resolved.
+#[must_use]
+pub fn render_neighbor(neighbor: &NetNeighborRecord) -> String {
+    let mut out = render_ip(neighbor.family, &neighbor.addr);
+    if let Some(mac) = neighbor.mac {
+        out.push_str(" at ");
+        out.push_str(&render_mac(mac));
+    }
+    out.push_str(" (");
+    out.push_str(neighbor.state.name());
+    out.push(')');
+    out
+}
+
+fn hex_digit(nibble: u8) -> char {
+    char::from(b"0123456789abcdef"[usize::from(nibble & 0xF)])
 }
 
 /// The first four bytes of an address slot as dotted-quad text.

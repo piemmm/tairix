@@ -37,6 +37,7 @@ use tairix_net::dns::{Name, RecordType};
 use tairix_net::eth::{
     self, ipv6_multicast_mac, BROADCAST, ETHERNET_HEADER_LEN, ETHERTYPE_IPV4, ETHERTYPE_IPV6,
 };
+use tairix_net::icmp::{IcmpContext, IcmpError, IcmpErrorKind, TYPE_V6_ECHO_REQUEST};
 use tairix_net::iface::{eui64_interface_id, TempAddrSource};
 use tairix_net::ipv4::{Ipv4Header, IPV4_HEADER_LEN};
 use tairix_net::ipv6::{Ipv6Header, IPV6_HEADER_LEN, NEXT_HEADER_ICMPV6};
@@ -46,7 +47,7 @@ use tairix_net::mdns::{
     PORT as MDNS_PORT,
 };
 use tairix_net::nd::{ND_HOP_LIMIT, TYPE_ROUTER_ADVERTISEMENT};
-use tairix_net::stack::{Stack, StackConfig, StackEvent, StackOutput, TxFrame};
+use tairix_net::stack::{EchoProbe, Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 use tairix_net::tcp::conn::{Tcb, TcpConfig};
 use tairix_net::tcp::listen::ListenConfig;
 use tairix_net::tcp::{SeqNumber, TcpFlags, TcpOptions, TcpSegment, TcpSegmentMeta};
@@ -124,16 +125,31 @@ impl NetPeer {
         Self::spawn_with(qemu_sock, peer_sock, run_peer)
     }
 
-    /// Bind `peer_sock` and start the **passive ICMP echo-responder** peer
-    /// thread (the N8b-2b-β `ping` vertical): it answers the guest's
-    /// neighbour resolution and every `ICMPv6` echo request the guest `ping`
-    /// tool sends over the shared IPv6 link-local wire, and reports success
-    /// once it has served at least one such request. Unlike [`Self::spawn`]
+    /// Bind `peer_sock` and start the **passive ICMP echo** peer thread (the
+    /// echo-tools vertical): it answers the guest's neighbour resolution and
+    /// every `ICMPv6` echo request the guest's `ping` and `traceroute` send
+    /// over the shared IPv6 link-local wire, playing the two routers of
+    /// [`wire::TRACE_ROUTER_IIDS`] in front of itself. Unlike [`Self::spawn`]
     /// it runs **no** outbound campaign of its own — the guest is the active
-    /// pinger — so its verdict ([`Self::stop_and_join`]) is `Ok` only when
-    /// the guest actually reached it and it answered.
-    pub fn spawn_ping_responder(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
-        Self::spawn_with(qemu_sock, peer_sock, run_ping_responder)
+    /// side — so its verdict ([`Self::stop_and_join`]) is `Ok` only when the
+    /// guest reached it and both routers.
+    pub fn spawn_echo_peer(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_echo_peer)
+    }
+
+    /// Bind `peer_sock` and start the **SLAAC router-advertisement** peer
+    /// thread (the `netmap` map vertical): it periodically emits an autonomous
+    /// Router Advertisement naming [`wire::SLAAC_PREFIX`] on-link and itself a
+    /// default router, so an unconfigured guest autoconfigures a global address
+    /// in the prefix and installs the peer as its default gateway — the routes
+    /// the map draws as its subnet and gateway tiers. It answers the guest's
+    /// neighbour resolution and echo through `lib/net` but runs no campaign,
+    /// and — unlike the reachability peers — ends no run: the `netmap` guest
+    /// drives its own exit. Its verdict ([`Self::stop_and_join`]) is `Ok` only
+    /// once it has advertised and seen the guest on the wire, so a dead NIC
+    /// still fails loud.
+    pub fn spawn_router_advert(qemu_sock: &Path, peer_sock: &Path) -> Result<Self, String> {
+        Self::spawn_with(qemu_sock, peer_sock, run_router_advert_peer)
     }
 
     /// Bind `peer_sock` and start the **passive TCP echo-server** peer
@@ -573,15 +589,9 @@ fn run_bond_peer(
             next_send = Instant::now() + RESEND_INTERVAL;
             sequence = sequence.wrapping_add(1);
             let mut out = StackOutput::default();
+            let probe = peer_echo(IpAddr::V6(guest_v6), sequence);
             if stack
-                .send_echo_request(
-                    IpAddr::V6(guest_v6),
-                    wire::PEER_ECHO_ID,
-                    sequence,
-                    wire::PEER_ECHO_PAYLOAD,
-                    now(start),
-                    &mut out,
-                )
+                .send_echo_request(&probe, now(start), &mut out)
                 .is_ok()
             {
                 send_frames_dual(primary, backup, &out.frames);
@@ -1462,7 +1472,13 @@ fn run_dhcp6_peer(
         // learns the route back regardless of when its link-local came up.
         if Instant::now() >= next_ra {
             next_ra = Instant::now() + RA_INTERVAL;
-            let frame = dhcp6_server::build_router_advertisement(peer_ll);
+            let frame = dhcp6_server::build_router_advertisement(
+                peer_ll,
+                true,
+                false,
+                wire::DHCP6_PREFIX,
+                wire::DHCP6_PREFIX_LEN,
+            );
             let _ = socket.send_to(&frame, qemu_sock);
         }
 
@@ -1754,25 +1770,30 @@ mod dhcp6_server {
         frame
     }
 
-    /// Build the full Ethernet frame carrying the peer's Router
-    /// Advertisement, multicast to all nodes.
+    /// Build the full Ethernet frame carrying a peer Router Advertisement,
+    /// multicast to all nodes, naming `prefix`/`prefix_len` on-link.
     ///
     /// TAIRiX's `lib/net` engine is a host and deliberately refuses to emit a
     /// Router Advertisement, so — as with the DHCPv6 server messages — the
-    /// router half of the exchange is built here. The RA names
-    /// [`wire::DHCP6_PREFIX`] on-link and **non**-autonomous (the guest
-    /// installs the on-link route but forms no SLAAC address, so its only
-    /// global address stays the DHCPv6 lease) and sets a non-zero router
-    /// lifetime so the peer is adopted as a default router. It is sourced
-    /// from `peer_ll` at hop limit 255, exactly as RFC 4861 requires.
-    pub fn build_router_advertisement(peer_ll: Ipv6Addr) -> Vec<u8> {
+    /// router half of the exchange is built here. `managed` sets the M flag
+    /// (addresses come from DHCPv6); `autonomous` sets the prefix's A flag so
+    /// the guest forms a SLAAC address in it. A non-zero router lifetime is
+    /// always set so the peer is adopted as a default router. Sourced from
+    /// `peer_ll` at hop limit 255, exactly as RFC 4861 requires.
+    pub fn build_router_advertisement(
+        peer_ll: Ipv6Addr,
+        managed: bool,
+        autonomous: bool,
+        prefix: Ipv6Addr,
+        prefix_len: u8,
+    ) -> Vec<u8> {
         // The ICMPv6 message: 4-octet header (type, code, checksum), then the
         // RA fixed fields and options.
         let mut msg = vec![TYPE_ROUTER_ADVERTISEMENT, 0, 0, 0];
-        // RA fixed fields (RFC 4861 §4.2): cur_hop_limit, flags (M set —
-        // addresses come from DHCPv6), router lifetime, reachable/retrans (0).
+        // RA fixed fields (RFC 4861 §4.2): cur_hop_limit, flags, router
+        // lifetime, reachable/retrans (0).
         msg.push(64); // cur_hop_limit
-        msg.push(0x80); // Managed-address flag
+        msg.push(if managed { 0x80 } else { 0 }); // M (managed-address) flag
         msg.extend_from_slice(&RA_ROUTER_LIFETIME_SECS.to_be_bytes());
         msg.extend_from_slice(&0u32.to_be_bytes()); // reachable time
         msg.extend_from_slice(&0u32.to_be_bytes()); // retrans timer
@@ -1782,16 +1803,16 @@ mod dhcp6_server {
         msg.push(1);
         msg.extend_from_slice(&wire::PEER_MAC);
 
-        // Prefix Information option (type 3, length 4 units = 32 bytes): the
-        // shared /64, on-link (L) but not autonomous (A cleared).
+        // Prefix Information option (type 3, length 4 units = 32 bytes),
+        // on-link (L), autonomous (A) only when the guest should SLAAC in it.
         msg.push(3);
         msg.push(4);
-        msg.push(wire::DHCP6_PREFIX_LEN);
-        msg.push(0x80); // L (on-link) set, A (autonomous) clear
+        msg.push(prefix_len);
+        msg.push(if autonomous { 0xC0 } else { 0x80 }); // L set; A per flag
         msg.extend_from_slice(&RA_PREFIX_LIFETIME_SECS.to_be_bytes()); // valid
         msg.extend_from_slice(&RA_PREFIX_LIFETIME_SECS.to_be_bytes()); // preferred
         msg.extend_from_slice(&0u32.to_be_bytes()); // reserved2
-        msg.extend_from_slice(&wire::DHCP6_PREFIX.octets());
+        msg.extend_from_slice(&prefix.octets());
 
         // Seal the ICMPv6 checksum over the IPv6 pseudo-header + message.
         let destination = ALL_NODES;
@@ -1966,15 +1987,31 @@ mod dhcp6_server {
             .is_none());
         }
 
-        /// The Router Advertisement the peer builds round-trips through the
-        /// production [`NdMessage::parse`]: hop limit 255, one on-link,
-        /// non-autonomous prefix naming the shared `/64`, a non-zero router
-        /// lifetime, and the peer's link-layer address — exactly the facts the
-        /// guest's stack installs an on-link route and default router from.
-        #[test]
-        fn router_advertisement_round_trips_through_nd_parse() {
+        /// What a guest reads from one Router Advertisement the peer builds.
+        #[derive(Debug, PartialEq, Eq)]
+        struct Advertised {
+            managed: bool,
+            router_lifetime: u16,
+            source_ll: Option<MacAddress>,
+            prefix: Ipv6Addr,
+            prefix_len: u8,
+            on_link: bool,
+            autonomous: bool,
+        }
+
+        /// Build an RA as the peer does and read it back through the
+        /// production parsers, checking what every RA must carry on the way:
+        /// the all-nodes destination, hop limit 255 from the peer's link-local,
+        /// a verifying checksum, and a prefix.
+        fn advertised(
+            managed: bool,
+            autonomous: bool,
+            prefix: Ipv6Addr,
+            prefix_len: u8,
+        ) -> Advertised {
             let peer_ll = wire::link_local(wire::PEER_IID);
-            let frame = build_router_advertisement(peer_ll);
+            let frame =
+                build_router_advertisement(peer_ll, managed, autonomous, prefix, prefix_len);
             let eth_frame = eth::EthernetFrame::parse(&frame).expect("valid Ethernet frame");
             assert_eq!(eth_frame.destination, ipv6_multicast_mac(&ALL_NODES));
             let (ip, payload) = Ipv6Header::parse(eth_frame.payload).expect("valid IPv6 packet");
@@ -2003,36 +2040,74 @@ mod dhcp6_server {
                     prefixes,
                     ..
                 } => {
-                    assert!(managed, "the RA sets the Managed flag (DHCPv6)");
-                    assert_eq!(router_lifetime, RA_ROUTER_LIFETIME_SECS);
-                    assert_eq!(source_ll, Some(MacAddress(wire::PEER_MAC)));
-                    let prefix = prefixes.first().expect("the RA carries a prefix");
-                    assert_eq!(prefix.prefix, wire::DHCP6_PREFIX);
-                    assert_eq!(prefix.prefix_len, wire::DHCP6_PREFIX_LEN);
-                    assert!(prefix.on_link, "the prefix is on-link");
-                    assert!(
-                        !prefix.autonomous,
-                        "the prefix is not autonomous (no SLAAC)"
-                    );
+                    let first = prefixes.first().expect("the RA carries a prefix");
+                    Advertised {
+                        managed,
+                        router_lifetime,
+                        source_ll,
+                        prefix: first.prefix,
+                        prefix_len: first.prefix_len,
+                        on_link: first.on_link,
+                        autonomous: first.autonomous,
+                    }
                 }
                 other => panic!("expected a Router Advertisement, got {other:?}"),
             }
         }
+
+        /// The DHCPv6 peer's RA: Managed set, the shared `/64` on-link but not
+        /// autonomous (no SLAAC), a non-zero router lifetime and the peer's
+        /// link-layer address — exactly what the guest installs an on-link
+        /// route and default router from while leasing its address.
+        #[test]
+        fn router_advertisement_round_trips_through_nd_parse() {
+            assert_eq!(
+                advertised(true, false, wire::DHCP6_PREFIX, wire::DHCP6_PREFIX_LEN),
+                Advertised {
+                    managed: true,
+                    router_lifetime: RA_ROUTER_LIFETIME_SECS,
+                    source_ll: Some(MacAddress(wire::PEER_MAC)),
+                    prefix: wire::DHCP6_PREFIX,
+                    prefix_len: wire::DHCP6_PREFIX_LEN,
+                    on_link: true,
+                    autonomous: false,
+                }
+            );
+        }
+
+        /// The router-advertisement peer's RA: not Managed, its prefix on-link
+        /// **and** autonomous, so an unconfigured guest forms a SLAAC address
+        /// in it and adopts the peer as its default router.
+        #[test]
+        fn a_slaac_router_advertisement_offers_an_autonomous_prefix() {
+            assert_eq!(
+                advertised(false, true, wire::SLAAC_PREFIX, wire::SLAAC_PREFIX_LEN),
+                Advertised {
+                    managed: false,
+                    router_lifetime: RA_ROUTER_LIFETIME_SECS,
+                    source_ll: Some(MacAddress(wire::PEER_MAC)),
+                    prefix: wire::SLAAC_PREFIX,
+                    prefix_len: wire::SLAAC_PREFIX_LEN,
+                    on_link: true,
+                    autonomous: true,
+                }
+            );
+        }
     }
 }
 
-/// The ICMP echo-responder loop (the `ping` vertical): serve the guest
-/// reactively — answer its neighbour resolution and every echo request it
-/// sends — and report whether at least one echo request was served.
+/// The SLAAC router-advertisement loop (the `netmap` map vertical): bring an
+/// on-link router up on the shared wire so an unconfigured guest autoconfigures
+/// a global address and a default route, then serve whatever the guest sends.
 ///
-/// It is the passive mirror of [`run_peer`]: it never campaigns. The guest
-/// `ping` tool is the active side; it resolves the peer's link-local, sends
-/// its echo requests, and the peer's engine auto-answers each (the reply is
-/// queued in the same [`Stack::on_frame`] output). Serving a request is the
-/// proof the guest's outbound echo crossed the two-process boundary and was
-/// answered, so the guest's own reply-receipt (its `icmp_seq=` line) and this
-/// verdict together mean neither side can pass alone.
-fn run_ping_responder(
+/// Unlike the DHCPv6 peer it leases nothing and campaigns at no one: it
+/// periodically emits an **autonomous** RA naming [`wire::SLAAC_PREFIX`]
+/// on-link and itself a default router, and lets the `lib/net` engine answer
+/// the guest's neighbour resolution (so the gateway resolves) and any echo.
+/// Its verdict is deliberately lenient — the map the guest draws is the
+/// assertion, not the peer — but still honest: `Ok` only once it has
+/// advertised and seen the guest on the wire.
+fn run_router_advert_peer(
     socket: &UnixDatagram,
     qemu_sock: &PathBuf,
     stop: &AtomicBool,
@@ -2058,7 +2133,95 @@ fn run_ping_responder(
     )
     .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
 
+    let peer_ll = wire::link_local(wire::PEER_IID);
+    let mut advertised = false;
+    let mut seen_guest = false;
+    let mut next_ra = Instant::now();
+    let mut buf = [0u8; MAX_FRAME];
+
+    while !stop.load(Ordering::Acquire) {
+        let mut out = StackOutput::default();
+        stack.advance(now(start), &mut out);
+        send_frames(socket, qemu_sock, &out.frames);
+
+        if Instant::now() >= next_ra {
+            next_ra = Instant::now() + RA_INTERVAL;
+            let frame = dhcp6_server::build_router_advertisement(
+                peer_ll,
+                false,
+                true,
+                wire::SLAAC_PREFIX,
+                wire::SLAAC_PREFIX_LEN,
+            );
+            if socket.send_to(&frame, qemu_sock).is_ok() {
+                advertised = true;
+            }
+        }
+
+        match socket.recv(&mut buf) {
+            Ok(len) => {
+                seen_guest = true;
+                let mut out = StackOutput::default();
+                stack.on_frame(&buf[..len], now(start), &mut out);
+                send_frames(socket, qemu_sock, &out.frames);
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("netstack peer: socket receive: {e}")),
+        }
+    }
+
+    if !advertised {
+        return Err("netstack peer: no router advertisement was sent".to_string());
+    }
+    if !seen_guest {
+        return Err("netstack peer: the guest never appeared on the wire".to_string());
+    }
+    Ok(())
+}
+
+/// The ICMP echo loop (the echo-tools vertical): serve the guest reactively
+/// — answer its neighbour resolution and every echo request it sends, a
+/// probe whose hop limit runs out short of the peer from the router it
+/// reached — and report whether it served an echo and answered as every
+/// router.
+///
+/// It is the passive mirror of [`run_peer`]: it never campaigns. The guest's
+/// tools are the active side; the peer's engine auto-answers each echo that
+/// reaches it (the reply is queued in the same [`Stack::on_frame`] output),
+/// and [`router_expiry`] answers the rest. Serving them is the proof the
+/// guest's probes crossed the two-process boundary, so the guest's own
+/// output and this verdict together mean neither side can pass alone.
+fn run_echo_peer(
+    socket: &UnixDatagram,
+    qemu_sock: &PathBuf,
+    stop: &AtomicBool,
+    _succeeded: &ObserverGate,
+) -> Result<(), String> {
+    let facts = DeviceFacts {
+        mac: MacAddress(wire::PEER_MAC),
+        mtu: 1500,
+        link: LinkState::Up,
+        offloads: NetOffloads::empty(),
+        rx_queues: 1,
+        max_tx_frame: 1500 + tairix_abi::driver::net::ETHERNET_HEADER_LEN,
+        multicast_filter: McastFilter::Unfiltered,
+    };
+    let start = Instant::now();
+    let now = |t0: Instant| {
+        Duration64::from_nanos(u64::try_from(t0.elapsed().as_nanos()).unwrap_or(u64::MAX))
+    };
+    let mut stack = Stack::new(
+        &StackConfig::new(facts, wire::PEER_IID, IPV4_IDENT_SEED, STACK_HASH_KEY),
+        Box::new(FixedTempSource),
+        now(start),
+    )
+    .map_err(|e| format!("netstack peer: engine construction: {e:?}"))?;
+
+    let peer_ll = wire::link_local(wire::PEER_IID);
     let mut served = false;
+    let mut routed = [false; wire::TRACE_ROUTER_IIDS.len()];
     let mut buf = [0u8; MAX_FRAME];
 
     while !stop.load(Ordering::Acquire) {
@@ -2073,6 +2236,12 @@ fn run_ping_responder(
         // link-local, and its echo requests (answered in the same output).
         match socket.recv(&mut buf) {
             Ok(len) => {
+                if let Some((hop, expired)) = router_expiry(&buf[..len], peer_ll) {
+                    routed[hop] = true;
+                    // Best effort, as the stack's own frames are sent.
+                    let _ = socket.send_to(&expired, qemu_sock);
+                    continue;
+                }
                 let mut out = StackOutput::default();
                 stack.on_frame(&buf[..len], now(start), &mut out);
                 note_served(&out, &mut served);
@@ -2085,10 +2254,140 @@ fn run_ping_responder(
         }
     }
 
-    if served {
-        Ok(())
-    } else {
-        Err("netstack peer: no inbound echo request was served".to_string())
+    if !served {
+        return Err("netstack peer: no inbound echo request was served".to_string());
+    }
+    match routed.iter().position(|&answered| !answered) {
+        Some(hop) => Err(format!(
+            "netstack peer: no probe ran out at router {}",
+            hop + 1
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The router a guest echo request to `target` runs out at, and the Time
+/// Exceeded it answers with, or [`None`] for anything else — a probe whose
+/// hop limit carries it past every router reaches `target` itself.
+fn router_expiry(frame: &[u8], target: Ipv6Addr) -> Option<(usize, Vec<u8>)> {
+    if frame.get(12..14)? != ETHERTYPE_IPV6.to_be_bytes() {
+        return None;
+    }
+    let packet = frame.get(ETHERNET_HEADER_LEN..)?;
+    let (header, payload) = Ipv6Header::parse(packet)?;
+    if header.destination != target
+        || header.next_header != NEXT_HEADER_ICMPV6
+        || payload.first() != Some(&TYPE_V6_ECHO_REQUEST)
+    {
+        return None;
+    }
+    let hop = usize::from(header.hop_limit).checked_sub(1)?;
+    let router = wire::link_local(*wire::TRACE_ROUTER_IIDS.get(hop)?);
+    let error = IcmpError::about(IcmpErrorKind::TimeExceeded { code: 0 }, packet, true);
+    let mut message = vec![0u8; error.wire_len()];
+    error.write(
+        IcmpContext::V6 {
+            source: router,
+            destination: header.source,
+        },
+        &mut message,
+    )?;
+    let mut reply = vec![0u8; ETHERNET_HEADER_LEN + IPV6_HEADER_LEN + message.len()];
+    let guest_mac: [u8; MAC_ADDRESS_LEN] = frame.get(6..12)?.try_into().ok()?;
+    eth::write_header(
+        &mut reply,
+        MacAddress(guest_mac),
+        MacAddress(wire::PEER_MAC),
+        ETHERTYPE_IPV6,
+    )?;
+    Ipv6Header::new(router, header.source, NEXT_HEADER_ICMPV6)
+        .write(&mut reply[ETHERNET_HEADER_LEN..], message.len())?;
+    reply[ETHERNET_HEADER_LEN + IPV6_HEADER_LEN..].copy_from_slice(&message);
+    Some((hop, reply))
+}
+
+#[cfg(test)]
+mod echo_peer_tests {
+    use super::*;
+    use tairix_net::icmp::{EchoKind, IcmpEcho};
+
+    const GUEST_IID: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 0x15];
+
+    /// A guest echo request to `dest` carrying `hop_limit`, as it reaches the
+    /// wire.
+    fn probe(dest: Ipv6Addr, hop_limit: u8) -> Vec<u8> {
+        let guest = wire::link_local(GUEST_IID);
+        let echo = IcmpEcho {
+            kind: EchoKind::Request,
+            identifier: 0x7A11,
+            sequence: 4,
+            payload: b"trace",
+        };
+        let mut message = vec![0u8; echo.wire_len()];
+        echo.write(
+            IcmpContext::V6 {
+                source: guest,
+                destination: dest,
+            },
+            &mut message,
+        )
+        .expect("fits");
+        let mut header = Ipv6Header::new(guest, dest, NEXT_HEADER_ICMPV6);
+        header.hop_limit = hop_limit;
+        let mut frame = vec![0u8; ETHERNET_HEADER_LEN + IPV6_HEADER_LEN + message.len()];
+        eth::write_header(
+            &mut frame,
+            MacAddress(wire::PEER_MAC),
+            MacAddress(wire::GUEST_MAC),
+            ETHERTYPE_IPV6,
+        )
+        .expect("fits");
+        header
+            .write(&mut frame[ETHERNET_HEADER_LEN..], message.len())
+            .expect("fits");
+        frame[ETHERNET_HEADER_LEN + IPV6_HEADER_LEN..].copy_from_slice(&message);
+        frame
+    }
+
+    #[test]
+    fn a_probe_runs_out_at_the_router_its_hop_limit_reaches() {
+        let peer = wire::link_local(wire::PEER_IID);
+        let guest = wire::link_local(GUEST_IID);
+        for (hop, iid) in wire::TRACE_ROUTER_IIDS.iter().enumerate() {
+            let limit = u8::try_from(hop + 1).expect("small");
+            let (at, reply) = router_expiry(&probe(peer, limit), peer).expect("expires");
+            assert_eq!(at, hop);
+            assert_eq!(&reply[..6], &wire::GUEST_MAC, "back to the prober");
+            let (header, message) = Ipv6Header::parse(&reply[ETHERNET_HEADER_LEN..]).expect("IPv6");
+            let router = wire::link_local(*iid);
+            assert_eq!((header.source, header.destination), (router, guest));
+            let error = IcmpError::parse(
+                IcmpContext::V6 {
+                    source: router,
+                    destination: guest,
+                },
+                message,
+            )
+            .expect("a well-formed error");
+            assert_eq!(error.kind, IcmpErrorKind::TimeExceeded { code: 0 });
+            let quoted = error.quoted_echo().expect("it quotes the probe");
+            assert_eq!(
+                (quoted.identifier, quoted.sequence),
+                (0x7A11, 4),
+                "the prober can tell which probe ran out"
+            );
+            assert_eq!(quoted.source, IpAddr::V6(guest));
+        }
+    }
+
+    #[test]
+    fn a_probe_past_the_routers_or_elsewhere_is_the_stacks_to_answer() {
+        let peer = wire::link_local(wire::PEER_IID);
+        let limit = u8::try_from(wire::TRACE_ROUTER_IIDS.len() + 1).expect("small");
+        assert!(router_expiry(&probe(peer, limit), peer).is_none());
+        assert!(router_expiry(&probe(peer, 64), peer).is_none());
+        let elsewhere = wire::link_local([0, 0, 0, 0, 0, 0, 0, 0x99]);
+        assert!(router_expiry(&probe(elsewhere, 1), peer).is_none());
     }
 }
 
@@ -2104,6 +2403,18 @@ fn note_served(out: &StackOutput, served: &mut bool) {
     }
 }
 
+/// The peer's echo request to `dest`: its fixed identifier and payload at the
+/// default hop limit.
+fn peer_echo(dest: IpAddr, sequence: u16) -> EchoProbe<'static> {
+    EchoProbe {
+        dest,
+        identifier: wire::PEER_ECHO_ID,
+        sequence,
+        hop_limit: None,
+        payload: wire::PEER_ECHO_PAYLOAD,
+    }
+}
+
 /// Queue one campaign echo request toward `dest` and transmit whatever
 /// the engine emits for it (the NS resolution, or the echo itself).
 fn campaign_ping(
@@ -2116,14 +2427,7 @@ fn campaign_ping(
 ) {
     let mut out = StackOutput::default();
     if stack
-        .send_echo_request(
-            dest,
-            wire::PEER_ECHO_ID,
-            sequence,
-            wire::PEER_ECHO_PAYLOAD,
-            now,
-            &mut out,
-        )
+        .send_echo_request(&peer_echo(dest, sequence), now, &mut out)
         .is_ok()
     {
         send_frames(socket, qemu_sock, &out.frames);

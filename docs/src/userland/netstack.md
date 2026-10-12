@@ -400,6 +400,17 @@ query, gated `CAP_SYSINFO_GLOBAL` and audited like the interface state
 (link aggregation is system-wide topology and its live failover state,
 `plans/NETWORK.md` §5, §6.3). A non-bond alias fails closed.
 
+The routing table and the neighbour cache are served by the paged
+`NetstackRequest::Routes` and `NetstackRequest::Neighbors` broker reads
+(`plans/NETMAP.md` NM-S1, NM-S2), forwarded by `sysinfod` as `NET_ROUTES`
+(`CAP_SYSINFO_GLOBAL`) and `NET_NEIGHBORS` (`CAP_SYSINFO_HW`, because the
+entries are other hosts' link-layer addresses). The route page lists every
+interface's IPv4 and IPv6 routes and, for each IPv6 default router a Router
+Advertisement named, the default route through it — those routers live in the
+default-router list, not the routing table. The neighbour page is an
+observation of the cache: it refreshes no entry, so a read never moves which
+one eviction takes.
+
 ## Capabilities
 
 The bundle requests `CAP_NET_RAW` (the NIC frame rings, and to call a

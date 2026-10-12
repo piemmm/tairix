@@ -19,7 +19,7 @@ use tairix_abi::time::Duration64;
 use tairix_fuzzseed::Prng;
 use tairix_net::eth::{EthernetFrame, ETHERNET_HEADER_LEN};
 use tairix_net::iface::{TempAddrSource, MAX_IPV6_ADDRS};
-use tairix_net::stack::{Stack, StackConfig, StackOutput};
+use tairix_net::stack::{EchoProbe, Stack, StackConfig, StackOutput};
 use tairix_net::{IpAddr, Ipv4Addr};
 
 /// A fixed key for the stack's neighbour-cache index, so a run's table layout
@@ -121,7 +121,14 @@ fn random_frames_never_panic_and_state_stays_bounded() {
                 let now = Duration64::from_secs(secs);
                 stack.advance(now, &mut out);
                 let dest = IpAddr::V4(Ipv4Addr::new(10, 0, 2, rng.next_u8()));
-                let _ = stack.send_echo_request(dest, 1, 1, b"fuzz", now, &mut out);
+                let probe = EchoProbe {
+                    dest,
+                    identifier: 1,
+                    sequence: 1,
+                    hop_limit: core::num::NonZeroU8::new(rng.next_u8()),
+                    payload: b"fuzz",
+                };
+                let _ = stack.send_echo_request(&probe, now, &mut out);
             }
             assert!(stack.counters().rx_frames > 0);
             assert!(stack.iface().ipv6_addresses().len() <= MAX_IPV6_ADDRS);

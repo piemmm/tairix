@@ -1220,7 +1220,7 @@ impl RollingMeters {
 }
 
 /// Nanoseconds in one second, the scale a per-second rate is derived at.
-const NANOS_PER_SEC: u64 = 1_000_000_000;
+const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// A per-second rate from two readings of one cumulative counter and the
 /// interval between them, or `None` when the interval is unmeasured or

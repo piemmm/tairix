@@ -23,7 +23,7 @@
 //! rasterises that icon to a [`Surface`] sized to the notification slot at
 //! the active scale and composites it onto the bar. A settings category or
 //! pane is the exception to the single colour: its built-in picture is a
-//! colour badge ([`badge`], [`builtin_picture`]).
+//! colour badge ([`badge()`], [`builtin_picture`]).
 //!
 //! ```
 //! use tairix_icon::{builtin_icon, IconKind};
@@ -42,6 +42,9 @@
 //! [`Surface::layered`]: tairix_raster::Surface::layered
 
 #![no_std]
+// `ICON_KINDS` is sized by the compiler's own count of `IconKind`'s variants,
+// so the table cannot leave a kind out.
+#![feature(variant_count)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -72,7 +75,7 @@ pub use artwork::{
     InlineArtwork, NoArtwork, NoArtworkSeam, Resolved, ARTWORK_ENTRY_METADATA_BYTES, GRAPHICS_DIR,
     ICONS_DIR, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE, MIN_ARTWORK_SIDE,
 };
-pub use badge::BadgeHue;
+pub use badge::{badge, BadgeHue, PlateShape};
 pub use desk::{ArtworkDesk, ArtworkJob, Delivered, Landed};
 pub use folder::{DrawnCard, FolderSample, SampleCard};
 pub use glyph::{builtin_icon, disk_icon, IconKind};

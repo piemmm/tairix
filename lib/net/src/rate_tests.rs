@@ -234,6 +234,16 @@ fn rate_limiter_zero_configuration_fails_closed() {
     assert!(!zero_rate.allow(Duration64::from_secs(1_000_000)));
 }
 
+#[test]
+fn a_clock_read_out_of_order_earns_no_budget() {
+    let mut limiter = TokenBucket::new(1, 1);
+    assert!(limiter.allow(Duration64::from_secs(10)));
+    assert!(!limiter.allow(Duration64::from_secs(5)));
+    // Refilling from the earlier reading would count 5 s to 10 s twice.
+    assert!(!limiter.allow(Duration64::from_secs(10)));
+    assert!(limiter.allow(Duration64::from_secs(11)));
+}
+
 fn host(last: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(192, 0, 2, last))
 }

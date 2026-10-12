@@ -705,10 +705,12 @@ per-tick callback latches it as the CPU's pending preemption
 dispatch hook consumes the latch when the interrupted syscall completes,
 suspending the caller back to the scheduler exactly as a `yield` syscall
 would (`DispatchOutcome::Reschedule { action: Yield }`) instead of
-returning to user mode with the expired quantum forgotten. The
-dispatcher clears the latch immediately before switching a task in, so a
+returning to user mode with the expired quantum forgotten. Every
+dispatch decision is made through `preempt::dispatcher_step`, which
+retires this latch and the forced-yield latch before the policy steps: a
 user-mode tick — which already preempted immediately — never doubles into
-a spurious yield on the resumed task's next syscall. A task's quantum
+a spurious yield on the task switched in next, while a latch set after the
+decision is still honoured. A task's quantum
 overrun is therefore bounded by the remainder of one syscall (each
 syscall's in-kernel work is itself bounded, e.g. `console_write`'s 4 KiB
 clamp); without the latch, a task whose quantum expired mid-syscall

@@ -86,6 +86,7 @@ fn destroy_during_in_flight_send_never_leaks_a_message() {
                 CapabilitySet::empty(),
                 64,
                 32,
+                tairix_abi::RLIMIT_INFINITY,
                 &*sink,
             )
             .expect("open"),
@@ -231,6 +232,7 @@ fn end_to_end_port_shmem_and_notification() {
         CapabilitySet::empty(),
         16,
         4,
+        tairix_abi::RLIMIT_INFINITY,
         &sink,
     )
     .unwrap();

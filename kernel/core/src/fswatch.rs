@@ -43,10 +43,10 @@ use core::hash::{Hash, Hasher};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::driver::filesystem::{NameMatching, NodeId};
-use tairix_abi::{DirChange, Errno, FileId};
+use tairix_abi::{DirChange, Errno, FileId, LimitKind};
 use tairix_collections::{HashMap, LruMap};
 use tairix_hash::BuildSipHash13;
-use tairix_kernel_sec::ProcessId;
+use tairix_kernel_sec::{Charge, ResourceCharges};
 use tairix_reclaim::{shrink_target, CacheBudget, MemoryPressure, ReclaimClass};
 use tairix_sync::SpinLock;
 use tairix_util::secret::WipedBuf;
@@ -1080,8 +1080,6 @@ const EPOCH_KEY: WakeKey = WakeKey::new(1);
 /// claims tables.
 pub struct WatchRegistry {
     volumes: SpinLock<Option<VolumeTables>>,
-    /// Armed watches per process, for the `DirWatches` limit.
-    charges: SpinLock<Option<HashMap<ProcessId, u64, BuildSipHash13>>>,
     /// The heap every journal holds, measured from the maps themselves.
     journal_bytes: AtomicUsize,
     /// How many journals share that heap.
@@ -1111,7 +1109,6 @@ impl WatchRegistry {
     pub const fn new() -> Self {
         Self {
             volumes: SpinLock::new(None),
-            charges: SpinLock::new(None),
             journal_bytes: AtomicUsize::new(0),
             journal_count: AtomicUsize::new(0),
             paths: AtomicU64::new(0),
@@ -1226,45 +1223,6 @@ impl WatchRegistry {
         self.volumes.lock().as_ref()?.get(&volume).cloned()
     }
 
-    /// How many watches `process` holds armed.
-    #[must_use]
-    pub fn usage(&self, process: ProcessId) -> u64 {
-        self.charges
-            .lock()
-            .as_ref()
-            .and_then(|map| map.get(&process).copied())
-            .unwrap_or(0)
-    }
-
-    fn charge(&self, process: ProcessId, limit: u64) -> Result<(), Errno> {
-        let mut charges = self.charges.lock();
-        let map = charges.get_or_insert_with(|| HashMap::with_hasher(hasher()));
-        let held = map.get(&process).copied().unwrap_or(0);
-        if held >= limit {
-            return Err(Errno::LimitExceeded);
-        }
-        if let Some(count) = map.get_mut(&process) {
-            *count += 1;
-            return Ok(());
-        }
-        map.try_insert(process, 1).map_err(|_| Errno::OutOfMemory)?;
-        Ok(())
-    }
-
-    fn uncharge(&self, process: ProcessId) {
-        let mut charges = self.charges.lock();
-        let Some(map) = charges.as_mut() else {
-            return;
-        };
-        let emptied = map.get_mut(&process).is_some_and(|count| {
-            *count = count.saturating_sub(1);
-            *count == 0
-        });
-        if emptied {
-            map.remove(&process);
-        }
-    }
-
     /// Add a File member on node `file`: its volume's table, which the member
     /// holds for its life, and the node's baseline generation.
     ///
@@ -1338,15 +1296,15 @@ pub fn mounts_changed() {
 
 /// A watch armed on an open directory description, released with it.
 pub struct ArmedWatch {
-    registry: &'static WatchRegistry,
     table: Arc<VolumeWatch>,
     node: u64,
     watcher: u64,
     latency_ns: u64,
-    owner: ProcessId,
     /// The mounts directly beneath the directory when its path last
     /// resolved; the epochs it resolved under are its cursor's.
     children: SpinLock<ChildMounts>,
+    /// What the owner is charged against its `dir-watches` limit.
+    _charge: Charge,
 }
 
 impl core::fmt::Debug for ArmedWatch {
@@ -1374,32 +1332,24 @@ impl ArmedWatch {
         registry: &'static WatchRegistry,
         dir: FileId,
         latency_ns: u64,
-        owner: ProcessId,
+        owner: &Arc<ResourceCharges>,
         limit: u64,
         resolved: Resolved,
     ) -> Result<Self, Errno> {
         let table = registry.volume(dir.volume).ok_or(Errno::NotImplemented)?;
-        registry.charge(owner, limit)?;
-        match table.watch(dir.node, resolved.epochs) {
-            Ok((watcher, created)) => {
-                if created {
-                    registry.share_out();
-                }
-                Ok(Self {
-                    registry,
-                    table,
-                    node: dir.node,
-                    watcher,
-                    latency_ns,
-                    owner,
-                    children: SpinLock::new(resolved.children),
-                })
-            }
-            Err(err) => {
-                registry.uncharge(owner);
-                Err(err)
-            }
+        let charge = owner.charge(LimitKind::DirWatches, 1, limit)?;
+        let (watcher, created) = table.watch(dir.node, resolved.epochs)?;
+        if created {
+            registry.share_out();
         }
+        Ok(Self {
+            table,
+            node: dir.node,
+            watcher,
+            latency_ns,
+            children: SpinLock::new(resolved.children),
+            _charge: charge,
+        })
     }
 
     /// The watched directory.
@@ -1472,7 +1422,6 @@ impl ArmedWatch {
 impl Drop for ArmedWatch {
     fn drop(&mut self) {
         self.table.unwatch(self.node, self.watcher);
-        self.registry.uncharge(self.owner);
     }
 }
 

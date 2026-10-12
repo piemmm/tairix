@@ -70,7 +70,7 @@ fn reject(kind: DbKind, text: &str) -> ParseErrorKind {
     }
 }
 
-fn decoded(bytes: &[u8], kind: DbKind) -> DevIds<'_> {
+fn decoded(bytes: &[u8], kind: DbKind) -> DevIds<&[u8]> {
     match DevIds::parse(kind, bytes) {
         Ok(ids) => ids,
         Err(e) => panic!("encoded table must decode: {e:?}"),
@@ -171,17 +171,27 @@ fn vetting_rejects_structural_damage() {
     // Escape-sequence injection through a name.
     assert_eq!(
         reject(DbKind::Pci, "0001  Evil\u{1b}[2Jname\n"),
-        ParseErrorKind::ControlChar
+        ParseErrorKind::HiddenChar
     );
     // A C1 control character.
     assert_eq!(
         reject(DbKind::Pci, "0001  Evil\u{9b}name\n"),
-        ParseErrorKind::ControlChar
+        ParseErrorKind::HiddenChar
     );
     // A carriage return (CRLF line endings are not the published format).
     assert_eq!(
         reject(DbKind::Pci, "0001  Name\r\n"),
-        ParseErrorKind::ControlChar
+        ParseErrorKind::HiddenChar
+    );
+    // A bidirectional override, which would reorder what follows it.
+    assert_eq!(
+        reject(DbKind::Oui, "000001  Evil\u{202e}name\n"),
+        ParseErrorKind::HiddenChar
+    );
+    // A zero-width space, which would let one name pass for another.
+    assert_eq!(
+        reject(DbKind::Usb, "0001  Ev\u{200b}il\n"),
+        ParseErrorKind::HiddenChar
     );
     // A tab inside an entry body.
     assert_eq!(
@@ -435,4 +445,96 @@ fn decoder_handles_the_empty_edge_of_each_table() {
     assert_eq!(ids.class(0), None);
     assert_eq!(ids.subclass(0, 0), None);
     assert_eq!(ids.prog_if(0, 0, 0), None);
+}
+
+const OUI_FIXTURE: &str = "\
+# vetted oui.ids fixture
+00000c  Cisco Systems, Inc
+001b63  Apple, Inc.
+b827eb  Raspberry Pi Foundation
+";
+
+#[test]
+fn an_oui_table_names_organisations_by_their_six_digit_ids() {
+    let db = parse_ok(DbKind::Oui, OUI_FIXTURE);
+    assert_eq!(db.counts().vendors, 3);
+    let bytes = db.encode();
+    let ids = decoded(&bytes, DbKind::Oui);
+    assert_eq!(ids.organisation(0x00_1b_63), Some("Apple, Inc."));
+    assert_eq!(
+        ids.organisation(0xb8_27_eb),
+        Some("Raspberry Pi Foundation")
+    );
+    assert_eq!(ids.organisation(0x00_00_0d), None);
+    assert_eq!(
+        decoded(&parse_ok(DbKind::Pci, PCI_FIXTURE).encode(), DbKind::Pci).organisation(0x8086),
+        None,
+        "only an OUI table answers for organisations"
+    );
+}
+
+#[test]
+fn every_table_refusal_says_what_is_wrong() {
+    let all = [
+        TableError::TruncatedHeader,
+        TableError::BadMagic,
+        TableError::WrongKind,
+        TableError::CountTooLarge,
+        TableError::LengthMismatch,
+        TableError::StringsNotUtf8,
+        TableError::UnsortedRecords,
+        TableError::BadNameSlice,
+        TableError::WrongShape,
+    ];
+    let said: alloc::collections::BTreeSet<alloc::string::String> =
+        all.iter().map(alloc::string::ToString::to_string).collect();
+    assert_eq!(said.len(), all.len(), "each refusal reads differently");
+}
+
+#[test]
+fn a_table_that_owns_its_bytes_answers_as_a_borrowed_one_does() {
+    let bytes = parse_ok(DbKind::Oui, OUI_FIXTURE).encode();
+    let borrowed = decoded(&bytes, DbKind::Oui);
+    let owned = DevIds::parse(DbKind::Oui, bytes.clone()).expect("decodes");
+    for oui in [0x00_00_0c, 0x00_1b_63, 0xb8_27_eb, 0x00_00_0d] {
+        assert_eq!(owned.organisation(oui), borrowed.organisation(oui));
+    }
+    let mut damaged = bytes;
+    damaged.truncate(damaged.len() - 1);
+    assert_eq!(
+        DevIds::parse(DbKind::Oui, damaged).map(|_| ()),
+        Err(TableError::LengthMismatch),
+        "owning the bytes skips none of the checks"
+    );
+}
+
+#[test]
+fn an_oui_snapshot_holds_organisations_alone() {
+    assert_eq!(
+        reject(DbKind::Oui, "001b63  Apple\n\t0001  child\n"),
+        ParseErrorKind::UnexpectedDepth
+    );
+    assert_eq!(reject(DbKind::Oui, "1b63  Apple\n"), ParseErrorKind::BadId);
+    assert_eq!(
+        reject(DbKind::Oui, "001B63  Apple\n"),
+        ParseErrorKind::BadId
+    );
+    assert_eq!(
+        reject(DbKind::Oui, "001b63  Apple\n001b63  Again\n"),
+        ParseErrorKind::DuplicateId
+    );
+    assert_eq!(
+        reject(DbKind::Oui, "C 03  Display\n"),
+        ParseErrorKind::BadId
+    );
+}
+
+#[test]
+fn an_oui_table_with_other_records_is_refused_whole() {
+    let mut bytes = parse_ok(DbKind::Pci, PCI_FIXTURE).encode();
+    bytes[8..12].copy_from_slice(&DbKind::Oui.code().to_le_bytes());
+    assert_eq!(
+        DevIds::parse(DbKind::Oui, &bytes).map(|_| ()),
+        Err(TableError::WrongShape)
+    );
 }

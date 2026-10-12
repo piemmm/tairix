@@ -20,6 +20,7 @@
 //! A read never panics and never blocks: it takes only the reader side of the
 //! registries' `RwLock`s, allocates the encoded answer, and returns it.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::SYSTEM_CONFIG_MAX_LEN;
@@ -777,13 +778,13 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // authoritative CapTable; a proc-id with no live task fails closed.
         let found = {
             let caps = self.state.caps.read();
-            let id = caps
+            let found = caps
                 .iter()
                 .find(|record| record.proc_id() == proc_id)
-                .map(tairix_kernel_sec::TaskCapabilities::process);
-            id
+                .map(|record| (record.process(), Arc::clone(record.charges())));
+            found
         };
-        let task_id = found.ok_or(Errno::NotFound)?;
+        let (task_id, charges) = found.ok_or(Errno::NotFound)?;
 
         // Read the task's effective limit set plus the live accounting
         // behind each kind under one registry read, and build the
@@ -797,7 +798,6 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // The live advisory-lock record count, read from the lock registry
         // that charges it rather than recounted here.
         let lock_usage = crate::filelock::usage(ProcessId(task_id.0));
-        let watch_usage = self.state.fswatch.usage(ProcessId(task_id.0));
         let (limits, aspace_usage, stack_usage, pinned_usage) = {
             let aspaces = self.state.aspaces.read();
             let process = ProcessId(task_id.0);
@@ -824,8 +824,11 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 LimitKind::PinnedMemoryBytes => pinned_usage,
                 LimitKind::Threads => thread_usage,
                 LimitKind::FileLocks => lock_usage,
-                LimitKind::DirWatches => watch_usage,
-                _ => 0,
+                LimitKind::DirWatches
+                | LimitKind::IpcQueueBytes
+                | LimitKind::WaitSets
+                | LimitKind::WaitSetMembers => charges.held(kind),
+                LimitKind::OpenStreams | LimitKind::Processes => 0,
             };
             let record = ResourceLimitRecord::new(kind, limits.get(kind), usage);
             out.extend_from_slice(&record.to_le_bytes());

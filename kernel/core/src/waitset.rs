@@ -9,8 +9,9 @@
 //! once and then blocks on the set, instead of busy-polling (the charter
 //! forbids spinning a core) or re-supplying a per-wait array (which would cap
 //! the number of sources at a fixed ceiling). Membership lives in a growable
-//! [`Vec`], so a busy controller with many interfaces is bounded only by
-//! memory, not by a hand-picked constant.
+//! [`Vec`], bounded by the owner's `wait-set-members` limit rather than a
+//! hand-picked constant, and each set by its `wait-sets` limit: the charges a
+//! set holds for both are returned when it goes.
 //!
 //! # What lives here, and what does not
 //!
@@ -37,6 +38,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FileId, WaitSourceKind};
+use tairix_kernel_sec::Charge;
 use tairix_sync::SpinLock;
 
 /// One registered source of a wait-set.
@@ -103,6 +105,10 @@ struct WaitSet {
     /// dragged pointer would never serve the endpoint its applications are
     /// blocked on.
     resume_after: Option<(WaitSourceKind, u64)>,
+    /// What the owner is charged for the set itself.
+    _set_charge: Charge,
+    /// What the owner is charged for the set's members, one unit each.
+    member_charge: Charge,
 }
 
 /// The lock-guarded registry state.
@@ -122,9 +128,11 @@ static WAIT_SETS: SpinLock<Inner> = SpinLock::new(Inner {
     sets: alloc::collections::BTreeMap::new(),
 });
 
-/// Mint a fresh, empty wait-set owned by `owner`, returning its handle.
+/// Mint a fresh, empty wait-set owned by `owner`, returning its handle. It
+/// holds `set_charge` for itself and grows `member_charge` by a unit for each
+/// member added to it.
 #[must_use]
-pub fn create(owner: u64) -> u64 {
+pub fn create(owner: u64, set_charge: Charge, member_charge: Charge) -> u64 {
     let mut g = WAIT_SETS.lock();
     let handle = g.next_handle;
     g.next_handle = g.next_handle.wrapping_add(1);
@@ -134,6 +142,8 @@ pub fn create(owner: u64) -> u64 {
             owner,
             members: Vec::new(),
             resume_after: None,
+            _set_charge: set_charge,
+            member_charge,
         },
     );
     handle
@@ -167,7 +177,9 @@ fn with_owned<R>(owner: u64, handle: u64, f: impl FnOnce(&mut WaitSet) -> R) -> 
 /// * [`Errno::AlreadyExists`] if a member with the same `(kind, id)` is already
 ///   registered (an unambiguous duplicate, mirroring `epoll_ctl(ADD)` of an
 ///   already-registered source — fail closed rather than silently double-add).
-pub fn add(owner: u64, handle: u64, member: Member) -> Result<(), Errno> {
+/// * [`Errno::LimitExceeded`] if one more member would carry the owner past
+///   `member_limit`, its `wait-set-members` limit.
+pub fn add(owner: u64, handle: u64, member: Member, member_limit: u64) -> Result<(), Errno> {
     with_owned(owner, handle, |set| {
         if set
             .members
@@ -176,6 +188,7 @@ pub fn add(owner: u64, handle: u64, member: Member) -> Result<(), Errno> {
         {
             return Err(Errno::AlreadyExists);
         }
+        set.member_charge.grow(1, member_limit)?;
         set.members.push(member);
         Ok(())
     })?
@@ -197,6 +210,7 @@ pub fn remove(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> Result<
             .iter()
             .position(|m| m.kind == kind && m.id == id)
             .ok_or(Errno::NotFound)?;
+        set.member_charge.shrink(1);
         Ok(set.members.remove(at))
     })??;
     release_file_member(&removed);
@@ -316,6 +330,29 @@ pub fn note_reported(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> 
     })
 }
 
+/// Close the owner's wait-set `handle`, releasing its members and returning
+/// what it was charged.
+///
+/// A wait another thread of the owner has under way on the set ends at its
+/// next event or deadline, as an `epoll_wait` on a descriptor closed under it
+/// does.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`.
+pub fn close(owner: u64, handle: u64) -> Result<(), Errno> {
+    let set = {
+        let mut g = WAIT_SETS.lock();
+        match g.sets.get(&handle) {
+            Some(set) if set.owner == owner => g.sets.remove(&handle),
+            _ => None,
+        }
+    }
+    .ok_or(Errno::NotFound)?;
+    release(&set);
+    Ok(())
+}
+
 /// Tear down every wait-set owned by the exiting task `owner`, returning how
 /// many were removed.
 ///
@@ -324,26 +361,37 @@ pub fn note_reported(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> 
 /// dropping the sets is the whole reclamation. Idempotent.
 pub fn release_owned_by(owner: u64) -> usize {
     // One set at a time, so a teardown allocates nothing; each set's file
-    // watches are released after the lock is dropped, so the
-    // watch_add/watch_remove pairing survives task teardown.
+    // watches are released after the lock is dropped. Handles only grow, so
+    // each search resumes past the last set removed and the whole teardown
+    // walks the registry once.
     let mut removed = 0;
+    let mut after = 0;
     loop {
         let set = {
             let mut g = WAIT_SETS.lock();
             let handle = g
                 .sets
-                .iter()
+                .range(after..)
                 .find(|(_, set)| set.owner == owner)
                 .map(|(&handle, _)| handle);
-            handle.and_then(|handle| g.sets.remove(&handle))
+            handle.and_then(|handle| {
+                after = handle;
+                g.sets.remove(&handle)
+            })
         };
         let Some(set) = set else {
             return removed;
         };
         removed += 1;
-        for member in &set.members {
-            release_file_member(member);
-        }
+        release(&set);
+    }
+}
+
+/// Release what a removed set's members hold, after the registry lock is
+/// dropped.
+fn release(set: &WaitSet) {
+    for member in &set.members {
+        release_file_member(member);
     }
 }
 
@@ -361,6 +409,25 @@ pub fn owned_by(owner: u64, handle: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
+    use tairix_abi::{LimitKind, RLIMIT_INFINITY};
+    use tairix_kernel_sec::ResourceCharges;
+
+    /// A set charged to counters no other test shares.
+    fn new_set(owner: u64) -> u64 {
+        set_charged_to(owner, &Arc::new(ResourceCharges::new()))
+    }
+
+    fn set_charged_to(owner: u64, charges: &Arc<ResourceCharges>) -> u64 {
+        let set = charges
+            .charge(LimitKind::WaitSets, 1, RLIMIT_INFINITY)
+            .expect("unlimited");
+        create(owner, set, charges.empty(LimitKind::WaitSetMembers))
+    }
+
+    fn put(owner: u64, handle: u64, member: Member) -> Result<(), Errno> {
+        add(owner, handle, member, RLIMIT_INFINITY)
+    }
 
     fn ep(id: u64, token: u64) -> Member {
         Member {
@@ -376,13 +443,13 @@ mod tests {
 
     #[test]
     fn create_then_owner_checked_access() {
-        let h = create(0x1001);
+        let h = new_set(0x1001);
         assert!(owned_by(0x1001, h));
         // A different task cannot see or mutate the set.
         assert!(!owned_by(0x2002, h));
         assert_eq!(members(0x2002, h), Err(Errno::NotFound));
         assert_eq!(
-            add(0x2002, h, ep(7, 70)),
+            put(0x2002, h, ep(7, 70)),
             Err(Errno::NotFound),
             "foreign add is refused"
         );
@@ -392,11 +459,11 @@ mod tests {
 
     #[test]
     fn add_remove_and_duplicate_is_refused() {
-        let h = create(0x3003);
-        assert_eq!(add(0x3003, h, ep(7, 70)), Ok(()));
-        assert_eq!(add(0x3003, h, ep(8, 80)), Ok(()));
+        let h = new_set(0x3003);
+        assert_eq!(put(0x3003, h, ep(7, 70)), Ok(()));
+        assert_eq!(put(0x3003, h, ep(8, 80)), Ok(()));
         // Same (kind,id) is a duplicate, even with a different token.
-        assert_eq!(add(0x3003, h, ep(7, 99)), Err(Errno::AlreadyExists));
+        assert_eq!(put(0x3003, h, ep(7, 99)), Err(Errno::AlreadyExists));
         assert_eq!(members(0x3003, h).map(|m| m.len()), Ok(2));
         assert_eq!(remove(0x3003, h, WaitSourceKind::Endpoint, 7), Ok(()));
         assert_eq!(members(0x3003, h).map(|m| m.len()), Ok(1));
@@ -410,10 +477,10 @@ mod tests {
 
     #[test]
     fn an_endpoint_and_an_irq_of_the_same_id_are_distinct_members() {
-        let h = create(0x4004);
-        assert_eq!(add(0x4004, h, ep(5, 50)), Ok(()));
+        let h = new_set(0x4004);
+        assert_eq!(put(0x4004, h, ep(5, 50)), Ok(()));
         assert_eq!(
-            add(
+            put(
                 0x4004,
                 h,
                 Member {
@@ -435,8 +502,8 @@ mod tests {
 
     #[test]
     fn release_owned_by_drops_only_the_owner_and_is_idempotent() {
-        let a = create(0x5005);
-        let b = create(0x6006);
+        let a = new_set(0x5005);
+        let b = new_set(0x6006);
         assert_eq!(release_owned_by(0x5005), 1);
         assert!(!owned_by(0x5005, a));
         assert!(owned_by(0x6006, b));
@@ -446,8 +513,8 @@ mod tests {
 
     #[test]
     fn handles_are_unique_across_creates() {
-        let a = create(0x7007);
-        let b = create(0x7007);
+        let a = new_set(0x7007);
+        let b = new_set(0x7007);
         assert_ne!(a, b, "each create mints a fresh handle");
         assert_eq!(release_owned_by(0x7007), 2);
     }
@@ -462,9 +529,9 @@ mod tests {
 
     #[test]
     fn a_fresh_set_scans_in_registration_order() {
-        let h = create(0x8008);
+        let h = new_set(0x8008);
         for id in 1..=3 {
-            assert_eq!(add(0x8008, h, ep(id, id * 10)), Ok(()));
+            assert_eq!(put(0x8008, h, ep(id, id * 10)), Ok(()));
         }
         assert_eq!(ids(0x8008, h), alloc::vec![1, 2, 3]);
         assert_eq!(release_owned_by(0x8008), 1);
@@ -476,9 +543,9 @@ mod tests {
     /// start on, so every member reaches the head within one lap.
     #[test]
     fn reporting_a_member_moves_the_scan_past_it() {
-        let h = create(0x9009);
+        let h = new_set(0x9009);
         for id in 1..=3 {
-            assert_eq!(add(0x9009, h, ep(id, id * 10)), Ok(()));
+            assert_eq!(put(0x9009, h, ep(id, id * 10)), Ok(()));
         }
         assert_eq!(
             note_reported(0x9009, h, WaitSourceKind::Endpoint, 1),
@@ -502,10 +569,10 @@ mod tests {
 
     #[test]
     fn the_rotation_is_per_kind_as_well_as_per_id() {
-        let h = create(0xa00a);
-        assert_eq!(add(0xa00a, h, ep(5, 50)), Ok(()));
+        let h = new_set(0xa00a);
+        assert_eq!(put(0xa00a, h, ep(5, 50)), Ok(()));
         assert_eq!(
-            add(
+            put(
                 0xa00a,
                 h,
                 Member {
@@ -534,9 +601,9 @@ mod tests {
 
     #[test]
     fn removing_the_last_reported_member_falls_back_to_registration_order() {
-        let h = create(0xb00b);
+        let h = new_set(0xb00b);
         for id in 1..=3 {
-            assert_eq!(add(0xb00b, h, ep(id, id * 10)), Ok(()));
+            assert_eq!(put(0xb00b, h, ep(id, id * 10)), Ok(()));
         }
         assert_eq!(
             note_reported(0xb00b, h, WaitSourceKind::Endpoint, 2),
@@ -550,7 +617,7 @@ mod tests {
 
     #[test]
     fn an_empty_set_rotates_to_nothing() {
-        let h = create(0xc00c);
+        let h = new_set(0xc00c);
         assert_eq!(ids(0xc00c, h), Vec::<u64>::new());
         assert_eq!(
             note_reported(0xc00c, h, WaitSourceKind::Endpoint, 1),
@@ -563,11 +630,79 @@ mod tests {
 
     #[test]
     fn note_reported_is_owner_checked() {
-        let h = create(0xd00d);
+        let h = new_set(0xd00d);
         assert_eq!(
             note_reported(0xe00e, h, WaitSourceKind::Endpoint, 1),
             Err(Errno::NotFound)
         );
         assert_eq!(release_owned_by(0xd00d), 1);
+    }
+
+    #[test]
+    fn a_set_and_its_members_are_charged_until_the_set_goes() {
+        let charges = Arc::new(ResourceCharges::new());
+        let h = set_charged_to(0xe11e, &charges);
+        assert_eq!(charges.held(LimitKind::WaitSets), 1);
+        assert_eq!(add(0xe11e, h, ep(1, 10), 2), Ok(()));
+        assert_eq!(add(0xe11e, h, ep(2, 20), 2), Ok(()));
+        assert_eq!(
+            add(0xe11e, h, ep(3, 30), 2),
+            Err(Errno::LimitExceeded),
+            "a member past the limit is refused"
+        );
+        assert_eq!(ids(0xe11e, h), alloc::vec![1, 2], "and is not recorded");
+        assert_eq!(
+            add(0xe11e, h, ep(1, 99), 2),
+            Err(Errno::AlreadyExists),
+            "a duplicate is a duplicate before it is a charge"
+        );
+        assert_eq!(remove(0xe11e, h, WaitSourceKind::Endpoint, 1), Ok(()));
+        assert_eq!(charges.held(LimitKind::WaitSetMembers), 1);
+        assert_eq!(add(0xe11e, h, ep(3, 30), 2), Ok(()), "a removal makes room");
+        assert_eq!(release_owned_by(0xe11e), 1);
+        assert_eq!(charges.held(LimitKind::WaitSets), 0);
+        assert_eq!(charges.held(LimitKind::WaitSetMembers), 0);
+    }
+
+    #[test]
+    fn close_releases_one_owned_set_and_refuses_any_other() {
+        let charges = Arc::new(ResourceCharges::new());
+        let kept = set_charged_to(0xf11f, &charges);
+        let closed = set_charged_to(0xf11f, &charges);
+        assert_eq!(put(0xf11f, closed, ep(1, 10)), Ok(()));
+        assert_eq!(
+            close(0x0bad, closed),
+            Err(Errno::NotFound),
+            "a foreign close"
+        );
+        assert_eq!(close(0xf11f, closed), Ok(()));
+        assert!(!owned_by(0xf11f, closed));
+        assert_eq!(
+            close(0xf11f, closed),
+            Err(Errno::NotFound),
+            "a second close"
+        );
+        assert_eq!(members(0xf11f, closed), Err(Errno::NotFound));
+        assert_eq!(charges.held(LimitKind::WaitSets), 1);
+        assert_eq!(charges.held(LimitKind::WaitSetMembers), 0);
+        assert!(owned_by(0xf11f, kept), "the owner's other set is untouched");
+        assert_eq!(release_owned_by(0xf11f), 1);
+    }
+
+    #[test]
+    fn teardown_removes_every_set_of_the_owner_among_others() {
+        let mine: Vec<u64> = (0..4)
+            .flat_map(|_| [new_set(0x1221), new_set(0x1331)])
+            .collect();
+        assert_eq!(release_owned_by(0x1221), 4);
+        for handle in &mine {
+            assert!(!owned_by(0x1221, *handle));
+        }
+        assert_eq!(release_owned_by(0x1221), 0, "idempotent");
+        assert_eq!(
+            release_owned_by(0x1331),
+            4,
+            "interleaved sets are another owner's"
+        );
     }
 }

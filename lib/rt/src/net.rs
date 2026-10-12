@@ -22,16 +22,20 @@
 //! service account ([`from_network_stack`]) and discards anything else
 //! (fail closed): a caller is only ever handed the stack's own deliveries.
 
+use core::num::NonZeroU8;
+
 use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, from_network_stack, ShutdownHow,
     SocketAddr, SocketDelivery, SocketEcho, SocketId, SocketRequest, SocketStreamEvent, SocketType,
     NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY,
 };
-use tairix_abi::net_ipc::{NetAddrFamily, IF_NAME_LEN};
+use tairix_abi::net_ipc::{address_parts, NetAddrFamily, IF_NAME_LEN};
+use tairix_abi::notice::NoticeTopic;
 use tairix_abi::reply::decode_status_reply;
+use tairix_abi::waitset::WaitSourceKind;
 use tairix_abi::{Errno, Origin};
 
-use crate::{ipc_call, ipc_recv};
+use crate::{ipc_call, ipc_recv, PrivatePort, WaitSet};
 
 /// Largest fixed control-plane request header (no payload): comfortably
 /// covers every [`SocketRequest`] but `Send`, which sizes its own buffer.
@@ -279,7 +283,8 @@ pub fn icmp_echo_socket(family: NetAddrFamily, deliver_port: u64) -> Result<Sock
 /// Send one ICMP/`ICMPv6` echo request from an echo `socket`. `dest` is
 /// [`None`] to use the connected peer (see [`connect`]); its port field is
 /// unused (ICMP has none) and must be zero. The caller chooses the
-/// `sequence`; the stack owns the identifier.
+/// `sequence`, and the `hop_limit` ([`None`] for the interface default); the
+/// stack owns the identifier.
 ///
 /// # Errors
 ///
@@ -290,12 +295,14 @@ pub fn send_echo(
     socket: SocketId,
     dest: Option<SocketAddr>,
     sequence: u16,
+    hop_limit: Option<NonZeroU8>,
     payload: &[u8],
 ) -> Result<(), Errno> {
     let request = SocketRequest::SendEcho {
         socket,
         dest,
         sequence,
+        hop_limit,
         payload,
     };
     let mut buf = payload_buffer(payload)?;
@@ -339,9 +346,10 @@ pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<SocketDelivery<'_>, Err
     SocketDelivery::parse(&buf[..len])
 }
 
-/// Receive the next inbound ICMP echo reply the stack delivered to
-/// `deliver_port`, decoding it into `buf`. Anything another sender posted
-/// there is discarded unread.
+/// Receive the next thing the stack delivered to `deliver_port` about one of
+/// the socket's echo requests — a reply, or an ICMP error a router or the
+/// destination sent about it (see [`SocketEcho::outcome`]) — decoding it into
+/// `buf`. Anything another sender posted there is discarded unread.
 ///
 /// # Errors
 ///
@@ -353,6 +361,129 @@ pub fn recv(deliver_port: u64, buf: &mut [u8]) -> Result<SocketDelivery<'_>, Err
 pub fn recv_echo(deliver_port: u64, buf: &mut [u8]) -> Result<SocketEcho<'_>, Errno> {
     let len = recv_from_stack(deliver_port, buf)?;
     SocketEcho::parse(&buf[..len])
+}
+
+/// Wait-set token of an [`EchoSocket`]'s delivery port.
+const ECHO_DELIVER_TOKEN: u64 = 1;
+/// Wait-set token of the network-interfaces notice.
+const ECHO_NETWORK_TOKEN: u64 = 2;
+/// An [`EchoSocket`]'s mailbox depth: answers to a full burst of outstanding
+/// probes queue rather than back-pressure the stack.
+const ECHO_DELIVER_CAPACITY: usize = 64;
+
+/// An ICMP/`ICMPv6` echo socket connected to one peer, with its own delivery
+/// port — what `ping`, `traceroute` and the network map probe through.
+///
+/// Answers and network changes are waited on through separate wait-sets: the
+/// delivery port stays ready while an answer is undrained, so a wait for the
+/// network that also watched it would return at once, over and over. Every
+/// wait parks until its own deadline or the event it waits for. Dropping the
+/// socket closes it and releases its port and wait-sets.
+pub struct EchoSocket {
+    socket: SocketId,
+    answers: WaitSet,
+    network: WaitSet,
+    deliver: PrivatePort,
+    buf: alloc::vec::Vec<u8>,
+}
+
+impl EchoSocket {
+    /// Open an echo socket connected to `peer`, so only answers about the
+    /// requests it sends reach it.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of the port, the wait-sets, the socket, or the connect —
+    /// [`Errno::PermissionDenied`] without `CAP_NET`/`CAP_NET_RAW`.
+    pub fn connect(peer: core::net::IpAddr) -> Result<Self, Errno> {
+        let buf = tairix_util::fallible::filled(SocketEcho::MAX_WIRE_LEN, 0u8)
+            .ok_or(Errno::OutOfMemory)?;
+        let deliver = PrivatePort::bind(SocketEcho::MAX_WIRE_LEN, ECHO_DELIVER_CAPACITY)?;
+        let answers = WaitSet::create()?;
+        answers.add(WaitSourceKind::Port, deliver.id(), ECHO_DELIVER_TOKEN)?;
+        let network = WaitSet::create()?;
+        network.add(
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::Network.as_u32()),
+            ECHO_NETWORK_TOKEN,
+        )?;
+        let (family, addr) = address_parts(peer);
+        let socket = icmp_echo_socket(family, deliver.id())?;
+        // An echo peer carries no port. Connecting records it, so the stack
+        // filters answers to it, and assigns the socket's identifier.
+        if let Err(errno) = connect(
+            socket,
+            SocketAddr {
+                family,
+                addr,
+                port: 0,
+            },
+        ) {
+            let _ = close(socket);
+            return Err(errno);
+        }
+        Ok(Self {
+            socket,
+            answers,
+            network,
+            deliver,
+            buf,
+        })
+    }
+
+    /// Send echo request `sequence` with `payload`, carrying `hop_limit`, or
+    /// the interface default for [`None`].
+    ///
+    /// # Errors
+    ///
+    /// The stack's refusal — [`Errno::NetworkUnreachable`] while no interface
+    /// can carry it yet.
+    pub fn send(
+        &self,
+        sequence: u16,
+        hop_limit: Option<NonZeroU8>,
+        payload: &[u8],
+    ) -> Result<(), Errno> {
+        send_echo(self.socket, None, sequence, hop_limit, payload)
+    }
+
+    /// Hand `read` the next thing the stack delivered about one of this
+    /// socket's requests, parking until one arrives or `deadline_ns` passes;
+    /// [`None`] once it has.
+    ///
+    /// # Errors
+    ///
+    /// A failed receive or wait, or a malformed delivery.
+    pub fn recv_until<R>(
+        &mut self,
+        deadline_ns: u64,
+        read: impl FnOnce(&SocketEcho<'_>) -> R,
+    ) -> Result<Option<R>, Errno> {
+        loop {
+            match recv_echo(self.deliver.id(), &mut self.buf) {
+                Ok(echo) => return Ok(Some(read(&echo))),
+                Err(Errno::WouldBlock) => {
+                    if self.answers.wait_until(deadline_ns)?.is_none() {
+                        return Ok(None);
+                    }
+                }
+                Err(other) => return Err(other),
+            }
+        }
+    }
+
+    /// Park until the machine's network interfaces next change or
+    /// `deadline_ns` passes, answering whether they changed.
+    #[must_use]
+    pub fn await_network(&self, deadline_ns: u64) -> bool {
+        matches!(self.network.wait_until(deadline_ns), Ok(Some(_)))
+    }
+}
+
+impl Drop for EchoSocket {
+    fn drop(&mut self) {
+        let _ = close(self.socket);
+    }
 }
 
 /// A zeroed request buffer for a header and `payload`, refused as
@@ -390,4 +521,32 @@ fn status_call(request: &SocketRequest<'_>) -> Result<(), Errno> {
     let mut reply = [0u8; SOCKET_MAX_REPLY];
     let len = call(request, &mut buf, &mut reply)?;
     decode_status_reply(&reply[..len])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tairix_abi_trap::seam::capture;
+
+    fn socket() -> EchoSocket {
+        EchoSocket {
+            socket: 1,
+            answers: WaitSet(2),
+            network: WaitSet(3),
+            deliver: PrivatePort(4),
+            buf: alloc::vec::Vec::new(),
+        }
+    }
+
+    #[test]
+    fn waiting_for_the_network_never_watches_the_answers() {
+        // An undrained answer keeps the delivery port ready, so a wait for the
+        // network that watched it would return at once, over and over.
+        let socket = socket();
+        let (number, args) = capture(0, || {
+            let _ = socket.await_network(u64::MAX);
+        });
+        assert_eq!(number, crate::NUM_WAITSET_WAIT);
+        assert_eq!(args[0], 3, "the network's own set");
+    }
 }

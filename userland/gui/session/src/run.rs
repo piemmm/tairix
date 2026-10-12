@@ -8625,8 +8625,7 @@ mod program {
         if usize::try_from(stat.size).map_or(true, |len| len > tairix_soundtheme::MAX_SOUND_BYTES) {
             return Err(Errno::LengthOutOfRange);
         }
-        let handle = tairix_rt::fd_grant(file.fd(), 0, to);
-        u64::try_from(handle).map_err(|_| Errno::from_syscall(handle))
+        Errno::syscall_result(tairix_rt::fd_grant(file.fd(), 0, to))
     }
 
     /// Hand `work` to the sound-choices worker, adopting at once what ran here

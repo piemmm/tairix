@@ -34,10 +34,15 @@ determinyddol sydd eisiau.
 
 Yn ddiofyn mae `ping` yn anfon un cais y eiliad nes ei atal; mae `-c` yn
 cyfyngu'r nifer. Mae pob ateb yn nodi'r ffynhonnell, y rhif dilyniant a'r
-amser; mae cais heb ateb o fewn y terfyn amser yn argraffu llinell dod i
-ben. Mae'r crynodeb yn nodi'r pecynnau a drosglwyddwyd ac a dderbyniwyd,
-y ganran colled, a'r amseroedd mynd a dod lleiaf, cyfartalog a mwyaf. Mae
-`-q` yn dangos y pennyn a'r crynodeb yn unig.
+amser. Pan fydd llwybrydd, neu'r gwesteiwr ei hun, yn adrodd gwall am gais
+— mae ei derfyn hopian wedi dod i ben, mae'r cyrchfan yn anghyraeddadwy,
+mae'r pecyn yn rhy fawr — mae llinell `From` yn enwi'r adroddwr a'r
+rheswm. Nid yw cais heb ateb o fewn y terfyn amser yn argraffu dim. Os na
+all unrhyw ryngwyneb gario cais eto, mae'n aros hyd at ei derfyn amser i'r
+rhwydwaith fod yn barod. Mae'r crynodeb yn nodi'r pecynnau a drosglwyddwyd
+ac a dderbyniwyd, unrhyw wallau, y ganran colled, a'r amseroedd mynd a dod
+lleiaf, cyfartalog a mwyaf gyda'u gwyriad cymedrig. Mae `-q` yn dangos y
+pennyn a'r crynodeb yn unig.
 
 Mae pob ateb yn enwi'r cymar fel `enw (cyfeiriad)` pan fo gan y cyfeiriad
 gofnod `PTR`, wedi'i ddatrys unwaith ar gyfer y rhediad drwy'r un

@@ -1170,6 +1170,20 @@ impl AppWindow {
         self.client.set_backdrop_blur(held.pane.id(), radius_px)
     }
 
+    /// Retitle the open window to `title`, replacing the title given at open.
+    /// With no window open there is nothing to retitle, which is not a
+    /// failure: the next open states the title that is current then.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal; the window keeps the title it had.
+    pub fn set_title(&mut self, title: &str) -> Result<(), Errno> {
+        let Some(held) = self.retained.as_ref() else {
+            return Ok(());
+        };
+        self.client.set_title(held.pane.id(), title)
+    }
+
     /// Answer the session's release of its own copy by giving this side's
     /// region back, so the pages are actually freed.
     pub fn release_frames(&mut self) {

@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 395 open, 534 closed, 929 total.
+**closed**, and a partial fix stays **open**. 398 open, 535 closed, 933 total.
 
-### Open (395)
+### Open (398)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -423,9 +423,12 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D933 | every user-space driver ends with a private exit code no reason accompanies: about twenty binaries each declare their own `EXIT_NO_HOST = 80` and `EXIT_BRINGUP_FAILED = 82` (`drivers/*/main.rs`, `program.rs`), the display service's five codes (80–84, `lib/display` `service`) are returned with nothing recorded, and the kernel's `task exited with nonzero status` is all a boot log shows — a duplicated vocabulary and a silent abnormal exit at every one | medium. The fix: one driver exit vocabulary in `lib/drvrt`, each code carrying its stated reason, recorded through `lib/log` with the node as the process ends; every driver and the display service use it and their private constants go. Its regression test: each code records its reason once, and no driver declares an exit constant of its own. |
 | D934 | on a Pi 4 display takeover the firmware refuses the HDMI0 encoder's first raise of its state-machine clock (clock 13, from the 120 MHz probe floor towards 1.01 × the pixel clock), which the clock server records as `clock: would not change; left as it is` at error (24307, 7.136 s in the 2026-10-12 boot log); the raise succeeds at 7.141 s only after the display engine lifted the core clock (clock 4) to 500 MHz at 7.138 s, picked up because a refused floor leaves `hsm_floor` unchanged and a later `settle_hsm` asks again (`drivers/display/bcm2711_hdmi` `hdmi`). The likely cause is ordering: the firmware bounds the state-machine clock by the core clock, and nothing orders the encoder's raise after the engine's | medium. Confirm the bound against the firmware's clock limits. The fix: the engine raises the core clock before it asks its encoders for a mode, so the encoder's raise is never refused on the way to a working mode. Its regression test: a mode set whose controller refuses a state-machine raise above the core clock reaches its output with no refusal recorded. |
 | D935 | a USB HID interface whose report descriptor serves none of the seat's devices (a receiver's vendor-defined interface) ends its driver with an error record (`usb-hid: the interface carries nothing the seat serves`, 4246) and exit 82, so the kernel also logs `task exited with nonzero status` (4035): a healthy boot with a common wireless receiver reads as a failed driver | low. The fix: a driver that finds nothing to serve on its matched node declines it — recorded at info, the node left unbound — through the one exit vocabulary D933 adds, never as a bring-up failure. Its regression test: a vendor-only descriptor declines with no error recorded and the node reported unbound. |
+| D937 | wait-set readiness is a poll: every wait snapshots and scans the whole membership, and adding, removing and reporting a member each scan it linearly, so a set's cost grows with what is registered rather than with what is ready | **medium**; noticed charging wait-set members, not absorbed. A ready list fed by each source's wake, as `epoll` keeps, makes a wait cost what is ready; the member bound is now a per-process limit, so the cost is bounded but not proportionate. `kernel/core/src/waitset.rs`, `syscalls.rs` `waitset_wait` |
+| D938 | a stream socket reports no send room, so a sender facing a full send buffer can only retry on a timer | **low**; noticed in `telnet`'s send path, not absorbed; that retry is now a timed park nothing pending can cut short. A room event delivered when the send buffer drains would let the sender park on it. `lib/abi/src/net.rs` `SocketStreamEvent`, `userland/net/netstack`, `userland/apps/telnet/src/run.rs` |
+| D939 | forty-five command crates each declare their own one-method byte-sink `Output` trait (`write_all(&self, &[u8]) -> Result<(), Errno>`) rather than sharing one | **low**; noticed writing `traceroute`, not absorbed. `userland/*/*/src/io.rs` and siblings |
 
 
-### Closed (534)
+### Closed (535)
 
 | ID | Subject |
 |---|---|
@@ -963,6 +966,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D926 | the PCM channel vocabulary had no rear centre, so a 6.1 layout was refused wherever it arrived: a FLAC stream of seven channels, a WAVE or FLAC mask naming the back centre, a virtio-snd map naming `RC`, a USB audio cluster stating its surround bit, and an HDMI sink's rear-centre allocations; `ChannelPosition::RearCentre` now carries it through every layer, the mixer splitting it into a surround pair or the fronts and folding a surround pair into it; `seven_channels_without_a_mask_are_six_one_with_its_back_centre`, `a_channel_map_naming_a_position_this_stack_cannot_place_is_left_unpublished`, `channel_maps_follow_the_stated_positions_or_the_conventional_reading`, `a_rear_centre_takes_the_slot_its_allocation_gives_it`, `a_rear_centre_splits_into_a_surround_pair_and_folds_forward_by_half`, `a_surround_pair_folds_into_a_lone_rear_centre` |
 | D927 | the shared work queue lost a wake: `collect_landed` counted the landed answers outside the desk's lock and `collect` re-armed the nudge only as it took one, so an answer landing between the count and the first take found the nudge still set, sent no wake, and then had it cleared — left uncollected on an idle loop until some unrelated wake; counting the pass now re-arms the nudge under the same lock (`JobQueue::landed_for_collection`), so an answer the pass will not take always owes a wake; `an_answer_landing_once_a_pass_has_counted_still_wakes_the_loop` |
 | D928 | `tairix_rt::call_post` and `submit::Submission::post` documented an over-capacity endpoint as refusing with `LengthOutOfRange`, which the kernel reserves for a configuration error; a full endpoint answers the retryable `WouldBlock`, as both now say, so a caller classifying the refusal from the docs no longer takes back-pressure for a permanent failure |
+| D936 | `mem-pin-migration` controller kicks bounced the caller between CPUs |
 
 ## Scope
 
@@ -10875,3 +10879,34 @@ honest shape is the one the cursor and wallpaper stores already use: list
 resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
+
+---
+
+## D936 — `mem-pin-migration` controller kicks bounced the caller between CPUs — DONE
+
+**Root cause.** The four-vCPU vertical's controller sent a reschedule IPI to
+every unpaused secondary on every iteration, so that one would steal work left
+on the paused source. A delivered reschedule IPI is an un-gated forced yield,
+re-honoured on the return to user mode until none is owed, and the harness's
+secondary loop stepped the policy without retiring the latches first. The
+caller was therefore yielded at nearly every return to user mode, and each
+yield on the CPU the controller had just paused stranded it there again: tens
+of thousands of migrations for 64 rounds, and in the tail a guest silent past
+its inactivity budget, because the stall guard counted sightings of the
+caller as progress.
+
+**Fix.** Every dispatch decision — the kernel's dispatch loop and the
+harness's — is made through `kernel_core::dispatcher_step`, which retires both
+reschedule latches before the policy steps. The controller kicks the
+dispatching secondaries once, when work appears where nothing would run it,
+and their masked idle check refuses to sleep while such work waits, so the
+one kick cannot be lost. The run takes about one migration per round. The
+endpoint id and round count are defined once in the chassis and passed to the
+role.
+
+**Regression coverage.**
+`preempt::tests::a_dispatch_decision_retires_the_latches_left_before_it`
+(fails without the retirement) and `a_latch_set_after_the_decision_is_honoured`.
+The vertical fails with `FAIL_BOUNCED` once the caller is seen on a fresh CPU
+more than four times per round, fails with `FAIL_ROUNDS` unless the endpoint
+served exactly the role's rounds, and its stall guard counts posted replies.

@@ -1,11 +1,12 @@
-//! The `pci.ids`/`usb.ids` snapshot parser, vetting filter, and compact
-//! lookup-table encoder (host/generator side; needs `alloc`).
+//! The `pci.ids`/`usb.ids`/`oui.ids` snapshot parser, vetting filter, and
+//! compact lookup-table encoder (host/generator side; needs `alloc`).
 //!
-//! Both public databases share one line grammar: `#` comments, blank lines,
-//! and tab-indented entries of the form `id`, two spaces, `name`. Depth 0
-//! holds vendors and tagged section headers (`C 03  Display controller`),
-//! depth 1 their children, depth 2 the grandchildren (PCI subsystems,
-//! class prog-ifs). [`parse`] validates the *whole* file under that grammar
+//! Every database shares one line grammar: `#` comments, blank lines, and
+//! tab-indented entries of the form `id`, two spaces, `name`. Depth 0 holds
+//! vendors and tagged section headers (`C 03  Display controller`), depth 1
+//! their children, depth 2 the grandchildren (PCI subsystems, class
+//! prog-ifs). `oui.ids` uses depth 0 alone, its ids six digits wide, and has
+//! no sections. [`parse`] validates the *whole* file under that grammar
 //! and rejects it on the first deviation — never skip-and-continue, so a
 //! smuggled section cannot hide (the raw download is untrusted input whose
 //! strings end up on users' terminals).
@@ -13,12 +14,15 @@
 //! The vetting rules, in one place:
 //!
 //! - the source must be valid UTF-8 and at most [`MAX_SOURCE_BYTES`];
-//! - no control characters other than the structural newline, and tab only
-//!   as indentation (or inside comments): no ESC/CSI/C0/C1 bytes, so a
-//!   hostile entry cannot inject terminal escape sequences through `lspci`
-//!   output;
+//! - no character that hides or reorders text (`tairix_util::utf8::is_hidden`)
+//!   other than the structural newline, and tab only as indentation (or inside
+//!   comments): no ESC/CSI/C0/C1 bytes, so a hostile entry cannot inject
+//!   terminal escape sequences through `lspci` output, and no bidirectional
+//!   control or zero-width character, so a name cannot pass for another or
+//!   hide text from the reviewer of a refresh;
 //! - ids are exact-width lowercase hex in the emitted scopes (vendors,
-//!   devices, subsystems, the `C` class tables); the auxiliary `usb.ids`
+//!   devices, subsystems, the `C` class tables, organisations); the
+//!   auxiliary `usb.ids`
 //!   tables (`AT`, `HID`, `R`, `BIAS`, `PHY`, `HUT`, `L`, `HCC`, `VT`)
 //!   accept 1–4 hex digits of either case, as upstream actually publishes
 //!   them;
@@ -60,8 +64,9 @@ pub enum ParseErrorKind {
     SourceTooLarge,
     /// The source is not valid UTF-8.
     NotUtf8,
-    /// A control character other than the structural tab/newline.
-    ControlChar,
+    /// A character that hides or reorders text, other than the structural
+    /// tab/newline.
+    HiddenChar,
     /// A tab inside an entry body (tabs are indentation only).
     TabInEntry,
     /// A comment line indented by tabs.
@@ -95,7 +100,7 @@ impl fmt::Display for ParseError {
         let what = match self.kind {
             ParseErrorKind::SourceTooLarge => "source exceeds the size bound",
             ParseErrorKind::NotUtf8 => "source is not valid UTF-8",
-            ParseErrorKind::ControlChar => "control character in line",
+            ParseErrorKind::HiddenChar => "control or invisible character in line",
             ParseErrorKind::TabInEntry => "tab inside an entry body",
             ParseErrorKind::IndentedComment => "comment indented by tabs",
             ParseErrorKind::TooDeep => "indented deeper than two tabs",
@@ -168,7 +173,7 @@ struct Class {
 #[derive(Debug)]
 pub struct ParsedDb {
     kind: DbKind,
-    vendors: BTreeMap<u16, Vendor>,
+    vendors: BTreeMap<u32, Vendor>,
     classes: BTreeMap<u8, Class>,
     counts: Counts,
 }
@@ -184,7 +189,7 @@ enum Cursor {
     /// The untagged vendor section (the file's opening section).
     Vendors {
         /// The open vendor a depth-1 device attaches to.
-        vendor: Option<u16>,
+        vendor: Option<u32>,
         /// The open device a depth-2 PCI subsystem attaches to.
         device: Option<u16>,
     },
@@ -271,7 +276,7 @@ fn split_tag(body: &str) -> Option<(&str, &str)> {
 /// cursor, and the bounded entry budget.
 struct Parser {
     kind: DbKind,
-    vendors: BTreeMap<u16, Vendor>,
+    vendors: BTreeMap<u32, Vendor>,
     classes: BTreeMap<u8, Class>,
     /// Auxiliary sections: `aux[tag][section id]` is the set of child ids,
     /// kept only for duplicate detection (validated, never encoded).
@@ -298,6 +303,9 @@ impl Parser {
     /// One depth-0 line: a vendor entry or a tagged section header.
     fn depth0(&mut self, body: &str, line: usize) -> Result<(), ParseError> {
         self.charge(line)?;
+        if self.kind == DbKind::Oui {
+            return self.organisation(body, line);
+        }
         if let Some((tag, rest)) = split_tag(body) {
             let (id, name) = split_entry(rest, line)?;
             if tag == "C" {
@@ -341,8 +349,18 @@ impl Parser {
         }
         let (id, name) = split_entry(body, line)?;
         let vendor = hex_exact(id, 4).ok_or_else(|| Self::reject(line, ParseErrorKind::BadId))?;
-        let vendor =
-            u16::try_from(vendor).map_err(|_| Self::reject(line, ParseErrorKind::BadId))?;
+        self.vendor(vendor, name, line)
+    }
+
+    /// An `oui.ids` line: an organisation by its six-digit OUI.
+    fn organisation(&mut self, body: &str, line: usize) -> Result<(), ParseError> {
+        let (id, name) = split_entry(body, line)?;
+        let oui = hex_exact(id, 6).ok_or_else(|| Self::reject(line, ParseErrorKind::BadId))?;
+        self.vendor(oui, name, line)
+    }
+
+    /// Record vendor `vendor` named `name`, opening it for child lines.
+    fn vendor(&mut self, vendor: u32, name: &str, line: usize) -> Result<(), ParseError> {
         match self.vendors.entry(vendor) {
             Entry::Occupied(_) => return Err(Self::reject(line, ParseErrorKind::DuplicateId)),
             Entry::Vacant(slot) => {
@@ -363,6 +381,9 @@ impl Parser {
     /// One depth-1 line: a device, subclass, or auxiliary child.
     fn depth1(&mut self, body: &str, line: usize) -> Result<(), ParseError> {
         self.charge(line)?;
+        if self.kind == DbKind::Oui {
+            return Err(Self::reject(line, ParseErrorKind::UnexpectedDepth));
+        }
         let (id, name) = split_entry(body, line)?;
         match self.cursor {
             Cursor::Vendors { vendor, .. } => {
@@ -443,6 +464,9 @@ impl Parser {
     /// One depth-2 line: a PCI subsystem or a class prog-if.
     fn depth2(&mut self, body: &str, line: usize) -> Result<(), ParseError> {
         self.charge(line)?;
+        if self.kind == DbKind::Oui {
+            return Err(Self::reject(line, ParseErrorKind::UnexpectedDepth));
+        }
         let (id, name) = split_entry(body, line)?;
         match self.cursor {
             Cursor::Vendors { vendor, device } => {
@@ -544,10 +568,10 @@ pub fn parse(kind: DbKind, bytes: &[u8]) -> Result<ParsedDb, ParseError> {
                         kind: ParseErrorKind::TabInEntry,
                     });
                 }
-            } else if c.is_control() {
+            } else if tairix_util::utf8::is_hidden(c) {
                 return Err(ParseError {
                     line,
-                    kind: ParseErrorKind::ControlChar,
+                    kind: ParseErrorKind::HiddenChar,
                 });
             }
         }
@@ -611,12 +635,9 @@ impl ParsedDb {
         let mut vendors = Vec::new();
         let mut devices = Vec::new();
         for (&id, vendor) in &self.vendors {
-            vendors.push((u32::from(id), strings.intern(&vendor.name)));
+            vendors.push((id, strings.intern(&vendor.name)));
             for (&dev, device) in &vendor.devices {
-                devices.push((
-                    u32::from(id) << 16 | u32::from(dev),
-                    strings.intern(&device.name),
-                ));
+                devices.push((id << 16 | u32::from(dev), strings.intern(&device.name)));
             }
         }
         let mut classes = Vec::new();

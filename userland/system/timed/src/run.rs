@@ -58,7 +58,7 @@ mod program {
     use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::rtc_ipc::{self, RtcOp, RtcReading, RTC_ENDPOINT};
     use tairix_abi::time::{Duration64, Time64};
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::waitset::WaitSourceKind;
     use tairix_abi::{Errno, WallClockReading, WallTimeState, MAX_TIME_SERVERS};
     use tairix_log::{Event, EventId, Level};
     use tairix_net::addr::IpAddr;
@@ -66,7 +66,7 @@ mod program {
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_resolver::RtDnsTransport;
     use tairix_rng::{FastRng, RandU64};
-    use tairix_rt::LogSink;
+    use tairix_rt::{LogSink, PrivatePort, WaitSet};
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{worker_role, RtLauncher};
     use tairix_sandbox::timesync::TimeSyncService;
@@ -413,10 +413,8 @@ mod program {
     ///
     /// [`None`] once the failure has been recorded: the service exits rather
     /// than degrading into a poll, and PID 1 relaunches it.
-    fn arm_reactor() -> Option<(u64, u64)> {
-        let Ok(deliver) =
-            tairix_rt::bind_private_port(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY)
-        else {
+    fn arm_reactor() -> Option<(WaitSet, PrivatePort)> {
+        let Ok(deliver) = PrivatePort::bind(SocketDatagram::MAX_WIRE_LEN, DELIVER_CAPACITY) else {
             record(
                 SERVICE_UNAVAILABLE,
                 Level::Warn,
@@ -424,7 +422,7 @@ mod program {
             );
             return None;
         };
-        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
+        let Ok(set) = WaitSet::create() else {
             record(
                 SERVICE_UNAVAILABLE,
                 Level::Warn,
@@ -432,13 +430,9 @@ mod program {
             );
             return None;
         };
-        if tairix_rt::waitset_ctl(
-            set,
-            WaitSetOp::Add,
-            WaitSourceKind::Port,
-            deliver,
-            DELIVER_TOKEN,
-        ) != 0
+        if set
+            .add(WaitSourceKind::Port, deliver.id(), DELIVER_TOKEN)
+            .is_err()
         {
             record(
                 SERVICE_UNAVAILABLE,
@@ -493,7 +487,7 @@ mod program {
                 clock: RtClock,
                 rtc: RtRtc,
                 store: RtRecordStore,
-                transport: RtTransport::new(&selection.servers, deliver),
+                transport: RtTransport::new(&selection.servers, deliver.id()),
                 sandbox: ParserSandbox::new(RtLauncher::own_binary(), LOG_SINK),
                 sink: LOG_SINK,
                 selection: selection.clone(),
@@ -516,13 +510,13 @@ mod program {
                 // configuration up either way, and PID 1 audits the exit.
                 return 0;
             };
-            let waited = tairix_rt::waitset_wait(set, timeout, &mut token);
+            let waited = tairix_rt::waitset_wait(set.handle(), timeout, &mut token);
             let woken = Duration64::from_nanos(tairix_rt::clock_get());
             if waited == 0 {
                 // A datagram is waiting. Drain what the stack delivered —
                 // the receive discards any other sender's post — then fall
                 // through to the deadline check.
-                while let Ok(delivery) = tairix_rt::net::recv(deliver, &mut scratch) {
+                while let Ok(delivery) = tairix_rt::net::recv(deliver.id(), &mut scratch) {
                     // Its sockets join no group, so a link edge never
                     // arrives; were one to, it carries nothing for the clock.
                     if let SocketDelivery::Datagram(datagram) = delivery {

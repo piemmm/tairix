@@ -77,7 +77,7 @@ pub mod server;
 
 pub use appbar::{
     declaration, declare_app_bar, info_and_quit, is_quit, AppBarRefused, DESKTOP_ROLE_SWITCH,
-    QUIT_ROW,
+    QUIT_LABEL, QUIT_ROW,
 };
 pub use client::{
     damage_in, key_input_event, pinch_input_events, pointer_input_events, pointer_point,

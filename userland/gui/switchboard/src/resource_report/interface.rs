@@ -18,7 +18,7 @@ use tairix_procinfo::display::{format_bytes, format_duration, format_rate};
 use tairix_procinfo::{render_if_addr, render_server};
 use tairix_theme::SignalRole;
 
-use super::{mac, reading};
+use super::reading;
 use crate::model::{display_name, RateTrace, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
@@ -159,7 +159,7 @@ fn link_block(sample: &Sample, iface: &NetInterfaceFactsRecord) -> BlockBody {
                 String::from(if state.link_up { "up" } else { "down" })
             }),
         ),
-        ReadingFact::text("Hardware address", mac(iface.mac)),
+        ReadingFact::text("Hardware address", tairix_procinfo::render_mac(iface.mac)),
         ReadingFact::text("MTU", format!("{} bytes", iface.mtu)),
     ];
     match state {

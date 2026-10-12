@@ -23,7 +23,8 @@ reason lands on standard error and nothing is fabricated
 
 Names come from the vetted `pci.ids` snapshot (`lib/devids`) compiled
 into the compact table this bundle ships as `Resources/pci.ids.bin` —
-data on the volume, read at runtime through the secured VFS, never
+data on the volume, read at runtime through the secured VFS by `lib/devids`'
+bounded `bundled::load`, never
 `include_bytes!` into the binary (`AGENTS.md` §16.5). An identity the
 database does not name is rendered numerically (`Vendor 8086`,
 `Device 2922`), never fabricated, with the count advised on fd 3

@@ -34,10 +34,15 @@ c'est une charge déterministe qui est voulue.
 
 Par défaut `ping` envoie une requête par seconde jusqu'à interruption ;
 `-c` en borne le nombre. Chaque réponse indique la source, le numéro de
-séquence et le temps ; une requête sans réponse dans le délai imparti
-affiche une ligne d'expiration. Le bilan final indique les paquets émis
-et reçus, le pourcentage de perte, et les temps d'aller-retour minimum,
-moyen et maximum. `-q` n'affiche que l'en-tête et le bilan.
+séquence et le temps. Lorsqu'un routeur, ou l'hôte lui-même, signale une
+erreur à propos d'une requête — sa limite de sauts épuisée, la destination
+injoignable, le paquet trop grand —, une ligne `From` nomme l'auteur du
+signalement et la raison. Une requête restée sans réponse dans le délai
+imparti n'affiche rien. Si aucune interface ne peut encore acheminer une
+requête, celle-ci attend jusqu'à son délai que le réseau soit prêt. Le
+bilan final indique les paquets émis et reçus, les erreurs éventuelles, le
+pourcentage de perte, et les temps d'aller-retour minimum, moyen et
+maximum avec leur écart moyen. `-q` n'affiche que l'en-tête et le bilan.
 
 Chaque réponse nomme le pair sous la forme `nom (adresse)` lorsque
 l'adresse possède un enregistrement `PTR`, résolu une seule fois pour

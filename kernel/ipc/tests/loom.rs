@@ -90,6 +90,7 @@ fn loom_send_versus_destroy_never_leaks() {
                 CapabilitySet::empty(),
                 8,
                 4,
+                tairix_abi::RLIMIT_INFINITY,
                 &DiscardSink,
             )
             .expect("open"),
@@ -144,6 +145,7 @@ fn loom_send_fast_path_observes_closed_state() {
                 CapabilitySet::empty(),
                 8,
                 4,
+                tairix_abi::RLIMIT_INFINITY,
                 &DiscardSink,
             )
             .expect("open"),

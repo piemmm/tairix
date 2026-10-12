@@ -55,6 +55,7 @@ mod program {
     use tairix_rt::keys::{KeyRelay, Keys};
     use tairix_rt::sync::{Mutex, WorkerWake};
     use tairix_rt::thread::{JoinHandle, Thread};
+    use tairix_rt::PrivatePort;
     use tairix_sandbox::audiodecode::AudioDecodeService;
     use tairix_sandbox::rt::{serve_session_stdio, session_worker_role};
     use tairix_termcap::{from_term, TermType};
@@ -113,7 +114,7 @@ mod program {
     struct Ui {
         board: Arc<Mutex<Board>>,
         wake: Arc<WorkerWake>,
-        commands: u64,
+        commands: PrivatePort,
         thread: JoinHandle<()>,
     }
 
@@ -148,7 +149,8 @@ mod program {
         fn start(list: List, gain: AudioGain, term: TermType) -> Result<Self, Errno> {
             let wake = Arc::new(WorkerWake::create());
             let wakes = Wakes::watch(KeyRelay::start()?, &wake)?;
-            let commands = tairix_rt::bind_private_port(1, COMMAND_CAPACITY)?;
+            let commands = PrivatePort::bind(1, COMMAND_CAPACITY)?;
+            let mailbox = commands.id();
             let board = Arc::new(Mutex::new(Board {
                 status: Status::new(gain),
                 notice: None,
@@ -158,7 +160,7 @@ mod program {
             let shown = Arc::clone(&board);
             let woken = Arc::clone(&wake);
             let thread =
-                Thread::spawn(move || interface(&list, &shown, &woken, commands, wakes, term))?;
+                Thread::spawn(move || interface(&list, &shown, &woken, mailbox, wakes, term))?;
             Ok(Self {
                 board,
                 wake,
@@ -536,7 +538,7 @@ mod program {
                 None
             };
             let commands = match &ui {
-                Some(ui) => Some(Commands::watch(set, ui.commands).map_err(|err| {
+                Some(ui) => Some(Commands::watch(set, ui.commands.id()).map_err(|err| {
                     format!("the interface's commands could not be watched: {err}")
                 })?),
                 None => None,

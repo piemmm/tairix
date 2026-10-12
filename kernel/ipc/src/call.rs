@@ -45,10 +45,11 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::ipc::{IPC_CALL_CAPACITY_MAX, IPC_MESSAGE_MAX_PAYLOAD_LEN};
-use tairix_abi::{Errno, Origin, ProcId};
+use tairix_abi::{Errno, LimitKind, Origin, ProcId};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::SensitiveBuffer;
 use tairix_kernel_sec::captable::TaskCapabilities;
+use tairix_kernel_sec::Charge;
 use tairix_log::{Field, Sink};
 use tairix_util::fmt::{format_hex_u64, format_usize};
 
@@ -163,6 +164,26 @@ pub struct CallEndpointLimits {
     /// Maximum number of outstanding calls before [`CallEndpoint::post`]
     /// fails closed (a fail-closed memory bound, not a scaling capacity ).
     pub capacity: usize,
+}
+
+impl CallEndpointLimits {
+    /// The kernel memory an endpoint with these limits may come to hold — its
+    /// bookkeeping and `capacity` outstanding calls, each carrying the larger
+    /// of its two payloads, since a call holds its request until the server
+    /// takes it and only then its reply — and so what its owner is charged
+    /// against its `ipc-queue-bytes` limit.
+    #[must_use]
+    pub fn reservation(self) -> u64 {
+        let entry = size_of::<PendingCall>()
+            .max(size_of::<InServiceCall>())
+            .max(size_of::<CompletedCall>());
+        crate::queue_reservation(
+            size_of::<CallEndpoint>(),
+            entry,
+            u64::from(self.max_request.max(self.max_reply)),
+            self.capacity,
+        )
+    }
 }
 
 /// One posted request awaiting receipt or reply.
@@ -285,6 +306,9 @@ pub struct CallEndpoint {
     /// Liveness read on the post fast path before taking the lock.
     state: AtomicU32,
     inner: tairix_sync::SpinLock<Inner>,
+    /// What the owner is charged for the calls this endpoint may come to
+    /// hold, returned when the endpoint is dropped.
+    _queue_charge: Charge,
 }
 
 impl CallEndpoint {
@@ -313,6 +337,9 @@ impl CallEndpoint {
     ///   [`IPC_CALL_CAPACITY_MAX`].
     /// * [`Errno::PermissionDenied`] if `creator` lacks the bind authority
     ///   above.
+    /// * [`Errno::LimitExceeded`] if the endpoint's
+    ///   [`reservation`](CallEndpointLimits::reservation) would carry the
+    ///   creator past `queue_limit`, its `ipc-queue-bytes` limit.
     ///
     /// On any failure exactly one [`AuditEvent::CallEndpointCreateDenied`] is
     /// emitted; on success exactly one [`AuditEvent::CallEndpointCreated`].
@@ -322,6 +349,7 @@ impl CallEndpoint {
         required_send_caps: CapabilitySet,
         required_recv_caps: CapabilitySet,
         limits: CallEndpointLimits,
+        queue_limit: u64,
         audit: &S,
     ) -> Result<Self, Errno> {
         Self::create_gated(
@@ -330,6 +358,7 @@ impl CallEndpoint {
             required_send_caps,
             required_recv_caps,
             limits,
+            queue_limit,
             false,
             audit,
         )
@@ -360,6 +389,7 @@ impl CallEndpoint {
         required_send_caps: CapabilitySet,
         required_recv_caps: CapabilitySet,
         limits: CallEndpointLimits,
+        queue_limit: u64,
         audit: &S,
     ) -> Result<Self, Errno> {
         Self::create_gated(
@@ -368,6 +398,7 @@ impl CallEndpoint {
             required_send_caps,
             required_recv_caps,
             limits,
+            queue_limit,
             true,
             audit,
         )
@@ -398,12 +429,17 @@ impl CallEndpoint {
     /// alternative authority for a reserved id (see
     /// [`Self::create_seat_attested`]); it never relaxes the
     /// restricted-sender gate.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the two public constructors' inputs plus the one that tells them apart"
+    )]
     fn create_gated<S: Sink + ?Sized>(
         id: EndpointId,
         creator: &TaskCapabilities,
         required_send_caps: CapabilitySet,
         required_recv_caps: CapabilitySet,
         limits: CallEndpointLimits,
+        queue_limit: u64,
         reserved_bind_attested: bool,
         audit: &S,
     ) -> Result<Self, Errno> {
@@ -456,6 +492,18 @@ impl CallEndpoint {
             return Err(Errno::PermissionDenied);
         }
 
+        let queue_charge = match creator.charges().charge(
+            LimitKind::IpcQueueBytes,
+            limits.reservation(),
+            queue_limit,
+        ) {
+            Ok(charge) => charge,
+            Err(err) => {
+                record(audit, AuditEvent::CallEndpointCreateDenied, &[id_field]);
+                return Err(err);
+            }
+        };
+
         if reserved_bind_attested {
             // The seat-attested bind is a distinct security decision:
             // record it distinguishably from a capability-authorised bind.
@@ -491,6 +539,7 @@ impl CallEndpoint {
                 in_service: Vec::new(),
                 completed: Vec::new(),
             }),
+            _queue_charge: queue_charge,
         })
     }
 
@@ -1265,6 +1314,7 @@ mod tests {
                 max_reply: 128,
                 capacity: 8,
             },
+            tairix_abi::RLIMIT_INFINITY,
             sink,
         )
         .expect("unrestricted endpoint")
@@ -1292,6 +1342,57 @@ mod tests {
     }
 
     #[test]
+    fn create_charges_the_creator_a_full_queue_of_the_larger_payload() {
+        let sink = RecordingSink::new();
+        let creator = task_with(1, &[]);
+        let limits = CallEndpointLimits {
+            max_request: 512,
+            max_reply: 64,
+            capacity: 4,
+        };
+        let reservation = limits.reservation();
+        assert!(
+            reservation >= 4 * 512,
+            "each call may hold the larger payload"
+        );
+        assert_eq!(
+            reservation,
+            CallEndpointLimits {
+                max_reply: 0,
+                ..limits
+            }
+            .reservation(),
+            "but never both: a call holds its request or its reply"
+        );
+        let create = |limit| {
+            CallEndpoint::create(
+                EndpointId(0xC1),
+                &creator,
+                CapabilitySet::empty(),
+                CapabilitySet::empty(),
+                limits,
+                limit,
+                &sink,
+            )
+        };
+        assert_eq!(
+            create(reservation - 1).map(|ep| ep.id()),
+            Err(Errno::LimitExceeded)
+        );
+        assert!(sink
+            .ids()
+            .contains(&AuditEvent::CallEndpointCreateDenied.id().0));
+        assert_eq!(creator.charges().held(LimitKind::IpcQueueBytes), 0);
+        let endpoint = create(reservation).expect("exactly fits");
+        assert_eq!(
+            creator.charges().held(LimitKind::IpcQueueBytes),
+            reservation
+        );
+        drop(endpoint);
+        assert_eq!(creator.charges().held(LimitKind::IpcQueueBytes), 0);
+    }
+
+    #[test]
     fn create_rejects_oversize_request_cap() {
         let sink = RecordingSink::new();
         let creator = task_with(1, &[]);
@@ -1305,6 +1406,7 @@ mod tests {
                 max_reply: 8,
                 capacity: 8,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -1333,6 +1435,7 @@ mod tests {
                 max_reply: 8,
                 capacity: IPC_CALL_CAPACITY_MAX + 1,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -1352,6 +1455,7 @@ mod tests {
                 max_reply: 8,
                 capacity: IPC_CALL_CAPACITY_MAX,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("the ceiling is a legal capacity");
@@ -1371,6 +1475,7 @@ mod tests {
                 max_reply: IPC_MESSAGE_MAX_PAYLOAD_LEN + 1,
                 capacity: 8,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -1392,6 +1497,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 0,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -1420,6 +1526,7 @@ mod tests {
                     max_reply: 64,
                     capacity: 8,
                 },
+                tairix_abi::RLIMIT_INFINITY,
                 &sink,
             )
             .err()
@@ -1445,6 +1552,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 8,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("privileged service binds its reserved rendezvous");
@@ -1467,6 +1575,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 8,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -1493,6 +1602,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 8,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .err()
@@ -1517,6 +1627,7 @@ mod tests {
                 max_reply: 200,
                 capacity: 4,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("authorised");
@@ -1547,6 +1658,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 4,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("authorised");
@@ -1573,6 +1685,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 4,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("ok");
@@ -1617,6 +1730,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 8,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("ok");
@@ -1661,6 +1775,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 4,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("ok");
@@ -1686,6 +1801,7 @@ mod tests {
                 max_reply: 64,
                 capacity: 2,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("ok");
@@ -1838,6 +1954,7 @@ mod tests {
                 max_reply: 16,
                 capacity: 2,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("created");
@@ -1995,6 +2112,7 @@ mod tests {
                 max_reply: 4,
                 capacity: 4,
             },
+            tairix_abi::RLIMIT_INFINITY,
             &sink,
         )
         .expect("ok");

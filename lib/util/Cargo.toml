@@ -1,6 +1,6 @@
 [package]
 name = "tairix-util"
-description = "TAIRiX placeholder: shared utilities used by two or more crates."
+description = "TAIRiX shared utilities, each used by two or more crates."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,8 +11,7 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[dev-dependencies]
-# The tests' durations are counted in the one nanoseconds-per-millisecond
-# definition rather than a copy of it. Test scaffolding only; never in a
-# TAIRiX build.
+[dependencies]
+# The one definition of time's units: the seconds operand is scaled by its
+# nanoseconds-per-second, and the tests count durations in it.
 tairix-abi = { path = "../abi", version = "=0.0.0" }

@@ -46,7 +46,7 @@ use crate::quality::Ladder;
 use crate::view::Viewport;
 
 /// Nanoseconds in a second.
-const NS_PER_SEC: u64 = 1_000_000_000;
+const NS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// The refresh the budget is stated at.
 pub const BASELINE_HZ: u64 = 60;

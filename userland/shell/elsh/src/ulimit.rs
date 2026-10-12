@@ -24,9 +24,7 @@
 //!   `unlimited`.
 //!
 //! `<resource>` is one of the canonical [`LimitKind`] names
-//! ([`LimitKind::name`]): `address-space-bytes`, `open-streams`,
-//! `processes`, `stack-bytes`, `pinned-memory-bytes`, `threads`,
-//! `file-locks`, `dir-watches`.
+//! ([`LimitKind::name`]); `ulimit -a` lists every one.
 //!
 //! Lowering a bound is always permitted; *raising* a hard bound above the
 //! inherited ceiling is gated kernel-side on

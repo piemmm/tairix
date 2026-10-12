@@ -91,8 +91,11 @@ for filesystems, the feature section below.
 | Networking | ◐ virtio | ◐ virtio + GENET | ◐ virtio | — |
 | DHCPv4 / DHCPv6 address configuration | ✓ | ✓ | ✓ | — |
 | DNS name resolution, forward and reverse (`A`/`AAAA`/`PTR`) | ✓ | ✓ | ✓ | — |
+| Neighbour-cache and routing-table reads (`NET_NEIGHBORS`, `NET_ROUTES`, `state:net/<iface>/…`) | ✓ | ✓ | ✓ | — |
+| Path tracing (`traceroute`): hop-limited echo probes and ICMP-error delivery to them | ✓ | ✓ | ✓ | — |
 | Link-local service browse, resolve, and `.local` lookup (mDNS / DNS-SD, `discoveryd`, `dns-sd`) | ✓ | ✓ | ✓ | — |
 | Link-local service publication (mDNS / DNS-SD) | ▢ | ▢ | ▢ | — |
+| Network map (`netmap.app`): topology, advertised services, hardware makers, passive device and OS inference | ✓ | ✓ | ✓ | — |
 | Network clock synchronisation (`timed`, sandboxed NTP client) | ✓ | ✓ | ✓ | — |
 | Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |

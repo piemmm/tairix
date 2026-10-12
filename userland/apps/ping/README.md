@@ -5,11 +5,13 @@ familiar iputils shape (`plans/NETWORK.md` N8b-2b, a `plans/APPS.md`
 command app).
 
 `ping` sends echo requests to a host and prints each reply with its
-sequence number and round-trip time, then a closing statistics block.
+sequence number and round-trip time, iputils' `From` line for each error a
+router or the host reports about a request, then a closing statistics
+block.
 `-c` bounds the request count, `-i` sets the interval, `-s` the payload
 size, `-W` the per-reply timeout, `-w` an overall deadline, `-p` a fixed
 payload pattern, `-4`/`-6` force the address family, `-q` is quiet, and
-and `-n` keeps the output numeric. `-?`/`--help` render the tool's own
+`-n` keeps the output numeric. `-?`/`--help` render the tool's own
 short help.
 
 The target operand is an IPv4 or IPv6 address literal **or a host name**.
@@ -43,9 +45,10 @@ still works on a machine with no resolver configured.
 
 The peer is reverse-resolved once per run through the same resolver, so a
 reply line reads `<n> bytes from <name> (<address>)` when the address has
-a `PTR` record and carries the bare address when it does not. `-n`
-suppresses the lookup entirely: no `PTR` query goes on the wire and every
-line stays numeric.
+a `PTR` record and carries the bare address when it does not; each router
+that reports an error is named the same way, once. `-n` suppresses the
+lookups entirely: no `PTR` query goes on the wire and every line stays
+numeric.
 
 ## How it reaches the network
 
@@ -58,14 +61,22 @@ authority (`AGENTS.md` §5.4). The IP time-to-live is not exposed through
 the echo-socket interface, so — unlike some `ping` implementations — a
 reply line carries no `ttl=` field.
 
+A request no interface can carry yet waits, up to its timeout, for the
+stack's network notice that an interface came up or gained a usable
+address; it never retries on a timer. Every wait — for a reply, for the
+next request's turn — parks until its own deadline.
+
 ## Structure
 
 * `command` — the option grammar (`Command`/`Config`) and its parser.
 * `error` — `PingError`, the fatal outcomes of `run`.
 * `io` — the `Output` seam.
 * `net` — the `PingIo` seam (name resolution, clock, echo socket, payload
-  entropy, wait/park), `ResolveFailure`, and the owned `EchoReply`.
-* `client` — the `run` entry point, the ping loop, and the statistics.
+  entropy, wait/park) and the owned `EchoEvent`; a target that names no
+  address fails with `lib/resolver`'s shared `TargetFailure`.
+* `client` — the `run` entry point and the request loop.
+* `report` — iputils' wording and number shapes: the reply and `From`
+  lines, the ICMP error reasons, and the statistics.
 * `run.rs` — the freestanding `Run` binary (pure-Rust, `tairix-rt`), which
   implements `PingIo` over `lib/resolver`, the `tairix_rt::net` echo-socket
   wrappers, and `lib/rng`'s payload generator.

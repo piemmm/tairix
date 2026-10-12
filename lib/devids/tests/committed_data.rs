@@ -1,50 +1,58 @@
 //! The committed data files are load-bearing: the snapshots under `assets/`
 //! must pass the vetting filter, the committed tables (each inside its
-//! consuming command bundle's `Resources/` —
+//! consuming bundle's `Resources/` —
 //! `userland/apps/lspci/Resources/pci.ids.bin`,
-//! `userland/apps/lsusb/Resources/usb.ids.bin`) must be exactly their
+//! `userland/apps/lsusb/Resources/usb.ids.bin`,
+//! `userland/apps/netmap/Resources/oui.ids.bin`) must be exactly their
 //! compile (the same drift the `cargo xtask devids` CI gate rejects), and
 //! well-known ids must resolve to their well-known names.
 
 use std::path::PathBuf;
 
-use tairix_devids::{textdb, DbKind, DevIds};
+use tairix_devids::{textdb, DbKind, DevIds, TABLE_SUFFIX};
 
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 fn committed(kind: DbKind) -> (Vec<u8>, Vec<u8>) {
-    let name = match kind {
-        DbKind::Pci => "pci.ids",
-        DbKind::Usb => "usb.ids",
-    };
-    let snapshot = std::fs::read(crate_root().join("assets").join(name)).expect("snapshot");
-    // Each compiled table ships inside its consuming command bundle.
     let bundle = match kind {
         DbKind::Pci => "lspci",
         DbKind::Usb => "lsusb",
+        DbKind::Oui => "netmap",
     };
+    let name = kind.name();
+    let snapshot = std::fs::read(crate_root().join("assets").join(name)).expect("snapshot");
+    // Each compiled table ships inside its consuming bundle.
     let table_path = crate_root()
         .join("../../userland/apps")
         .join(bundle)
         .join("Resources")
-        .join(format!("{name}.bin"));
+        .join(format!("{name}{TABLE_SUFFIX}"));
     let table = std::fs::read(table_path).expect("table");
     (snapshot, table)
 }
 
 #[test]
 fn committed_snapshots_pass_vetting_and_match_the_committed_tables() {
-    for kind in [DbKind::Pci, DbKind::Usb] {
+    for kind in [DbKind::Pci, DbKind::Usb, DbKind::Oui] {
         let (snapshot, table) = committed(kind);
         let parsed = match textdb::parse(kind, &snapshot) {
             Ok(db) => db,
             Err(e) => panic!("committed {kind:?} snapshot fails vetting: {e}"),
         };
         // A plausible real database, not a truncated stub.
-        assert!(parsed.counts().vendors > 2000, "{kind:?} vendor count");
-        assert!(parsed.counts().devices > 10_000, "{kind:?} device count");
+        let counts = parsed.counts();
+        match kind {
+            DbKind::Oui => {
+                assert!(counts.vendors > 30_000, "{kind:?} organisation count");
+                assert_eq!(counts.devices, 0, "{kind:?} has no children");
+            }
+            DbKind::Pci | DbKind::Usb => {
+                assert!(counts.vendors > 2000, "{kind:?} vendor count");
+                assert!(counts.devices > 10_000, "{kind:?} device count");
+            }
+        }
         assert_eq!(
             parsed.encode(),
             table,
@@ -79,4 +87,17 @@ fn well_known_usb_ids_resolve() {
     assert_eq!(ids.class(0x03), Some("Human Interface Device"));
     assert_eq!(ids.subclass(0x03, 0x01), Some("Boot Interface Subclass"));
     assert_eq!(ids.prog_if(0x03, 0x01, 0x01), Some("Keyboard"));
+}
+
+#[test]
+fn well_known_ouis_resolve() {
+    let (_, table) = committed(DbKind::Oui);
+    let ids = DevIds::parse(DbKind::Oui, &table).expect("committed table decodes");
+    assert_eq!(ids.organisation(0x00_00_0c), Some("Cisco Systems, Inc"));
+    assert_eq!(
+        ids.organisation(0xb8_27_eb),
+        Some("Raspberry Pi Foundation")
+    );
+    // A locally administered address names no organisation.
+    assert_eq!(ids.organisation(0x52_54_00), None);
 }

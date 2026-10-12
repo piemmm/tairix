@@ -29,7 +29,10 @@
 #define TAIRIX_LIMIT_KIND_THREADS ((uint32_t)5u)
 #define TAIRIX_LIMIT_KIND_FILE_LOCKS ((uint32_t)6u)
 #define TAIRIX_LIMIT_KIND_DIR_WATCHES ((uint32_t)7u)
-#define TAIRIX_LIMIT_KIND_COUNT ((uint32_t)8u)
+#define TAIRIX_LIMIT_KIND_IPC_QUEUE_BYTES ((uint32_t)8u)
+#define TAIRIX_LIMIT_KIND_WAIT_SETS ((uint32_t)9u)
+#define TAIRIX_LIMIT_KIND_WAIT_SET_MEMBERS ((uint32_t)10u)
+#define TAIRIX_LIMIT_KIND_COUNT ((uint32_t)11u)
 
 /* Length, in bytes, of the little-endian tairix_resource_limit_t encoding. */
 #define TAIRIX_RESOURCE_LIMIT_WIRE_LEN 16u

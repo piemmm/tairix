@@ -168,6 +168,14 @@ for the room that frees. Only the first refusal under an admission is
 recorded; the rest are counted into the port's destruction record, so a
 sender the port will never take cannot flood the audit trail through it.
 
+A port, like a call endpoint, is charged to its owner's `ipc-queue-bytes`
+limit when it is created — its capacity times its largest message, plus its
+bookkeeping, since any sender may fill it — and the charge travels with the
+object, so destroying it by any path returns it
+([resource limits](./resource-limits.md)). `port_unbind` lets the owner tear a
+port down before it exits, which is what a program opening a transport per
+operation needs: `tairix_rt::PrivatePort` unbinds its port when dropped.
+
 ### Well-known names
 
 A numeric `EndpointId` is an opaque handle a binder must already know.

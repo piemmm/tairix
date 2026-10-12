@@ -1247,7 +1247,9 @@ mod program {
                         Level::Info,
                         "netstack: DHCPv6 lease lost (address withdrawn)",
                     ),
-                    StackEvent::UdpDatagram { .. } | StackEvent::EchoReply { .. } => {
+                    StackEvent::UdpDatagram { .. }
+                    | StackEvent::EchoReply { .. }
+                    | StackEvent::EchoError { .. } => {
                         emit_deliveries(&sockets.deliver(event, outcome.interface));
                     }
                     StackEvent::TcpSegment {

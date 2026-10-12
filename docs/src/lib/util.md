@@ -211,7 +211,15 @@ and panic-free throughout.
   3-7: a continuation byte, the always-overlong `0xC0`/`0xC1`, or a lead
   past U+10FFFF). `lib/syntax`'s lexers step over one character by it,
   `wc` counts characters by it, and TextEdit decodes its grid by it, so no
-  hand-written decoder admits a lead the standard rejects.
+  hand-written decoder admits a lead the standard rejects. `is_hidden` is the
+  one rule for which characters draw nothing yet can hide, reorder or break
+  the text around them — a C0 or C1 control, a line or paragraph separator,
+  an interlinear-annotation control, or any default-ignorable code point
+  (bidirectional controls, zero-width characters, fillers, variation
+  selectors, tags). TextEdit draws them as `[U+202E]` tokens, `lib/net`'s
+  `DisplayLabel` escapes them in what a peer names itself, and `lib/devids`
+  refuses a database that holds one, so text from elsewhere is escaped by one
+  rule.
 
 ## How to grow the crate
 

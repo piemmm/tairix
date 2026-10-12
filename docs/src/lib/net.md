@@ -154,7 +154,10 @@ and that random splits reassemble exactly.
 - `DefaultRouterList` — the bounded RFC 4861 default-router list:
   lifetimes from Router Advertisements, expiry via `advance`, selection
   preferring reachable routers then rotating round-robin (§6.3.6), and
-  fail-closed refusal of new routers beyond capacity (RA floods).
+  fail-closed refusal of new routers beyond capacity (RA floods). `iter`
+  lists the live routers without selecting one; the stack's
+  `default_routers`, `routes_v4`, `routes_v6` and `neighbors` accessors are
+  the read-only views the route and neighbour broker reads are built from.
 - `select_source` — RFC 6724 source-address selection over the caller's
   candidate set (rules 1, 2, 3, 6 with the default policy-table labels,
   and 8; rule 5 is the caller's interface pre-filter).
@@ -174,7 +177,10 @@ returned `NeighborAction` values (solicit multicast, probe unicast,
 report unreachable) the caller performs. The caller owns the timer —
 `next_deadline()` reports the earliest pending transition and
 `advance(now)` performs everything that is due, so the service parks on
-a one-shot timer and is woken by events, never polling.
+a one-shot timer and is woken by events, never polling. `entry` and `iter`
+are observations: they report state and the cached link-layer address
+without refreshing recency, so a diagnostic read never changes which entry
+eviction takes.
 
 Defences against cache poisoning and exhaustion are structural:
 
@@ -488,6 +494,17 @@ per-server soft failure). The live `netsock-v1` socket client, the QEMU
 vertical, and the unit tests all drive this *same* loop (no second copy of
 the orchestration). The engine and driver are host-tested and fuzzed
 (`fuzz_net_dns`).
+
+Every name and label a peer sends is display text no consumer may trust, so
+`dns` defines how each reaches one: `Presentation` renders octets in RFC 1035
+§5.1 form for a terminal, `WireName` renders an uncompressed wire-form name
+(the octets in presentation form when it does not decode), and `DisplayLabel`
+renders a label for a display that draws text — printable Unicode kept, as
+DNS-SD instance names are written, and every character `lib/util`'s
+`utf8::is_hidden` names — a control, a line or paragraph separator, a
+bidirectional control, a default-ignorable character — escaped as `\DDD`, so no
+label can pass for another by an invisible difference. `mdns::TxtStrings::over`
+walks the length-prefixed strings of any `TXT` rdata.
 
 `Stack::dhcp_dns_servers()` is the pure source that feeds a real resolver
 its servers (`plans/DNS.md` DNS2): it surfaces the recursive DNS servers an

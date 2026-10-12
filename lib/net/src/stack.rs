@@ -37,9 +37,11 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::hash::Hasher;
+use core::num::NonZeroU8;
 
 use tairix_abi::driver::net::{DeviceFacts, LinkState, MacAddress, NetOffloads};
 use tairix_abi::driver::net_channel::RxFilterPolicy;
+use tairix_abi::net_ipc::{ipv4_network, ipv6_network};
 use tairix_abi::time::Duration64;
 use tairix_hash::{FastHash, HashSeed};
 
@@ -142,6 +144,23 @@ pub enum RouteKind {
     Redirect,
 }
 
+/// One ICMP echo request to originate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EchoProbe<'a> {
+    /// The unicast destination.
+    pub dest: IpAddr,
+    /// The echo identifier.
+    pub identifier: u16,
+    /// The echo sequence number.
+    pub sequence: u16,
+    /// The hop limit (TTL) to send with, or [`None`] for the interface's
+    /// default. A traceroute probe sets it so the probe expires at the router
+    /// it is asking about.
+    pub hop_limit: Option<NonZeroU8>,
+    /// The echo payload.
+    pub payload: &'a [u8],
+}
+
 /// Typed events the engine reports alongside its frames.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StackEvent {
@@ -192,6 +211,23 @@ pub enum StackEvent {
     IcmpErrorReceived {
         /// Address the error came from.
         source: IpAddr,
+        /// The error's kind and fields.
+        kind: IcmpErrorKind,
+    },
+    /// An ICMP/`ICMPv6` error arrived about an echo request this host sent:
+    /// its quoted packet is an echo request whose source is one of this
+    /// interface's own addresses. Reported instead of
+    /// [`StackEvent::IcmpErrorReceived`], so the error can reach the probe
+    /// that caused it.
+    EchoError {
+        /// The router or host that reported the error.
+        reporter: IpAddr,
+        /// The destination the quoted echo request was sent to.
+        destination: IpAddr,
+        /// The quoted request's identifier.
+        identifier: u16,
+        /// The quoted request's sequence number.
+        sequence: u16,
         /// The error's kind and fields.
         kind: IcmpErrorKind,
     },
@@ -292,6 +328,7 @@ impl StackEvent {
             | StackEvent::DadFailed { .. }
             | StackEvent::NeighborUnreachable { .. }
             | StackEvent::IcmpErrorReceived { .. }
+            | StackEvent::EchoError { .. }
             | StackEvent::ReassemblyExpired { .. }
             | StackEvent::DhcpLeaseAcquired { .. }
             | StackEvent::DhcpLeaseLost
@@ -849,6 +886,31 @@ impl Stack {
         &self.iface
     }
 
+    /// The neighbour cache, read-only (ARP and Neighbour Discovery entries).
+    #[must_use]
+    pub fn neighbors(&self) -> &NeighborTable {
+        &self.neighbors
+    }
+
+    /// The IPv4 routing table, read-only.
+    #[must_use]
+    pub fn routes_v4(&self) -> &RoutingTable<Ipv4Addr, RouteKind> {
+        &self.routes_v4
+    }
+
+    /// The IPv6 routing table, read-only. The default routes through
+    /// advertised routers are not here: they are [`Self::default_routers`].
+    #[must_use]
+    pub fn routes_v6(&self) -> &RoutingTable<Ipv6Addr, RouteKind> {
+        &self.routes_v6
+    }
+
+    /// The IPv6 default routers learned from Router Advertisements.
+    #[must_use]
+    pub fn default_routers(&self) -> &DefaultRouterList {
+        &self.routers
+    }
+
     /// Whether `peer` is on this interface's own link: link-local by
     /// definition (RFC 3927 §2.6, RFC 4291 §2.5.6), or covered by a route
     /// with no gateway — the same test the transmit path uses to decide a
@@ -930,7 +992,7 @@ impl Stack {
         if !self.ipv4_enabled {
             return Err(crate::iface::AddrError::V4Disabled);
         }
-        let connected = Prefix::new(mask_v4(addr, prefix_len), prefix_len)
+        let connected = Prefix::new(ipv4_network(addr, prefix_len), prefix_len)
             .ok_or(crate::iface::AddrError::BadPrefixLen)?;
         if let Some(gw) = gateway {
             if !connected.contains(gw) {
@@ -964,7 +1026,7 @@ impl Stack {
         prefix_len: u8,
         now: Duration64,
     ) -> Result<(), crate::iface::AddrError> {
-        let connected = Prefix::new(mask_v6(addr, prefix_len), prefix_len)
+        let connected = Prefix::new(ipv6_network(addr, prefix_len), prefix_len)
             .ok_or(crate::iface::AddrError::BadPrefixLen)?;
         self.iface.add_ipv6_static(addr, prefix_len, now)?;
         self.routes_v6.insert(connected, None, RouteKind::Static);
@@ -1494,13 +1556,35 @@ impl Stack {
             return;
         }
         if let Some(error) = IcmpError::parse(IcmpContext::V4, payload) {
-            out.events.push(StackEvent::IcmpErrorReceived {
-                source: IpAddr::V4(header.source),
-                kind: error.kind,
-            });
+            out.events
+                .push(self.error_event(IpAddr::V4(header.source), &error));
             return;
         }
         self.counters.rx_dropped += 1;
+    }
+
+    /// The event an ICMP error from `reporter` raises: [`StackEvent::EchoError`]
+    /// when it quotes an echo request this interface sent, else
+    /// [`StackEvent::IcmpErrorReceived`]. Whether the request was ours is
+    /// decided by its quoted source, never by the identifier alone.
+    fn error_event(&self, reporter: IpAddr, error: &IcmpError<'_>) -> StackEvent {
+        let ours = error.quoted_echo().filter(|quoted| match quoted.source {
+            IpAddr::V4(source) => self.iface.ipv4().is_some_and(|(own, _)| own == source),
+            IpAddr::V6(source) => self.iface.is_assigned(source),
+        });
+        match ours {
+            Some(quoted) => StackEvent::EchoError {
+                reporter,
+                destination: quoted.destination,
+                identifier: quoted.identifier,
+                sequence: quoted.sequence,
+                kind: error.kind,
+            },
+            None => StackEvent::IcmpErrorReceived {
+                source: reporter,
+                kind: error.kind,
+            },
+        }
     }
 
     /// True when `dest` is a solicited-node group of any of our
@@ -1822,10 +1906,8 @@ impl Stack {
                         );
                     }
                 }
-                out.events.push(StackEvent::IcmpErrorReceived {
-                    source: IpAddr::V6(header.source),
-                    kind: error.kind,
-                });
+                out.events
+                    .push(self.error_event(IpAddr::V6(header.source), &error));
             }
         }
     }
@@ -1963,7 +2045,7 @@ impl Stack {
             {
                 continue;
             }
-            let masked = mask_v6(info.prefix, info.prefix_len);
+            let masked = ipv6_network(info.prefix, info.prefix_len);
             if let Some(prefix) = Prefix::new(masked, info.prefix_len) {
                 self.routes_v6.insert(prefix, None, RouteKind::RaOnLink);
                 self.ra_routes += 1;
@@ -2749,7 +2831,7 @@ impl Stack {
         );
     }
 
-    /// Originate an ICMP echo request to `dest`.
+    /// Originate the ICMP echo request `probe` describes.
     ///
     /// # Errors
     ///
@@ -2759,10 +2841,7 @@ impl Stack {
     /// oversize IPv6 request is source-fragmented, RFC 8200 §4.5).
     pub fn send_echo_request(
         &mut self,
-        dest: IpAddr,
-        identifier: u16,
-        sequence: u16,
-        payload: &[u8],
+        probe: &EchoProbe<'_>,
         now: Duration64,
         out: &mut StackOutput,
     ) -> Result<(), SendError> {
@@ -2770,7 +2849,13 @@ impl Stack {
         if !self.link_up {
             return Err(SendError::LinkDown);
         }
-        match dest {
+        let echo = IcmpEcho {
+            kind: crate::icmp::EchoKind::Request,
+            identifier: probe.identifier,
+            sequence: probe.sequence,
+            payload: probe.payload,
+        };
+        match probe.dest {
             IpAddr::V4(dest) => {
                 if dest.is_multicast() || dest.is_broadcast() || dest.is_unspecified() {
                     return Err(SendError::NotUnicast);
@@ -2781,16 +2866,22 @@ impl Stack {
                 if self.next_hop_v4(dest).is_none() {
                     return Err(SendError::NoRoute);
                 }
-                let echo = IcmpEcho {
-                    kind: crate::icmp::EchoKind::Request,
-                    identifier,
-                    sequence,
-                    payload,
-                };
                 let mut message = self.bufs.take_zeroed(echo.wire_len());
-                echo.write(IcmpContext::V4, &mut message)
-                    .ok_or(SendError::TooLarge)?;
-                self.send_ipv4_packet(out, source, dest, PROTOCOL_ICMP, &message, now);
+                if echo.write(IcmpContext::V4, &mut message).is_none() {
+                    self.bufs.give(message);
+                    return Err(SendError::TooLarge);
+                }
+                self.send_ipv4_packet_ttl(
+                    out,
+                    source,
+                    dest,
+                    PROTOCOL_ICMP,
+                    &message,
+                    probe.hop_limit.map(NonZeroU8::get),
+                    Ecn::NotEct,
+                    TxOffload::None,
+                    now,
+                );
                 self.bufs.give(message);
             }
             IpAddr::V6(dest) => {
@@ -2802,12 +2893,7 @@ impl Stack {
                     return Err(SendError::NoRoute);
                 }
                 let path_mtu = self.pmtu.mtu(dest, self.mtu_v6_wire(), now) as usize;
-                let echo = IcmpEcho {
-                    kind: crate::icmp::EchoKind::Request,
-                    identifier,
-                    sequence,
-                    payload,
-                };
+                let hop_limit = probe.hop_limit.map_or(self.hop_limit, NonZeroU8::get);
                 let context = IcmpContext::V6 {
                     source,
                     destination: dest,
@@ -2827,7 +2913,7 @@ impl Stack {
                         dest,
                         NEXT_HEADER_ICMPV6,
                         &message,
-                        self.hop_limit,
+                        hop_limit,
                         now,
                     );
                     true
@@ -2838,7 +2924,7 @@ impl Stack {
                         dest,
                         NEXT_HEADER_ICMPV6,
                         &message,
-                        self.hop_limit,
+                        hop_limit,
                         path_mtu,
                         now,
                     )
@@ -4085,15 +4171,6 @@ fn checksum_mode(offload: TxOffload) -> ChecksumMode {
     }
 }
 
-/// Zero the host bits of `addr` for a `prefix_len`-bit prefix.
-fn mask_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
-    if prefix_len == 0 || prefix_len > 32 {
-        return Ipv4Addr::UNSPECIFIED;
-    }
-    let bits = u32::from_be_bytes(addr.octets());
-    Ipv4Addr::from((bits & (u32::MAX << (32 - u32::from(prefix_len)))).to_be_bytes())
-}
-
 /// The directed-broadcast address of the subnet `addr`/`prefix_len` names:
 /// the network address with every host bit set. Every host on the subnet
 /// accepts it, so the receive pre-filter must admit it.
@@ -4105,7 +4182,7 @@ fn directed_broadcast_v4(addr: Ipv4Addr, prefix_len: u8) -> Ipv4Addr {
         // out of the broadcast set.
         return addr;
     }
-    let network = u32::from_be_bytes(mask_v4(addr, prefix_len).octets());
+    let network = u32::from_be_bytes(ipv4_network(addr, prefix_len).octets());
     let hosts = u32::MAX >> u32::from(prefix_len);
     Ipv4Addr::from((network | hosts).to_be_bytes())
 }
@@ -4121,15 +4198,6 @@ fn prefix_len_from_mask(mask: Ipv4Addr) -> Option<u8> {
     }
     // `ones` is at most 32, so this conversion never truncates.
     u8::try_from(ones).ok()
-}
-
-/// Zero the host bits of `addr` for a `prefix_len`-bit prefix.
-fn mask_v6(addr: Ipv6Addr, prefix_len: u8) -> Ipv6Addr {
-    if prefix_len == 0 || prefix_len > 128 {
-        return Ipv6Addr::from([0u8; 16]);
-    }
-    let bits = u128::from_be_bytes(addr.octets());
-    Ipv6Addr::from((bits & (u128::MAX << (128 - u32::from(prefix_len)))).to_be_bytes())
 }
 
 /// Write a fixed IPv6 header and payload into `buf` (sized to exactly
@@ -4240,7 +4308,14 @@ impl Stack {
         now: Duration64,
     ) -> Result<StackOutput, SendError> {
         let mut out = StackOutput::default();
-        self.send_echo_request(dest, identifier, sequence, payload, now, &mut out)?;
+        let probe = EchoProbe {
+            dest,
+            identifier,
+            sequence,
+            hop_limit: None,
+            payload,
+        };
+        self.send_echo_request(&probe, now, &mut out)?;
         Ok(out)
     }
 

@@ -13,33 +13,27 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::net::EchoOutcome;
 use tairix_abi::net_ipc::NetAddrFamily;
 use tairix_abi::Errno;
+use tairix_resolver::TargetFailure;
 
-/// One received echo reply, owned so the engine can verify it after the
+/// What became of one echo request — a reply, or an ICMP error a router or
+/// the host reported about it — owned so the engine can judge it after the
 /// borrow of the receive buffer ends.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EchoReply {
-    /// The echoed sequence number.
+pub struct EchoEvent {
+    /// The request's sequence number.
     pub seq: u16,
+    /// What became of it.
+    pub outcome: EchoOutcome,
     /// The source family.
     pub family: NetAddrFamily,
-    /// The source address bytes (IPv4 uses the first four).
+    /// The host that answered or the router that reported, its address bytes
+    /// (IPv4 uses the first four).
     pub addr: [u8; 16],
-    /// The echoed payload.
+    /// The echoed payload; empty for an error.
     pub payload: Vec<u8>,
-}
-
-/// Why a target operand did not resolve to a usable address.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResolveFailure {
-    /// The name does not exist, has no address record of the wanted family,
-    /// or no configured server answered.
-    Unknown,
-    /// The operand *is* an address literal, but of the family the command
-    /// line excluded (`ping -4 ::1`). Distinguished from [`Self::Unknown`]
-    /// because the fix is to drop the `-4`/`-6`, not to check the name.
-    FamilyMismatch,
 }
 
 /// Name resolution, the clock, the echo socket, the payload entropy, and the
@@ -51,19 +45,19 @@ pub trait PingIo {
     ///
     /// # Errors
     ///
-    /// A [`ResolveFailure`] the caller reports naming the host it was given.
+    /// The [`TargetFailure`] the caller reports naming the host it was given.
     fn resolve(
         &mut self,
         host: &str,
         family: Option<NetAddrFamily>,
-    ) -> Result<(NetAddrFamily, [u8; 16]), ResolveFailure>;
+    ) -> Result<(NetAddrFamily, [u8; 16]), TargetFailure>;
 
     /// The name `addr` reverse-resolves to (a `PTR` lookup), or [`None`]
     /// when it has no record or the lookup did not conclude.
     ///
-    /// Called once per run, after [`Self::resolve`] and only when the
-    /// command line did not ask for numeric output, so `-n` issues no DNS
-    /// query at all.
+    /// Called for the target and for each router that reports an error, and
+    /// only when the command line did not ask for numeric output, so `-n`
+    /// issues no DNS query at all.
     fn reverse(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> Option<String>;
 
     /// Open the echo socket and connect it to the resolved peer, so the
@@ -94,19 +88,22 @@ pub trait PingIo {
     /// # Errors
     ///
     /// Any [`Errno`] the send raised (e.g. [`Errno::NetworkUnreachable`]
-    /// while the interface is still coming up).
+    /// while no interface can carry it yet).
     fn send(&mut self, seq: u16, payload: &[u8]) -> Result<(), Errno>;
 
-    /// Wait for the next echo reply, giving the CPU up until one arrives or
-    /// the absolute `deadline_ns` passes (never a busy spin). Returns
-    /// [`Some`] with a reply, or [`None`] when the deadline passed with no
-    /// reply.
+    /// Park until the machine's network interfaces next change — one comes
+    /// up, or gains a usable address — or the absolute `deadline_ns` passes,
+    /// answering whether they changed.
+    fn await_network(&mut self, deadline_ns: u64) -> bool;
+
+    /// Wait for what became of a request, giving the CPU up until it arrives
+    /// or the absolute `deadline_ns` passes (never a busy spin). Returns
+    /// [`None`] when the deadline passed with nothing.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] a fatal receive error raised (a transient empty
-    /// mailbox is not an error — it parks and retries until the deadline).
-    fn recv(&mut self, deadline_ns: u64) -> Result<Option<EchoReply>, Errno>;
+    /// Any [`Errno`] a fatal receive error raised.
+    fn recv(&mut self, deadline_ns: u64) -> Result<Option<EchoEvent>, Errno>;
 
     /// Park until the absolute `deadline_ns` (the inter-request spacing),
     /// giving the CPU up rather than spinning.

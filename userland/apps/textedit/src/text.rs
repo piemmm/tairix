@@ -8,6 +8,7 @@
 
 use core::ops::ControlFlow;
 
+use tairix_util::utf8::is_hidden;
 use tairix_vt::char_width;
 
 use crate::document::{rows_of, Document, LineBounds, MAX_ROW_BYTES};
@@ -24,8 +25,8 @@ pub enum Glyph {
     /// A byte that is not UTF-8, drawn `[xC3]`.
     Invalid(u8),
     /// A character that draws nothing on its own — a C1 control, a
-    /// bidirectional control, a zero-width or other format character — drawn
-    /// `[U+202E]`.
+    /// bidirectional control, a zero-width or other format character, a
+    /// variation selector or tag — drawn `[U+202E]`.
     Hidden(char),
 }
 
@@ -69,30 +70,6 @@ impl Glyph {
         }
         core::str::from_utf8(&buf[..len]).ok()
     }
-}
-
-/// Whether `ch` draws nothing on its own, and so is shown as a token.
-#[must_use]
-pub fn is_hidden(ch: char) -> bool {
-    matches!(
-        u32::from(ch),
-        0x0080..=0x009f
-            | 0x00ad
-            | 0x061c
-            | 0x115f
-            | 0x1160
-            | 0x180e
-            | 0x200b..=0x200f
-            | 0x2028..=0x202e
-            | 0x2060..=0x2064
-            | 0x2066..=0x206f
-            | 0x3164
-            | 0xfeff
-            | 0xffa0
-            | 0xfff9..=0xfffb
-            | 0x1_d173..=0x1_d17a
-            | 0xe_0000..=0xe_007f
-    )
 }
 
 /// One caret stop of a line.

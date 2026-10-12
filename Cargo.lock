@@ -1525,7 +1525,11 @@ dependencies = [
 name = "tairix-devids"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
+ "tairix-cmdres",
  "tairix-fuzzseed",
+ "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3308,6 +3312,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3328,6 +3333,28 @@ dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-netmap"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-controls",
+ "tairix-devids",
+ "tairix-discovery",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-icon",
+ "tairix-input",
+ "tairix-net",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-resolver",
+ "tairix-rt",
+ "tairix-theme",
+ "tairix-util",
+ "tairix-window",
 ]
 
 [[package]]
@@ -3439,6 +3466,7 @@ dependencies = [
  "tairix-resolver",
  "tairix-rng",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -5669,6 +5697,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netmap-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-ipc",
+ "tairix-kernel-syscall",
+ "tairix-log",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-test-netstack-autoload-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -5821,6 +5866,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-netstack-icmp-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-netstack-listener-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -5831,18 +5888,6 @@ dependencies = [
  "tairix-kernel",
  "tairix-log",
  "tairix-test-tcpserve",
-]
-
-[[package]]
-name = "tairix-test-netstack-ping-qemu-aarch64"
-version = "0.0.0"
-dependencies = [
- "tairix-arch-aarch64",
- "tairix-itest-harness",
- "tairix-itest-witness",
- "tairix-kalloc",
- "tairix-kernel",
- "tairix-log",
 ]
 
 [[package]]
@@ -7603,6 +7648,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-traceroute"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-help",
+ "tairix-net",
+ "tairix-procinfo",
+ "tairix-resolver",
+ "tairix-rt",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-true"
 version = "0.0.0"
 dependencies = [
@@ -8073,6 +8131,7 @@ dependencies = [
  "tairix-mkimage",
  "tairix-net",
  "tairix-netconfig",
+ "tairix-netmap",
  "tairix-parallel",
  "tairix-procinfo",
  "tairix-proglib",
@@ -8105,6 +8164,7 @@ dependencies = [
  "tairix-test-handover-qemu-aarch64",
  "tairix-test-memsoak",
  "tairix-test-menu-qemu-aarch64",
+ "tairix-test-netmap-qemu-aarch64",
  "tairix-test-netstack-wire",
  "tairix-test-rng-soak",
  "tairix-test-rtc-fixture",

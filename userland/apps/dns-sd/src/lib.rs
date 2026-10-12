@@ -35,8 +35,9 @@ use tairix_abi::discovery_ipc::{Answer, Change, Entry, Families, Query, ServiceT
 use tairix_abi::Errno;
 use tairix_discovery::{DiscoveryError, Waited};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_net::dns::{Name, Presentation};
+use tairix_net::dns::{Name, Presentation, WireName};
 use tairix_net::dnssd::{InstanceName, ServiceType, Transport};
+use tairix_net::mdns::TxtStrings;
 use tairix_net::mdns::{is_link_local_name, LOCAL_LABEL};
 
 /// The one-line usage banner.
@@ -396,13 +397,13 @@ fn render(entry: &Entry<'_>, request: &Request, lines: &mut String) {
                     Request::Resolve { instance, service },
                 ) => writeln!(
                     lines,
-                    "{movement} {}.{service}.local. can be reached at {}:{port} (interface {on}, priority {priority}, weight {weight})",
+                    "{movement} {}.{service}.local. can be reached at {}.:{port} (interface {on}, priority {priority}, weight {weight})",
                     Presentation(instance.as_bytes()),
-                    wire_name(target),
+                    WireName(target),
                 ),
                 (Answer::Text { octets }, _) => {
                     let mut text = String::new();
-                    for string in txt_strings(octets) {
+                    for string in TxtStrings::over(octets) {
                         let _ = write!(text, " {}", Presentation(string));
                     }
                     writeln!(lines, "{movement}   TXT{text} (interface {on})")
@@ -411,7 +412,7 @@ fn render(entry: &Entry<'_>, request: &Request, lines: &mut String) {
                     writeln!(lines, "{movement}    {on:<16} {address:<41} {ttl}")
                 }
                 (Answer::Pointer { target }, _) => {
-                    writeln!(lines, "{movement}    {on:<16} {}", wire_name(target))
+                    writeln!(lines, "{movement}    {on:<16} {}.", WireName(target))
                 }
                 // An answer of a shape its request does not ask for.
                 _ => Ok(()),
@@ -428,27 +429,6 @@ fn render(entry: &Entry<'_>, request: &Request, lines: &mut String) {
             lines.push_str("Lost   updates were dropped; what is shown may be incomplete\n");
         }
     }
-}
-
-/// A name the service sent in uncompressed wire form, presented; one that
-/// does not decode is shown as the octets it was.
-fn wire_name(target: &[u8]) -> String {
-    Name::from_wire(target).map_or_else(
-        || format!("{}", Presentation(target)),
-        |name| format!("{name}."),
-    )
-}
-
-/// The length-prefixed strings of `TXT` rdata; a string that runs past the
-/// end ends the walk.
-fn txt_strings(octets: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let mut rest = octets;
-    core::iter::from_fn(move || {
-        let (&len, tail) = rest.split_first()?;
-        let string = tail.get(..usize::from(len))?;
-        rest = &tail[usize::from(len)..];
-        Some(string)
-    })
 }
 
 /// Report why the request could not go on, returning the exit status.

@@ -1088,7 +1088,14 @@ mod tests {
         let leaves = complete("cat state:net/wan/", 18, CommandEnv::default(), &lister);
         assert_eq!(
             displays(&leaves.candidates),
-            ["active-member", "address", "link", "member-health"]
+            [
+                "active-member",
+                "address",
+                "link",
+                "member-health",
+                "neighbors",
+                "routes"
+            ]
         );
         assert_eq!(leaves.candidates[2].insert, "state:net/wan/link");
         assert!(leaves.candidates.iter().all(|c| c.closing == Some(' ')));

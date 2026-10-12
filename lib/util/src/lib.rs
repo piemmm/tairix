@@ -43,6 +43,9 @@
 //!   (`-c`/`-n` values), consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the GNU multiplier alphabet
 //!   exists in exactly one place.
+//! * [`seconds`] — the decimal-seconds operand a network tool's timing
+//!   option takes, as nanoseconds, consumed by the `ping` and `traceroute`
+//!   command apps, so the grammar and its bound exist in exactly one place.
 //! * [`secret`] — erasing a password/key buffer so the optimiser cannot
 //!   delete the erasure, consumed by the `lib/rt` elevation client, the
 //!   shell's `elevate` builtin, the login supervisor's elevation broker,
@@ -65,7 +68,10 @@
 //!   by `lib/collections` and the text editor.
 //! * [`utf8`] — which bytes begin a UTF-8 sequence and its length, consumed
 //!   by `lib/syntax`, `wc`, and the text editor, so a hand-written decoder never
-//!   admits a lead the standard rejects.
+//!   admits a lead the standard rejects; and which characters hide or reorder
+//!   the text they are shown with, consumed by the text editor, `lib/net`'s
+//!   peer-label display, and `lib/devids`' vetting filter, so text from
+//!   elsewhere is escaped by one rule.
 //! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines"
 //!   windows, consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
@@ -103,6 +109,7 @@ pub mod hexdump;
 pub mod lanes;
 pub mod mathf;
 pub mod retry;
+pub mod seconds;
 pub mod secret;
 pub mod size;
 pub mod space;

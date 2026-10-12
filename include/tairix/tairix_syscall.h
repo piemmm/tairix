@@ -165,6 +165,8 @@ extern "C" {
 #define TAIRIX_SYS_FOREGROUND_HELD 139u
 #define TAIRIX_SYS_HW_NODE_SETTLE 140u
 #define TAIRIX_SYS_CONSOLE_RELOCATE 141u
+#define TAIRIX_SYS_WAITSET_CLOSE 142u
+#define TAIRIX_SYS_PORT_UNBIND 143u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -659,6 +661,8 @@ int32_t tairix_sys_port_admit(uint64_t a0, uint64_t a1);
 uint64_t tairix_sys_foreground_held(uint32_t a0);
 int32_t tairix_sys_hw_node_settle(void);
 uint64_t tairix_sys_console_relocate(void * a0, uintptr_t a1);
+int32_t tairix_sys_waitset_close(uint64_t a0);
+int32_t tairix_sys_port_unbind(uint64_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

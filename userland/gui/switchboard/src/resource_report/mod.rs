@@ -366,18 +366,6 @@ fn health_text(record: &VolumeIoHealthRecord) -> String {
     faults.join(", ")
 }
 
-/// A hardware address in the conventional colon-separated hexadecimal.
-fn mac(bytes: [u8; 6]) -> String {
-    let mut out = String::new();
-    for (i, byte) in bytes.iter().enumerate() {
-        if i > 0 {
-            out.push(':');
-        }
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
 /// A limit's name in the words the resource-limit facility uses.
 pub(super) const fn limit_name(kind: LimitKind) -> &'static str {
     match kind {
@@ -389,6 +377,9 @@ pub(super) const fn limit_name(kind: LimitKind) -> &'static str {
         LimitKind::Threads => "Threads",
         LimitKind::FileLocks => "File locks",
         LimitKind::DirWatches => "Folder watches",
+        LimitKind::IpcQueueBytes => "Message queues",
+        LimitKind::WaitSets => "Wait-sets",
+        LimitKind::WaitSetMembers => "Wait-set members",
     }
 }
 
@@ -398,15 +389,10 @@ pub(super) fn bound(kind: LimitKind, value: u64) -> String {
     if value == RLIMIT_INFINITY {
         return String::from("unlimited");
     }
-    match kind {
-        LimitKind::AddressSpaceBytes | LimitKind::StackBytes | LimitKind::PinnedMemoryBytes => {
-            format_bytes(value)
-        }
-        LimitKind::OpenStreams
-        | LimitKind::Processes
-        | LimitKind::Threads
-        | LimitKind::FileLocks
-        | LimitKind::DirWatches => value.to_string(),
+    if kind.counts_bytes() {
+        format_bytes(value)
+    } else {
+        value.to_string()
     }
 }
 

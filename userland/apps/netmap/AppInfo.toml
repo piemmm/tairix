@@ -1,0 +1,25 @@
+# Signed-AppInfo manifest source for the network map (plans/NETMAP.md).
+# Discovered by the build's app-bundle composer, which cross-compiles Run,
+# signs the manifest, and plants the bundle on the read-only
+# /System/Applications store.
+#
+# CAP_CONSOLE_WRITE is for fail-loud stderr diagnostics and CAP_SHM for the
+# window frame region. CAP_FS_ACCESS reads the table of hardware makers the
+# bundle ships in Resources/. CAP_SYSINFO_GLOBAL reads the interface state and the
+# routing table; CAP_SYSINFO_HW reads interface and neighbour hardware
+# addresses. CAP_NET carries the reverse DNS queries that name hosts, and
+# CAP_NET_DISCOVER_ALL lets the map enumerate and browse every advertised
+# service type. The SYSINFO pair and CAP_NET_DISCOVER_ALL are administrative:
+# the launched process receives this set intersected with the launching user's
+# grants, and under a narrower ceiling the map states what it cannot read and
+# draws the rest.
+id = "os.tairix.netmap"
+name = "netmap"
+title = "Network Map"
+version = "0.1.0"
+kind = "application"
+purpose = "See the networks this machine is on and what is on them"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_NET_DISCOVER_ALL", "CAP_SHM", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_HW"]
+library = "SystemTools"
+library-icon = "netmap.png"

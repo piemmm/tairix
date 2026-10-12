@@ -36,7 +36,7 @@ const GATED_STREAMS: [Stream; 2] = [Stream::Runtime, Stream::Debug];
 const GATED: usize = GATED_STREAMS.len();
 
 /// Nanoseconds per second, for the token-bucket arithmetic.
-const NANOS_PER_SEC: u64 = 1_000_000_000;
+const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// The index into the per-stream state arrays for `stream`, or `None` if the
 /// stream is not rate-limitable.

@@ -24,10 +24,10 @@
 //! * **`child <over>`** — maps `over` bytes (past the parent's pinned
 //!   budget) and exits `0`: the pin mark is process-scoped state a spawn
 //!   never inherits.
-//! * **`ipc`** — repeatedly blocks on the migration test's private call
-//!   endpoint, validates each echoed reply, and checks callee-saved integer,
-//!   FP, stack, control-flow, and address-space-local state across every
-//!   return.
+//! * **`ipc <endpoint> <rounds>`** — blocks `rounds` times on the migration
+//!   test's private call endpoint, validates each echoed reply, and checks
+//!   callee-saved integer, FP, stack, control-flow, and address-space-local
+//!   state across every return.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland runtime
 //! `tairix-rt` (`_start`, stack canary, panic handler, syscall wrappers),
@@ -46,10 +46,6 @@ mod program {
 
     use tairix_abi::{Errno, LimitKind, MapFlags, ResourceLimit};
 
-    /// Private endpoint installed only by the consuming migration chassis.
-    const MIGRATION_ENDPOINT: u64 = 0x4d49_4752_4154_4501;
-    /// Repeated block/wake cycles in one bounded run.
-    const IPC_ROUNDS: u64 = 64;
     /// Address-space-local state that must survive every migration.
     static IPC_STATE: AtomicU64 = AtomicU64::new(0);
 
@@ -153,15 +149,15 @@ mod program {
         0
     }
 
-    /// Perform one real synchronous call and validate its echo plus the
-    /// process-local state carried across the block/wake boundary.
-    extern "C" fn ipc_roundtrip(round: u64) -> u64 {
+    /// Perform one real synchronous call on `endpoint` and validate its echo
+    /// plus the process-local state carried across the block/wake boundary.
+    extern "C" fn ipc_roundtrip(round: u64, endpoint: u64) -> u64 {
         if IPC_STATE.load(Ordering::Acquire) != round {
             return 61;
         }
         let request = round.to_le_bytes();
         let mut reply = [0u8; 8];
-        let Ok(len) = tairix_rt::ipc_call(MIGRATION_ENDPOINT, &request, &mut reply) else {
+        let Ok(len) = tairix_rt::ipc_call(endpoint, &request, &mut reply) else {
             return 62;
         };
         if len != reply.len() || reply != request {
@@ -174,7 +170,7 @@ mod program {
     /// Call [`ipc_roundtrip`] while pinning sentinels in AAPCS64 callee-saved
     /// integer/FP registers and checking the stack returns to the same address.
     #[cfg(mem_pin_aarch64)]
-    fn checked_ipc_roundtrip(round: u64) -> u64 {
+    fn checked_ipc_roundtrip(round: u64, endpoint: u64) -> u64 {
         let result: u64;
         // SAFETY: this is an aarch64-only test of the ABI state that must
         // survive a blocking syscall migration. The frame is 16-byte aligned,
@@ -225,19 +221,27 @@ mod program {
                 "add sp, sp, #32",
                 call = sym ipc_roundtrip,
                 inlateout("x0") round => result,
+                in("x1") endpoint,
                 clobber_abi("C"),
             );
         }
         result
     }
 
-    /// Repeated blocking-IPC migration role.
+    /// Repeated blocking-IPC migration role: `arg(2)` is the chassis's call
+    /// endpoint and `arg(3)` the number of rounds to make on it.
     fn ipc() -> i32 {
-        for round in 0..IPC_ROUNDS {
+        let (Some(endpoint), Some(rounds)) = (
+            tairix_rt::arg(2).and_then(parse_u64),
+            tairix_rt::arg(3).and_then(parse_u64),
+        ) else {
+            return 66;
+        };
+        for round in 0..rounds {
             #[cfg(mem_pin_aarch64)]
-            let result = checked_ipc_roundtrip(round);
+            let result = checked_ipc_roundtrip(round, endpoint);
             #[cfg(not(mem_pin_aarch64))]
-            let result = ipc_roundtrip(round);
+            let result = ipc_roundtrip(round, endpoint);
             if result != 0 {
                 // Every round code is small by construction; one that is not
                 // an exit code at all is itself a failure worth reporting.
@@ -250,7 +254,7 @@ mod program {
                 spins = core::hint::black_box(spins - 1);
             }
         }
-        if IPC_STATE.load(Ordering::Acquire) != IPC_ROUNDS {
+        if IPC_STATE.load(Ordering::Acquire) != rounds {
             return 64;
         }
         0

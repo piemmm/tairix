@@ -36,6 +36,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_util::argv::option_value;
 
 /// Default payload size in bytes (the classic `ping` 56, which with the
 /// 8-byte ICMP header reads as "64 bytes from").
@@ -45,7 +46,7 @@ pub const DEFAULT_SIZE: usize = 56;
 pub const MAX_SIZE: usize = tairix_abi::net::SOCKET_MAX_DATAGRAM;
 
 /// Nanoseconds in one second.
-const NANOS_PER_SEC: u64 = 1_000_000_000;
+const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// Default seconds between echo requests, as nanoseconds.
 pub const DEFAULT_INTERVAL_NS: u64 = NANOS_PER_SEC;
@@ -212,8 +213,7 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
             continue;
         }
         if let Some(long) = arg.strip_prefix("--") {
-            parse_long(&mut builder, long, arg, args, &mut i)?;
-            if matches!(builder_help(long), Some(())) {
+            if parse_long(&mut builder, long, arg, args, &mut i)? {
                 return Ok(Command::Help);
             }
             continue;
@@ -226,53 +226,38 @@ pub fn parse(args: &[&str]) -> Result<Command, ParseError> {
     build(builder)
 }
 
-/// `Some(())` when `long` is the help option, so [`parse`] can short-circuit.
-fn builder_help(long: &str) -> Option<()> {
-    let key = long.split('=').next().unwrap_or(long);
-    (key == "help").then_some(())
-}
-
 /// Parse one `--long` option (possibly `--key=value`), consuming a
 /// following value argument when the option takes one and none is attached.
+/// Returns `Ok(true)` when it requested help.
 fn parse_long(
     builder: &mut Builder,
     long: &str,
     original: &str,
     args: &[&str],
     i: &mut usize,
-) -> Result<(), ParseError> {
+) -> Result<bool, ParseError> {
     let (key, inline) = match long.split_once('=') {
         Some((k, v)) => (k, Some(v)),
         None => (long, None),
     };
-    let mut take_value = |key: &str| -> Result<String, ParseError> {
-        if let Some(v) = inline {
-            return Ok(v.to_string());
-        }
-        if *i < args.len() {
-            let v = args[*i].to_string();
-            *i += 1;
-            Ok(v)
-        } else {
-            Err(ParseError::MissingValue(format!("--{key}")))
-        }
+    let mut take_value = |key: &str| {
+        option_value(inline, args, i).ok_or_else(|| ParseError::MissingValue(format!("--{key}")))
     };
     match key {
-        // `help` is detected by the caller (`builder_help`).
-        "help" => {}
+        "help" => return Ok(true),
         "numeric" => builder.numeric = true,
-        "count" => builder.count = Some(parse_count(&take_value(key)?, "--count")?),
-        "interval" => builder.interval_ns = parse_seconds(&take_value(key)?, "--interval")?,
-        "timeout" => builder.timeout_ns = parse_seconds(&take_value(key)?, "--timeout")?,
-        "deadline" => builder.deadline_ns = Some(parse_seconds(&take_value(key)?, "--deadline")?),
-        "size" => builder.size = parse_size(&take_value(key)?, "--size")?,
-        "pattern" => builder.payload = parse_pattern(&take_value(key)?, "--pattern")?,
+        "count" => builder.count = Some(parse_count(take_value(key)?, "--count")?),
+        "interval" => builder.interval_ns = parse_seconds(take_value(key)?, "--interval")?,
+        "timeout" => builder.timeout_ns = parse_seconds(take_value(key)?, "--timeout")?,
+        "deadline" => builder.deadline_ns = Some(parse_seconds(take_value(key)?, "--deadline")?),
+        "size" => builder.size = parse_size(take_value(key)?, "--size")?,
+        "pattern" => builder.payload = parse_pattern(take_value(key)?, "--pattern")?,
         "quiet" => builder.quiet = true,
         "ipv4" => builder.family = Some(NetAddrFamily::V4),
         "ipv6" => builder.family = Some(NetAddrFamily::V6),
         _ => return Err(ParseError::UnknownOption(original.to_string())),
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Parse one short-option argument. Returns `Ok(true)` when it requested
@@ -294,17 +279,9 @@ fn parse_short(
             'c' | 'i' | 's' | 'W' | 'w' | 'p' => {
                 // The value is the rest of this argument, or the next one.
                 let rest = &flags[pos + flag.len_utf8()..];
-                let value = if rest.is_empty() {
-                    if *i < args.len() {
-                        let v = args[*i];
-                        *i += 1;
-                        v
-                    } else {
-                        return Err(ParseError::MissingValue(format!("-{flag}")));
-                    }
-                } else {
-                    rest
-                };
+                let attached = (!rest.is_empty()).then_some(rest);
+                let value = option_value(attached, args, i)
+                    .ok_or_else(|| ParseError::MissingValue(format!("-{flag}")))?;
                 apply_value_flag(builder, flag, value)?;
                 return Ok(false);
             }
@@ -416,46 +393,9 @@ fn parse_size(value: &str, option: &str) -> Result<usize, ParseError> {
     Ok(n)
 }
 
-/// Parse a non-negative decimal number of seconds into nanoseconds, with a
-/// fractional part of up to nine digits. Bounded so the conversion cannot
-/// overflow a `u64` (a value above `~year` is refused).
+/// Parse a decimal-seconds operand into nanoseconds, refusing anything else.
 fn parse_seconds(value: &str, option: &str) -> Result<u64, ParseError> {
-    let (whole_str, frac_str) = match value.split_once('.') {
-        Some((w, f)) => (w, f),
-        None => (value, ""),
-    };
-    // Reject empty, sign, or non-digit content: fail closed, never guess.
-    if whole_str.is_empty() && frac_str.is_empty() {
-        return Err(invalid(option, value));
-    }
-    let whole: u64 = if whole_str.is_empty() {
-        0
-    } else {
-        whole_str.parse().map_err(|_| invalid(option, value))?
-    };
-    // A whole-seconds value that would overflow when scaled to ns, or a
-    // multi-day interval, is a usage error rather than a wrapped value.
-    if whole > 31_536_000 {
-        return Err(invalid(option, value));
-    }
-    let mut nanos = whole
-        .checked_mul(NANOS_PER_SEC)
-        .ok_or_else(|| invalid(option, value))?;
-    if !frac_str.is_empty() {
-        if frac_str.len() > 9 || !frac_str.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(invalid(option, value));
-        }
-        // Right-pad to nanosecond precision (nine digits).
-        let mut scaled = frac_str.to_string();
-        while scaled.len() < 9 {
-            scaled.push('0');
-        }
-        let frac: u64 = scaled.parse().map_err(|_| invalid(option, value))?;
-        nanos = nanos
-            .checked_add(frac)
-            .ok_or_else(|| invalid(option, value))?;
-    }
-    Ok(nanos)
+    tairix_util::seconds::parse_seconds(value).ok_or_else(|| invalid(option, value))
 }
 
 fn invalid(option: &str, value: &str) -> ParseError {
@@ -646,6 +586,47 @@ mod tests {
             alloc::vec!["--numeric", "10.0.0.1"],
         ] {
             assert!(config(&args).numeric, "args {args:?}");
+        }
+    }
+
+    /// Every locale's `OPTIONS` documents the switches this parser accepts,
+    /// read from the bundle's own on-disk `Help/` tree; each documented
+    /// spelling must parse, so the list cannot name a switch the parser does
+    /// not know.
+    #[test]
+    fn help_documents_the_parser_switches() {
+        extern crate std;
+
+        const SWITCHES: [(&str, Option<&str>); 11] = [
+            ("`-c, --count`", Some("10")),
+            ("`-i, --interval`", Some("10")),
+            ("`-s, --size`", Some("10")),
+            ("`-p, --pattern`", Some("10")),
+            ("`-W, --timeout`", Some("10")),
+            ("`-w, --deadline`", Some("10")),
+            ("`-4, --ipv4`", None),
+            ("`-6, --ipv6`", None),
+            ("`-n, --numeric`", None),
+            ("`-q, --quiet`", None),
+            ("`-?, --help`", None),
+        ];
+        for (key, value) in SWITCHES {
+            for spelling in key.trim_matches('`').split(", ") {
+                let argv = match value {
+                    Some(value) => vec![spelling, value, "10.0.0.1"],
+                    None => vec![spelling, "10.0.0.1"],
+                };
+                assert!(parse(&argv).is_ok(), "{spelling} must parse");
+            }
+        }
+        let help_root = format!("{}/Help", env!("CARGO_MANIFEST_DIR"));
+        for locale in tairix_help::REQUIRED_LOCALES {
+            let path = format!("{help_root}/{locale}/ping.md");
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            for (key, _) in SWITCHES {
+                assert!(text.contains(key), "{locale}/ping.md must document {key}");
+            }
         }
     }
 }

@@ -116,9 +116,8 @@ authority and zeroises the password buffer on every path.
 process's own resource limits (`AGENTS.md` §24.3) over the `LimitStore`
 seam: `-a` (or no operand) lists every resource, `-H`/`-S` select the
 hard/soft bound, and a `<value>` (a decimal or `unlimited`) sets it.
-`<resource>` is a canonical `LimitKind` name (`address-space-bytes`,
-`open-streams`, `processes`, `stack-bytes`, `pinned-memory-bytes`, `threads`,
-`file-locks`, `dir-watches`). Lowering a bound is free;
+`<resource>` is a canonical `LimitKind` name, all of which `ulimit -a` lists.
+Lowering a bound is free;
 raising a hard bound is gated kernel-side on `CAP_RLIMIT_RAISE` and a
 denial is reported, never hidden (§2.9).
 

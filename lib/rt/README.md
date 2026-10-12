@@ -394,11 +394,15 @@ the anonymous-memory pair (`mem_map`, `mem_unmap`) and the `mem_map`-backed
 built on it. That park is one definition with two entry points (`AGENTS.md`
 §2.2): `park_ns` for anything that already holds a nanosecond span — an
 animation's next frame, a timed retry — and the `ClockDelay` `Delay` facility
-for a driver's microsecond settle window. It genuinely sleeps, parking on the
-process's lazily created, memberless sleep wait-set (`waitset_wait` with the
-remaining window as its deadline) so the kernel's one-shot timer wakes it,
-and degrades to a cooperative yield wait only if the kernel refuses a
-wait-set. `park_forever` is its unbounded counterpart.
+for a driver's microsecond settle window. It genuinely sleeps, in a futex
+wait on a word nothing wakes, so the kernel's one-shot timer wakes it and no
+kernel object a limit could refuse is needed. `park_forever` is its unbounded
+counterpart.
+
+`PrivatePort` and `WaitSet` own a process-private message port and a wait-set,
+releasing them (`port_unbind`, `waitset_close`) when dropped, so a
+per-operation transport returns what it was charged; `WaitSet::wait_until`
+parks until a member is ready or an absolute deadline passes.
 
 `latency_watch` is the one diagnostic wrapper: an interactive surface calls
 it once with `tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS` before its event

@@ -25,7 +25,7 @@ use tairix_abi::net_ipc::address_parts;
 
 use super::{
     configured_servers, pointer_name, resolve_host, resolve_name, resolve_pointer, route_address,
-    route_name, LinkLookup, ResolveError, Route,
+    route_name, target_failure, LinkLookup, ResolveError, Route, TargetFailure,
 };
 
 // -- The System Information API fake -------------------------------------
@@ -425,6 +425,35 @@ fn a_literal_of_the_wrong_forced_family_names_nothing() {
     assert_eq!(
         resolve_host("10.0.2.2", Some(NetAddrFamily::V6), &mut query),
         None
+    );
+}
+
+#[test]
+fn a_literal_of_the_excluded_family_is_told_apart_from_an_unknown_name() {
+    assert_eq!(
+        target_failure("::1", Some(NetAddrFamily::V4)),
+        TargetFailure::FamilyMismatch
+    );
+    assert_eq!(
+        target_failure("10.0.2.2", Some(NetAddrFamily::V6)),
+        TargetFailure::FamilyMismatch
+    );
+    assert_eq!(
+        target_failure("nope.invalid", Some(NetAddrFamily::V4)),
+        TargetFailure::Unknown
+    );
+    assert_eq!(
+        target_failure("::1", None),
+        TargetFailure::Unknown,
+        "with no family forced a literal cannot be of the wrong one"
+    );
+    assert_eq!(
+        TargetFailure::Unknown.to_string(),
+        "Name or service not known"
+    );
+    assert_eq!(
+        TargetFailure::FamilyMismatch.to_string(),
+        "Address family for hostname not supported"
     );
 }
 

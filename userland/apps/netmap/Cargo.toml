@@ -1,0 +1,81 @@
+[package]
+name = "tairix-netmap"
+description = "TAIRiX network map and inventory (netmap.app): a windowed, pannable and zoomable map of this machine's interfaces, subnets, neighbours, routers and gateway, read through the capability-checked System Information API and drawn with the desktop's device glyphs (plans/NETMAP.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tairix_netmap"
+
+[dependencies]
+# The landed network ABI records the engine ingests (interface facts/state,
+# the address family <-> `core::net::IpAddr` conversion) and `IF_NAME_LEN`.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The one text spelling of a network or link-layer address every surface
+# prints, so the map never spells an address the way no other tool does.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0" }
+# The shared integer screen geometry (`Point`) node positions and the viewport
+# are expressed in.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# First-party `no_std` trigonometry for the radial layout — keeps an external
+# libm out of the trusted computing base.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The shared desktop input vocabulary the view's one input entry point takes.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# Rasterisation: plates, edges and glyph blits.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# The one desktop theme the map is drawn in.
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# Labels and the detail panel's text.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The device-class glyphs a node is drawn with.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The detail panel's fact list, and the one wheel-to-pixel conversion.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The discovery-v1 client the advertised services are kept current through.
+tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0" }
+# Presentation form for every name and label a peer authored, and the
+# link-local test that decides which addresses the segment is asked to name.
+tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
+# The organisation a hardware address was assigned to, from the IEEE table
+# this bundle ships as `Resources/oui.ids.bin`; the import half stays off.
+tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", default-features = false }
+
+# The package is both the host-tested map engine and the `Run` entry-point
+# binary of the on-disk `netmap.app` bundle: a freestanding pure-Rust program
+# on the native Tier-1 targets and an inert host stub elsewhere.
+[[bin]]
+name = "tairix-netmap-run"
+path = "src/run.rs"
+
+# Everything only the freestanding `Run` binary links.
+[target.'cfg(target_os = "none")'.dependencies]
+# The app half of the window channel and the shared windowed-app shell.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The userland runtime: `_start`, the allocator, syscalls, and the worker the
+# network is read on.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The production sysinfo transport the worker reads through.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+# The discovery service's endpoint transport.
+tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0", features = ["program"] }
+# Reverse DNS for the routable addresses the map names.
+tairix-resolver = { path = "../../../lib/resolver", version = "=0.0.0", features = ["program"] }
+# The one bounded loader the bundled OUI table is read through.
+tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", default-features = false, features = ["rt"] }
+
+[dev-dependencies]
+# The view's host tests draw labels, so they inject the shared solid test
+# transport rather than reaching a running `fontd`.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The source tests compile a fixture OUI table through the same pipeline the
+# generator uses, never a hand-built imitation of its format.
+tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", features = ["textdb"] }
+
+[lints]
+workspace = true

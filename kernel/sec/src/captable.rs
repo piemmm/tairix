@@ -34,6 +34,7 @@ use tairix_crypto::Ed25519PublicKey;
 use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
+use crate::charge::ResourceCharges;
 use crate::identity::{format_hex_u64, format_i32, GroupId, UserId};
 use crate::session::{HeldExit, Placement, PlacementError, Released, SessionTree, ROOT_SESSION};
 
@@ -372,6 +373,9 @@ pub struct TaskCapabilities {
     /// calls, mirroring [`Self::io_bytes_read`] in every respect but
     /// direction.
     io_bytes_written: Arc<AtomicU64>,
+    /// What the process holds against its object limits, shared by every
+    /// copy of its record for the same reason as [`Self::io_bytes_read`].
+    charges: Arc<ResourceCharges>,
 }
 
 /// Add `delta` to the value `counter` holds, clamping at [`u64::MAX`]
@@ -454,6 +458,7 @@ impl TaskCapabilities {
             console: ORIGIN_CONSOLE_NONE,
             io_bytes_read: Arc::new(AtomicU64::new(0)),
             io_bytes_written: Arc::new(AtomicU64::new(0)),
+            charges: Arc::new(ResourceCharges::new()),
         }
     }
 
@@ -750,23 +755,26 @@ impl TaskCapabilities {
         saturating_fetch_add(&self.io_bytes_written, n);
     }
 
-    /// Continue `previous`'s I/O totals in this record instead of starting
-    /// fresh ones.
+    /// What this process holds against the limits on the kernel objects it
+    /// creates; a charge taken here is returned when its object drops.
+    #[must_use]
+    pub fn charges(&self) -> &Arc<ResourceCharges> {
+        &self.charges
+    }
+
+    /// Continue `previous`'s live accounting — its I/O totals and what it
+    /// holds against its limits — in this record instead of starting fresh.
     ///
-    /// A spawned child's record is installed twice under one task id — the
-    /// empty-set placeholder at admit, then the effective set once its image
-    /// verifies — and each derivation mints its own counter cells. Without
-    /// this, the second install would silently restart the task's totals at
-    /// zero mid-life, so a byte the loading slice moved would vanish and the
-    /// counters would not be monotonic for the process's lifetime as their
-    /// contract promises. [`CapTable::insert`] applies it at the one place a
-    /// record can replace a live entry, so the continuity holds for every
-    /// install path without any caller having to remember it, and only ever
-    /// between records of the *same* task (the registry keys on
-    /// [`Self::process`], which no setter can change after derivation).
-    fn adopt_io_counters(&mut self, previous: &Self) {
+    /// A record replaced under the same task id (the placeholder installed at
+    /// admit, then the verified set) would otherwise restart its totals
+    /// mid-life, and fresh charge counters would hand the process its whole
+    /// budget again while its objects still hold the old one.
+    /// [`CapTable::insert`] applies it at the one place a record replaces a
+    /// live entry, and only between records of the same task.
+    fn adopt_accounting(&mut self, previous: &Self) {
         self.io_bytes_read = Arc::clone(&previous.io_bytes_read);
         self.io_bytes_written = Arc::clone(&previous.io_bytes_written);
+        self.charges = Arc::clone(&previous.charges);
     }
 
     /// The task's kernel-attested monotonic admission timestamp.
@@ -1289,7 +1297,7 @@ impl CapTable {
     /// over from its admit-time placeholder; because the entry is keyed on
     /// the record's own [`TaskCapabilities::process`], a replacement always
     /// concerns that same process, so the incoming record continues the
-    /// outgoing one's per-process I/O totals rather than restarting them.
+    /// outgoing one's accounting rather than restarting it.
     /// A replacement leaves the process's thread set and its session
     /// untouched: both belong to the process, not to the record that
     /// describes it. A new process inserted here is in the root session;
@@ -1297,7 +1305,7 @@ impl CapTable {
     pub fn insert(&mut self, mut caps: TaskCapabilities) -> Option<Arc<TaskCapabilities>> {
         let process = caps.process();
         if let Some(previous) = self.entries.get(&process) {
-            caps.adopt_io_counters(previous);
+            caps.adopt_accounting(previous);
             caps.session = previous.session;
             caps.login_session = previous.login_session;
             self.instances.remove(&previous.proc_id());
@@ -3311,6 +3319,32 @@ mod tests {
         // visible through the displaced record too — it is the same task.
         current.record_bytes_read(4);
         assert_eq!(displaced.io_bytes_read(), 4100);
+    }
+
+    #[test]
+    fn captable_replacement_keeps_what_the_task_holds_against_its_limits() {
+        use tairix_abi::LimitKind;
+
+        let mut table = CapTable::new();
+        let placeholder = make_caps(22, &[]);
+        let held = placeholder
+            .charges()
+            .charge(LimitKind::WaitSets, 3, 4)
+            .expect("fits");
+        table.insert(placeholder);
+        table.insert(make_caps(22, &[]));
+        let current = table.caps_for(TaskId(22)).expect("present");
+        // A replacement that restarted the counters would grant the whole
+        // budget again while the placeholder's objects still held it.
+        assert_eq!(current.charges().held(LimitKind::WaitSets), 3);
+        assert!(current.charges().charge(LimitKind::WaitSets, 2, 4).is_err());
+        drop(held);
+        assert_eq!(current.charges().held(LimitKind::WaitSets), 0);
+        assert_eq!(
+            make_caps(23, &[]).charges().held(LimitKind::WaitSets),
+            0,
+            "another task starts with nothing held"
+        );
     }
 
     #[test]

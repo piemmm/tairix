@@ -12,7 +12,7 @@ use tairix_abi::WAITSET_TIMEOUT_NONE;
 use tairix_theme::Timeline;
 
 /// Nanoseconds in one second.
-const NANOS_PER_SEC: u64 = 1_000_000_000;
+const NANOS_PER_SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// Milliseconds in one second, the unit a theme authors a duration in.
 const MILLIS_PER_SEC: u64 = 1_000;

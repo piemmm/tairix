@@ -223,6 +223,7 @@
 - [TextEdit](./desktop/textedit.md)
 - [Paint](./desktop/paint.md)
 - [Settings](./desktop/settings.md)
+- [Network Map](./desktop/netmap.md)
 - [Widget gallery](./desktop/widgets.md)
 - [Sapper](./desktop/sapper.md)
 - [Cinder](./desktop/cinder.md)

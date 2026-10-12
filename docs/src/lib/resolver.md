@@ -49,7 +49,9 @@ operator inspecting the configuration can never disagree (`AGENTS.md` §2.2).
   socket (`tairix_rt::net`). Opening one keys its query-id generator once from
   the kernel CSPRNG — a transport that cannot be keyed is refused rather than
   run on predictable ids — and binds a process-private delivery port
-  (`tairix_rt::bind_private_port`). It opens the
+  (`tairix_rt::PrivatePort`), which it releases with its wait-set when it is
+  dropped, so a lookup a long-lived program makes leaves nothing behind. It
+  opens the
   datagram socket for a server's address family on demand with a CSPRNG-drawn
   ephemeral source port (the RFC 5452 source-port randomisation the socket
   layer contributes), and parks on the delivery port for the reply — never a

@@ -8,7 +8,7 @@
 //! same kind of drawing to the rasteriser.
 //!
 //! The same marks serve two pictures: a category's colour badge, where the
-//! symbol stands small in white on its plate ([`crate::badge`]), and the
+//! symbol stands small in white on its plate ([`crate::badge()`]), and the
 //! category's tintable glyph, where it fills the grid on its own.
 
 use alloc::vec::Vec;
@@ -259,6 +259,20 @@ pub(crate) fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::SoundDevices => FADERS,
         IconKind::SoundEffects => NOTES,
         IconKind::Theme => PALETTE,
+        IconKind::Computer => COMPUTER,
+        IconKind::Laptop => LAPTOP,
+        IconKind::Server => SERVER,
+        IconKind::Router => ROUTER,
+        IconKind::NetworkSwitch => NETWORK_SWITCH,
+        IconKind::Phone => PHONE,
+        IconKind::Nas => NAS,
+        IconKind::IotDevice => SMART_BULB,
+        IconKind::DeviceUnknown => UNKNOWN_DEVICE,
+        IconKind::Subnet => SEGMENT,
+        IconKind::OsLinux => PENGUIN,
+        IconKind::OsWindows => PANED_WINDOW,
+        IconKind::OsApple => LOOPED_SQUARE,
+        IconKind::OsAndroid => ROBOT_HEAD,
         _ => return None,
     })
 }
@@ -686,3 +700,240 @@ const PALETTE: &[Mark] = &[cut(&[
     circle(13.1, 6.4, 1.55),
     circle(17.1, 9.3, 1.55),
 ])];
+
+/// A monitor on its stand, beside a tower with a drive slot and power button.
+const COMPUTER: &[Mark] = &[
+    stroke(
+        &[Outline::Path(
+            "M5 5.2H12.9A1.6 1.6 0 0 1 14.5 6.8V12.4A1.6 1.6 0 0 1 12.9 14H5\
+             A1.6 1.6 0 0 1 3.4 12.4V6.8A1.6 1.6 0 0 1 5 5.2Z",
+        )],
+        1.8,
+    ),
+    fill(&[Outline::Path(
+        "M7.9 14H10L10.3 16.6H11.9A0.8 0.8 0 0 1 11.9 18.2H6A0.8 0.8 0 0 1 6 16.6H7.6Z",
+    )]),
+    cut(&[
+        Outline::Path(
+            "M17.6 3.6H20.4A1.2 1.2 0 0 1 21.6 4.8V19.2A1.2 1.2 0 0 1 20.4 20.4H17.6\
+             A1.2 1.2 0 0 1 16.4 19.2V4.8A1.2 1.2 0 0 1 17.6 3.6Z",
+        ),
+        Outline::Path("M17.8 6.2H20.2V7.4H17.8Z"),
+        circle(19.0, 17.4, 0.85),
+    ]),
+];
+
+/// An open lid over a keyboard deck with its finger notch.
+const LAPTOP: &[Mark] = &[
+    stroke(
+        &[Outline::Path(
+            "M6.2 4.4H17.8A1.6 1.6 0 0 1 19.4 6V15H4.6V6A1.6 1.6 0 0 1 6.2 4.4Z",
+        )],
+        1.8,
+    ),
+    cut(&[
+        Outline::Path(
+            "M1.8 16.4H22.2L21.4 18.8A1.6 1.6 0 0 1 19.9 19.8H4.1A1.6 1.6 0 0 1 2.6 18.8Z",
+        ),
+        Outline::Path("M10.2 16.4H13.8V17.3H10.2Z"),
+    ]),
+];
+
+/// Three stacked rack units, each with a drive slot and a status light.
+const SERVER: &[Mark] = &[cut(&[
+    Outline::Path(
+        "M4.8 2.6H19.2A1.4 1.4 0 0 1 20.6 4V6.8A1.4 1.4 0 0 1 19.2 8.2H4.8\
+         A1.4 1.4 0 0 1 3.4 6.8V4A1.4 1.4 0 0 1 4.8 2.6Z",
+    ),
+    Outline::Path("M6.2 4.8H12V6H6.2Z"),
+    circle(17.4, 5.4, 0.85),
+    Outline::Path(
+        "M4.8 9.2H19.2A1.4 1.4 0 0 1 20.6 10.6V13.4A1.4 1.4 0 0 1 19.2 14.8H4.8\
+         A1.4 1.4 0 0 1 3.4 13.4V10.6A1.4 1.4 0 0 1 4.8 9.2Z",
+    ),
+    Outline::Path("M6.2 11.4H12V12.6H6.2Z"),
+    circle(17.4, 12.0, 0.85),
+    Outline::Path(
+        "M4.8 15.8H19.2A1.4 1.4 0 0 1 20.6 17.2V20A1.4 1.4 0 0 1 19.2 21.4H4.8\
+         A1.4 1.4 0 0 1 3.4 20V17.2A1.4 1.4 0 0 1 4.8 15.8Z",
+    ),
+    Outline::Path("M6.2 18H12V19.2H6.2Z"),
+    circle(17.4, 18.6, 0.85),
+])];
+
+/// A low box of status lights and a port, under two splayed antennas.
+const ROUTER: &[Mark] = &[
+    stroke(
+        &[Outline::Path("M6.2 11.6L4.8 4.4M17.8 11.6L19.2 4.4")],
+        1.8,
+    ),
+    cut(&[
+        Outline::Path(
+            "M4.4 11.6H19.6A1.8 1.8 0 0 1 21.4 13.4V17.6A1.8 1.8 0 0 1 19.6 19.4H4.4\
+             A1.8 1.8 0 0 1 2.6 17.6V13.4A1.8 1.8 0 0 1 4.4 11.6Z",
+        ),
+        circle(6.6, 15.5, 0.85),
+        circle(9.4, 15.5, 0.85),
+        circle(12.2, 15.5, 0.85),
+        Outline::Path("M15.4 14.9H18.6V16.1H15.4Z"),
+    ]),
+];
+
+/// A flat box of five ports, between traffic passing one way above it and the
+/// other way below.
+const NETWORK_SWITCH: &[Mark] = &[
+    stroke(
+        &[Outline::Path(
+            "M6.8 4.6H17.2M15 2.6L17.2 4.6L15 6.6M17.2 19.4H6.8M9 17.4L6.8 19.4L9 21.4",
+        )],
+        1.6,
+    ),
+    cut(&[
+        Outline::Path(
+            "M3.2 8.6H20.8A1.6 1.6 0 0 1 22.4 10.2V13.8A1.6 1.6 0 0 1 20.8 15.4H3.2\
+             A1.6 1.6 0 0 1 1.6 13.8V10.2A1.6 1.6 0 0 1 3.2 8.6Z",
+        ),
+        Outline::Path(
+            "M4.1 10.6H6.3V13.4H4.1ZM7.5 10.6H9.7V13.4H7.5ZM10.9 10.6H13.1V13.4H10.9Z\
+             M14.3 10.6H16.5V13.4H14.3ZM17.7 10.6H19.9V13.4H17.7Z",
+        ),
+    ]),
+];
+
+/// A handset: its screen and home button cut from a rounded body.
+const PHONE: &[Mark] = &[cut(&[
+    Outline::Path(
+        "M8.8 2.2H15.2A2.4 2.4 0 0 1 17.6 4.6V19.4A2.4 2.4 0 0 1 15.2 21.8H8.8\
+         A2.4 2.4 0 0 1 6.4 19.4V4.6A2.4 2.4 0 0 1 8.8 2.2Z",
+    ),
+    Outline::Path("M8.2 4.8H15.8V17.4H8.2Z"),
+    circle(12.0, 19.6, 0.95),
+])];
+
+/// A storage box: two drive bays over a pair of activity lights.
+const NAS: &[Mark] = &[cut(&[
+    Outline::Path(
+        "M6.4 2.6H17.6A1.8 1.8 0 0 1 19.4 4.4V19.6A1.8 1.8 0 0 1 17.6 21.4H6.4\
+         A1.8 1.8 0 0 1 4.6 19.6V4.4A1.8 1.8 0 0 1 6.4 2.6Z",
+    ),
+    Outline::Path("M6.8 5H17.2V8.6H6.8ZM6.8 10.4H17.2V14H6.8Z"),
+    circle(8.4, 17.6, 0.9),
+    circle(11.4, 17.6, 0.9),
+])];
+
+/// A smart bulb: the glass with its filament cut through, on a two-ring base.
+const SMART_BULB: &[Mark] = &[
+    cut(&[
+        Outline::Path("M9.2 17.2V15.6A6.4 6.4 0 1 1 14.8 15.6V17.2Z"),
+        Outline::Path("M11.3 15.6V12.6L10.2 11.2H13.8L12.7 12.6V15.6Z"),
+    ]),
+    fill(&[
+        Outline::Path("M9.4 18.4H14.6V19.6H9.4Z"),
+        Outline::Path("M10.2 20.6H13.8A0.6 0.6 0 0 1 13.8 21.8H10.2A0.6 0.6 0 0 1 10.2 20.6Z"),
+    ]),
+];
+
+/// A question mark in an empty device outline.
+const UNKNOWN_DEVICE: &[Mark] = &[
+    stroke(
+        &[
+            Outline::Path(
+                "M5.6 3.6H18.4A2 2 0 0 1 20.4 5.6V18.4A2 2 0 0 1 18.4 20.4H5.6\
+                 A2 2 0 0 1 3.6 18.4V5.6A2 2 0 0 1 5.6 3.6Z",
+            ),
+            Outline::Path("M9.4 9.6A2.7 2.7 0 1 1 13.4 11.9L12.6 12.5A1.5 1.5 0 0 0 12 13.7V14.2"),
+        ],
+        1.8,
+    ),
+    fill(&[circle(12.0, 17.0, 1.05)]),
+];
+
+/// Three hosts tapped onto one shared line.
+const SEGMENT: &[Mark] = &[
+    stroke(
+        &[Outline::Path("M3 12H21M6.5 12V8.4M12 12V15.6M17.5 12V8.4")],
+        1.7,
+    ),
+    fill(&[
+        Outline::Path(
+            "M5.3 4.4H7.7A0.8 0.8 0 0 1 8.5 5.2V7.6A0.8 0.8 0 0 1 7.7 8.4H5.3\
+             A0.8 0.8 0 0 1 4.5 7.6V5.2A0.8 0.8 0 0 1 5.3 4.4Z",
+        ),
+        Outline::Path(
+            "M10.8 15.6H13.2A0.8 0.8 0 0 1 14 16.4V18.8A0.8 0.8 0 0 1 13.2 19.6H10.8\
+             A0.8 0.8 0 0 1 10 18.8V16.4A0.8 0.8 0 0 1 10.8 15.6Z",
+        ),
+        Outline::Path(
+            "M16.3 4.4H18.7A0.8 0.8 0 0 1 19.5 5.2V7.6A0.8 0.8 0 0 1 18.7 8.4H16.3\
+             A0.8 0.8 0 0 1 15.5 7.6V5.2A0.8 0.8 0 0 1 16.3 4.4Z",
+        ),
+    ]),
+];
+
+/// A penguin standing front on: its face and belly white, its eyes, beak and
+/// feet dark.
+const PENGUIN: &[Mark] = &[
+    cut(&[
+        Outline::Path(
+            "M12 2.4C14.7 2.4 16.4 4.5 16.4 7.2C16.4 8.6 17 9.6 17.9 10.9\
+             C19.1 12.6 19.7 14.7 19.3 16.9C18.9 19.2 16.6 20.7 12 20.7\
+             C7.4 20.7 5.1 19.2 4.7 16.9C4.3 14.7 4.9 12.6 6.1 10.9\
+             C7 9.6 7.6 8.6 7.6 7.2C7.6 4.5 9.3 2.4 12 2.4Z",
+        ),
+        Outline::Path(
+            "M12 4.5C13.5 4.5 14.6 5.6 14.6 7C14.6 8.7 13.4 9.9 12 10.5\
+             C10.6 9.9 9.4 8.7 9.4 7C9.4 5.6 10.5 4.5 12 4.5Z",
+        ),
+        Outline::Path(
+            "M12 11.4C14.4 11.4 15.9 13.6 15.9 16C15.9 18.3 14.3 19.5 12 19.5\
+             C9.7 19.5 8.1 18.3 8.1 16C8.1 13.6 9.6 11.4 12 11.4Z",
+        ),
+    ]),
+    fill(&[
+        circle(10.8, 6.6, 0.8),
+        circle(13.2, 6.6, 0.8),
+        Outline::Path("M10.6 8.2H13.4L12 9.8Z"),
+        Outline::Path(
+            "M6.6 20.3C6.6 19.3 8.2 18.8 10 19.1C11.4 19.4 11.6 20.8 10.6 21.3\
+             C9.4 21.9 6.6 21.6 6.6 20.3Z",
+        ),
+        Outline::Path(
+            "M17.4 20.3C17.4 19.3 15.8 18.8 14 19.1C12.6 19.4 12.4 20.8 13.4 21.3\
+             C14.6 21.9 17.4 21.6 17.4 20.3Z",
+        ),
+    ]),
+];
+
+/// A window of four panes in its frame.
+const PANED_WINDOW: &[Mark] = &[stroke(
+    &[
+        Outline::Path(
+            "M5.4 3.6H18.6A1.8 1.8 0 0 1 20.4 5.4V18.6A1.8 1.8 0 0 1 18.6 20.4H5.4\
+             A1.8 1.8 0 0 1 3.6 18.6V5.4A1.8 1.8 0 0 1 5.4 3.6Z",
+        ),
+        Outline::Path("M12 3.6V20.4M3.6 12H20.4"),
+    ],
+    1.9,
+)];
+
+/// The looped square: four loops joined by the square their lines cross in.
+const LOOPED_SQUARE: &[Mark] = &[stroke(
+    &[Outline::Path(
+        "M8.7 6A2.7 2.7 0 1 0 6 8.7H18A2.7 2.7 0 1 0 15.3 6V18\
+         A2.7 2.7 0 1 0 18 15.3H6A2.7 2.7 0 1 0 8.7 18Z",
+    )],
+    1.9,
+)];
+
+/// A robot's domed head with its two eyes and splayed antennas.
+const ROBOT_HEAD: &[Mark] = &[
+    cut(&[
+        Outline::Path("M3.8 17.2A8.2 8.2 0 0 1 20.2 17.2Z"),
+        circle(8.7, 13.4, 1.15),
+        circle(15.3, 13.4, 1.15),
+    ]),
+    stroke(
+        &[Outline::Path("M8.3 10.8L6.6 7.9M15.7 10.8L17.4 7.9")],
+        1.4,
+    ),
+];

@@ -8,7 +8,8 @@ use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::hwtree::{HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NetNeighborRecord, NetRouteRecord,
+    NetServerAddr, NetSocketRecord,
 };
 use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord};
 use tairix_abi::sysinfo::{
@@ -412,6 +413,13 @@ fn net_list(source: &dyn SysinfoSource, page: &mut ListPage<'_>) -> Option<Resul
             || source.net_bond_members(caller),
             NetBondMemberRecord::to_le_bytes,
         ),
+        SysinfoQueryId::NET_NEIGHBORS => page.of(
+            || source.net_neighbors(caller),
+            NetNeighborRecord::to_le_bytes,
+        ),
+        SysinfoQueryId::NET_ROUTES => {
+            page.of(|| source.net_routes(caller), NetRouteRecord::to_le_bytes)
+        }
         SysinfoQueryId::NET_RESOLVER_SERVERS => page.of(
             || source.net_resolver_servers(caller),
             NetServerAddr::to_le_bytes,
@@ -825,8 +833,8 @@ mod tests {
     use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
-        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSockProto,
-        NetSockState, NetSocketRecord,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetNeighborRecord, NetRouteRecord,
+        NetServerAddr, NetSockProto, NetSockState, NetSocketRecord,
     };
     use tairix_abi::raid::{ArrayHealth, RaidLevel};
     use tairix_abi::raid_admin::{
@@ -1393,6 +1401,15 @@ mod tests {
         ) -> Result<alloc::vec::Vec<NetBondMemberRecord>, Errno> {
             Ok(alloc::vec![fixture_net_bond_member()])
         }
+        fn net_neighbors(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<NetNeighborRecord>, Errno> {
+            Ok(alloc::vec![fixture_net_neighbor()])
+        }
+        fn net_routes(&self, _caller: &Caller) -> Result<alloc::vec::Vec<NetRouteRecord>, Errno> {
+            Ok(alloc::vec![fixture_net_route()])
+        }
         fn net_resolver_servers(
             &self,
             _caller: &Caller,
@@ -1681,6 +1698,21 @@ mod tests {
                     LimitKind::DirWatches,
                     ResourceLimit::new(16, 32).unwrap(),
                     2,
+                ),
+                ResourceLimitRecord::new(
+                    LimitKind::IpcQueueBytes,
+                    ResourceLimit::new(1 << 24, 1 << 24).unwrap(),
+                    65_536,
+                ),
+                ResourceLimitRecord::new(
+                    LimitKind::WaitSets,
+                    ResourceLimit::new(256, 256).unwrap(),
+                    6,
+                ),
+                ResourceLimitRecord::new(
+                    LimitKind::WaitSetMembers,
+                    ResourceLimit::new(1024, 1024).unwrap(),
+                    9,
                 ),
             ])
         }
@@ -2114,7 +2146,7 @@ mod tests {
         let caps = Caps(&[]);
         let sink = RecordingSink::new();
         let req = request_bytes(SysinfoQueryId::RESOURCE_LIMITS, &[]);
-        let mut resp = [0u8; 256];
+        let mut resp = [0u8; RESOURCE_LIMITS_REPORT_LEN];
         let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         assert_eq!(n, RESOURCE_LIMITS_REPORT_LEN);
         // The records decode positionally, one per LimitKind in order.
@@ -2522,6 +2554,99 @@ mod tests {
         assert_eq!(
             sink.events.borrow().as_slice(),
             &[(Level::Debug, events::QUERY_SERVED)]
+        );
+    }
+
+    fn fixture_if_name() -> [u8; tairix_abi::net_ipc::IF_NAME_LEN] {
+        let mut name = [0u8; tairix_abi::net_ipc::IF_NAME_LEN];
+        name[..4].copy_from_slice(b"eth0");
+        name
+    }
+
+    /// The neighbour record the fixture serves.
+    fn fixture_net_neighbor() -> NetNeighborRecord {
+        let mut addr = [0u8; 16];
+        addr[..4].copy_from_slice(&[192, 168, 1, 20]);
+        NetNeighborRecord {
+            interface: fixture_if_name(),
+            family: tairix_abi::net_ipc::NetAddrFamily::V4,
+            state: tairix_abi::net_ipc::NetNeighborState::Reachable,
+            addr,
+            mac: Some([0x02, 0, 0, 0, 0x14, 0x01]),
+        }
+    }
+
+    /// The route record the fixture serves: a default route via a gateway.
+    fn fixture_net_route() -> NetRouteRecord {
+        let mut gateway = [0u8; 16];
+        gateway[..4].copy_from_slice(&[192, 168, 1, 1]);
+        NetRouteRecord {
+            interface: fixture_if_name(),
+            family: tairix_abi::net_ipc::NetAddrFamily::V4,
+            prefix: 0,
+            origin: tairix_abi::net_ipc::NetRouteOrigin::Static,
+            dest: [0u8; 16],
+            next_hop: Some(gateway),
+        }
+    }
+
+    /// One record query refused (and logged) holding only `other`, then served
+    /// and audited holding `gate`, its one record encoding as `expected`.
+    fn assert_one_record_query_is_gated<const N: usize>(
+        query: SysinfoQueryId,
+        gate: &'static [CapabilityId],
+        other: &'static [CapabilityId],
+        expected: [u8; N],
+    ) {
+        tairix_log::set_max_level(Level::Trace);
+        let source = FixtureSource::new();
+        let nlr = PageRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        };
+        let req = request_bytes(query, &nlr.to_le_bytes());
+        let mut resp = [0u8; 512];
+
+        let denied = Caps(other);
+        let sink = RecordingSink::new();
+        assert_eq!(
+            serve_once(&source, &caller(&denied), &sink, &req, &mut resp),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Warn, events::QUERY_DENIED)]
+        );
+
+        let granted = Caps(gate);
+        let sink = RecordingSink::new();
+        let n = serve_once(&source, &caller(&granted), &sink, &req, &mut resp).unwrap();
+        assert_eq!(resp[..n], expected);
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(Level::Debug, events::QUERY_SERVED)]
+        );
+    }
+
+    #[test]
+    fn net_neighbors_is_gated_on_hardware_identity_audited_and_round_trips() {
+        assert_one_record_query_is_gated(
+            SysinfoQueryId::NET_NEIGHBORS,
+            &[CapabilityId::SYSINFO_HW],
+            &[CapabilityId::SYSINFO_GLOBAL],
+            fixture_net_neighbor().to_le_bytes(),
+        );
+    }
+
+    #[test]
+    fn net_routes_is_gated_on_global_state_audited_and_round_trips() {
+        assert_one_record_query_is_gated(
+            SysinfoQueryId::NET_ROUTES,
+            &[CapabilityId::SYSINFO_GLOBAL],
+            &[CapabilityId::SYSINFO_HW],
+            fixture_net_route().to_le_bytes(),
         );
     }
 
