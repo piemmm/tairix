@@ -193,15 +193,21 @@ fn exercise_cache(rng: &mut Prng) {
         if !sources.contains(&source) {
             sources.push(source);
         }
-        cache.learn(now, &record, source, &mut |_, _| {});
+        let watcher = (rng.next_u64() & 1 == 0).then(|| QuestionId::new(rng.next_u32()));
+        cache.learn(now, cache.keyed(&record), source, watcher, &mut |_, _| {});
         if rng.next_u64().is_multiple_of(8) {
-            cache.set_watched(&record.name, record.record_type(), rng.next_u64() & 1 == 0);
+            let watcher = (rng.next_u64() & 1 == 0).then(|| QuestionId::new(rng.next_u32()));
+            let key = cache.key_of(&record.name, record.record_type());
+            cache.set_watched(key, &record.name, record.record_type(), watcher);
         }
         if rng.next_u64().is_multiple_of(8) {
-            cache.advance(now, &mut |_, _| {}, &mut |_, _| {});
+            cache.advance(now, &mut |_| {}, &mut |_, _| {});
         }
-        let _ = cache.holds_fresher(now, &record);
-        let _ = cache.lookup(&record.name, record.record_type()).count();
+        let _ = cache.would_offer(now, cache.keyed(&record));
+        let key = cache.key_of(&record.name, record.record_type());
+        let _ = cache
+            .lookup(key, &record.name, record.record_type())
+            .count();
 
         assert!(cache.len() <= MAX_RECORDS, "the global bound holds");
         for source in &sources {
@@ -284,9 +290,10 @@ fn exercise_engine(rng: &mut Prng) {
         }
         assert!(engine.cache().len() <= MAX_RECORDS);
         for question in &asked {
-            let cached = engine
-                .cache()
-                .lookup(&question.name, question.record_type)
+            let cache = engine.cache();
+            let key = cache.key_of(&question.name, question.record_type);
+            let cached = cache
+                .lookup(key, &question.name, question.record_type)
                 .count();
             assert_eq!(
                 question.held.len(),
@@ -340,17 +347,22 @@ fn seed_engine(
         );
     }
     let mut asked = Vec::new();
-    for _ in 0..rng.below(4) {
+    for raw in 0..rng.below(4) {
+        let id = QuestionId::new(u32::try_from(raw).unwrap_or(u32::MAX));
         let name = draw_name(rng);
         let record_type = *rng.pick(&[RecordType::Ptr, RecordType::A, RecordType::Srv]);
         let mut told = Vec::new();
-        if let Ok(id) = engine.ask(
-            Duration64::from_secs(0),
-            name,
-            record_type,
-            rand,
-            &mut |answer| told.push(answer.record.record),
-        ) {
+        if engine
+            .ask(
+                Duration64::from_secs(0),
+                id,
+                name,
+                record_type,
+                rand,
+                &mut |answer| told.push(answer.record.record),
+            )
+            .is_ok()
+        {
             asked.push(Asked {
                 id,
                 name,
@@ -374,6 +386,23 @@ fn engine_step(
     stopped: &mut Vec<QuestionId>,
 ) {
     let mut sink = |answer: &Answer<'_>| check_answer(asked, stopped, answer);
+    if rng.next_u64().is_multiple_of(16) {
+        // One source past its own bound, at the names the questions ask, so
+        // its evictions take watched answers and stack one name's chains.
+        let source = peer(u8::try_from(rng.below(8)).unwrap_or(0));
+        for _ in 0..MAX_RECORDS_PER_SOURCE + 8 {
+            let mut record = Record::unique(
+                draw_name(rng),
+                RData::A(Ipv4Addr::from(rng.next_u32().to_be_bytes())),
+            );
+            record.cache_flush = rng.next_u64() & 1 == 0;
+            let built = build_records(&[record]);
+            let emitted =
+                engine.on_message(now, &built, on_link(source, PORT), rand, buf, &mut sink);
+            check_emit(emitted.map(|emit| (emit.to, emit.len)), buf);
+        }
+        return;
+    }
     match rng.next_u64() % 4 {
         0 => {
             let mut datagram = [0u8; 512];
@@ -581,6 +610,20 @@ fn check_emit(emitted: Option<(Destination, usize)>, buf: &[u8]) {
     if let Destination::Peer { port, .. } = to {
         assert_ne!(port, 0, "a reply must name a port to reach");
     }
+}
+
+/// A response asserting `records` in its answer section.
+fn build_records(records: &[Record]) -> Vec<u8> {
+    let mut out = [0u8; BUF];
+    let len = {
+        let mut writer =
+            tairix_net::mdns::MessageWriter::new(&mut out, 0, true).expect("a header fits");
+        for record in records {
+            assert!(writer.push_record(tairix_net::mdns::Section::Answer, record));
+        }
+        writer.finish()
+    };
+    out[..len].to_vec()
 }
 
 /// Build a structurally valid message out of drawn parts.

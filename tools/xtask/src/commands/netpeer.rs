@@ -3005,7 +3005,7 @@ mod mdns_tests {
         eui64_interface_id, fixture_draws, publish_fixture, Duration64, IpAddr, MdnsEngine,
         Message, Name, RecordType, Sender, MDNS_MAX_MESSAGE_LEN, MDNS_PORT, STACK_HASH_KEY,
     };
-    use tairix_net::mdns::Section;
+    use tairix_net::mdns::{QuestionId, Section};
     use tairix_test_netstack_wire as wire;
 
     fn at(millis: u64) -> Duration64 {
@@ -3053,17 +3053,25 @@ mod mdns_tests {
             wire::MDNS_INSTANCE,
             wire::MDNS_SERVICE
         ));
-        for (owner, record_type) in [
+        for (id, owner, record_type) in [
             (
+                1,
                 name(&format!("{}.local", wire::MDNS_SERVICE)),
                 RecordType::Ptr,
             ),
-            (instance, RecordType::Srv),
-            (instance, RecordType::Txt),
-            (name(wire::MDNS_HOST), RecordType::Aaaa),
+            (2, instance, RecordType::Srv),
+            (3, instance, RecordType::Txt),
+            (4, name(wire::MDNS_HOST), RecordType::Aaaa),
         ] {
             guest
-                .ask(at(10_000), owner, record_type, &mut draws, &mut |_| {})
+                .ask(
+                    at(10_000),
+                    QuestionId::new(id),
+                    owner,
+                    record_type,
+                    &mut draws,
+                    &mut |_| {},
+                )
                 .expect("asks");
         }
         let mut answered_again = false;

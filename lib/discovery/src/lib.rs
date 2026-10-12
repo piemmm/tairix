@@ -72,8 +72,9 @@ pub enum DiscoveryError {
     Unavailable,
     /// The service refused the request, for the reason carried:
     /// [`Errno::PermissionDenied`] when the caller may not ask it,
-    /// [`Errno::LimitExceeded`] past a session's bounds, [`Errno::OutOfRange`]
-    /// for a name or type multicast DNS does not answer for.
+    /// [`Errno::LimitExceeded`] past its account's or the service's bounds,
+    /// [`Errno::OutOfRange`] for a name or type multicast DNS does not answer
+    /// for.
     Refused(Errno),
     /// The call itself failed.
     Transport(Errno),

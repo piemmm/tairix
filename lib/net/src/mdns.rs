@@ -27,9 +27,11 @@
 //!
 //! - The codec is total, allocation-free, and fail-closed: a malformed
 //!   message is dropped whole and nothing partial is cached.
-//! - Per-packet cost is bounded and indexed. The cache is keyed under a
-//!   per-boot secret, so a peer cannot choose a set of names that all land in
-//!   one bucket and turn every arriving record into a scan of the table.
+//! - Per-packet cost is bounded and indexed. Records and questions are found
+//!   under keys hashed with a per-boot secret, so a peer can neither choose
+//!   names that share one chain nor stack records under one name to lengthen
+//!   the walk to a record, and a name costs a fixed number of compression
+//!   pointers at most.
 //! - The cache bounds ([`MAX_RECORDS`], [`MAX_RECORDS_PER_SOURCE`]) are fixed
 //!   security bounds, not capacities that grow with the segment: total
 //!   resident state is the per-interface ceiling times the interface count,
@@ -54,7 +56,7 @@ pub mod cache;
 #[path = "mdns_engine.rs"]
 mod engine;
 
-pub use cache::{CachedRecord, Learned, RecordCache};
+pub use cache::{CachedRecord, KeyedRecord, Learned, RecordCache, RecordKey};
 pub use codec::{Message, MessageWriter, Question, Section};
 pub use engine::{
     Answer, AnswerChange, Destination, Emit, MdnsEngine, MdnsEvent, PublishError, PublishId,
@@ -108,15 +110,17 @@ pub const MAX_TXT_LEN: usize = tairix_abi::discovery_ipc::TXT_MAX;
 
 /// The largest number of records one interface's cache holds.
 ///
-/// A fixed security bound. Eviction is least-recently-used within it, and
-/// [`MAX_RECORDS_PER_SOURCE`] keeps one shouting peer from spending more
-/// than its share of it.
-pub const MAX_RECORDS: usize = 512;
+/// A fixed security bound, sized for a populated segment: a printer, a
+/// television or a NAS publishes some fifty records, and an inventory of the
+/// segment watches answers from every host on it. Eviction is
+/// least-recently-used within it, and [`MAX_RECORDS_PER_SOURCE`] keeps one
+/// shouting peer from spending more than its share of it.
+pub const MAX_RECORDS: usize = 4096;
 
 /// The largest number of cached records attributable to any one source
-/// address. A peer past it evicts its **own** oldest record, never a
-/// neighbour's.
-pub const MAX_RECORDS_PER_SOURCE: usize = 32;
+/// address — room for a sleep proxy answering for several hosts. A peer past
+/// it evicts its **own** oldest record, never a neighbour's.
+pub const MAX_RECORDS_PER_SOURCE: usize = 256;
 
 /// The largest number of records one interface may publish.
 pub const MAX_PUBLISHED: usize = 64;
@@ -125,11 +129,11 @@ pub const MAX_PUBLISHED: usize = 64;
 ///
 /// A fixed bound on what this host asks of a segment, not a capacity: every
 /// question is a query the whole link hears, re-asked on its backoff and on
-/// each refresh point. It is sized for a desktop's concurrent browses plus the
-/// short-lived resolves beneath them, a resolve being four questions (`SRV`,
-/// `TXT`, and the target's `A` and `AAAA`). An engine holds one question per
-/// name and type, so consumers wanting the same answer share it.
-pub const MAX_QUESTIONS: usize = 64;
+/// each refresh point. It is sized for an inventory of a segment of hundreds
+/// of hosts — the type list, a browse per type, a resolve per instance (`SRV`
+/// and `TXT`), a lookup per host (`A` and `AAAA`). An engine holds one
+/// question per name and type, so consumers wanting the same answer share it.
+pub const MAX_QUESTIONS: usize = 4096;
 
 /// The largest message this host builds.
 ///
@@ -139,15 +143,13 @@ pub const MAX_QUESTIONS: usize = 64;
 /// is truncated and flagged (RFC 6762 §7.2), never fragmented.
 pub const MAX_MESSAGE_LEN: usize = 1232;
 
-/// The largest number of records one built message may carry in a section.
-pub const MAX_SECTION_RECORDS: usize = 64;
-
-/// The largest number of questions one received message may carry.
+/// The most questions one message carries.
 ///
-/// A message with more is truncated to this many rather than rejected: the
-/// questions past the bound are simply not answered, which costs a peer
-/// nothing it could not have achieved by sending two messages, and bounds
-/// the work one datagram can ask for.
+/// A received message with more is truncated to this many rather than
+/// rejected: the questions past the bound are simply not answered, which
+/// costs a peer nothing it could not have achieved by sending two messages,
+/// and bounds the work one datagram can ask for. A query this host builds
+/// carries no more, so a peer holding the same bound reads all of it.
 pub const MAX_MESSAGE_QUESTIONS: usize = 32;
 
 /// The largest number of records this engine reads from one received
@@ -233,7 +235,7 @@ impl QuestionType {
 }
 
 /// The `SRV` rdata (RFC 2782): where a service instance is actually reached.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Service {
     /// Lower is preferred among targets of one name.
     pub priority: u16,
@@ -331,6 +333,12 @@ impl PartialEq for TxtRecord {
 
 impl Eq for TxtRecord {}
 
+impl core::hash::Hash for TxtRecord {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.as_octets().hash(state);
+    }
+}
+
 /// Prints the octet count rather than the octets: a `TXT` record is
 /// peer-authored text and a debug line is not a display-safe surface.
 impl core::fmt::Debug for TxtRecord {
@@ -386,7 +394,7 @@ pub enum TxtError {
 /// multicast reading over exactly that range. A higher window on the wire is
 /// ignored rather than rejected: it asserts nothing about the types this
 /// engine asks for.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct TypeBitmap {
     types: tairix_inline::BitSet256,
 }
@@ -440,7 +448,7 @@ impl TypeBitmap {
 // arriving record, and a fixed footprint is what makes the cache's resident
 // size a figure a small machine can predict whatever the segment sends.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum RData {
     /// An IPv4 host address.
     A(Ipv4Addr),

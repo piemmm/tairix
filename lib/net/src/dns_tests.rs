@@ -215,6 +215,39 @@ fn name_read_rejects_forward_pointer_loop() {
     assert!(Name::read(&msg, 10).is_none());
 }
 
+/// A message holding `example.com` at offset 12 and then `hops` pointers,
+/// each to the one before it, the first to the name; returns the message
+/// and the offset of the last pointer.
+fn pointer_chain(hops: usize) -> (alloc::vec::Vec<u8>, usize) {
+    let mut msg = alloc::vec![0u8; 12];
+    msg.extend_from_slice(Name::encode("example.com").unwrap().as_wire());
+    let mut target = 12usize;
+    for _ in 0..hops {
+        let at = msg.len();
+        msg.push(0xC0 | u8::try_from(target >> 8).unwrap());
+        msg.push(u8::try_from(target & 0xFF).unwrap());
+        target = at;
+    }
+    (msg, target)
+}
+
+#[test]
+fn name_read_follows_a_chain_of_pointers_up_to_the_bound() {
+    let (msg, last) = pointer_chain(MAX_POINTER_HOPS);
+    let (name, next) = Name::read(&msg, last).unwrap();
+    assert_eq!(name, Name::encode("example.com").unwrap());
+    assert_eq!(next, last + 2);
+}
+
+#[test]
+fn name_read_refuses_a_pointer_past_the_hop_bound() {
+    // Strictly backwards pointers cannot loop, but without the bound a chain
+    // through a large datagram would cost a hop per two octets on every name
+    // that enters it.
+    let (msg, last) = pointer_chain(MAX_POINTER_HOPS + 1);
+    assert!(Name::read(&msg, last).is_none());
+}
+
 #[test]
 fn name_read_rejects_reserved_label_type() {
     // 0x40 / 0x80 high bits are reserved label types.

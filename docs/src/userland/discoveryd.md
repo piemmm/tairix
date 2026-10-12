@@ -71,14 +71,33 @@ another principal holds that type.
 
 ### Bounds
 
-Fixed containment bounds, since each is state the service holds for a client:
+Fixed containment bounds, since each is state the service holds for a client,
+sized so an inventory of a segment of hundreds of hosts fits one account
+(`netmap` holds up to 577 requests in one session):
 
 | Bound | Value |
 |---|---|
-| Sessions per account | 8 |
-| Requests per session | 16 |
-| Queued answers per session | 64 KiB; past it the request is told `Lost` once, after everything queued before |
-| Sessions in all | 256 |
+| Sessions per account | 32 |
+| Requests per account, across its sessions | 1024 |
+| Queued answers per session | 256 KiB |
+| Queued answers per account, across its sessions | 1 MiB |
+| Queued answers in all | 16 MiB |
+| Sessions in all | 4096 |
+| Distinct questions, every client together | 4096 (`mdns::MAX_QUESTIONS`) |
+
+Past any queue bound a request's updates are dropped and it is told `Lost`
+once, after everything queued before. Requests are counted per account so
+opening sessions cannot multiply them. An account's queues together hold a
+sixteenth of the whole, so readers that never collect fill the service only
+from sixteen accounts. An account is charged a question slot for each
+subscription its requests hold and each question it left that the decoder has
+not yet said it stopped, and is held to half the questions every client
+shares. A request is admitted only after its authority is checked, so a caller
+at its bound asking what it may not ask is refused and audited as
+unauthorised. A drained queue gives back its storage. A session, a request,
+an answer, and a request's place in a question it shares are each found by
+id, and an exited owner's sessions by the owner, so no call or answer costs a
+scan of the tables.
 
 A session ends when its owner exits: the service watches every principal it
 holds a session for through the kernel's peer-exit watch
@@ -92,12 +111,19 @@ requests share it, on every interface whose link is up. A request that joins a
 question already asked is brought up to date by a replay from the decoder's
 cache rather than from a second copy in the front.
 
+A question's id is its slot in the front's table. The decoder acknowledges
+every stop, and the id is given to another question only after that word:
+frames cross the pipe in order, so no answer to the old question can follow
+it, and ids are reused rather than run out.
+
 The front keeps keyed fingerprints of what each question holds on each link,
 which is all it needs to hold the decoder to its word: an answer is added once,
 renewed or retired only while held, and never beyond the most records an honest
-engine can hold for one question on one link. An answer that crossed a stop, a
-flush, or a link edge in flight is stale and dropped; one no honest decoder
-sends condemns it.
+engine's cache holds on one link — counted across every question there, since
+each cached record answers one question at most. An answer that crossed a stop,
+a flush, a link edge, or a replaced decoder in flight is stale and dropped; one
+no honest decoder sends — about an id that holds no question, or a stop it was
+never told — condemns it.
 
 ## The channel
 
@@ -112,14 +138,15 @@ exactly its bytes.
 | front → decoder | `Datagram` | the instant, the arrival interface, the sender's address and port, the payload unread |
 | front → decoder | `Tick` | the instant |
 | front → decoder | `Link` | the instant, an interface, and whether its link came up or went down |
-| front → decoder | `Ask` | the instant, a question id, its form, and the name |
-| front → decoder | `Stop` | a question id |
+| front → decoder | `Ask` | the instant, a question id below `MAX_QUESTIONS`, its form, and the name |
+| front → decoder | `Stop` | a question id, which the decoder acknowledges with `Stopped` |
 | front → decoder | `Replay` | a question id and a token naming the requests owed it |
 | decoder → front | `Deadline` | the earliest instant any engine next needs time, or none |
 | decoder → front | `Answer` | one edge in one question's answers, already typed |
 | decoder → front | `Held` / `Replayed` | a replay's answers, then its end |
 | decoder → front | `Transmit` | a datagram an engine built, its interface, and its destination |
 | decoder → front | `Linked` | the acknowledgement of one link edge |
+| decoder → front | `Stopped` | the acknowledgement of one stop, after which nothing about the question follows |
 
 The decoder acknowledges every link edge. The front believes an answer about a
 link, and sends a datagram built for it, only once every edge it told the
@@ -192,7 +219,9 @@ one, a doomed one, one that lies, and the real decoder end to end. They cover
 relay admission, the held datagram, the tick floor, crash replacement under
 fresh keys, condemnation, admission and refusal, grants, replays to late
 joiners, link flaps in flight, bounded queues and the `Lost` notice, peer exit,
-and every transmit rule.
+every transmit rule, one session holding hundreds of requests through the real
+decoder, ids freed only by the decoder's word and never run out, per-account
+request bounds, and id wrap that never names a live session or request.
 
 `fuzz_discoveryd` is enrolled in `cargo xtask fuzz`: both codecs canonical under
 random frames and single-bit mutations, the decoder total over hostile and

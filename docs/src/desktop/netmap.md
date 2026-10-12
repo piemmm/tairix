@@ -42,13 +42,28 @@ title reaches the screen with the data, never ahead of it.
 The map keeps one discovery session open, ringing a doorbell port that is a
 member of the window's own wait-set, so it collects only when the service says
 its answers moved. The pure `Discovery` engine enumerates the segment's service
-types, browses each, resolves each instance, looks up the host each resolves
-to, and asks for the names of the link-local addresses on the map, every kind
-bounded (`MAX_TYPES`, `MAX_SERVICES`, `MAX_HOSTS`, `MAX_REVERSES`). It
-reconciles the open requests against what is held once per collect, walking
-down from the type list, so a type that goes takes every browse, resolve and
-lookup below it with it, and a request whose updates the service dropped is
-asked again. Every label a peer authored is shown as a `DisplayLabel`:
+types, browses each, resolves each instance, looks up each host under
+`.local` an instance resolves to — a unicast name is not the link's to answer
+— and asks for the names of the link-local addresses on the map, every kind
+bounded (`MAX_TYPES`, `MAX_SERVICES`, `MAX_HOSTS`, `MAX_REVERSES`), together
+well inside what the service grants one account. It reconciles the open
+requests against what is held once per collect, walking down from the type
+list, so a type that goes takes every browse, resolve and lookup below it with
+it, and a request whose updates the service dropped is asked again — started
+before the old one stops, so the service replays what it holds rather than
+asking the segment again, unless the map is at its account's bound, when the
+old one stops first to make the room. One lost again as soon as it was asked
+again waits for the next read, so a request too large to replay whole costs a
+retry a read rather than a storm.
+
+A refusal bears on what it refused, and the map says which. An ask the map
+may not make (`CAP_NET_DISCOVER_ALL` withheld) or the service will not
+answer is not made again while it is wanted, so it is refused and audited
+once, and every other ask goes on; a service at its bounds ends that pass, and
+the next read asks again. When the type list itself is refused the map says
+service discovery is not permitted. A session the service refuses outright is
+not asked for again. Every label a
+peer authored is shown as a `DisplayLabel`:
 printable Unicode as DNS-SD names are written, but every control and every
 character that formats, joins or hides text escaped, so no label can pass for
 another by an invisible difference.
@@ -59,9 +74,9 @@ discovery knows the host, and under its interface until the host's addresses
 are known. A host is labelled with its reverse DNS name, else with what the
 segment calls it, else with its address; both names are kept as facts. Reverse
 DNS runs on a worker of its own, one lookup at a time, so a slow resolver never
-holds up a refresh; each routable address is looked up once per run. A refused
-discovery session or DNS transport is stated on the map and asked again at the
-next read.
+holds up a refresh; each routable address is looked up once per run. A
+discovery session that fails, or a DNS transport refused, is stated on the map
+and asked again at the next read.
 
 ## What each host is
 

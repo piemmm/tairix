@@ -16,6 +16,10 @@ use crate::wire::Form;
 /// The name the RFC 6763 §9 type enumeration asks about.
 const SERVICES_NAME: &str = "_services._dns-sd._udp.local";
 
+/// The most questions one request asks: a resolve's `SRV` and `TXT`, a
+/// host's `A` and `AAAA`.
+pub const QUESTIONS_PER_REQUEST: usize = 2;
+
 /// The authority a query needs, beyond the `CAP_NET` every session needs.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Needs {
@@ -43,7 +47,7 @@ pub struct Plan {
     /// The authority.
     pub needs: Needs,
     /// The questions, one or two.
-    pub asks: ArrayVec<Asking, 2>,
+    pub asks: ArrayVec<Asking, QUESTIONS_PER_REQUEST>,
 }
 
 /// Plan `query`.

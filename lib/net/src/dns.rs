@@ -62,6 +62,15 @@ pub const MAX_NAME_LEN: usize = tairix_abi::discovery_ipc::NAME_MAX;
 /// high bits of a label length octet are reserved for compression pointers.
 pub const MAX_LABEL_LEN: usize = tairix_abi::discovery_ipc::LABEL_MAX;
 
+/// The most compression pointers one name read follows (BIND's
+/// `DNS_POINTER_MAXHOPS`).
+///
+/// A fixed validation bound. Strictly backwards pointers cannot loop, but a
+/// chain of them through a large datagram can still cost a hop per two
+/// octets on every name that enters it; a compressor never emits more than a
+/// few, so this bounds what one name costs whatever the message holds.
+pub const MAX_POINTER_HOPS: usize = 16;
+
 /// The largest number of resolved addresses surfaced from one response. A
 /// fixed validation bound: a response advertising more is truncated to this
 /// many, so a hostile answer section can never size an allocation.
@@ -643,13 +652,15 @@ impl Name {
     /// Compression pointers are followed, but every followed pointer must
     /// target an offset strictly *before* the pointer itself, so the walk
     /// is monotonically decreasing and cannot loop; the expanded length is
-    /// bounded by [`MAX_NAME_LEN`]. Returns `None` (fail closed) on any
-    /// out-of-range offset, reserved label-type, over-length name, or a
-    /// pointer that does not point backwards.
+    /// bounded by [`MAX_NAME_LEN`] and the pointers followed by
+    /// [`MAX_POINTER_HOPS`]. Returns `None` (fail closed) on any
+    /// out-of-range offset, reserved label-type, over-length name, a
+    /// pointer that does not point backwards, or one pointer too many.
     pub(crate) fn read(msg: &[u8], start: usize) -> Option<(Self, usize)> {
         let mut wire = [0u8; MAX_NAME_LEN];
         let mut len = 0usize;
         let mut pos = start;
+        let mut hops = 0usize;
         // The offset just past the name as it appears in the record stream,
         // fixed at the first pointer we follow (or the root label if none).
         let mut next_pos: Option<usize> = None;
@@ -685,9 +696,9 @@ impl Name {
                     // whole next octet.
                     let &second = msg.get(pos + 1)?;
                     let target = ((usize::from(first & 0x3F)) << 8) | usize::from(second);
-                    if target >= min_target {
-                        // Not strictly backwards: reject rather than risk a
-                        // loop.
+                    hops += 1;
+                    // A pointer that is not strictly backwards could loop.
+                    if target >= min_target || hops > MAX_POINTER_HOPS {
                         return None;
                     }
                     if next_pos.is_none() {

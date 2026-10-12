@@ -425,8 +425,11 @@ rejected rather than encoded, since a resolver queries host names), bounded
 by the 255-octet ceiling. The internal reader expands RFC 1035 §4.1.4
 compression pointers, but every followed pointer must target an offset
 *strictly before* the pointer itself, so the walk decreases monotonically
-and a crafted pointer loop can never hang the parser; a reserved label type
-or an over-length expansion fails closed.
+and a crafted pointer loop can never hang the parser, and it follows at most
+`MAX_POINTER_HOPS` (16, BIND's bound) of them, so a chain of pointers through a
+large datagram cannot make every name that enters it cost a hop per two
+octets; a reserved label type, an over-length expansion, or one pointer too
+many fails closed.
 
 `write_query` emits one standard query (the 12-byte header with the RD bit,
 one question, no other records). `DnsResponse::parse` validates a response
@@ -549,24 +552,41 @@ the group) and cache-flush on a record (replace what you held) — the
 record vocabulary service discovery needs (`RData`, `Service`, `TxtRecord`,
 `TypeBitmap`), and a writer that builds a message into a caller-owned
 buffer with RFC 1035 name compression and the RFC 3597 §4 rule that a name
-inside a post-1035 type's rdata is never compressed.
+inside a post-1035 type's rdata is never compressed. The writer takes no
+more than `MAX_MESSAGE_QUESTIONS` (32) questions or `MAX_MESSAGE_RECORDS`
+(128) records, so it never builds a message a reader holding the same bounds
+would drop.
 
 Reading is two-phase and the phases fail differently. `Message::parse`
 walks the datagram once and refuses it **whole** on any structural fault: a
 short header, a non-zero opcode or rcode, a name that runs off the end or
-points forward, an rdata length past the message, or more questions or
-records than the fixed bounds admit. Within a message that passes, a record
-whose rdata does not match its own type is *skipped*, exactly as one of a
-type this engine has no decoder for is — the protocol is extensible, so a
-reader that rejected every message carrying something it did not understand
-would be unusable on a real segment. It is never guessed at.
+points forward, an rdata length past the message, or more records than the
+fixed bound admits. A message with more than `MAX_MESSAGE_QUESTIONS`
+questions is read as its first that many and nothing after them: its
+records begin past questions this host will not walk. Within a message that
+passes, a record whose rdata does not match its own type is *skipped*,
+exactly as one of a type this engine has no decoder for is — the protocol is
+extensible, so a reader that rejected every message carrying something it
+did not understand would be unusable on a real segment. It is never guessed
+at.
 
-`RecordCache` is the per-interface cache. Every arriving record must be
-found or placed in constant time, so records are chained under a hash of
-their owner name and type, and that hash is **keyed** with the per-boot
-secret: a peer chooses the names, and an unkeyed hash would let it choose a
-set that all land in one chain and restore the scan the index exists to
-prevent. `MAX_RECORDS` and `MAX_RECORDS_PER_SOURCE` are fixed *security*
+`RecordCache` is the per-interface cache. Every arriving record is found,
+renewed, retired, or placed in constant time whatever a peer stacks under
+one name: records are chained under keyed hashes of their owner name and
+type (for a lookup), of the whole record (for finding it again), and of the
+announcing source with the name and type (for a cache-flush, which then
+walks that source's own records there oldest first, retires each once and
+takes it off the walk, and stops at the first received within the last
+second, so it costs what it retires). Every hash is **keyed** with
+the per-boot secret: a peer chooses the names and the rdata, and an unkeyed
+hash would let it choose a set that all land in one chain and restore the
+scan the index exists to prevent. Every record sits in an `IndexedHeap`
+(`lib/collections`) at its next deadline, so a sweep reaches only the
+records whose expiry or refresh point has come, however many are held.
+Which question watches a record is the engine's to say when the record is
+folded in; the cache keeps that question's id with the record, so every edge
+it reports names the question directly.
+`MAX_RECORDS` (4096) and `MAX_RECORDS_PER_SOURCE` (256) are fixed *security*
 bounds, not capacities that grow with the segment — resident state is the
 per-interface ceiling times the interface count, independent of how many
 hosts are shouting. The per-source bound is what makes the global one fair:
@@ -608,11 +628,39 @@ to a budget — whether this host keeps its name must not depend on something
 a flood can drain — so a probe for a name we own is answered at once, and
 multicast, so the whole segment sees the claim.
 
+A continuous question is asked under the caller's own `QuestionId`, which
+every answer edge carries, so a caller keeps no map from the engine's ids to
+its own; an id may be asked again once its question stops. Up to
+`MAX_QUESTIONS` (4096) are asked per interface, and none costs a scan of the
+others: an arriving record and a question another host asked find their
+question under the cache's key for its name and type, and a refresh reaches
+it by the id its records carry. Due questions travel together, at most
+`MAX_MESSAGE_QUESTIONS` to a query, and a burst larger than that goes out
+across successive queries in one `poll` loop.
+
+A query offers what it already holds as known answers (RFC 6762 §7.1). A
+lookup comes freshest first — most recently received, and a record a goodbye
+or a flush cut short last — so each question's list ends at its first record
+past half its lifetime. Known answers a query has no room for follow it at
+once in messages of their own (§7.2): the query and every message but the
+last carry the truncation bit, and the rest is dropped if time moves before
+it is sent, since the responders waiting on it have stopped. A multicast
+response never carries the bit (§18.5): what does not fit goes out in the
+next datagram. A QM question another host multicasts counts as ours (§7.3)
+only if every known answer it carries is one we would offer ourselves, and
+never when it is truncated, so a peer cannot keep a question of ours from
+ever being answered by asking it knowing an answer we do not.
+
 The engine is tickless: `next_deadline` folds probe, announce, response
 delay, query backoff, cache expiry, and the RFC 6762 §5.2 cache-refresh
 points (80/85/90/95 % of TTL, and only for records a live question covers,
 so a passively cached record costs no timers) into the one instant the
-caller arms a one-shot for. Host-tested and fuzzed (`fuzz_net_mdns`).
+caller arms a one-shot for. Questions sit in an `IndexedHeap` at their next
+query instant, so the instant is exact, and moving, stopping, or sending a
+question costs the heap's height rather than a pass over the others: a
+query's due questions are walked in time proportional to how many are due.
+Host-tested and fuzzed (`fuzz_net_mdns`), including floods past a source's
+bound at the very names the questions ask.
 
 ### `dnssd` — service instance naming and `TXT` attributes
 

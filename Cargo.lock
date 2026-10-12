@@ -1598,6 +1598,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-collections",
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",

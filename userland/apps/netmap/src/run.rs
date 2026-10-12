@@ -96,6 +96,11 @@ mod program {
         names: BTreeMap<IpAddr, String>,
         truncated: bool,
         refused: Option<DiscoveryError>,
+        stalled: Option<DiscoveryError>,
+        /// Work was left for the next read: an ask stalled, or a lost
+        /// request held back.
+        unsettled: bool,
+        locked_out: bool,
     }
 
     /// The reader's answer.
@@ -151,6 +156,9 @@ mod program {
                 names: engine.names(),
                 truncated: engine.truncated(),
                 refused: engine.refused().copied(),
+                stalled: engine.stalled().copied(),
+                unsettled: engine.stalled().is_some() || engine.deferred(),
+                locked_out: engine.locked_out(),
             })
         }
     }
@@ -366,12 +374,22 @@ mod program {
                 Answer::Discovered(Ok(discovered)) => {
                     self.inventory.replace_services(discovered.services);
                     self.inventory.replace_segment_names(discovered.names);
-                    self.discovery_notice = match (discovered.refused, discovered.truncated) {
-                        (Some(refusal), _) => Some(format!("Service discovery stopped: {refusal}")),
-                        (None, true) => Some(String::from(
-                            "Not every advertised service is shown: the discovery bounds were reached",
-                        )),
-                        (None, false) => None,
+                    self.discovery_notice = if let Some(refusal) =
+                        discovered.refused.filter(|_| discovered.locked_out)
+                    {
+                        Some(format!("Service discovery is not permitted: {refusal}"))
+                    } else if let Some(refusal) = discovered.refused {
+                        Some(format!("Some advertised services are not shown: {refusal}"))
+                    } else if let Some(stall) = discovered.stalled {
+                        Some(format!(
+                            "Some advertised services are not shown yet: {stall}"
+                        ))
+                    } else if discovered.truncated {
+                        Some(String::from(
+                            "Not every advertised service is shown: the map's own bounds were reached",
+                        ))
+                    } else {
+                        None
                     };
                 }
                 Answer::Discovered(Err(err)) => {
@@ -499,7 +517,8 @@ mod program {
     /// Where the discovery collects stand.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     enum Collect {
-        /// The map has no doorbell, so it asks the service nothing.
+        /// The map asks the service nothing: it has no doorbell, or the
+        /// service refused it a session.
         #[default]
         Off,
         /// Nothing has moved since the last collect.
@@ -523,10 +542,24 @@ mod program {
             };
         }
 
-        /// The outstanding collect answered, `ok` unless it failed.
-        fn answered(&mut self, ok: bool) {
+        /// The outstanding collect answered with `result`.
+        fn answered(&mut self, result: &Result<Discovered, DiscoveryError>) {
+            // A session refused outright is not asked for again, as an ask
+            // refused outright is not.
+            if matches!(
+                result,
+                Err(DiscoveryError::Refused(Errno::PermissionDenied))
+            ) {
+                *self = Self::Off;
+                return;
+            }
+            // A pass that left work is asked again at the next read, not only
+            // when the service next rings.
+            let settled = result
+                .as_ref()
+                .is_ok_and(|discovered| !discovered.unsettled);
             if let Self::Asked { again } = *self {
-                *self = match (again, ok) {
+                *self = match (again, settled) {
                     (true, _) => Self::Due,
                     (false, true) => Self::Idle,
                     (false, false) => Self::Retry,
@@ -680,7 +713,7 @@ mod program {
                         }
                     }
                     Answer::Discovered(ref discovered) => {
-                        outstanding.collect.answered(discovered.is_ok());
+                        outstanding.collect.answered(discovered);
                     }
                 }
                 app_state.adopt(answer);

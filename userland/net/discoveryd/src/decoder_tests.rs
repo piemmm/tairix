@@ -37,6 +37,7 @@ enum Said {
     Replayed(u32),
     Transmit([u8; IF_NAME_LEN], Destination),
     Linked([u8; IF_NAME_LEN], bool),
+    Stopped(u32),
 }
 
 fn label_of(entry: &Entry<'_>) -> Vec<u8> {
@@ -85,6 +86,7 @@ impl Collected {
                     FromDecoder::Replayed { token } => Said::Replayed(token),
                     FromDecoder::Transmit { interface, to, .. } => Said::Transmit(interface, to),
                     FromDecoder::Linked { interface, up } => Said::Linked(interface, up),
+                    FromDecoder::Stopped { question } => Said::Stopped(question),
                 },
             )
             .collect()
@@ -383,18 +385,59 @@ fn a_stopped_question_is_told_nothing_more() {
     let (mut decoder, mut out) = linked();
     let host = Name::encode("printer.local").unwrap();
     handled(&mut decoder, &ask(0, 2, Form::AddressV4, &host), &mut out);
+    out.take();
     handled(
         &mut decoder,
         &frame(&ToDecoder::Stop { question: 2 }),
         &mut out,
     );
-    out.take();
+    assert_eq!(out.take()[0], Said::Stopped(2), "the stop is acknowledged");
     handled(
         &mut decoder,
         &datagram(SEC, b"eth0", &announcement("printer.local", 5, 120)),
         &mut out,
     );
     assert!(out.answers().is_empty());
+}
+
+#[test]
+fn a_stopped_id_asked_again_is_a_new_question() {
+    let (mut decoder, mut out) = linked();
+    let printer = Name::encode("printer.local").unwrap();
+    let scanner = Name::encode("scanner.local").unwrap();
+    handled(
+        &mut decoder,
+        &ask(0, 3, Form::AddressV4, &printer),
+        &mut out,
+    );
+    handled(
+        &mut decoder,
+        &frame(&ToDecoder::Stop { question: 3 }),
+        &mut out,
+    );
+    assert_eq!(
+        handled(
+            &mut decoder,
+            &ask(0, 3, Form::AddressV4, &scanner),
+            &mut out
+        ),
+        SessionStep::Continue
+    );
+    out.take();
+    handled(
+        &mut decoder,
+        &datagram(SEC, b"eth0", &announcement("scanner.local", 7, 120)),
+        &mut out,
+    );
+    assert_eq!(
+        out.answers(),
+        [Said::Answer(
+            3,
+            iface(b"eth0"),
+            Change::Added,
+            b"10.0.0.7".to_vec()
+        )]
+    );
 }
 
 #[test]
@@ -419,12 +462,17 @@ fn a_link_that_goes_down_takes_its_engine_and_one_that_comes_up_is_asked_everyth
     let (mut decoder, mut out) = linked();
     handled(&mut decoder, &ask(0, 6, Form::AddressV4, &host), &mut out);
     handled(&mut decoder, &link(SEC, b"wlan0", true), &mut out);
-    let wlan = decoder
-        .links
-        .iter()
-        .find(|link| link.name == iface(b"wlan0"))
-        .expect("an engine for the new link");
-    assert_eq!(wlan.asked.len(), 1, "asked the standing question");
+    out.take();
+    handled(
+        &mut decoder,
+        &frame(&ToDecoder::Tick { now: 2 * SEC }),
+        &mut out,
+    );
+    assert!(
+        out.take()
+            .contains(&Said::Transmit(iface(b"wlan0"), Destination::Group)),
+        "the standing question is asked on the new link"
+    );
 }
 
 #[test]
@@ -453,7 +501,9 @@ fn a_record_learned_on_one_interface_never_reaches_another() {
         .iter()
         .find(|link| link.name == iface(b"eth0"))
         .expect("eth0 runs");
-    assert_eq!(eth0.engine.cache().lookup(&host, RecordType::A).count(), 0);
+    let cache = eth0.engine.cache();
+    let key = cache.key_of(&host, RecordType::A);
+    assert_eq!(cache.lookup(key, &host, RecordType::A).count(), 0);
 }
 
 #[test]

@@ -31,6 +31,7 @@ a later tier.
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap | a hot path that holds a handful of elements and allocates anyway |
 | `ByteQueue` | a byte FIFO under its holder's bound, kept as one contiguous run; amortised O(1) per byte, storage committed up front or as bytes arrive, and wiped before it is given back | the session frame arena `lib/sandbox` carried privately, and the SSH transport's three stream buffers |
 | `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: lookup, insertion, removal and tagging cost the tree's height — eleven nodes at most — whatever it holds, and an ordered or tagged walk resumes from the path it last took | a sorted `Vec` whose every insertion moved the entries above it |
+| `IndexedHeap<P>` | a min-heap over a holder's own dense slot numbers: the least read in O(1), a slot's priority moved either way or withdrawn in O(log n), and every entry at or below a bound walked in O(k) for the k it returns | a per-slot deadline array swept whole for what was due, and `alloc::BinaryHeap`, which can neither find an entry nor move one |
 
 ## `ByteQueue`
 
@@ -110,6 +111,31 @@ costs four nodes, and none costs more than eleven.
   allocation first, so it changes all of them or none: the IOVA space
   (`kernel/iommu/api`), its first consumer with one tree per buddy order,
   reserves the buddies a split will record before the split removes anything.
+
+## `IndexedHeap`
+
+A deadline that moves — a record renewed, a question's backoff doubling, a
+timer cancelled — is a priority change at a known slot. `alloc::BinaryHeap`
+cannot find an entry, so a holder pushes the new deadline and skips the stale
+copy when it surfaces, and the heap grows with every move; the alternative was
+a deadline per slot swept whole on every timer. `IndexedHeap` records each
+slot's place in the heap beside the heap itself.
+
+* `try_insert`, `set`, `remove` and `pop` sift one path, so each costs at most
+  two comparisons a level; `peek` reads the root.
+* `up_to(bound)` walks the subtree at the root whose entries are at or below
+  `bound` without a stack — from an entry past the bound it climbs over every
+  right child to the next sibling — so finding what is due costs what is due,
+  however many slots are held.
+* Slots are the holder's dense indices: an arena slot, a table row. The heap
+  keeps room for every slot below the largest it has reserved and never gives
+  it back, so after `try_reserve_slot` no insertion of any lower slot can fail.
+  A holder taking a slot reserves it beside the slot's own storage, and every
+  later schedule of it is infallible. A sparse holder pays for the gaps.
+
+Its first consumers are the multicast DNS record cache and question table in
+`lib/net`, whose deadlines are each record's expiry and refresh points and
+each question's next query.
 
 ## `RangeMap` and `RangeSet`
 
@@ -303,6 +329,14 @@ The intrusive list is gated on the same kind of number: a mid-list unlink
 reaches the departing node and its two neighbours and writes exactly those
 three links, identically over three nodes and over ten thousand. That is what
 "constant time, no search" is, stated as something a regression shows up in.
+
+`IndexedHeap` is gated on comparisons the same way: over 4 096 slots, raising
+a slot to the top, sinking it to the bottom, removing one from the middle,
+popping and inserting each stay within twice the height, and a walk of
+everything at or below a bound compares only what it returns and the children
+that stopped it. A shuffled history of twenty thousand operations agrees with a
+slot-to-priority model at every step, and `tests/fuzz_collections.rs` drives
+the same model over priorities crowded into ties and slots packed and sparse.
 
 The sequence tier's tests hold each container to the same bar: one drop per
 element ever taken, across a bulk push, a wrapped drain, an eviction and a

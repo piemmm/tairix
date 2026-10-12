@@ -296,9 +296,13 @@ mod program {
     }
 
     /// Park on room in exactly the client ports a doorbell is owed to.
-    fn sync_rooms(set: u64, owed: &[u64], rooms: &mut Vec<u64>) {
+    ///
+    /// `rooms` is kept sorted and `owed` is sorted here, so each side is
+    /// found in the other by a binary search, not a scan.
+    fn sync_rooms(set: u64, owed: &mut [u64], rooms: &mut Vec<u64>) {
+        owed.sort_unstable();
         rooms.retain(|port| {
-            let keep = owed.contains(port);
+            let keep = owed.binary_search(port).is_ok();
             if !keep {
                 let _ = tairix_rt::waitset_ctl(
                     set,
@@ -310,8 +314,13 @@ mod program {
             }
             keep
         });
-        for &port in owed {
-            if rooms.contains(&port) || rooms.try_reserve(1).is_err() {
+        let watched = rooms.len();
+        for (at, &port) in owed.iter().enumerate() {
+            let repeated = at > 0 && owed[at - 1] == port;
+            if repeated
+                || rooms[..watched].binary_search(&port).is_ok()
+                || rooms.try_reserve(1).is_err()
+            {
                 continue;
             }
             if tairix_rt::waitset_ctl(
@@ -325,6 +334,7 @@ mod program {
                 rooms.push(port);
             }
         }
+        rooms.sort_unstable();
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -441,8 +451,15 @@ mod program {
                 port_armed = draining;
             }
             owed.clear();
-            owed.extend(front.owed_rings());
-            sync_rooms(set, &owed, &mut rooms);
+            for port in front.owed_rings() {
+                // Short of memory, a doorbell left unwatched is retried with
+                // the next one that is.
+                if owed.try_reserve(1).is_err() {
+                    break;
+                }
+                owed.push(port);
+            }
+            sync_rooms(set, &mut owed, &mut rooms);
 
             let timeout = front
                 .wake_at()

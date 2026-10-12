@@ -291,6 +291,96 @@ fn an_rdata_length_past_the_message_is_refused() {
 }
 
 #[test]
+fn more_questions_than_the_bound_are_read_as_its_first_and_nothing_after() {
+    let mut bytes = build(0, false, |writer| {
+        for index in 0..MAX_MESSAGE_QUESTIONS {
+            let asked = name(&alloc::format!("q{index}.local"));
+            assert!(
+                writer.push_question(&Question::new(asked, QuestionType::Record(RecordType::A)))
+            );
+        }
+    });
+    // One question past the bound and an answer after it, by hand: the
+    // writer builds neither.
+    bytes.extend_from_slice(name("extra.local").as_wire());
+    bytes.extend_from_slice(&RecordType::A.value().to_be_bytes());
+    bytes.extend_from_slice(&1u16.to_be_bytes());
+    bytes.extend_from_slice(name("printer.local").as_wire());
+    bytes.extend_from_slice(&RecordType::A.value().to_be_bytes());
+    bytes.extend_from_slice(&1u16.to_be_bytes());
+    bytes.extend_from_slice(&120u32.to_be_bytes());
+    bytes.extend_from_slice(&4u16.to_be_bytes());
+    bytes.extend_from_slice(&[10, 0, 0, 5]);
+    let asked = u16::try_from(MAX_MESSAGE_QUESTIONS + 1).expect("small");
+    bytes[4..6].copy_from_slice(&asked.to_be_bytes());
+    bytes[6..8].copy_from_slice(&1u16.to_be_bytes());
+
+    let message = Message::parse(&bytes).expect("truncated, not refused");
+    let read: Vec<Question> = message.questions().collect();
+    assert_eq!(read.len(), MAX_MESSAGE_QUESTIONS);
+    assert_eq!(read[0].name, name("q0.local"));
+    assert_eq!(
+        message.records().count(),
+        0,
+        "the records lie past questions not walked"
+    );
+}
+
+#[test]
+fn the_writer_takes_no_more_than_a_reader_reads() {
+    let mut buf = alloc::vec![0u8; 64 * 1024];
+    let mut writer = MessageWriter::new(&mut buf, 0, false).expect("a header fits");
+    let question = Question::new(name("printer.local"), QuestionType::Record(RecordType::A));
+    for _ in 0..MAX_MESSAGE_QUESTIONS {
+        assert!(writer.push_question(&question));
+    }
+    assert!(!writer.push_question(&question), "one question too many");
+    for last in 0..MAX_MESSAGE_RECORDS {
+        let address = Ipv4Addr::new(10, 0, 0, u8::try_from(last % 256).expect("small"));
+        assert!(writer.push_record(
+            Section::Answer,
+            &Record::unique(name("printer.local"), RData::A(address))
+        ));
+    }
+    let one_more = Record::unique(name("printer.local"), RData::A(Ipv4Addr::new(10, 0, 1, 1)));
+    assert!(
+        !writer.push_record(Section::Additional, &one_more),
+        "one record too many"
+    );
+    let len = writer.finish();
+    let message = Message::parse(&buf[..len]).expect("everything built reads back");
+    assert_eq!(message.questions().count(), MAX_MESSAGE_QUESTIONS);
+    assert_eq!(message.records().count(), MAX_MESSAGE_RECORDS);
+}
+
+#[test]
+fn nested_names_never_point_deeper_than_a_reader_follows() {
+    let mut dotted = alloc::string::String::from("local");
+    let names: Vec<Name> = (1..=24)
+        .map(|n| {
+            dotted = alloc::format!("x{n}.{dotted}");
+            name(&dotted)
+        })
+        .collect();
+    let deepest = *names.last().expect("named");
+    let bytes = build(0, false, |writer| {
+        for nested in &names {
+            assert!(
+                writer.push_question(&Question::new(*nested, QuestionType::Record(RecordType::A)))
+            );
+        }
+        // A known answer's owner points at its question, one pointer more.
+        assert!(writer.push_record(
+            Section::Answer,
+            &Record::shared(deepest, RData::A(Ipv4Addr::new(10, 0, 0, 9)))
+        ));
+    });
+    let message = Message::parse(&bytes).expect("a reader follows every pointer written");
+    assert!(message.questions().map(|question| question.name).eq(names));
+    assert_eq!(records_of(&bytes)[0].1.name, deepest);
+}
+
+#[test]
 fn more_records_than_the_bound_admits_is_refused() {
     let mut bytes = alloc::vec![0u8; 12];
     let too_many = u16::try_from(MAX_MESSAGE_RECORDS + 1).expect("small");

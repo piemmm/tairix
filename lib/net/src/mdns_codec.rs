@@ -26,7 +26,9 @@ use tairix_hash::FastHash;
 use tairix_inline::ArrayVec;
 
 use crate::addr::{Ipv4Addr, Ipv6Addr};
-use crate::dns::{read_u16, read_u32, Name, RecordType, HEADER_LEN, MAX_NAME_LEN};
+use crate::dns::{
+    read_u16, read_u32, Name, RecordType, HEADER_LEN, MAX_NAME_LEN, MAX_POINTER_HOPS,
+};
 
 use super::{
     QuestionType, RData, Record, Service, TxtRecord, TypeBitmap, CLASS_IN, CLASS_TOP_BIT,
@@ -130,7 +132,12 @@ impl<'a> Message<'a> {
     /// require those to be ignored, and a receiver that acted on one would
     /// be answering a protocol it does not speak), a name or rdata that runs
     /// off the end of the message, a compression pointer that does not point
-    /// strictly backwards, or section counts past the fixed bounds.
+    /// strictly backwards or chains past [`MAX_POINTER_HOPS`], or more records
+    /// than [`MAX_MESSAGE_RECORDS`].
+    ///
+    /// A message carrying more than [`MAX_MESSAGE_QUESTIONS`] questions is
+    /// read as its first that many and nothing after them: its records begin
+    /// past questions this host will not walk, so none is read.
     #[must_use]
     pub fn parse(bytes: &'a [u8]) -> Option<Self> {
         if bytes.len() < HEADER_LEN {
@@ -141,14 +148,21 @@ impl<'a> Message<'a> {
         if flags & FLAG_OPCODE_MASK != 0 || flags & FLAG_RCODE_MASK != 0 {
             return None;
         }
-        let question_count = read_u16(bytes, 4)?;
-        let answer_count = read_u16(bytes, 6)?;
-        let authority_count = read_u16(bytes, 8)?;
-        let additional_count = read_u16(bytes, 10)?;
+        let asked = read_u16(bytes, 4)?;
+        let question_count = u16::try_from(usize::from(asked).min(MAX_MESSAGE_QUESTIONS)).ok()?;
+        let (answer_count, authority_count, additional_count) = if asked == question_count {
+            (
+                read_u16(bytes, 6)?,
+                read_u16(bytes, 8)?,
+                read_u16(bytes, 10)?,
+            )
+        } else {
+            (0, 0, 0)
+        };
         let records = usize::from(answer_count)
             .checked_add(usize::from(authority_count))?
             .checked_add(usize::from(additional_count))?;
-        if usize::from(question_count) > MAX_MESSAGE_QUESTIONS || records > MAX_MESSAGE_RECORDS {
+        if records > MAX_MESSAGE_RECORDS {
             return None;
         }
 
@@ -422,15 +436,27 @@ fn read_type_bitmap(mut rest: &[u8]) -> Option<TypeBitmap> {
 ///
 /// Sections are written in wire order and the writer refuses a push that
 /// would go backwards, so a half-built message cannot claim a layout it does
-/// not have. Every push reports whether the record fitted; a caller that
-/// runs out of room sets the truncation bit and continues in a second
-/// message, which is how a long known-answer list travels (RFC 6762 §7.2).
+/// not have. Nor does it take more than [`MAX_MESSAGE_QUESTIONS`] questions
+/// or [`MAX_MESSAGE_RECORDS`] records, so it never builds what
+/// [`Message::parse`] would refuse or cut short. Every push reports whether it
+/// fitted; a caller that runs out of room sets the truncation bit and
+/// continues in a second message, which is how a long known-answer list
+/// travels (RFC 6762 §7.2).
 #[derive(Debug)]
 pub struct MessageWriter<'a> {
     out: &'a mut [u8],
     len: usize,
     counts: [u16; 4],
-    names: ArrayVec<(u16, u32), MAX_COMPRESSION_ENTRIES>,
+    names: ArrayVec<Remembered, MAX_COMPRESSION_ENTRIES>,
+}
+
+/// A label boundary a later name may point at.
+#[derive(Clone, Copy, Debug)]
+struct Remembered {
+    offset: u16,
+    hash: u32,
+    /// Pointers a reader follows from `offset` to the end of the name.
+    hops: u8,
 }
 
 impl<'a> MessageWriter<'a> {
@@ -459,7 +485,9 @@ impl<'a> MessageWriter<'a> {
 
     /// Append a question. Questions precede every record.
     pub fn push_question(&mut self, question: &Question) -> bool {
-        if self.counts[1..].iter().any(|count| *count != 0) {
+        if self.counts[1..].iter().any(|count| *count != 0)
+            || usize::from(self.counts[0]) >= MAX_MESSAGE_QUESTIONS
+        {
             return false;
         }
         let start = self.len;
@@ -489,7 +517,13 @@ impl<'a> MessageWriter<'a> {
             Section::Authority => 2,
             Section::Additional => 3,
         };
-        if self.counts[index + 1..].iter().any(|count| *count != 0) {
+        let records: usize = self.counts[1..]
+            .iter()
+            .map(|count| usize::from(*count))
+            .sum();
+        if self.counts[index + 1..].iter().any(|count| *count != 0)
+            || records >= MAX_MESSAGE_RECORDS
+        {
             return false;
         }
         let start = self.len;
@@ -542,7 +576,7 @@ impl<'a> MessageWriter<'a> {
 
     /// Undo a partial record, leaving the buffer exactly as it was.
     fn rewind(&mut self, to: usize) {
-        self.names.retain(|(offset, _)| usize::from(*offset) < to);
+        self.names.retain(|entry| usize::from(entry.offset) < to);
         self.len = to;
     }
 
@@ -584,12 +618,12 @@ impl<'a> MessageWriter<'a> {
                         self.rewind(start);
                         return false;
                     }
-                    let pointer = 0xC000u16 | target;
+                    let pointer = 0xC000u16 | target.offset;
                     if !self.write_u16(pointer) {
                         self.rewind(start);
                         return false;
                     }
-                    self.remember(start, wire, offset);
+                    self.remember(start, wire, offset, target.hops + 1);
                     return true;
                 }
                 offset += 1 + usize::from(wire[offset]);
@@ -599,35 +633,38 @@ impl<'a> MessageWriter<'a> {
             self.rewind(start);
             return false;
         }
-        self.remember(start, wire, wire.len());
+        self.remember(start, wire, wire.len(), 0);
         true
     }
 
-    /// An earlier offset whose expansion equals the name `suffix` spells, or
-    /// `None`.
+    /// An earlier name a pointer may reach whose expansion equals the name
+    /// `suffix` spells, or `None`.
     ///
+    /// One whose own expansion already follows [`MAX_POINTER_HOPS`] pointers
+    /// is passed over: the pointer to it would be one too many for a reader.
     /// The stored hash filters first, so the exact comparison — which has to
     /// expand the candidate out of the buffer — runs at most once per real
     /// match.
-    fn lookup(&self, suffix: &[u8]) -> Option<u16> {
+    fn lookup(&self, suffix: &[u8]) -> Option<Remembered> {
         let wanted = hash_name(suffix);
-        if !self.names.iter().any(|(_, hash)| *hash == wanted) {
+        let reachable = |entry: &&Remembered| {
+            entry.hash == wanted && usize::from(entry.hops) < MAX_POINTER_HOPS
+        };
+        if !self.names.iter().any(|entry| reachable(&entry)) {
             return None;
         }
         let candidate = Name::read(suffix, 0)?.0;
-        self.names.iter().find_map(|&(offset, hash)| {
-            if hash != wanted {
-                return None;
-            }
-            let (expanded, _) = Name::read(&self.out[..self.len], usize::from(offset))?;
-            (expanded == candidate).then_some(offset)
+        self.names.iter().filter(reachable).find_map(|&entry| {
+            let (expanded, _) = Name::read(&self.out[..self.len], usize::from(entry.offset))?;
+            (expanded == candidate).then_some(entry)
         })
     }
 
     /// Record the label boundaries of the name just written that a later
     /// name may point at: those inside the literal part, whose bytes are in
-    /// the buffer, up to `literal_len` octets of `wire`.
-    fn remember(&mut self, start: usize, wire: &[u8], literal_len: usize) {
+    /// the buffer, up to `literal_len` octets of `wire`, each `hops` pointers
+    /// from the name's end.
+    fn remember(&mut self, start: usize, wire: &[u8], literal_len: usize, hops: u8) {
         let mut offset = 0usize;
         while offset < literal_len && wire[offset] != 0 {
             let at = start + offset;
@@ -637,11 +674,12 @@ impl<'a> MessageWriter<'a> {
             let Ok(at) = u16::try_from(at) else {
                 return;
             };
-            if self
-                .names
-                .try_push((at, hash_name(&wire[offset..])))
-                .is_err()
-            {
+            let entry = Remembered {
+                offset: at,
+                hash: hash_name(&wire[offset..]),
+                hops,
+            };
+            if self.names.try_push(entry).is_err() {
                 return;
             }
             offset += 1 + usize::from(wire[offset]);

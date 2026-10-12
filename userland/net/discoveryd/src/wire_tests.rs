@@ -3,14 +3,14 @@
 use super::{
     Form, FromDecoder, ToDecoder, ASK_HEADER_LEN, CACHE_KEY_LEN, CONFIGURE_LEN,
     DATAGRAM_HEADER_LEN, DEADLINE_LEN, LINK_LEN, MAX_FROM_DECODER, MAX_TO_DECODER, REPLAYED_LEN,
-    REPLAY_LEN, RNG_KEY_LEN, STOP_LEN, TICK_LEN, TRANSMIT_HEADER_LEN,
+    REPLAY_LEN, RNG_KEY_LEN, STOPPED_LEN, STOP_LEN, TICK_LEN, TRANSMIT_HEADER_LEN,
 };
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::discovery_ipc::{Answer, Change, Entry};
 use tairix_abi::net::SOCKET_MAX_DATAGRAM;
 use tairix_abi::net_ipc::IF_NAME_LEN;
-use tairix_net::mdns::{Destination, MAX_MESSAGE_LEN};
+use tairix_net::mdns::{Destination, MAX_MESSAGE_LEN, MAX_QUESTIONS};
 use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_sandbox::wire::WireError;
 
@@ -74,7 +74,7 @@ fn every_front_frame_round_trips() {
         },
         ToDecoder::Ask {
             now: 10,
-            question: u32::MAX,
+            question: u32::try_from(MAX_QUESTIONS - 1).unwrap(),
             form: Form::Instance,
             name: b"\x04_ipp\x04_tcp\x05local\x00",
         },
@@ -209,6 +209,10 @@ fn every_decoder_frame_round_trips() {
             interface: iface(b"eth3"),
             up: false,
         },
+        FromDecoder::Stopped { question: 0 },
+        FromDecoder::Stopped {
+            question: u32::try_from(MAX_QUESTIONS - 1).unwrap(),
+        },
         FromDecoder::Transmit {
             interface: iface(b"eth0"),
             to: Destination::Group,
@@ -238,6 +242,42 @@ fn every_decoder_frame_round_trips() {
         from_decoder(&FromDecoder::Replayed { token: 1 }).len(),
         REPLAYED_LEN
     );
+    assert_eq!(
+        from_decoder(&FromDecoder::Stopped { question: 1 }).len(),
+        STOPPED_LEN
+    );
+}
+
+#[test]
+fn no_frame_names_a_question_past_the_bound() {
+    let past = u32::try_from(MAX_QUESTIONS).unwrap();
+    let mut out = vec![0u8; MAX_TO_DECODER];
+    for frame in [
+        ToDecoder::Ask {
+            now: 1,
+            question: past,
+            form: Form::AddressV4,
+            name: b"\x04host\x05local\x00",
+        },
+        ToDecoder::Stop { question: past },
+        ToDecoder::Replay {
+            question: past,
+            token: 1,
+        },
+    ] {
+        assert_eq!(frame.encode(&mut out), None, "never built");
+    }
+    assert_eq!(
+        FromDecoder::Stopped { question: past }.encode(&mut out),
+        None
+    );
+    // Nor believed when built by hand.
+    let mut stop = encoded(&ToDecoder::Stop { question: 0 });
+    stop[1..].copy_from_slice(&past.to_le_bytes());
+    assert_eq!(ToDecoder::decode(&stop), Err(WireError::Malformed));
+    let mut stopped = from_decoder(&FromDecoder::Stopped { question: 0 });
+    stopped[1..].copy_from_slice(&past.to_le_bytes());
+    assert_eq!(FromDecoder::decode(&stopped), Err(WireError::Malformed));
 }
 
 #[test]

@@ -49,7 +49,9 @@ use tairix_discoveryd::wire::{
 use tairix_fuzzseed::Prng;
 use tairix_log::{Event, Sink};
 use tairix_net::dns::Name;
-use tairix_net::mdns::{Destination, MessageWriter, RData, Record, Section, GROUP_V4, GROUP_V6};
+use tairix_net::mdns::{
+    Destination, MessageWriter, RData, Record, Section, GROUP_V4, GROUP_V6, MAX_QUESTIONS,
+};
 use tairix_sandbox::proto::{ProtoError, FRAME_HEADER_LEN};
 use tairix_sandbox::session::{
     FrameOut, SessionDescriptors, SessionService, SessionStep, SessionTransport,
@@ -62,7 +64,7 @@ const SMOKE_ITERATIONS: u64 = 200;
 const SEC: u64 = 1_000 * MS;
 
 /// The kinds of thing a hostile decoder says, one per round in turn.
-const SAYINGS: usize = 12;
+const SAYINGS: usize = 13;
 
 /// The family sockets the front listens on.
 const V4: u32 = 1;
@@ -150,6 +152,11 @@ fn announcement(rng: &mut Prng) -> Vec<u8> {
     out
 }
 
+/// A question id the front could issue.
+fn question(rng: &mut Prng) -> u32 {
+    u32::try_from(rng.below(MAX_QUESTIONS)).expect("the bound fits an id")
+}
+
 fn encoded(frame: &ToDecoder<'_>) -> Vec<u8> {
     let mut out = vec![0u8; MAX_TO_DECODER];
     let len = frame.encode(&mut out).expect("a well-formed frame fits");
@@ -203,15 +210,15 @@ fn exercise_codecs(rng: &mut Prng, noise: &[u8]) {
         },
         ToDecoder::Ask {
             now: rng.next_u64(),
-            question: rng.next_u32(),
+            question: question(rng),
             form: *rng.pick(&FORMS),
             name: b"\x07printer\x05local\x00",
         },
         ToDecoder::Stop {
-            question: rng.next_u32(),
+            question: question(rng),
         },
         ToDecoder::Replay {
-            question: rng.next_u32(),
+            question: question(rng),
             token: rng.next_u32(),
         },
     ];
@@ -276,6 +283,9 @@ fn exercise_decoder_codec(rng: &mut Prng, noise: &[u8]) {
         FromDecoder::Linked {
             interface: iface(rng),
             up: rng.next_u64() & 1 == 0,
+        },
+        FromDecoder::Stopped {
+            question: question(rng),
         },
     ] {
         let mut bytes = from_decoder(&shape);
@@ -713,6 +723,13 @@ fn say(wires: &Wires, kind: usize, rng: &mut Prng, noise: &[u8], now: u64) -> bo
             framed(&from_decoder(&FromDecoder::Linked {
                 interface: named(b"zz9"),
                 up: true,
+            })),
+            true,
+        ),
+        // A stop it was never told of: no client asked this front anything.
+        12 => (
+            framed(&from_decoder(&FromDecoder::Stopped {
+                question: question(rng),
             })),
             true,
         ),

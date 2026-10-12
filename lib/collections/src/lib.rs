@@ -27,6 +27,10 @@
 //! * [`RadixTree`] — a sparse `u64`-keyed index whose every operation costs
 //!   its height, with predecessor and successor search and tagged walks. What
 //!   a sorted vector updated by shifting was standing in for.
+//! * [`IndexedHeap`] — a min-heap over a holder's own slot numbers, a slot's
+//!   priority moved or withdrawn in O(log n) and everything due walked in
+//!   time proportional to what is due. What a deadline array swept whole was
+//!   standing in for.
 //! * [`SmallVec`] — inline while it is small, spilling to the heap beyond
 //!   that, for the paths that carry a handful of elements and pay an
 //!   allocation for it.
@@ -69,6 +73,7 @@ use core::fmt;
 
 pub mod bytequeue;
 pub mod group;
+pub mod heap;
 pub mod lru;
 pub mod map;
 pub mod radix;
@@ -79,6 +84,7 @@ pub mod set;
 pub mod smallvec;
 
 pub use bytequeue::{ByteQueue, QueueError};
+pub use heap::IndexedHeap;
 pub use lru::LruMap;
 pub use map::HashMap;
 pub use radix::RadixTree;

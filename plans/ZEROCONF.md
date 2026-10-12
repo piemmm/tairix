@@ -450,12 +450,37 @@ re-derive:
   `Name::encode`'s host-name rules refuse) and `Name::labels` reads them
   back — the pair Z2's instance/type/domain split needs.
 - **The cache index is keyed and the bounds are fixed.** Records chain
-  under a keyed hash of (owner name, type), so a peer cannot choose a name
-  set that collapses into one chain. `MAX_RECORDS` (512) and
-  `MAX_RECORDS_PER_SOURCE` (32) are §24.4 bounds; a full slot table is
-  about half a mebibyte per interface, grown on demand, and independent of
-  segment population. A source at its own ceiling evicts its own oldest
-  record; only a globally full table evicts by recency.
+  under keyed hashes of (owner name, type) for a lookup, of the whole record
+  for finding it again, and of (source, owner name, type) for a cache-flush,
+  so a peer can neither choose names that collapse into one chain nor stack
+  records under one name to lengthen the walk to a record: a find compares
+  one record, a flush costs what it retires, and a known-answer list ends at
+  its first stale record. `MAX_RECORDS` (4096)
+  and `MAX_RECORDS_PER_SOURCE` (256) are §24.4 bounds sized for a populated
+  segment; a full slot table is under four mebibytes per interface, grown on
+  demand, and independent of segment population. Records and questions sit
+  in `IndexedHeap`s at their next deadline, so a sweep reaches only what is
+  due and every deadline reported is exact. A source at its own ceiling
+  evicts its own oldest record; only a globally full table evicts by
+  recency.
+- **Questions are found, never scanned.** `MAX_QUESTIONS` (4096) per
+  interface, each asked under the caller's `QuestionId` and chained under the
+  cache's key, so a record, a question another host asked, and a refresh
+  reach their question in one comparison; a cached record carries the id of
+  the question watching it. A query carries at most `MAX_MESSAGE_QUESTIONS`,
+  the writer takes no more questions or records than the reader reads, and a
+  received message with more questions is read as its first that many. A
+  name read follows at most `dns::MAX_POINTER_HOPS` compression pointers,
+  and the writer never points deeper than that. Known answers a query has no
+  room for follow it at once (RFC 6762 §7.2); a multicast response never
+  sets the truncation bit, sending what does not fit next; and a QM question
+  another host multicasts counts as ours only if it is untruncated and every
+  known answer it carries is one we would offer ourselves (§7.3).
+- **Remaining: a responder's use of continued known answers.** A responder
+  delays its answer to a truncated query as §7.2 asks but does not yet drop
+  from it what the querier's continuation messages list: the pending answer
+  is one set for every querier, so pruning it needs per-record knowledge of
+  which queriers still want each record, not just a union.
 - **A derived `NSEC` is announced and answered with, never probed.** A
   unique publication gains an `NSEC` asserting exactly the types published
   at the name, but it is excluded from the probe's authority section and
@@ -640,11 +665,18 @@ What it now guarantees:
 - **Questions are shared and replayed.** Each distinct question is asked once
   on every up link however many requests share it; a request joining one
   already asked is brought up to date by a replay from the decoder's cache.
+- **Question ids are slots, reused only after the decoder's word.** The
+  decoder acknowledges every `Stop` (`Stopped`); the id is freed then and not
+  before, and frames cross in order, so no answer to the old question can
+  follow and ids never run out. A stopping question still counts against
+  `MAX_QUESTIONS`.
 - **The front holds the decoder to its word.** It keeps keyed fingerprints of
   what each question holds per link: an answer is added once, renewed or
-  retired only while held, never past `MAX_RECORDS` for one question on one
-  link. Stale answers (across a stop, a flush, or an edge in flight) are
-  dropped; impossible ones condemn the decoder.
+  retired only while held, never past `MAX_RECORDS` on one link across every
+  question there, since each cached record answers one question at most.
+  Stale answers (across a stop, a flush, an edge, or a replaced decoder in
+  flight) are dropped; impossible ones — about an id that holds no question,
+  or a stop never told — condemn the decoder.
 - **Nothing crosses a link edge.** The decoder acknowledges every link edge
   (`Linked`); an answer about a link is believed, and a datagram built for it
   sent, only once every edge told has been acknowledged.
@@ -653,10 +685,17 @@ What it now guarantees:
   (a burst of 32 at 8 per second), or directly to a peer it relayed from on
   that interface in the last second, once per datagram relayed and at most four
   owed at once.
-- **Clients are bounded (§8).** 8 sessions per account, 16 requests per
-  session, 64 KiB of queued answers per session (then one `Lost` notice), 256
-  sessions in all; one doorbell outstanding per session, authenticated by the
-  service's uid.
+- **Clients are bounded (§8), generously.** 32 sessions and 1024 requests
+  per account (requests across all of its sessions, so opening sessions
+  cannot multiply them), 256 KiB of queued answers per session, 1 MiB per
+  account and 16 MiB in all (then one `Lost` notice), 4096 sessions in all;
+  one doorbell outstanding per session, authenticated by the service's uid.
+  An account is charged for its subscriptions and the questions it left still
+  stopping, and held to half of `MAX_QUESTIONS`, asserted at build time.
+  Authority is checked before room, so a refusal for room never hides an
+  unauthorised request from the audit. Sessions, requests, and questions are
+  found by id, and an exited owner's sessions by the owner, never by a
+  scan.
 - **Every answer names its interface; caches never merge.**
 - **`.local` never leaves the link, and absence is not an error.** A build
   without discovery answers a link name with nothing.

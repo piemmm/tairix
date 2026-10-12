@@ -13,6 +13,14 @@
 //! answers call for. Nothing a peer authored is display-safe, so every label
 //! and `TXT` string reaches the view as a [`DisplayLabel`] and every name as a
 //! [`WireName`].
+//!
+//! A refusal bears on what it refused. An ask the service will not answer,
+//! or this program may not make, is not made again while it is wanted; one
+//! refused for the service's bounds, or failing for want of the service, ends
+//! the pass, and the next asks again. A request whose replacement was lost
+//! again at once is held back a pass, so a request that cannot be replayed
+//! whole is retried at the read's pace rather than as fast as its losses
+//! arrive.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -20,10 +28,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::IpAddr;
 
-use tairix_abi::discovery_ipc::{Entry, Families, Query, ServiceTypeField, Transport};
+use tairix_abi::discovery_ipc::{
+    Entry, Families, Query, ServiceTypeField, Transport, REQUESTS_PER_ACCOUNT,
+};
+use tairix_abi::Errno;
 use tairix_discovery::{request_of, DiscoveryError, Held, OwnedAnswer, Session};
-use tairix_net::dns::{DisplayLabel, Presentation, WireName};
-use tairix_net::mdns::{is_link_local_address, TxtStrings};
+use tairix_net::dns::{DisplayLabel, Name, Presentation, WireName};
+use tairix_net::mdns::{is_link_local_address, is_link_local_name, TxtStrings};
 
 use crate::model::InterfaceName;
 
@@ -35,6 +46,11 @@ pub const MAX_SERVICES: usize = 256;
 pub const MAX_HOSTS: usize = 128;
 /// The most link-local addresses named at once.
 pub const MAX_REVERSES: usize = 128;
+
+// The map alone never meets the bound its account shares with its other
+// programs, even while a lost request is replaced before the old one stops.
+const _: () =
+    assert!(1 + MAX_TYPES + MAX_SERVICES + MAX_HOSTS + MAX_REVERSES < REQUESTS_PER_ACCOUNT);
 
 /// The requests a [`Discovery`] keeps open with the discovery service.
 pub trait Directory {
@@ -158,10 +174,20 @@ pub struct Discovery {
     held: BTreeMap<u32, (Ask, Held)>,
     /// Each open request's id, by what it asks.
     open: BTreeMap<Ask, u32>,
-    /// A bound turned an ask away.
+    /// A bound turned an ask away in the last pass.
     truncated: bool,
-    /// The service refused a request: nothing further is started.
+    /// The service refused an ask this program may not make.
     refused: Option<DiscoveryError>,
+    /// What ended the last pass early: the next pass asks again.
+    stalled: Option<DiscoveryError>,
+    /// Asks the service refused for themselves, not made again while wanted.
+    unanswerable: BTreeSet<Ask>,
+    /// Passes reconciled so far.
+    pass: u64,
+    /// The pass each lost request was last replaced in.
+    replaced: BTreeMap<Ask, u64>,
+    /// A lost request was held back in the last pass.
+    deferred: bool,
 }
 
 impl Discovery {
@@ -186,16 +212,15 @@ impl Discovery {
     /// is held now.
     pub fn reconcile(&mut self, directory: &mut dyn Directory, named: &BTreeSet<IpAddr>) {
         let wanted = self.wanted(named);
-        let lost: Vec<Ask> = self
-            .held
-            .values()
-            .filter(|(ask, held)| held.is_lost() && wanted.contains(ask))
-            .map(|(ask, _)| ask.clone())
-            .collect();
+        self.pass += 1;
+        self.truncated = false;
+        self.stalled = None;
+        self.deferred = false;
+        self.unanswerable.retain(|ask| wanted.contains(ask));
         let stale: Vec<(Ask, u32)> = self
             .open
             .iter()
-            .filter(|(ask, _)| !wanted.contains(*ask) || lost.contains(ask))
+            .filter(|(ask, _)| !wanted.contains(*ask))
             .map(|(ask, &request)| (ask.clone(), request))
             .collect();
         for (ask, request) in stale {
@@ -205,12 +230,62 @@ impl Discovery {
             // closes; a refused stop leaves nothing this map acts on.
             let _ = directory.stop(request);
         }
+        let lost: Vec<(Ask, u32)> = self
+            .open
+            .iter()
+            .filter(|(_, request)| {
+                self.held
+                    .get(request)
+                    .is_some_and(|(_, held)| held.is_lost())
+            })
+            .map(|(ask, &request)| (ask.clone(), request))
+            .collect();
+        let open = &self.open;
+        self.replaced.retain(|ask, _| open.contains_key(ask));
+        for (ask, old) in lost {
+            if self.stalled.is_some() {
+                break;
+            }
+            if self.replaced.get(&ask) == Some(&(self.pass - 1)) {
+                self.deferred = true;
+                continue;
+            }
+            // Started before the old one stops, so the question they share
+            // stays asked and the service replays what it holds rather than
+            // asking the segment again.
+            let started = match directory.start(&ask.query()) {
+                // At the account's bound the replacement has no room until
+                // the old request goes, so it goes first.
+                Err(DiscoveryError::Refused(Errno::LimitExceeded)) => {
+                    let _ = directory.stop(old);
+                    self.held.remove(&old);
+                    self.open.remove(&ask);
+                    directory.start(&ask.query())
+                }
+                started => started,
+            };
+            match started {
+                Ok(request) => {
+                    if self.open.remove(&ask).is_some() {
+                        let _ = directory.stop(old);
+                        self.held.remove(&old);
+                    }
+                    self.held.insert(request, (ask.clone(), Held::default()));
+                    self.replaced.insert(ask.clone(), self.pass);
+                    self.open.insert(ask, request);
+                }
+                Err(refusal) => self.refuse(ask, refusal),
+            }
+        }
         let mut counts = [0usize; 5];
         for ask in self.open.keys() {
             counts[usize::from(ask.rank())] += 1;
         }
         for ask in wanted {
-            if self.refused.is_some() || self.open.contains_key(&ask) {
+            if self.stalled.is_some() {
+                break;
+            }
+            if self.open.contains_key(&ask) || self.unanswerable.contains(&ask) {
                 continue;
             }
             let count = &mut counts[usize::from(ask.rank())];
@@ -224,8 +299,24 @@ impl Discovery {
                     self.held.insert(request, (ask.clone(), Held::default()));
                     self.open.insert(ask, request);
                 }
-                Err(refusal) => self.refused = Some(refusal),
+                Err(refusal) => self.refuse(ask, refusal),
             }
+        }
+    }
+
+    /// Record why `ask` was refused, as it bears on what is asked next.
+    fn refuse(&mut self, ask: Ask, refusal: DiscoveryError) {
+        match refusal {
+            // Authority does not change while the program runs, so asking
+            // again would only be refused, and audited, again.
+            DiscoveryError::Refused(Errno::PermissionDenied) => {
+                self.unanswerable.insert(ask);
+                self.refused = Some(refusal);
+            }
+            DiscoveryError::Refused(Errno::OutOfRange) => {
+                self.unanswerable.insert(ask);
+            }
+            _ => self.stalled = Some(refusal),
         }
     }
 
@@ -332,16 +423,38 @@ impl Discovery {
         names
     }
 
-    /// Whether a bound turned an ask away, so the view is incomplete.
+    /// Whether a bound turned an ask away in the last pass, so the view is
+    /// incomplete.
     #[must_use]
     pub const fn truncated(&self) -> bool {
         self.truncated
     }
 
-    /// The service's refusal, once one stopped further requests.
+    /// The service's refusal of an ask this program may not make; what it
+    /// may make goes on being asked.
     #[must_use]
     pub const fn refused(&self) -> Option<&DiscoveryError> {
         self.refused.as_ref()
+    }
+
+    /// What ended the last pass before every ask was made, which the next
+    /// pass asks again: the service at its bounds, or not reached.
+    #[must_use]
+    pub const fn stalled(&self) -> Option<&DiscoveryError> {
+        self.stalled.as_ref()
+    }
+
+    /// Whether the last pass held a lost request back for the next.
+    #[must_use]
+    pub const fn deferred(&self) -> bool {
+        self.deferred
+    }
+
+    /// Whether the service refused the type list itself, so nothing can be
+    /// shown at all.
+    #[must_use]
+    pub fn locked_out(&self) -> bool {
+        self.refused.is_some() && self.unanswerable.contains(&Ask::Types)
     }
 
     /// Each looked-up host's addresses, by its wire-form name.
@@ -376,9 +489,11 @@ fn child_of(parent: &Ask, answer: &OwnedAnswer) -> Option<Ask> {
             name: name.clone(),
             transport: *transport,
         }),
-        (Ask::Resolve { .. }, OwnedAnswer::Service { target, .. }) => {
-            Some(Ask::Host(target.clone()))
-        }
+        // A target outside `.local` is a unicast DNS name the link does not
+        // answer for.
+        (Ask::Resolve { .. }, OwnedAnswer::Service { target, .. }) => Name::from_wire(target)
+            .filter(is_link_local_name)
+            .map(|_| Ask::Host(target.clone())),
         _ => None,
     }
 }

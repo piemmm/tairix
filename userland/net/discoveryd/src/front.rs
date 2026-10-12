@@ -39,6 +39,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::discovery_ipc::{
     encode_doorbell, encode_id_reply, Change, DiscoveryRequest, Entry, Query, NAME_MAX,
+    REQUESTS_PER_ACCOUNT,
 };
 use tairix_abi::net::{SocketAddr, SocketDelivery, SocketId, SocketLinkEvent};
 use tairix_abi::net_ipc::{address_parts, ip_from_parts, IF_NAME_LEN};
@@ -49,7 +50,7 @@ use tairix_hash::HashSeed;
 use tairix_inline::{ArrayString, ArrayVec};
 use tairix_log::{Event, Field, Level, Sink};
 use tairix_net::dnssd::ServiceType;
-use tairix_net::mdns::{Destination, GROUP_V4, GROUP_V6, PORT};
+use tairix_net::mdns::{Destination, GROUP_V4, GROUP_V6, MAX_QUESTIONS, PORT};
 use tairix_net::rate::{PeerBudgets, TokenBucket};
 use tairix_net::IpAddr;
 use tairix_sandbox::proto::FRAME_HEADER_LEN;
@@ -60,9 +61,9 @@ use tairix_util::secret::Wiped;
 
 use crate::events::{DECODER_STARTED, REQUEST_DENIED};
 use crate::grants::Grants;
-use crate::query::{plan, Needs};
+use crate::query::{plan, Needs, QUESTIONS_PER_REQUEST};
 use crate::questions::{Questions, Verdict};
-use crate::sessions::Sessions;
+use crate::sessions::{Session, Sessions, Subscribed};
 use crate::wire::{
     FromDecoder, ToDecoder, ASK_HEADER_LEN, CACHE_KEY_LEN, CONFIGURE_LEN, MAX_FROM_DECODER,
     MAX_TO_DECODER, RNG_KEY_LEN, TICK_LEN,
@@ -109,6 +110,13 @@ const ASKER_CREDITS: u8 = 4;
 // is back-pressure and never a frame that can never be sent.
 const _: () = assert!(OUTBOUND_QUEUE - FRAME_HEADER_LEN >= MAX_TO_DECODER);
 const _: () = assert!(INBOUND_QUEUE - FRAME_HEADER_LEN >= MAX_FROM_DECODER);
+
+/// The question slots one account may keep: its requests' subscriptions and
+/// the questions it left that the decoder has not yet said it stopped.
+const ACCOUNT_QUESTIONS: usize = QUESTIONS_PER_REQUEST * REQUESTS_PER_ACCOUNT;
+
+// No one account can keep more than half the questions every client shares.
+const _: () = assert!(2 * ACCOUNT_QUESTIONS <= MAX_QUESTIONS);
 
 /// Everything the front does to the world outside it, so the front itself is
 /// host-testable.
@@ -404,12 +412,8 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
     /// `peer` has exited: its sessions end, and the questions only it asked
     /// stop being asked.
     pub fn on_peer_exit(&mut self, now: u64, peer: ProcId) {
-        for (session, requests) in self.sessions.close_all(peer) {
-            for request in requests {
-                for &question in &request.questions {
-                    self.questions.unsubscribe(question, session, request.id);
-                }
-            }
+        while let Some(session) = self.sessions.close_any(peer) {
+            self.unsubscribe_all(&session);
         }
         self.sync(now);
     }
@@ -422,10 +426,8 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
 
     /// Post every doorbell owed.
     pub fn retry_rings(&mut self) {
-        for (session, port) in self.sessions.take_owed() {
-            let result = self.host.ring(port, &encode_doorbell(session));
-            self.sessions.rang(session, result);
-        }
+        let Self { sessions, host, .. } = self;
+        sessions.retry_owed(&mut |port, session| host.ring(port, &encode_doorbell(session)));
     }
 
     /// The decoder's write end has room. The held datagram goes first — it
@@ -741,14 +743,8 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 let linked = entry_interface(&entry)
                     .and_then(|name| self.links.iter().find(|link| link.name == name))
                     .is_some_and(Link::settled);
-                match self.questions.on_answer(&entry, linked) {
-                    Verdict::Tell(requests) => {
-                        self.tell(&requests, &entry);
-                        true
-                    }
-                    Verdict::Stale => true,
-                    Verdict::Lie => false,
-                }
+                let verdict = self.questions.on_answer(&entry, linked);
+                self.tell(verdict, &entry)
             }
             FromDecoder::Held { token, entry } => {
                 if !matches!(
@@ -760,14 +756,8 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 ) {
                     return false;
                 }
-                match self.questions.on_held(token, &entry) {
-                    Verdict::Tell(requests) => {
-                        self.tell(&requests, &entry);
-                        true
-                    }
-                    Verdict::Stale => true,
-                    Verdict::Lie => false,
-                }
+                let verdict = self.questions.on_held(token, &entry);
+                self.tell(verdict, &entry)
             }
             FromDecoder::Replayed { token } => {
                 self.questions.replayed(token);
@@ -791,24 +781,49 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 link.pending = pending;
                 true
             }
+            FromDecoder::Stopped { question } => self.questions.on_stopped(question),
         }
     }
 
-    /// Queue `entry` for each of `requests`, ringing each quiet session.
-    fn tell(&mut self, requests: &[(u32, u32)], entry: &Entry<'_>) {
-        for &(session, request) in requests {
-            if let Some(port) = self.sessions.queue(session, request, entry) {
-                let result = self.host.ring(port, &encode_doorbell(session));
-                self.sessions.rang(session, result);
+    /// Queue `entry` for the requests `verdict` names, ringing each quiet
+    /// session; `false` when the verdict is that the decoder lied.
+    fn tell(&mut self, verdict: Verdict, entry: &Entry<'_>) -> bool {
+        let Self {
+            questions,
+            sessions,
+            host,
+            ..
+        } = self;
+        match verdict {
+            Verdict::Tell(question) => {
+                for (session, request) in questions.told(question) {
+                    let rung = sessions.queue(session, request, entry);
+                    ring(sessions, host, session, rung);
+                }
+            }
+            Verdict::TellOne(session, request) => {
+                let rung = sessions.queue(session, request, entry);
+                ring(sessions, host, session, rung);
+            }
+            Verdict::Stale => {}
+            Verdict::Lie => return false,
+        }
+        true
+    }
+
+    /// Stop every question `session`'s requests asked.
+    fn unsubscribe_all(&mut self, session: &Session) {
+        for request in session.requests() {
+            for &question in &request.questions {
+                self.questions
+                    .unsubscribe(question, session.id(), request.id);
             }
         }
     }
 
     fn tell_flush(&mut self, session: u32, request: u32, interface: [u8; IF_NAME_LEN]) {
-        if let Some(port) = self.sessions.flush(session, request, interface) {
-            let result = self.host.ring(port, &encode_doorbell(session));
-            self.sessions.rang(session, result);
-        }
+        let rung = self.sessions.flush(session, request, interface);
+        ring(&mut self.sessions, &mut self.host, session, rung);
     }
 
     /// Send a datagram the decoder built, if its destination is one the
@@ -897,11 +912,8 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 encode_id_reply(Ok(session), reply)
             }
             DiscoveryRequest::Close { session } => {
-                for request in self.sessions.close(session, owner)? {
-                    for &question in &request.questions {
-                        self.questions.unsubscribe(question, session, request.id);
-                    }
-                }
+                let closed = self.sessions.close(session, owner)?;
+                self.unsubscribe_all(&closed);
                 status_ok(reply)
             }
             DiscoveryRequest::Start { session, query } => {
@@ -909,21 +921,18 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 encode_id_reply(Ok(id), reply)
             }
             DiscoveryRequest::Stop { session, request } => {
-                let stopped = self
-                    .sessions
-                    .owned(session, owner)?
-                    .remove_request(request)?;
+                let stopped = self.sessions.remove_request(session, owner, request)?;
                 for &question in &stopped.questions {
                     self.questions.unsubscribe(question, session, request);
                 }
                 status_ok(reply)
             }
-            DiscoveryRequest::Collect { session, capacity } => {
-                self.sessions.owned(session, owner)?.collect(
-                    usize::try_from(capacity).map_err(|_| Errno::OutOfRange)?,
-                    reply,
-                )
-            }
+            DiscoveryRequest::Collect { session, capacity } => self.sessions.collect(
+                session,
+                owner,
+                usize::try_from(capacity).map_err(|_| Errno::OutOfRange)?,
+                reply,
+            ),
         }
     }
 
@@ -935,9 +944,6 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         query: &Query<'_>,
     ) -> Result<u32, Errno> {
         let owner = origin.proc_id();
-        if !self.sessions.owned(session, owner)?.has_room() {
-            return Err(Errno::LimitExceeded);
-        }
         let planned = plan(query)?;
         let everything = origin
             .capabilities()
@@ -968,28 +974,31 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 }
             }
         }
+        let account = self.sessions.owned(session, owner)?.uid();
+        let charged = self.questions.charged(account);
+        if !self.sessions.has_room(session, owner)?
+            || charged + QUESTIONS_PER_REQUEST > ACCOUNT_QUESTIONS
+        {
+            return Err(Errno::LimitExceeded);
+        }
         let request = self
             .sessions
-            .owned(session, owner)?
-            .add_request(ArrayVec::new())?;
-        let mut subscribed: ArrayVec<u32, 2> = ArrayVec::new();
+            .add_request(session, owner, Subscribed::new())?;
+        let mut subscribed = Subscribed::new();
         for asking in &planned.asks {
             match self
                 .questions
-                .subscribe(asking.form, asking.name, session, request)
+                .subscribe(asking.form, asking.name, session, request, account)
             {
                 Ok(question) => {
-                    // Two questions per request at most, as `plan` builds.
+                    // Never more than the plan's own bound, which this shares.
                     let _ = subscribed.try_push(question);
                 }
                 Err(err) => {
                     for &question in &subscribed {
                         self.questions.unsubscribe(question, session, request);
                     }
-                    let _ = self
-                        .sessions
-                        .owned(session, owner)
-                        .and_then(|held| held.remove_request(request));
+                    let _ = self.sessions.remove_request(session, owner, request);
                     return Err(err);
                 }
             }
@@ -1045,6 +1054,15 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         for (session, request, interface) in self.questions.forget_decoder() {
             self.tell_flush(session, request, interface);
         }
+    }
+}
+
+/// Ring `session` on the port `rung` names, when queueing for it asked for a
+/// doorbell, and record how the post went.
+fn ring<H: Host>(sessions: &mut Sessions, host: &mut H, session: u32, rung: Option<u64>) {
+    if let Some(port) = rung {
+        let result = host.ring(port, &encode_doorbell(session));
+        sessions.rang(session, result);
     }
 }
 

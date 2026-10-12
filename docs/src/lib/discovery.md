@@ -16,8 +16,8 @@ kernel-attested identity. Stability tier: **experimental**.
   continuously until stopped.
 - **`Held`** — one request's current answers, kept from the entries `collect`
   returns. Each entry says an answer was added, renewed, or retired, that
-  everything held on one interface is void, or that updates were lost because
-  the session's queue filled; `apply` folds one in and reports what moved, so a
+  everything held on one interface is void, or that updates were lost for
+  want of room to queue them; `apply` folds one in and reports what moved, so a
   browse that runs for an hour costs what changes rather than what is held.
 - **`RtDiscovery`** (the `program` feature) — the production glue: the endpoint
   call, and a wait on the session's doorbell that the service wakes. A

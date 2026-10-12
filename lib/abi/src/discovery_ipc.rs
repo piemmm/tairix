@@ -120,20 +120,27 @@ pub const TXT_MAX: usize = 512;
 /// A fixed containment bound, not a capacity: every session holds a queue in
 /// the service, and an account opening sessions it never reads must not be
 /// able to grow the service without limit. It is per account rather than per
-/// process so a user cannot multiply it by starting processes.
-pub const SESSIONS_PER_ACCOUNT: usize = 8;
+/// process so a user cannot multiply it by starting processes, and generous
+/// because the resolver spends one on every link-local lookup.
+pub const SESSIONS_PER_ACCOUNT: usize = 32;
 
-/// Requests one session may hold at once — a fixed containment bound, since
-/// each is a standing question the service asks the segment on the caller's
-/// behalf.
-pub const REQUESTS_PER_SESSION: usize = 16;
+/// Requests one account may hold at once, across all of its sessions.
+///
+/// A fixed containment bound, since each is a standing question the service
+/// asks the segment on the caller's behalf, sized for an inventory of a
+/// segment of hundreds of hosts: the type list, a browse per type, a resolve
+/// per instance, a lookup per host and per link-local address. Per account,
+/// like [`SESSIONS_PER_ACCOUNT`], so opening sessions cannot multiply it.
+pub const REQUESTS_PER_ACCOUNT: usize = 1024;
 
 /// Bytes of answers the service queues for one session before it stops
 /// queueing that session's updates and tells it so ([`Entry::Lost`]).
 ///
 /// A fixed containment bound: a reader that does not collect costs the
-/// service this much and no more.
-pub const SESSION_QUEUE_BYTES: usize = 64 * 1024;
+/// service this much and no more. Room for a request to be replayed every
+/// answer a busy segment holds for it at once; the service also bounds what
+/// all of one account's sessions hold together.
+pub const SESSION_QUEUE_BYTES: usize = 256 * 1024;
 
 /// The largest collect reply the service sends.
 pub const DISCOVERY_MAX_REPLY: usize = 8192;
@@ -795,9 +802,9 @@ pub enum Entry<'a> {
         /// The interface.
         interface: [u8; IF_NAME_LEN],
     },
-    /// Updates for the request were dropped because the session's queue was
-    /// full, so its answers are incomplete from here. Stopping and starting
-    /// it again answers with what is held now.
+    /// Updates for the request were dropped for want of room to queue them —
+    /// the session's, its account's, or the service's — so its answers are
+    /// incomplete from here. Starting it again answers with what is held now.
     Lost {
         /// The request.
         request: u32,

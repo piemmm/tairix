@@ -301,13 +301,23 @@ minimalism test is met by *not* minting anything.
 
 - `discover::Discovery` is the pure engine over an injected `Directory`
   (`Session` implements it): the type list, a browse per type, a resolve per
-  instance, a host lookup per resolve target, and a reverse lookup per
-  link-local address the map shows, each kind bounded (`MAX_TYPES`,
-  `MAX_SERVICES`, `MAX_HOSTS`, `MAX_REVERSES`). `reconcile` diffs the open set
+  instance, a host lookup per `.local` resolve target, and a reverse lookup
+  per link-local address the map shows, each kind bounded (`MAX_TYPES`,
+  `MAX_SERVICES`, `MAX_HOSTS`, `MAX_REVERSES`), their sum asserted below
+  `discovery_ipc::REQUESTS_PER_ACCOUNT`. `reconcile` diffs the open set
   against a walk down from the type list once per collect, so retirement
-  unwinds every level at once and a `Lost` request is restarted; a refused
-  start is kept and stops further starts. `services()` and `names()` are the
-  view.
+  unwinds every level at once; a `Lost` request is replaced by starting the
+  new one before stopping the old, so the shared question stays asked and is
+  replayed from the decoder's cache — except at the account's bound, where the
+  old one stops first to make the room. A request lost again as soon as it was
+  replaced is held back a pass (`deferred()`), so one the service cannot
+  replay whole is retried at the read's pace, not as fast as its losses
+  arrive. A refusal bears on what it refused: `PermissionDenied` and
+  `OutOfRange` drop that ask while it stays wanted (`refused()` reports the
+  first, and `locked_out()` says the type list itself was refused), anything
+  else — the service's bounds, its absence — ends the pass (`stalled()`), and
+  the next pass asks again; `truncated()` is the last pass's. `services()` and
+  `names()` are the view.
 - Nothing a peer authored reaches the model raw: labels and `TXT` strings
   through `tairix_net::dns::DisplayLabel` (printable Unicode kept, controls and
   default-ignorable characters escaped as `\DDD`), names through `WireName`,
@@ -319,8 +329,11 @@ minimalism test is met by *not* minting anything.
 - `run.rs`: a doorbell `PrivatePort` in the event wait-set (origin-checked
   before it counts); a queued reader worker for reads and collects, a queued
   namer worker for reverse DNS; collect state `Off`/`Idle`/`Due`/`Asked`/
-  `Retry`, a failed collect retried at the next read, names asked only after a
-  read so a refusing namer costs one ask per refresh.
+  `Retry`, a failed collect — or a pass that left work, stalled or deferred —
+  retried at the next read and a session refused `PermissionDenied` never
+  asked for again, names asked only after a read so a refusing namer costs one
+  ask per refresh. A refused type list says discovery is not permitted rather
+  than that some services are not shown.
 
 ### NM2c — the live QEMU vertical
 

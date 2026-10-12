@@ -47,8 +47,11 @@ tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # allocation for the relay's frame buffer.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The bounded, allocation-free lists a request's questions and the recent
-# askers are held in.
+# askers are held in, and the intrusive lists the question table threads.
 tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
+# The hash maps sessions, requests and questions are found by, so an answer
+# reaches its request without a scan of the table.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 
 # The `Run` binary's freestanding userland runtime: `_start`, the global
 # allocator, the socket and wait-set wrappers, the clock, and the random

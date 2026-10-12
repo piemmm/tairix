@@ -27,6 +27,9 @@
 //!    predecessor and its tagged walk — over keys crowding one leaf, spread
 //!    across the whole key space and clustered at both of its ends, and drops
 //!    every value exactly once.
+//! 9. An `IndexedHeap` agrees with a slot-to-priority map — membership, the
+//!    least priority, and the walk of everything at or below a bound — over
+//!    priorities crowded into ties and slots both packed and sparse.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -36,8 +39,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use tairix_collections::{
-    ByteQueue, HashMap, LruMap, QueueError, RadixTree, RangeError, RangeKey, RangeMap, RangeSet,
-    SmallVec,
+    ByteQueue, HashMap, IndexedHeap, LruMap, QueueError, RadixTree, RangeError, RangeKey, RangeMap,
+    RangeSet, SmallVec,
 };
 use tairix_fuzzseed::Prng;
 use tairix_hash::{BuildSipHash13, HashSeed};
@@ -605,6 +608,52 @@ fn sweep_radix(rng: &mut Prng, live: &Rc<Cell<i64>>) {
     assert!(tree.iter().map(|(k, _)| k).eq(model.keys().copied()));
 }
 
+/// Drive an `IndexedHeap` against a slot-to-priority map, checking the least
+/// priority and a bounded walk after every operation.
+fn sweep_indexed_heap(rng: &mut Prng) {
+    let mut heap: IndexedHeap<u16> = IndexedHeap::new();
+    let mut model: std::collections::BTreeMap<usize, u16> = std::collections::BTreeMap::new();
+    let width = *rng.pick(&[8, 64, 4096]);
+    for _ in 0..OPS_PER_ROUND {
+        let slot = rng.below(width);
+        let priority = rng.next_u16() % *rng.pick(&[4, 256, u16::MAX]);
+        match rng.below(5) {
+            0 | 1 => assert_eq!(
+                heap.try_insert(slot, priority)
+                    .expect("the host allocator supplies a place"),
+                model.insert(slot, priority)
+            ),
+            2 => {
+                let moved = model
+                    .get_mut(&slot)
+                    .map(|held| core::mem::replace(held, priority));
+                assert_eq!(heap.set(slot, priority), moved);
+            }
+            3 => assert_eq!(heap.remove(slot), model.remove(&slot)),
+            _ => {
+                let popped = heap.pop();
+                assert_eq!(popped.map(|(_, p)| p), model.values().min().copied());
+                if let Some((slot, priority)) = popped {
+                    assert_eq!(model.remove(&slot), Some(priority));
+                }
+            }
+        }
+        assert_eq!(heap.len(), model.len());
+        let least = heap.peek();
+        assert_eq!(least.map(|(_, p)| p), model.values().min().copied());
+        if let Some((slot, priority)) = least {
+            assert_eq!(model.get(&slot), Some(&priority));
+        }
+        let bound = rng.next_u16();
+        let mut walked: Vec<(usize, u16)> = heap.up_to(bound).collect();
+        walked.sort_unstable();
+        assert!(walked.iter().copied().eq(model
+            .iter()
+            .map(|(&s, &p)| (s, p))
+            .filter(|&(_, p)| p <= bound)));
+    }
+}
+
 #[test]
 fn heap_backed_containers_agree_with_their_models() {
     let mut rng = Prng::new(tairix_fuzzseed::start(
@@ -638,6 +687,8 @@ fn heap_backed_containers_agree_with_their_models() {
             let live = Rc::new(Cell::new(0i64));
             sweep_radix(&mut rng, &live);
             assert_eq!(live.get(), 0, "a `RadixTree` leaked or double-dropped");
+
+            sweep_indexed_heap(&mut rng);
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;

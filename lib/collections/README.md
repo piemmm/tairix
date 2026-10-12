@@ -19,6 +19,7 @@ depends on it for the inline half of its `SmallVec`.
 | `SmallVec<T, N>` | inline to `N`, then one spill to the heap |
 | `ByteQueue` | a bounded byte FIFO kept as one contiguous run, so a stream is parsed or transformed in place; storage committed up front or as bytes arrive, and wiped before it is given back |
 | `RadixTree<V, TAGS>` | a sparse `u64`-keyed index of 64-way nodes: every operation, and each step of an ordered or tagged walk, costs the tree's height; nodes are reserved before a change |
+| `IndexedHeap<P>` | a min-heap over a holder's own dense slot numbers: the least read in O(1), a slot's priority moved or withdrawn in O(log n), everything at or below a bound walked in O(k); room for a slot is reserved before a change and never given back |
 
 `plans/COLLECTIONS.md` is the ledger of what has landed across both container
 crates and what is still to come. `HashSet` and `SmallVec` are the two types
@@ -110,6 +111,11 @@ retention, and an abandoned owning iterator.
 
 `SmallVec` is held to the same bar as the table: one drop per element ever
 taken across its spill, and an inline footprint carrying no heap pointer.
+
+`IndexedHeap` is held to a model through a shuffled history of insertions,
+moves, removals and pops, and to comparison counts rather than a clock: every
+operation over 4096 slots stays within twice the height, and a bounded walk
+within twice what it returns.
 
 `tests/fuzz_collections.rs` drives the map against a plain association list
 over deliberately colliding key streams and `SmallVec` across its spill

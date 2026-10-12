@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use tairix_abi::discovery_ipc::{
     decode_doorbell, decode_id_reply, Answer, Change, CollectReply, DiscoveryRequest, Entry,
-    Families, Query, ServiceTypeField, Transport, DISCOVERY_MAX_REPLY,
+    Families, Query, ServiceTypeField, Transport, DISCOVERY_MAX_REPLY, REQUESTS_PER_ACCOUNT,
 };
 use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketLinkEvent};
 use tairix_abi::net_ipc::{NetAddrFamily, IF_NAME_LEN};
@@ -27,7 +27,7 @@ use tairix_abi::{
 };
 use tairix_log::{Event, EventId, Sink};
 use tairix_net::dns::Name;
-use tairix_net::mdns::{Destination, MessageWriter, RData, Record, Section};
+use tairix_net::mdns::{Destination, MessageWriter, RData, Record, Section, MAX_QUESTIONS};
 use tairix_net::{IpAddr, Ipv4Addr};
 use tairix_sandbox::host::EVENT_WORKER_CRASHED;
 use tairix_sandbox::loopback::{LoopbackSession, LoopbackSessionLauncher};
@@ -985,6 +985,104 @@ fn end_to_end_a_second_browse_of_the_same_type_is_replayed_what_is_held() {
         [(request, "added", b"Lobby".to_vec())]
     );
     assert_eq!(collected(&mut front, &first, one).len(), 1, "told once");
+}
+
+/// Start a lookup of `hostN.local` in `session`.
+fn look_up<L: SessionLauncher>(
+    front: &mut Front<L, RecordingSink, FakeHost>,
+    who: &Origin,
+    session: u32,
+    n: usize,
+) -> Result<u32, Errno> {
+    let name = Name::encode(&alloc::format!("host{n}.local")).unwrap();
+    decode_id_reply(&call(
+        front,
+        0,
+        who,
+        &DiscoveryRequest::Start {
+            session,
+            query: Query::Host {
+                name: name.as_wire(),
+                families: Families::BOTH,
+            },
+        },
+    ))
+}
+
+fn open<L: SessionLauncher>(front: &mut Front<L, RecordingSink, FakeHost>, who: &Origin) -> u32 {
+    decode_id_reply(&call(
+        front,
+        0,
+        who,
+        &DiscoveryRequest::Open { deliver_port: PORT },
+    ))
+    .unwrap()
+}
+
+#[test]
+fn end_to_end_one_session_holds_an_inventorys_worth_of_requests() {
+    // What a map of a busy segment keeps open: well past what one session
+    // once held, two questions apiece.
+    let (mut front, sink, _) = real();
+    let who = origin(25, &[CapabilityId::NET], None);
+    let session = open(&mut front, &who);
+    for n in 0..600 {
+        assert!(look_up(&mut front, &who, session, n).is_ok(), "lookup {n}");
+    }
+    assert_eq!(
+        sink.count(EVENT_WORKER_CRASHED),
+        0,
+        "the decoder holds them all"
+    );
+}
+
+#[test]
+fn a_caller_at_its_bound_asking_what_it_may_not_is_refused_as_unauthorised() {
+    let (mut front, sink, _) = real();
+    let who = origin(27, &[CapabilityId::NET], None);
+    let session = open(&mut front, &who);
+    for n in 0..REQUESTS_PER_ACCOUNT {
+        assert!(look_up(&mut front, &who, session, n).is_ok(), "lookup {n}");
+    }
+    assert_eq!(
+        look_up(&mut front, &who, session, REQUESTS_PER_ACCOUNT),
+        Err(Errno::LimitExceeded)
+    );
+    let browsed = decode_id_reply(&call(
+        &mut front,
+        0,
+        &who,
+        &DiscoveryRequest::Start {
+            session,
+            query: Query::Browse { service: ipp() },
+        },
+    ));
+    assert_eq!(
+        browsed,
+        Err(Errno::PermissionDenied),
+        "authority before room"
+    );
+    assert_eq!(sink.count(REQUEST_DENIED), 1, "and audited as such");
+}
+
+#[test]
+fn end_to_end_ids_freed_by_the_decoders_word_never_run_out() {
+    // More distinct questions than the table holds, each stopped as soon as
+    // it is asked: only the decoder's word that it stopped frees an id.
+    let (mut front, sink, _) = real();
+    let who = origin(26, &[CapabilityId::NET], None);
+    let session = open(&mut front, &who);
+    for n in 0..MAX_QUESTIONS {
+        let request = look_up(&mut front, &who, session, n).expect("an id is free");
+        let stopped = call(
+            &mut front,
+            0,
+            &who,
+            &DiscoveryRequest::Stop { session, request },
+        );
+        assert_eq!(decode_status_reply(&stopped), Ok(()));
+    }
+    assert_eq!(sink.count(EVENT_WORKER_CRASHED), 0);
 }
 
 #[test]

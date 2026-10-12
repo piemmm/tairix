@@ -10,10 +10,11 @@
 //! One engine per interface the front says is up, so a record learned on one
 //! link can never answer for another, and a link that goes down takes
 //! everything learned on it. Every question the front asks is asked on every
-//! such interface, and each answer crosses back already typed — a browse's
-//! instance label, a resolve's target and port — so the front reads a field
-//! rather than a record. A record that does not read as its question's form
-//! (a browse `PTR` naming an instance of another type) is not an answer to it.
+//! such interface under the front's own id, and each answer crosses back
+//! already typed — a browse's instance label, a resolve's target and port —
+//! so the front reads a field rather than a record. A record that does not
+//! read as its question's form (a browse `PTR` naming an instance of another
+//! type) is not an answer to it.
 
 use alloc::vec::Vec;
 
@@ -25,7 +26,7 @@ use tairix_net::dns::Name;
 use tairix_net::dnssd::{ServiceInstance, ServiceType};
 use tairix_net::mdns::{
     Answer as EngineAnswer, AnswerChange, MdnsEngine, QuestionId, RData, Record, Sender,
-    MAX_MESSAGE_LEN,
+    MAX_MESSAGE_LEN, MAX_QUESTIONS,
 };
 use tairix_net::IpAddr;
 use tairix_rng::{FastRng, RandU64};
@@ -39,7 +40,8 @@ use crate::wire::{Form, FromDecoder, ToDecoder, MAX_FROM_DECODER};
 pub struct Decoder {
     configured: Option<Configured>,
     links: Vec<Link>,
-    questions: Vec<Question>,
+    /// Every question the front asks, at its id.
+    questions: Vec<Option<Question>>,
     /// The deadline the front was last told of. It starts as the front's own
     /// belief about a fresh decoder: nothing due.
     reported: Option<u64>,
@@ -58,18 +60,17 @@ struct Configured {
 }
 
 /// One question the front asks.
+#[derive(Clone, Copy)]
 struct Question {
     id: u32,
     form: Form,
     name: Name,
 }
 
-/// One interface's engine, and which of its questions is which of the
-/// front's.
+/// One interface's engine.
 struct Link {
     name: [u8; IF_NAME_LEN],
     engine: MdnsEngine,
-    asked: Vec<(u32, QuestionId)>,
 }
 
 impl Decoder {
@@ -212,7 +213,14 @@ impl Decoder {
                 self.now = self.now.max(now);
                 self.on_ask(configured, question, form, name, out)
             }
-            ToDecoder::Stop { question } => self.on_stop(question),
+            ToDecoder::Stop { question } => {
+                self.on_stop(question)
+                    && send(
+                        &mut configured.frame,
+                        out,
+                        &FromDecoder::Stopped { question },
+                    )
+            }
             ToDecoder::Replay { question, token } => {
                 self.replay(&mut configured.frame, question, token, out)
             }
@@ -239,11 +247,7 @@ impl Decoder {
             ..
         } = configured;
         let mut alive = true;
-        let Link {
-            name,
-            engine,
-            asked,
-        } = link;
+        let Link { name, engine } = link;
         let emitted = engine.on_message(
             Duration64::from_nanos(self.now),
             payload,
@@ -251,7 +255,7 @@ impl Decoder {
             &mut || draw(rng),
             message,
             &mut |answer| {
-                alive &= relay(frame, out, *name, asked, &self.questions, answer, None);
+                alive &= relay(frame, out, *name, &self.questions, answer);
             },
         );
         if let Some(emit) = emitted {
@@ -280,31 +284,46 @@ impl Decoder {
         let Some(name) = Name::from_wire(name) else {
             return false;
         };
-        if self.questions.iter().any(|asked| asked.id == question)
-            || self.questions.try_reserve(1).is_err()
-        {
+        let slot = question as usize;
+        // The front asks each id once until it is stopped, and none past the
+        // bound; a frame that does either is not one it sends.
+        if slot >= MAX_QUESTIONS {
             return false;
         }
-        self.questions.push(Question {
+        if self.questions.len() <= slot {
+            if self
+                .questions
+                .try_reserve(slot + 1 - self.questions.len())
+                .is_err()
+            {
+                return false;
+            }
+            self.questions.resize(slot + 1, None);
+        }
+        if self.questions[slot].is_some() {
+            return false;
+        }
+        let asked = Question {
             id: question,
             form,
             name,
-        });
-        let asked = self.questions.len() - 1;
-        (0..self.links.len()).all(|link| self.ask_on(configured, link, asked, out))
+        };
+        self.questions[slot] = Some(asked);
+        (0..self.links.len()).all(|link| self.ask_on(configured, link, &asked, out))
     }
 
     /// Stop asking one question on every link.
     fn on_stop(&mut self, question: u32) -> bool {
-        let Some(at) = self.questions.iter().position(|asked| asked.id == question) else {
+        let Some(slot) = self
+            .questions
+            .get_mut(question as usize)
+            .filter(|slot| slot.is_some())
+        else {
             return false;
         };
-        self.questions.swap_remove(at);
+        *slot = None;
         for link in &mut self.links {
-            if let Some(index) = link.asked.iter().position(|(id, _)| *id == question) {
-                let (_, engine_id) = link.asked.swap_remove(index);
-                link.engine.stop_asking(engine_id);
-            }
+            link.engine.stop_asking(QuestionId::new(question));
         }
         true
     }
@@ -322,20 +341,22 @@ impl Decoder {
         self.links.push(Link {
             name: interface,
             engine: MdnsEngine::new(configured.cache),
-            asked: Vec::new(),
         });
         let link = self.links.len() - 1;
-        (0..self.questions.len()).all(|asked| self.ask_on(configured, link, asked, out))
+        (0..self.questions.len()).all(|slot| match self.questions[slot] {
+            Some(asked) => self.ask_on(configured, link, &asked, out),
+            None => true,
+        })
     }
 
-    /// Ask question `asked` on link `link`, relaying what its cache already
-    /// holds. An engine that refuses a question the front bounded is not one
-    /// the session can go on with.
+    /// Ask `asked` on link `link`, relaying what its cache already holds. An
+    /// engine that refuses a question the front bounded is not one the
+    /// session can go on with.
     fn ask_on(
         &mut self,
         configured: &mut Configured,
         link: usize,
-        asked: usize,
+        asked: &Question,
         out: &mut dyn FrameOut,
     ) -> bool {
         let Self {
@@ -344,29 +365,23 @@ impl Decoder {
             now,
             ..
         } = self;
-        let (Some(link), Some(question)) = (links.get_mut(link), questions.get(asked)) else {
+        let Some(link) = links.get_mut(link) else {
             return false;
         };
-        if link.asked.try_reserve(1).is_err() {
-            return false;
-        }
         let Configured { rng, frame, .. } = configured;
         let mut alive = true;
         let name = link.name;
         let asked_on = link.engine.ask(
             Duration64::from_nanos(*now),
-            question.name,
-            question.form.record_type(),
+            QuestionId::new(asked.id),
+            asked.name,
+            asked.form.record_type(),
             &mut || draw(rng),
             &mut |answer| {
-                alive &= relay(frame, out, name, &[], questions, answer, Some(question.id));
+                alive &= relay(frame, out, name, questions, answer);
             },
         );
-        let Ok(engine_id) = asked_on else {
-            return false;
-        };
-        link.asked.push((question.id, engine_id));
-        alive
+        asked_on.is_ok() && alive
     }
 
     /// Send what `question` holds on every link under `token`, then the
@@ -378,14 +393,13 @@ impl Decoder {
         token: u32,
         out: &mut dyn FrameOut,
     ) -> bool {
-        if let Some(asked) = self.questions.iter().find(|asked| asked.id == question) {
+        if let Some(asked) = asked(&self.questions, question) {
+            let record_type = asked.form.record_type();
             for link in &self.links {
-                for cached in link
-                    .engine
-                    .cache()
-                    .lookup(&asked.name, asked.form.record_type())
-                {
-                    let Some(answer) = typed(asked, &cached.record) else {
+                let cache = link.engine.cache();
+                let key = cache.key_of(&asked.name, record_type);
+                for cached in cache.lookup(key, &asked.name, record_type) {
+                    let Some(answer) = typed(&asked, &cached.record) else {
                         continue;
                     };
                     let entry = Entry::Answer {
@@ -415,14 +429,10 @@ impl Decoder {
             ..
         } = configured;
         for link in &mut self.links {
-            let Link {
-                name,
-                engine,
-                asked,
-            } = link;
+            let Link { name, engine } = link;
             let mut alive = true;
             while let Some(emit) = engine.poll(now, &mut || draw(rng), message, &mut |answer| {
-                alive &= relay(frame, out, *name, asked, &self.questions, answer, None);
+                alive &= relay(frame, out, *name, &self.questions, answer);
             }) {
                 alive &= send(
                     frame,
@@ -445,28 +455,24 @@ impl Decoder {
     }
 }
 
-/// Relay one engine answer as the front's question it answers: `during_ask`
-/// names the question an engine is being asked, whose engine id is not yet
-/// recorded, and otherwise `asked` maps the engine's ids to the front's.
+/// The question the front asks under `id`.
+fn asked(questions: &[Option<Question>], id: u32) -> Option<Question> {
+    questions.get(id as usize).copied().flatten()
+}
+
+/// Relay one engine answer as the front's question it answers, which the
+/// engine names by the front's own id.
 fn relay(
     frame: &mut [u8],
     out: &mut dyn FrameOut,
     interface: [u8; IF_NAME_LEN],
-    asked: &[(u32, QuestionId)],
-    questions: &[Question],
+    questions: &[Option<Question>],
     answer: &EngineAnswer<'_>,
-    during_ask: Option<u32>,
 ) -> bool {
-    let front = during_ask.or_else(|| {
-        asked
-            .iter()
-            .find(|(_, engine_id)| *engine_id == answer.question)
-            .map(|(id, _)| *id)
-    });
-    let Some(question) = front.and_then(|id| questions.iter().find(|asked| asked.id == id)) else {
+    let Some(question) = asked(questions, answer.question.get()) else {
         return true;
     };
-    let Some(typed) = typed(question, &answer.record.record) else {
+    let Some(typed) = typed(&question, &answer.record.record) else {
         return true;
     };
     let change = match answer.change {

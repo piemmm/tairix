@@ -8,6 +8,9 @@ use alloc::vec::Vec;
 /// A buffer comfortably larger than anything these tests build.
 const BUF: usize = 4096;
 
+/// The id the tests' one browse is asked under.
+const BROWSE: QuestionId = QuestionId::new(1);
+
 fn at(millis: u64) -> Duration64 {
     Duration64::from_nanos(millis * 1_000_000)
 }
@@ -1095,9 +1098,10 @@ fn withdrawing_one_publication_leaves_the_others_answerable() {
 fn a_question_is_asked_then_re_asked_on_a_doubling_backoff() {
     let mut engine = engine();
     let mut rng = lowest();
-    let _id = engine
+    engine
         .ask(
             at(0),
+            BROWSE,
             name("_ipp._tcp.local"),
             RecordType::Ptr,
             &mut rng,
@@ -1123,6 +1127,7 @@ fn a_query_carries_what_we_already_know_so_responders_can_stay_quiet() {
     engine
         .ask(
             at(0),
+            BROWSE,
             name("_ipp._tcp.local"),
             RecordType::Ptr,
             &mut rng,
@@ -1156,6 +1161,7 @@ fn a_question_another_host_has_just_asked_slides_to_the_next_round() {
     engine
         .ask(
             at(0),
+            BROWSE,
             name("_ipp._tcp.local"),
             RecordType::Ptr,
             &mut rng,
@@ -1183,6 +1189,7 @@ fn a_cached_answer_about_to_expire_pulls_its_question_forward() {
     engine
         .ask(
             at(0),
+            BROWSE,
             name("_ipp._tcp.local"),
             RecordType::Ptr,
             &mut rng,
@@ -1212,9 +1219,10 @@ fn a_cached_answer_about_to_expire_pulls_its_question_forward() {
 fn dropping_a_question_stops_the_refreshing() {
     let mut engine = engine();
     let mut rng = lowest();
-    let id = engine
+    engine
         .ask(
             at(0),
+            BROWSE,
             name("_ipp._tcp.local"),
             RecordType::Ptr,
             &mut rng,
@@ -1230,11 +1238,15 @@ fn dropping_a_question_stops_the_refreshing() {
     engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
     drain(&mut engine, at(0));
 
-    engine.stop_asking(id);
+    engine.stop_asking(BROWSE);
     assert_eq!(
         engine.next_deadline(),
         Some(at(100_000)),
         "only the record's own expiry remains"
+    );
+    assert!(
+        poll(&mut engine, at(99_999)).is_none(),
+        "a stopped question is not asked"
     );
 }
 
@@ -1244,13 +1256,22 @@ fn questions_past_the_bound_are_refused() {
     let mut rng = lowest();
     for index in 0..super::MAX_QUESTIONS {
         let owner = alloc::format!("q{index}.local");
+        let id = QuestionId::new(u32::try_from(index).expect("small"));
         engine
-            .ask(at(0), name(&owner), RecordType::A, &mut rng, &mut |_| {})
+            .ask(
+                at(0),
+                id,
+                name(&owner),
+                RecordType::A,
+                &mut rng,
+                &mut |_| {},
+            )
             .expect("asks");
     }
     assert_eq!(
         engine.ask(
             at(0),
+            QuestionId::new(u32::MAX),
             name("one-more.local"),
             RecordType::A,
             &mut rng,
@@ -1258,6 +1279,109 @@ fn questions_past_the_bound_are_refused() {
         ),
         Err(PublishError::TooMany)
     );
+}
+
+#[test]
+fn an_id_already_asked_is_refused_and_free_again_once_stopped() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    engine
+        .ask(
+            at(0),
+            BROWSE,
+            browse(),
+            RecordType::Ptr,
+            &mut rng,
+            &mut |_| {},
+        )
+        .expect("asks");
+    assert_eq!(
+        engine.ask(
+            at(0),
+            BROWSE,
+            name("printer.local"),
+            RecordType::A,
+            &mut rng,
+            &mut |_| {}
+        ),
+        Err(PublishError::Duplicate)
+    );
+    engine.stop_asking(BROWSE);
+    assert!(engine
+        .ask(
+            at(0),
+            BROWSE,
+            name("printer.local"),
+            RecordType::A,
+            &mut rng,
+            &mut |_| {}
+        )
+        .is_ok());
+}
+
+#[test]
+fn a_record_finds_its_question_among_thousands_by_one_comparison() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    for index in 0..super::MAX_QUESTIONS {
+        let owner = alloc::format!("q{index}.local");
+        let id = QuestionId::new(u32::try_from(index).expect("small"));
+        engine
+            .ask(
+                at(0),
+                id,
+                name(&owner),
+                RecordType::A,
+                &mut rng,
+                &mut |_| {},
+            )
+            .expect("asks");
+    }
+    engine.take_compared();
+    let last = super::MAX_QUESTIONS - 1;
+    let mut answer = Record::unique(name(&alloc::format!("q{last}.local")), address(5));
+    answer.ttl = 120;
+    let mut told = Told::new();
+    hear(&mut engine, at(1), &announced(&[answer]), &mut told);
+    assert_eq!(told.len(), 1);
+    let expected = QuestionId::new(u32::try_from(last).expect("small"));
+    assert_eq!(told[0].0, expected);
+    assert_eq!(engine.take_compared(), 1);
+}
+
+#[test]
+fn every_due_question_goes_out_however_many_queries_it_takes() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    let count = 3 * MAX_MESSAGE_QUESTIONS + 1;
+    for index in 0..count {
+        let owner = alloc::format!("q{index}.local");
+        let id = QuestionId::new(u32::try_from(index).expect("small"));
+        engine
+            .ask(
+                at(0),
+                id,
+                name(&owner),
+                RecordType::A,
+                &mut rng,
+                &mut |_| {},
+            )
+            .expect("asks");
+    }
+    let mut asked = alloc::collections::BTreeSet::new();
+    let mut queries = 0;
+    while let Some((_, bytes)) = poll(&mut engine, at(0)) {
+        let carried = questions(&bytes);
+        assert!(
+            carried.len() <= MAX_MESSAGE_QUESTIONS,
+            "a peer reads all of it"
+        );
+        asked.extend(carried.into_iter().map(|question| question.name));
+        queries += 1;
+        assert!(queries <= count, "poll settles");
+    }
+    assert_eq!(asked.len(), count, "none is left behind");
+    assert!(engine.next_deadline().is_some_and(|next| next > at(0)));
 }
 
 // -- the folded deadline -------------------------------------------------
@@ -1285,6 +1409,7 @@ fn the_deadline_is_the_earliest_of_everything_pending() {
     engine
         .ask(
             at(500),
+            BROWSE,
             name("_ipp._tcp.local"),
             RecordType::Ptr,
             &mut rng,
@@ -1462,8 +1587,16 @@ fn tick(engine: &mut MdnsEngine, now: Duration64, told: &mut Told) {
 fn ask_browse(engine: &mut MdnsEngine, told: &mut Told) -> QuestionId {
     let mut rng = lowest();
     engine
-        .ask(at(0), browse(), RecordType::Ptr, &mut rng, &mut into(told))
-        .expect("asks")
+        .ask(
+            at(0),
+            BROWSE,
+            browse(),
+            RecordType::Ptr,
+            &mut rng,
+            &mut into(told),
+        )
+        .expect("asks");
+    BROWSE
 }
 
 #[test]
@@ -1595,6 +1728,7 @@ fn asking_a_name_and_type_already_asked_is_refused() {
     assert_eq!(
         engine.ask(
             at(0),
+            QuestionId::new(2),
             browse(),
             RecordType::Ptr,
             &mut rng,
@@ -1606,6 +1740,7 @@ fn asking_a_name_and_type_already_asked_is_refused() {
     assert!(engine
         .ask(
             at(0),
+            QuestionId::new(2),
             browse(),
             RecordType::Txt,
             &mut rng,
@@ -1618,9 +1753,20 @@ fn asking_a_name_and_type_already_asked_is_refused() {
 fn questions_due_together_travel_in_one_query() {
     let mut engine = engine();
     let mut rng = lowest();
-    for owner in ["_ipp._tcp.local", "_http._tcp.local", "_smb._tcp.local"] {
+    for (id, owner) in [
+        (1, "_ipp._tcp.local"),
+        (2, "_http._tcp.local"),
+        (3, "_smb._tcp.local"),
+    ] {
         engine
-            .ask(at(0), name(owner), RecordType::Ptr, &mut rng, &mut |_| {})
+            .ask(
+                at(0),
+                QuestionId::new(id),
+                name(owner),
+                RecordType::Ptr,
+                &mut rng,
+                &mut |_| {},
+            )
             .expect("asks");
     }
     let (_, bytes) = poll(&mut engine, at(0)).expect("one query");
@@ -1659,7 +1805,14 @@ fn a_poll_with_no_room_still_moves_every_schedule_on() {
         )
         .expect("publishes");
     engine
-        .ask(at(0), browse(), RecordType::Ptr, &mut rng, &mut |_| {})
+        .ask(
+            at(0),
+            BROWSE,
+            browse(),
+            RecordType::Ptr,
+            &mut rng,
+            &mut |_| {},
+        )
         .expect("asks");
     for _ in 0..8 {
         assert!(engine.poll(at(0), &mut rng, &mut [], &mut |_| {}).is_none());
@@ -1667,5 +1820,218 @@ fn a_poll_with_no_room_still_moves_every_schedule_on() {
     assert!(
         engine.next_deadline().is_some_and(|next| next > at(0)),
         "nothing is left due at an instant already reached"
+    );
+}
+
+// -- known answers, continuations, and duplicate questions ---------------
+
+fn browse_answer(instance: usize, ttl: u32) -> Record {
+    let target = name(&alloc::format!("i{instance}._ipp._tcp.local"));
+    let mut record = Record::shared(browse(), RData::Ptr(target));
+    record.ttl = ttl;
+    record
+}
+
+/// Answer the browse with `count` instances from one peer at `now`.
+fn learn_instances(engine: &mut MdnsEngine, count: usize, ttl: u32, now: Duration64) {
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    let all: Vec<usize> = (0..count).collect();
+    for batch in all.chunks(100) {
+        let theirs = message(0, true, |writer| {
+            for &instance in batch {
+                assert!(writer.push_record(Section::Answer, &browse_answer(instance, ttl)));
+            }
+        });
+        engine.on_message(now, &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
+    }
+}
+
+#[test]
+fn a_query_walks_no_known_answer_past_the_first_stale_one() {
+    let mut engine = engine();
+    ask_browse(&mut engine, &mut Vec::new());
+    learn_instances(&mut engine, 200, 100, at(0));
+    let _ = engine.cache.take_looked();
+    let mut buf = [0u8; BUF];
+    let (len, carried) = engine
+        .build_query(nanos(at(60_000)), &mut buf, &[0])
+        .expect("the question fits");
+    assert_eq!(carried, 1);
+    assert!(
+        answers(&buf[..len]).is_empty(),
+        "nothing past half its lifetime is offered"
+    );
+    assert_eq!(
+        engine.cache.take_looked(),
+        1,
+        "the walk ends at the first record past half its lifetime"
+    );
+}
+
+#[test]
+fn known_answers_too_many_for_one_query_follow_it_at_once() {
+    let mut engine = engine();
+    ask_browse(&mut engine, &mut Vec::new());
+    learn_instances(&mut engine, 200, 4500, at(0));
+    let sent = drain(&mut engine, at(0));
+    assert_eq!(sent.len(), 2, "the query and one message of the rest");
+    let first = Message::parse(&sent[0].1).expect("valid");
+    let rest = Message::parse(&sent[1].1).expect("valid");
+    assert!(first.truncated, "the query says more known answers follow");
+    assert_eq!(first.questions().count(), 1);
+    assert!(!rest.truncated, "the last message says none do");
+    assert_eq!(rest.questions().count(), 0);
+    let offered: usize = sent.iter().map(|(_, bytes)| answers(bytes).len()).sum();
+    assert_eq!(offered, 200, "every known answer goes out once");
+}
+
+#[test]
+fn a_known_answer_list_left_over_is_dropped_once_time_moves() {
+    let mut engine = engine();
+    ask_browse(&mut engine, &mut Vec::new());
+    learn_instances(&mut engine, 200, 4500, at(0));
+    let (_, query) = poll(&mut engine, at(0)).expect("the query");
+    assert!(Message::parse(&query).expect("valid").truncated);
+    assert!(
+        poll(&mut engine, at(1)).is_none(),
+        "nobody waits on the rest any more"
+    );
+    assert!(engine.next_deadline().is_some_and(|next| next > at(1)));
+}
+
+#[test]
+fn a_buffer_too_small_for_any_question_spends_every_due_round() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    for id in 1..=40 {
+        let owner = name(&alloc::format!("h{id}.local"));
+        engine
+            .ask(
+                at(0),
+                QuestionId::new(id),
+                owner,
+                RecordType::A,
+                &mut rng,
+                &mut |_| {},
+            )
+            .expect("asks");
+    }
+    let mut tiny = [0u8; 16];
+    assert!(engine
+        .poll(at(0), &mut rng, &mut tiny, &mut |_| {})
+        .is_none());
+    assert!(
+        engine.next_deadline().is_some_and(|next| next > at(0)),
+        "no round is left in the past"
+    );
+}
+
+/// Another host's QM query for the browse, carrying `known`.
+fn their_browse(known: &[Record], truncated: bool, unicast: bool) -> Vec<u8> {
+    message(0, false, |writer| {
+        let mut question = Question::new(browse(), QuestionType::Record(RecordType::Ptr));
+        question.unicast_response = unicast;
+        assert!(writer.push_question(&question));
+        for record in known {
+            assert!(writer.push_record(Section::Answer, record));
+        }
+        if truncated {
+            writer.set_truncated();
+        }
+    })
+}
+
+#[test]
+fn a_question_asked_knowing_only_what_we_know_counts_as_ours() {
+    let mut engine = engine();
+    ask_browse(&mut engine, &mut Vec::new());
+    learn_instances(&mut engine, 1, 4500, at(0));
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    let theirs = their_browse(&[browse_answer(0, 4500)], false, false);
+    engine.on_message(at(0), &theirs, on_link(7), &mut rng, &mut buf, &mut |_| {});
+    assert!(poll(&mut engine, at(0)).is_none(), "their query was ours");
+}
+
+#[test]
+fn a_question_asked_knowing_more_than_we_do_is_still_asked() {
+    let mut engine = engine();
+    ask_browse(&mut engine, &mut Vec::new());
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    let theirs = their_browse(&[browse_answer(0, 4500)], false, false);
+    engine.on_message(at(0), &theirs, on_link(7), &mut rng, &mut buf, &mut |_| {});
+    assert!(
+        poll(&mut engine, at(0)).is_some(),
+        "responders stay quiet for what they know, which we do not"
+    );
+}
+
+#[test]
+fn a_unicast_or_truncated_question_never_counts_as_ours() {
+    for (truncated, unicast) in [(true, false), (false, true)] {
+        let mut engine = engine();
+        ask_browse(&mut engine, &mut Vec::new());
+        let mut rng = lowest();
+        let mut buf = [0u8; BUF];
+        let theirs = their_browse(&[], truncated, unicast);
+        engine.on_message(at(0), &theirs, on_link(7), &mut rng, &mut buf, &mut |_| {});
+        assert!(
+            poll(&mut engine, at(0)).is_some(),
+            "truncated {truncated}, unicast {unicast}"
+        );
+    }
+}
+
+#[test]
+fn a_multicast_response_that_outgrows_a_datagram_goes_out_whole_and_untruncated() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    let addresses: Vec<RData> = (1..=6).map(address).collect();
+    let id = engine
+        .publish(
+            at(0),
+            name("printer.local"),
+            NameKind::Host,
+            true,
+            &addresses,
+            &mut rng,
+        )
+        .expect("publishes");
+    establish(&mut engine, id);
+    drain(&mut engine, at(30_000));
+    let theirs = query(
+        &name("printer.local"),
+        QuestionType::Record(RecordType::A),
+        false,
+    );
+    let mut buf = [0u8; BUF];
+    assert!(engine
+        .on_message(
+            at(60_000),
+            &theirs,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {}
+        )
+        .is_none());
+    let mut sent = Vec::new();
+    let mut small = [0u8; 100];
+    while let Some(emit) = engine.poll(at(61_000), &mut rng, &mut small, &mut |_| {}) {
+        let bytes = &small[..emit.len];
+        assert!(
+            !Message::parse(bytes).expect("valid").truncated,
+            "a multicast response never claims truncation"
+        );
+        sent.extend(answers(bytes));
+        assert!(sent.len() <= 64, "poll settles");
+    }
+    assert!(
+        addresses
+            .iter()
+            .all(|address| sent.iter().any(|record| record.data == *address)),
+        "every address went out"
     );
 }

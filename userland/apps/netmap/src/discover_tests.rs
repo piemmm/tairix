@@ -10,23 +10,42 @@ use tairix_abi::Errno;
 struct Book {
     next: u32,
     open: BTreeMap<u32, String>,
-    refuse: bool,
+    /// Asks refused, by the start of their description.
+    refusals: Vec<(&'static str, Errno)>,
+    /// The most requests it holds; a start past them is refused.
+    limit: Option<usize>,
+    /// Starts asked of it, refused or not.
+    attempts: usize,
     starts: usize,
+    /// Every call made of it, in order.
+    calls: Vec<String>,
 }
 
 impl Directory for Book {
     fn start(&mut self, query: &Query<'_>) -> Result<u32, DiscoveryError> {
-        if self.refuse {
-            return Err(DiscoveryError::Refused(Errno::PermissionDenied));
+        self.attempts += 1;
+        let what = describe(query);
+        if let Some(&(_, errno)) = self
+            .refusals
+            .iter()
+            .find(|(refused, _)| what.starts_with(refused))
+        {
+            return Err(DiscoveryError::Refused(errno));
+        }
+        if self.limit.is_some_and(|limit| self.open.len() >= limit) {
+            return Err(DiscoveryError::Refused(Errno::LimitExceeded));
         }
         self.next += 1;
         self.starts += 1;
-        self.open.insert(self.next, describe(query));
+        self.calls.push(format!("start {what}"));
+        self.open.insert(self.next, what);
         Ok(self.next)
     }
 
     fn stop(&mut self, request: u32) -> Result<(), DiscoveryError> {
-        self.open.remove(&request);
+        if let Some(what) = self.open.remove(&request) {
+            self.calls.push(format!("stop {what}"));
+        }
         Ok(())
     }
 }
@@ -205,14 +224,108 @@ fn a_request_whose_updates_were_lost_is_asked_again() {
     let mut discovery = printer(&mut book);
     let browse = book.id("browse ipp");
     discovery.apply(&Entry::Lost { request: browse });
+    book.calls.clear();
     discovery.reconcile(&mut book, &BTreeSet::new());
     let again = book.id("browse ipp");
     assert_ne!(again, browse, "the browse is started afresh");
     assert!(!book.open.contains_key(&browse));
-    assert!(
-        book.asks().contains(&"types"),
-        "only the lost request is redone"
+    assert_eq!(
+        book.calls,
+        ["start browse ipp", "stop browse ipp"],
+        "only the lost request is redone, and the old one stops last, so the \
+         question they share is never left unasked"
     );
+}
+
+#[test]
+fn a_lost_request_at_the_accounts_bound_makes_room_for_its_replacement() {
+    let mut book = Book::default();
+    let mut discovery = printer(&mut book);
+    let browse = book.id("browse ipp");
+    discovery.apply(&Entry::Lost { request: browse });
+    book.limit = Some(book.open.len());
+    discovery.reconcile(&mut book, &BTreeSet::new());
+    assert_ne!(book.id("browse ipp"), browse, "replaced");
+    let stopped = book.calls.iter().position(|call| call == "stop browse ipp");
+    let started = book
+        .calls
+        .iter()
+        .rposition(|call| call == "start browse ipp");
+    assert!(stopped < started, "the old request made the room first");
+    assert_eq!(discovery.stalled(), None);
+}
+
+#[test]
+fn a_request_lost_again_as_soon_as_it_is_replaced_waits_a_pass() {
+    let mut book = Book::default();
+    let mut discovery = printer(&mut book);
+    let browse = book.id("browse ipp");
+    discovery.apply(&Entry::Lost { request: browse });
+    discovery.reconcile(&mut book, &BTreeSet::new());
+    let replaced = book.id("browse ipp");
+    assert_ne!(replaced, browse);
+    assert!(!discovery.deferred());
+    discovery.apply(&Entry::Lost { request: replaced });
+    discovery.reconcile(&mut book, &BTreeSet::new());
+    assert_eq!(book.id("browse ipp"), replaced, "held back a pass");
+    assert!(discovery.deferred(), "and the pass says so");
+    discovery.reconcile(&mut book, &BTreeSet::new());
+    assert_ne!(
+        book.id("browse ipp"),
+        replaced,
+        "asked again the pass after"
+    );
+    assert!(!discovery.deferred());
+}
+
+#[test]
+fn a_refused_type_list_is_told_apart_from_a_refused_type() {
+    let mut book = Book::default();
+    book.refusals.push(("types", Errno::PermissionDenied));
+    let mut discovery = Discovery::new();
+    discovery.reconcile(&mut book, &BTreeSet::new());
+    assert!(discovery.locked_out());
+}
+
+#[test]
+fn a_host_outside_local_is_not_looked_up_on_the_link() {
+    let mut book = Book::default();
+    let mut discovery = Discovery::new();
+    let none = BTreeSet::new();
+    discovery.reconcile(&mut book, &none);
+    discovery.apply(&entry(
+        book.id("types"),
+        Change::Added,
+        Answer::Type { service: ipp() },
+    ));
+    discovery.reconcile(&mut book, &none);
+    let label = "Office Printer".as_bytes();
+    discovery.apply(&entry(
+        book.id("browse ipp"),
+        Change::Added,
+        Answer::Instance { label },
+    ));
+    discovery.reconcile(&mut book, &none);
+    let target = wire("printer.example.com");
+    discovery.apply(&entry(
+        book.id("resolve Office Printer"),
+        Change::Added,
+        Answer::Service {
+            priority: 0,
+            weight: 0,
+            port: 631,
+            target: &target,
+        },
+    ));
+    discovery.reconcile(&mut book, &none);
+    assert_eq!(
+        book.asks(),
+        ["types", "browse ipp", "resolve Office Printer"],
+        "a unicast name is no question for the link"
+    );
+    assert_eq!(discovery.services()[0].host, "printer.example.com");
+    assert_eq!(discovery.refused(), None);
+    assert_eq!(discovery.stalled(), None);
 }
 
 #[test]
@@ -264,23 +377,100 @@ fn every_kind_of_request_is_bounded() {
     discovery.reconcile(&mut book, &BTreeSet::new());
     assert_eq!(book.open.len(), 1 + MAX_TYPES);
     assert!(discovery.truncated());
+
+    // Once the segment fits the bound again, the view is whole again.
+    discovery.apply(&entry(
+        types,
+        Change::Retired,
+        Answer::Type {
+            service: ServiceTypeField {
+                name: names[0].as_bytes(),
+                transport: Transport::Tcp,
+            },
+        },
+    ));
+    discovery.reconcile(&mut book, &BTreeSet::new());
+    assert_eq!(book.open.len(), 1 + MAX_TYPES);
+    assert!(!discovery.truncated());
+}
+
+fn link_local(last: u16) -> IpAddr {
+    IpAddr::V6(core::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, last))
 }
 
 #[test]
-fn a_refusal_stops_further_requests_and_is_kept() {
+fn a_service_at_its_bounds_is_asked_again_on_the_next_pass() {
     let mut book = Book {
-        refuse: true,
+        limit: Some(2),
         ..Book::default()
     };
     let mut discovery = Discovery::new();
-    discovery.reconcile(&mut book, &BTreeSet::new());
+    let named = BTreeSet::from([link_local(1), link_local(2), link_local(3)]);
+    discovery.reconcile(&mut book, &named);
+    assert_eq!(book.open.len(), 2);
+    assert_eq!(
+        discovery.stalled(),
+        Some(&DiscoveryError::Refused(Errno::LimitExceeded))
+    );
+    assert_eq!(book.attempts, 3, "the pass ends at the first refusal");
+    assert_eq!(discovery.refused(), None, "nothing is given up");
+    book.limit = None;
+    discovery.reconcile(&mut book, &named);
+    assert_eq!(book.open.len(), 4, "the rest are asked once there is room");
+    assert_eq!(discovery.stalled(), None);
+}
+
+#[test]
+fn an_ask_this_program_may_not_make_is_not_made_again_and_the_rest_are() {
+    let mut book = Book {
+        refusals: alloc::vec![("types", Errno::PermissionDenied)],
+        ..Book::default()
+    };
+    let mut discovery = Discovery::new();
+    let named = BTreeSet::from([link_local(1)]);
+    discovery.reconcile(&mut book, &named);
+    assert_eq!(book.asks(), ["reverse fe80::1"]);
     assert_eq!(
         discovery.refused(),
         Some(&DiscoveryError::Refused(Errno::PermissionDenied))
     );
-    book.refuse = false;
-    discovery.reconcile(&mut book, &BTreeSet::new());
-    assert_eq!(book.starts, 0, "a refused service is not asked again");
+    book.refusals.clear();
+    discovery.reconcile(&mut book, &named);
+    assert_eq!(
+        book.asks(),
+        ["reverse fe80::1"],
+        "a refusal for authority is not asked, nor audited, again"
+    );
+}
+
+#[test]
+fn an_ask_the_service_will_not_answer_is_skipped_and_the_rest_are_made() {
+    let mut book = Book {
+        refusals: alloc::vec![("reverse fe80::1", Errno::OutOfRange)],
+        ..Book::default()
+    };
+    let mut discovery = Discovery::new();
+    let named = BTreeSet::from([link_local(1), link_local(2)]);
+    discovery.reconcile(&mut book, &named);
+    assert_eq!(book.asks(), ["types", "reverse fe80::2"]);
+    assert_eq!(discovery.refused(), None);
+    assert_eq!(discovery.stalled(), None);
+    let attempts = book.attempts;
+    discovery.reconcile(&mut book, &named);
+    assert_eq!(book.attempts, attempts, "the refused ask is not made again");
+}
+
+#[test]
+fn a_map_of_a_busy_segment_keeps_hundreds_of_requests_in_one_session() {
+    let mut book = Book::default();
+    let mut discovery = Discovery::new();
+    let named: BTreeSet<IpAddr> = (1..=MAX_REVERSES)
+        .map(|last| link_local(u16::try_from(last).expect("small")))
+        .collect();
+    discovery.reconcile(&mut book, &named);
+    assert_eq!(book.open.len(), 1 + MAX_REVERSES);
+    assert_eq!(discovery.stalled(), None);
+    assert!(!discovery.truncated());
 }
 
 #[test]

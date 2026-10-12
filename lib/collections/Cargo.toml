@@ -1,6 +1,6 @@
 [package]
 name = "tairix-collections"
-description = "TAIRiX shared heap-backed no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), the spilling SmallVec, and the bounded contiguous ByteQueue. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path. The allocation-free containers are lib/inline."
+description = "TAIRiX shared heap-backed no_std containers that core and alloc do not provide: the open-addressed HashMap/HashSet over control-byte groups (whose group scan is a lib/cpuops self-verified ops table), the spilling SmallVec, the bounded contiguous ByteQueue, and the slot-indexed IndexedHeap. Fallible allocation throughout, no fixed capacity ceiling, no allocation on a read path. The allocation-free containers are lib/inline."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

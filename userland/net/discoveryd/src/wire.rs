@@ -16,7 +16,7 @@ use tairix_abi::net_ipc::{
     address_parts, ip_from_parts, validate_if_name, NetAddrFamily, IF_NAME_LEN,
 };
 use tairix_net::dns::RecordType;
-use tairix_net::mdns::{Destination, MAX_MESSAGE_LEN};
+use tairix_net::mdns::{Destination, MAX_MESSAGE_LEN, MAX_QUESTIONS};
 use tairix_net::IpAddr;
 use tairix_sandbox::wire::{Reader, WireError};
 
@@ -40,6 +40,7 @@ const TAG_HELD: u8 = 3;
 const TAG_REPLAYED: u8 = 4;
 const TAG_TRANSMIT: u8 = 5;
 const TAG_LINKED: u8 = 6;
+const TAG_STOPPED: u8 = 7;
 
 const TO_GROUP: u8 = 0;
 const TO_PEER: u8 = 1;
@@ -75,6 +76,9 @@ pub const REPLAYED_LEN: usize = 1 + 4;
 
 /// Length of a [`FromDecoder::Linked`] frame.
 pub const LINKED_LEN: usize = 1 + IF_NAME_LEN + 1;
+
+/// Length of a [`FromDecoder::Stopped`] frame.
+pub const STOPPED_LEN: usize = 1 + 4;
 
 /// Length of a [`FromDecoder::Transmit`] frame before its payload: tag,
 /// interface, destination kind, family, address, port.
@@ -182,14 +186,15 @@ pub enum ToDecoder<'a> {
     Ask {
         /// The monotonic instant, in nanoseconds.
         now: u64,
-        /// The front's id for it, never reused.
+        /// The front's id for it, below [`MAX_QUESTIONS`] and reused only
+        /// after the decoder has said [`FromDecoder::Stopped`] for it.
         question: u32,
         /// How its answers are read.
         form: Form,
         /// The name asked about, in canonical wire form.
         name: &'a [u8],
     },
-    /// Stop asking a question.
+    /// Stop asking a question, and say so with [`FromDecoder::Stopped`].
     Stop {
         /// The question.
         question: u32,
@@ -259,7 +264,7 @@ impl<'a> ToDecoder<'a> {
                 form,
                 name,
             } => {
-                if name.is_empty() || name.len() > NAME_MAX {
+                if name.is_empty() || name.len() > NAME_MAX || !is_question(question) {
                     return None;
                 }
                 let len = ASK_HEADER_LEN + name.len();
@@ -273,12 +278,18 @@ impl<'a> ToDecoder<'a> {
                 Some(len)
             }
             Self::Stop { question } => {
+                if !is_question(question) {
+                    return None;
+                }
                 let frame = out.get_mut(..STOP_LEN)?;
                 frame[0] = TAG_STOP;
                 frame[1..].copy_from_slice(&question.to_le_bytes());
                 Some(STOP_LEN)
             }
             Self::Replay { question, token } => {
+                if !is_question(question) {
+                    return None;
+                }
                 let frame = out.get_mut(..REPLAY_LEN)?;
                 frame[0] = TAG_REPLAY;
                 frame[1..5].copy_from_slice(&question.to_le_bytes());
@@ -295,7 +306,7 @@ impl<'a> ToDecoder<'a> {
     /// [`WireError`] for a short frame, an unknown tag, trailing bytes, an
     /// interface name the stack would never use, an unknown address family or
     /// form, an IPv4 address with a dirty tail, a flag other than `0` or `1`,
-    /// or a field longer than its bound.
+    /// a question id past [`MAX_QUESTIONS`], or a field longer than its bound.
     pub fn decode(frame: &'a [u8]) -> Result<Self, WireError> {
         let mut reader = Reader::new(frame);
         let decoded = match reader.u8()? {
@@ -328,7 +339,7 @@ impl<'a> ToDecoder<'a> {
             },
             TAG_ASK => {
                 let now = reader.u64()?;
-                let question = reader.u32()?;
+                let question = question(&mut reader)?;
                 let form = Form::from_u8(reader.u8()?).ok_or(WireError::Malformed)?;
                 let len = usize::from(reader.u8()?);
                 if len == 0 {
@@ -342,10 +353,10 @@ impl<'a> ToDecoder<'a> {
                 }
             }
             TAG_STOP => Self::Stop {
-                question: reader.u32()?,
+                question: question(&mut reader)?,
             },
             TAG_REPLAY => Self::Replay {
-                question: reader.u32()?,
+                question: question(&mut reader)?,
                 token: reader.u32()?,
             },
             _ => return Err(WireError::Malformed),
@@ -394,6 +405,12 @@ pub enum FromDecoder<'a> {
         interface: [u8; IF_NAME_LEN],
         /// Whether it is now up.
         up: bool,
+    },
+    /// A [`ToDecoder::Stop`] has been carried out: no frame after this one
+    /// is about the question, whose id the front may give to another.
+    Stopped {
+        /// The question.
+        question: u32,
     },
 }
 
@@ -464,6 +481,15 @@ impl<'a> FromDecoder<'a> {
                 frame[1 + IF_NAME_LEN] = u8::from(up);
                 Some(LINKED_LEN)
             }
+            Self::Stopped { question } => {
+                if !is_question(question) {
+                    return None;
+                }
+                let frame = out.get_mut(..STOPPED_LEN)?;
+                frame[0] = TAG_STOPPED;
+                frame[1..].copy_from_slice(&question.to_le_bytes());
+                Some(STOPPED_LEN)
+            }
         }
     }
 
@@ -474,8 +500,10 @@ impl<'a> FromDecoder<'a> {
     /// [`WireError`] for a short frame, an unknown tag, trailing bytes, a
     /// presence flag other than `0` or `1`, an absent deadline whose instant
     /// is not zero, an entry the discovery channel would refuse, an interface
-    /// name the stack would never use, a group destination with an address, or
-    /// a datagram empty or past [`MAX_MESSAGE_LEN`].
+    /// name the stack would never use, a group destination with an address, a
+    /// datagram empty or past [`MAX_MESSAGE_LEN`], or a frame's own question
+    /// id past [`MAX_QUESTIONS`]. The id an answer entry carries is judged by
+    /// the question table, which holds the decoder to its word.
     pub fn decode(frame: &'a [u8]) -> Result<Self, WireError> {
         let mut reader = Reader::new(frame);
         let decoded = match reader.u8()? {
@@ -524,6 +552,9 @@ impl<'a> FromDecoder<'a> {
                 interface: interface(&mut reader)?,
                 up: flag(reader.u8()?)?,
             },
+            TAG_STOPPED => Self::Stopped {
+                question: question(&mut reader)?,
+            },
             _ => return Err(WireError::Malformed),
         };
         if !reader.is_exhausted() {
@@ -531,6 +562,21 @@ impl<'a> FromDecoder<'a> {
         }
         Ok(decoded)
     }
+}
+
+/// Whether `id` can name a question: every id is a slot below
+/// [`MAX_QUESTIONS`].
+fn is_question(id: u32) -> bool {
+    usize::try_from(id).is_ok_and(|id| id < MAX_QUESTIONS)
+}
+
+/// A question id.
+fn question(reader: &mut Reader<'_>) -> Result<u32, WireError> {
+    let id = reader.u32()?;
+    if !is_question(id) {
+        return Err(WireError::Malformed);
+    }
+    Ok(id)
 }
 
 /// Read `N` raw bytes as a fixed array.
