@@ -22,7 +22,7 @@
 //! records query and is not offered until it can be served honestly.
 //!
 //! This crate is the pure engine — decode, select, render — over injected
-//! seams (`tairix_procinfo::Transport`, [`io::Output`],
+//! seams (`tairix_procinfo::Transport`, [`Output`],
 //! `tairix_help::HelpSource`), host-tested with no kernel. The
 //! freestanding `Run` binary in `src/run.rs` binds the production seams.
 
@@ -34,9 +34,8 @@ extern crate alloc;
 pub mod client;
 pub mod command;
 pub mod error;
-pub mod io;
 
 pub use client::{run, USAGE};
 pub use command::{parse, Command, DeviceFilter, NameMode, Options, ParseError};
 pub use error::LspciError;
-pub use io::Output;
+pub use tairix_util::output::Output;

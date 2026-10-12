@@ -73,15 +73,4 @@ pub trait Walk {
     fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno>;
 }
 
-/// Writes bytes to one of the tool's output streams.
-///
-/// The client uses two instances: standard output for the usage rows, and
-/// standard error for the per-path diagnostics it reports before moving on.
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;

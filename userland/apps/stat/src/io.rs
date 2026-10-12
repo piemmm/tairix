@@ -85,12 +85,4 @@ pub trait Names {
     fn user(&self, uid: u32) -> Option<String>;
 }
 
-/// Writes rendered bytes to one of the tool's output streams.
-pub trait Output {
-    /// Write all of `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises; a partial write is an error.
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;

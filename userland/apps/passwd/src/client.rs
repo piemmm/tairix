@@ -32,15 +32,7 @@ pub trait SaltSource {
     fn salt(&self) -> Option<Salt>;
 }
 
-/// Writes rendered bytes to the terminal.
-pub trait Output {
-    /// Write every byte of `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// Why a `passwd` run did not complete.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -33,6 +33,8 @@ path = "src/run.rs"
 # The frozen user/kernel vocabulary: `Errno` for every seam refusal (the
 # dedicated `NotEmpty`/`NotADirectory` codes drive the GNU semantics).
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one path-spelling grammar: `Path::prefix` spells each ancestor of an
 # operand, so `-p` walks parents without a second path parser.
 tairix-path = { path = "../../../lib/path", version = "=0.0.0" }

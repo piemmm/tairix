@@ -926,7 +926,10 @@ The RFC 9293 transmission control block (`Tcb`), built on the segment
 codec and `SeqNumber`. It is pure and event-driven exactly as `neigh`
 and `mcast` are: the caller feeds parsed inbound segments and explicit
 `now`, drives the application side (`connect`/`listen`/`send`/`recv`/
-`close`/`abort`), drains outbound segments through a `poll_transmit`
+`close`/`abort`, with `recv` split as `peek` and `consume` for a consumer
+that takes bytes only once it has somewhere to put them, so the receive
+window stays shut until it does), drains outbound segments through a
+`poll_transmit`
 `emit` closure, fires timers with `advance`, and re-arms one one-shot
 timer from `next_deadline` (never a poll loop). The initial sequence
 number is a **caller-supplied CSPRNG draw** (§22): the engine generates
@@ -943,9 +946,9 @@ the RFC 9293 ABORT that resets both directions at once.
 
 It implements the full state machine — active, passive, and simultaneous
 open; the complete teardown lattice through TIME-WAIT (2·MSL) — plus the
-send and receive windows over `SeqNumber`, RFC 7323 window scaling and
-timestamps with PAWS, RFC 2018 SACK generation from a bounded
-out-of-order reassembly set, RFC 6298 retransmission (SRTT/RTTVAR/RTO)
+send and receive windows over `SeqNumber`, RFC 7323 window scaling (the
+window a SYN or SYN-ACK carries is never scaled) and timestamps with PAWS,
+RFC 2018 SACK generation from a bounded out-of-order reassembly set, RFC 6298 retransmission (SRTT/RTTVAR/RTO)
 with Karn's algorithm, RFC 6675 SACK-based selective loss recovery (a
 bounded scoreboard drives `IsLost`/`SetPipe`/`NextSeg`, replacing
 go-back-N when the peer negotiated SACK; go-back-N remains the fallback

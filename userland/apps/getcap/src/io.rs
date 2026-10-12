@@ -76,15 +76,4 @@ pub trait FileSystem {
     fn read_dir(&self, path: &str, index: u64) -> Result<Option<Entry>, Errno>;
 }
 
-/// Writes rendered bytes to the terminal.
-///
-/// `getcap` writes one line per gated file, plus the usage banner for
-/// [`Command::Help`](crate::Command::Help).
-pub trait Output {
-    /// Write every byte of `bytes` to the terminal.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the console raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;

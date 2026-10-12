@@ -19,27 +19,11 @@ mod program {
     use alloc::format;
 
     use tairix_abi::discovery_ipc::{Entry, Query};
-    use tairix_abi::Errno;
+
     use tairix_discovery::{DiscoveryError, RtDiscovery, Waited};
-    use tairix_dns_sd::{parse, run, Command, Discovery, Output, USAGE};
+    use tairix_dns_sd::{parse, run, Command, Discovery, USAGE};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stdout.write_all(bytes).map_err(|_| Errno::BrokenPipe)
-        }
-    }
-
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::BrokenPipe)
-        }
-    }
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
     /// The discovery service, reached lazily: help needs no session.
     struct RtService(Option<RtDiscovery>);
@@ -90,7 +74,7 @@ mod program {
         let help = BundleHelp::new("dns-sd");
         let asks = matches!(command, Command::Ask { .. });
         let mut service = RtService(None);
-        match run(command, locale, &mut service, &help, &RtOutput, &RtErrors) {
+        match run(command, locale, &mut service, &help, &Stdout, &Stderr) {
             Ok(status) => status,
             Err(err) => {
                 if asks {

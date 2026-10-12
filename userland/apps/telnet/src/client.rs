@@ -17,9 +17,9 @@ use tairix_vt::line::{LineEditor, LineFeed};
 use crate::command::{Command, Config, Target};
 use crate::error::TelnetError;
 use crate::interp::{self, Action};
-use crate::io::Output;
 use crate::net::{CloseReason, Endpoint, IoEvent, TelnetIo};
 use crate::session::Session;
+use crate::Output;
 
 /// The one-line usage banner, printed on a usage error and as the fallback when
 /// the bundled help document is unavailable.
@@ -180,7 +180,9 @@ fn relay(
     };
 
     loop {
-        let event = io.next_event().map_err(TelnetError::Receive)?;
+        let event = io
+            .next_event(!session.wire_pending())
+            .map_err(TelnetError::Receive)?;
         match event {
             IoEvent::Network(bytes) => {
                 let fold = session.on_network(&bytes);
@@ -218,6 +220,7 @@ fn relay(
                 }
                 phase = Phase::Relay;
             }
+            IoEvent::Room => flush(session, io, out, err)?,
             IoEvent::Closed(reason) => {
                 let text = match reason {
                     CloseReason::PeerClosed => "\r\nConnection closed by foreign host.\r\n",
@@ -431,7 +434,9 @@ fn flush(
     if !io.connected() {
         return Ok(());
     }
-    io.send(&wire).map_err(TelnetError::Send)
+    let sent = io.send(&wire).map_err(TelnetError::Send)?;
+    session.requeue_wire(wire, sent);
+    Ok(())
 }
 
 #[cfg(test)]

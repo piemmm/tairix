@@ -42,14 +42,14 @@ mod program {
     use tairix_abi::{Errno, InputMode, TerminalSize};
     use tairix_help::BundleHelp;
     use tairix_net::IpAddr;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_rt::keys::{KeyRelay, Keys};
     use tairix_rt::{PrivatePort, WaitSet};
     use tairix_telnet::net::{
         await_handshake, connect_when_reachable, CloseReason, Endpoint, Handshake, IoEvent,
         TelnetIo,
     };
-    use tairix_telnet::{parse, run, Command, Output, FALLBACK_TERM, USAGE};
+    use tairix_telnet::{parse, run, Command, FALLBACK_TERM, USAGE};
 
     /// Wait-set token for the stack's delivery port.
     const DELIVER_TOKEN: u64 = 1;
@@ -67,10 +67,6 @@ mod program {
     /// NIC driver may not be bound to the stack yet and it answers
     /// `NetworkUnreachable`.
     const CONNECT_PATIENCE_NANOS: u64 = 5 * NANOS_PER_SEC;
-
-    /// The timed park before offering bytes again to a full send buffer: the
-    /// stream protocol reports no room, so this is the one wait with no event.
-    const SEND_RETRY_NANOS: u64 = 25_000_000;
 
     /// Bytes offered per `stream_send` call, so one marshalled request stays
     /// modest however much the operator pasted.
@@ -91,36 +87,14 @@ mod program {
     /// Columns of the fallback grid.
     const FALLBACK_COLS: u16 = 80;
 
-    /// The production standard-output stream: the remote host's output and the
-    /// command interpreter's replies go to fd 1. The tool names only
-    /// descriptors its spawner chose, so the same binary drives a serial
-    /// terminal, a framebuffer console, or a windowed terminal unchanged.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The production standard-error stream: diagnostics and negotiation traces
-    /// go to fd 2, keeping the session's own output on fd 1 clean for pipes.
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// The production [`TelnetIo`]: the stream socket, the two ports, the
     /// wait-sets they are registered on, and the terminal controls.
     struct RtTelnetIo {
         /// The wait-set the relay parks on: the delivery port and the keyboard.
         set: WaitSet,
-        /// The delivery port alone, for the handshake, which must not wake for
-        /// a keystroke it cannot take yet.
-        handshake: WaitSet,
+        /// The delivery port alone, for the handshake and for output waiting
+        /// on room, neither of which may wake for a keystroke it cannot take.
+        stream: WaitSet,
         /// The network-interfaces notice, for a connect waiting on the network.
         network: WaitSet,
         /// The process-private port the stack delivers stream events to.
@@ -143,8 +117,8 @@ mod program {
             let set = WaitSet::create()?;
             set.add(WaitSourceKind::Port, deliver.id(), DELIVER_TOKEN)?;
             set.add(WaitSourceKind::Port, keys.port(), KEYBOARD_TOKEN)?;
-            let handshake = WaitSet::create()?;
-            handshake.add(WaitSourceKind::Port, deliver.id(), DELIVER_TOKEN)?;
+            let stream = WaitSet::create()?;
+            stream.add(WaitSourceKind::Port, deliver.id(), DELIVER_TOKEN)?;
             let network = WaitSet::create()?;
             network.add(
                 WaitSourceKind::SystemNotice,
@@ -153,7 +127,7 @@ mod program {
             )?;
             Ok(Self {
                 set,
-                handshake,
+                stream,
                 network,
                 deliver,
                 keys,
@@ -164,8 +138,9 @@ mod program {
         }
 
         /// Park until one of the two ports has a message, giving the CPU up.
-        fn park(&self) {
-            let _ = self.set.wait_until(u64::MAX);
+        fn park(&self, keyboard: bool) {
+            let set = if keyboard { &self.set } else { &self.stream };
+            let _ = set.wait_until(u64::MAX);
         }
 
         /// Drain one keyboard message, or [`None`] if the mailbox was empty.
@@ -187,6 +162,7 @@ mod program {
                 SocketStreamEvent::Data { socket: s, payload } if s == socket => {
                     Some(Ok(IoEvent::Network(payload.to_vec())))
                 }
+                SocketStreamEvent::Room { socket: s } if s == socket => Some(Ok(IoEvent::Room)),
                 SocketStreamEvent::Closed { socket: s, reason } if s == socket => {
                     self.socket = None;
                     Some(Ok(IoEvent::Closed(match reason {
@@ -208,7 +184,7 @@ mod program {
         /// must fail loud with a reason rather than hang the terminal.
         fn await_connected(&mut self, socket: SocketId) -> Result<(), Errno> {
             let deadline = tairix_rt::clock_get().saturating_add(HANDSHAKE_TIMEOUT_NANOS);
-            let (deliver, buf, handshake) = (self.deliver.id(), &mut self.buf, &self.handshake);
+            let (deliver, buf, stream) = (self.deliver.id(), &mut self.buf, &self.stream);
             await_handshake(
                 || match tairix_rt::net::stream_recv(deliver, buf) {
                     Ok(SocketStreamEvent::Connected { socket: s }) if s == socket => {
@@ -220,7 +196,7 @@ mod program {
                     Ok(_) => Some(Handshake::Unrelated),
                     Err(_) => None,
                 },
-                || handshake.wait_until(deadline).map(|woke| woke.is_some()),
+                || stream.wait_until(deadline).map(|woke| woke.is_some()),
             )
         }
     }
@@ -282,7 +258,7 @@ mod program {
             self.socket.is_some()
         }
 
-        fn next_event(&mut self) -> Result<IoEvent, Errno> {
+        fn next_event(&mut self, keyboard: bool) -> Result<IoEvent, Errno> {
             loop {
                 // Both mailboxes are drained before parking again, so an event
                 // that arrived while the last one was being handled is never
@@ -290,27 +266,26 @@ mod program {
                 if let Some(event) = self.drain_network() {
                     return event;
                 }
-                if let Some(event) = self.drain_keyboard() {
-                    return event;
+                if keyboard {
+                    if let Some(event) = self.drain_keyboard() {
+                        return event;
+                    }
                 }
-                self.park();
+                self.park(keyboard);
             }
         }
 
-        fn send(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+        fn send(&mut self, bytes: &[u8]) -> Result<usize, Errno> {
             let socket = self.socket.ok_or(Errno::NotConnected)?;
-            let mut offset = 0usize;
-            while offset < bytes.len() {
-                let end = (offset + SEND_CHUNK).min(bytes.len());
-                match tairix_rt::net::stream_send(socket, &bytes[offset..end]) {
-                    // A momentarily-full send buffer is retried after a timed
-                    // park, which nothing pending can cut short.
-                    Ok(0) => tairix_rt::park_ns(SEND_RETRY_NANOS),
-                    Ok(accepted) => offset += accepted as usize,
-                    Err(errno) => return Err(errno),
+            let mut taken = 0usize;
+            for chunk in bytes.chunks(SEND_CHUNK) {
+                let accepted = tairix_rt::net::stream_send(socket, chunk)? as usize;
+                taken += accepted;
+                if accepted < chunk.len() {
+                    break;
                 }
             }
-            Ok(())
+            Ok(taken)
         }
 
         fn terminal_size(&mut self) -> Option<TerminalSize> {
@@ -392,9 +367,7 @@ mod program {
         if matches!(command, Command::Help) {
             // The help path opens no socket, binds no port and starts no
             // thread: it is a plain write to standard output.
-            return match run(
-                command, locale, term, &mut NoIo, &help, &RtOutput, &RtErrors,
-            ) {
+            return match run(command, locale, term, &mut NoIo, &help, &Stdout, &Stderr) {
                 Ok(()) => 0,
                 Err(err) => {
                     write_stderr_line(&format!("telnet: {err}"));
@@ -453,7 +426,7 @@ mod program {
             }
         };
 
-        match run(command, locale, term, &mut io, &help, &RtOutput, &RtErrors) {
+        match run(command, locale, term, &mut io, &help, &Stdout, &Stderr) {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(&format!("telnet: {err}"));
@@ -485,11 +458,11 @@ mod program {
             false
         }
 
-        fn next_event(&mut self) -> Result<IoEvent, Errno> {
+        fn next_event(&mut self, _keyboard: bool) -> Result<IoEvent, Errno> {
             Err(Errno::NotConnected)
         }
 
-        fn send(&mut self, _bytes: &[u8]) -> Result<(), Errno> {
+        fn send(&mut self, _bytes: &[u8]) -> Result<usize, Errno> {
             Err(Errno::NotConnected)
         }
 

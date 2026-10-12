@@ -17,7 +17,7 @@
 //! fabricated name), and runs the parsed command against the production
 //! seams: the shared `tairix_procinfo::IpcTransport` for the `sysinfo-v1`
 //! `HARDWARE_TREE` query, the shared `tairix_help::BundleHelp` for the
-//! short-help switches, and `RtOutput`/`RtErrors`, which write the listing
+//! short-help switches, and `Stdout`/`Stderr`, which write the listing
 //! to the inherited standard output (with the naming advisory on fd 3,
 //! best-effort) and the diagnostics to standard error. The tool binds only
 //! to its inherited descriptors, never a console device, and holds no
@@ -37,36 +37,14 @@ mod program {
 
     use alloc::format;
 
-    use tairix_abi::Errno;
     use tairix_devids::{DbKind, DevIds};
     use tairix_help::BundleHelp;
-    use tairix_lsusb::{parse, run, Output, USAGE};
+    use tairix_lsusb::{parse, run, USAGE};
     use tairix_procinfo::IpcTransport;
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdout};
 
     /// The command word this bundle is named by.
     const OWN_WORD: &str = "lsusb";
-
-    /// The production standard-output stream: the listing goes to fd 1 and
-    /// the naming advisory to fd 3 (best-effort). The tool names only
-    /// descriptors its spawner chose, so the same binary drives a serial
-    /// terminal, a framebuffer console, or a future windowed terminal
-    /// unchanged.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-
-        fn info(&self, record: &[u8]) {
-            // fd 3 is ignorable by contract: unattached is a no-op and a
-            // short write is never an error a listing depends on.
-            let _ = StdInfo.write_all(record);
-        }
-    }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
@@ -121,7 +99,7 @@ mod program {
             &IpcTransport,
             database.as_ref(),
             &BundleHelp::new(OWN_WORD),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

@@ -104,6 +104,12 @@ thread parks on a wait-set holding *both* ports. Neither thread ever spins and
 no timer is armed, which is what §2.23 asks for; the engine above the seam sees
 one ordered event stream and stays single-threaded and host-testable.
 
+Output is driven the same way. A send the connection takes only part of leaves
+the rest queued in the session, which takes no keystroke until the stack's
+`Room` event says the connection can take more, while the server's output
+keeps being read; typing cannot outrun the connection and nothing waits on a
+timer.
+
 The alternative considered and rejected was a timed poll of standard input
 between socket waits: §2.23 permits a periodic re-poll only where an event has
 *no* wake source, and here it has one. Adding a kernel wait-source for

@@ -32,6 +32,8 @@ path = "src/run.rs"
 [dependencies]
 # The audited ABI vocabulary: `Errno` for the seam error channel.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md).

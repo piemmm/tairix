@@ -546,9 +546,11 @@ fn exercise_net_socket(bytes: &[u8]) {
         let len = event
             .encode(&mut buf)
             .expect("round-trip encode of an accepted stream event must succeed");
-        let reparsed = SocketStreamEvent::parse(&buf[..len])
-            .expect("round-trip of an accepted stream event must succeed");
-        assert_eq!(event, reparsed);
+        assert_eq!(
+            &buf[..len],
+            bytes,
+            "an accepted stream event is the one encoding of itself"
+        );
     }
     let _ = decode_socket_reply(bytes);
     let _ = decode_bind_reply(bytes);

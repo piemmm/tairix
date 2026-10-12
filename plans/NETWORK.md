@@ -963,6 +963,14 @@ the whole is too large for one change and each leaves the tree working.
     stream timers fold into `stream_next_deadline`/`advance_streams`. `run.rs`
     drives the stream pump in the event loop. A netstack stream connect+echo
     test exercises the real pump against a passive-peer echo server.
+  - Stream delivery is back-pressured end to end. A socket owing its client
+    an event is listed and posted at the top of each loop pass; received
+    bytes leave the `Tcb` only once their post lands (`Tcb::peek` /
+    `consume`), so a full client port shuts the window on the peer rather
+    than losing acknowledged bytes, and the service parks on `PortRoom` for
+    the ports still owed. A `Send` the buffer takes only part of owes one
+    `Room` once half the buffer is free; a listener's ready connections share
+    one `Accepted`.
   - `lib/rt::net`: `stream_socket`/`stream_send`/`stream_recv` client
     wrappers (`connect`/`close` shared with datagrams).
   `listen`/`accept` remain N6; `shutdown` is N15.

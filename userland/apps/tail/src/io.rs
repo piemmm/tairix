@@ -133,26 +133,4 @@ pub trait Input {
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 }
 
-/// Writes bytes to one of the tool's output streams.
-///
-/// The client uses two instances: standard output for the selected data and
-/// headers, and standard error for the per-file diagnostics it reports
-/// before moving to the next operand.
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
-
-/// Emits framed advisory records to the standard information stream (fd 3).
-///
-/// Kept separate from [`Output`] because fd 3 is ignorable by contract: an
-/// unattached consumer or a short write is silently a no-op and never
-/// affects `tail`'s output, exit status, or pipeline semantics.
-pub trait Info {
-    /// Emit one framed `stdinfo` record on fd 3, best-effort.
-    fn emit(&self, record: &[u8]);
-}
+pub use tairix_util::output::Output;

@@ -16,7 +16,7 @@
 //! `RtProbe`, which confirms a `file` operand through the kernel-authorised
 //! `fs_*` syscalls (every per-inode and mount check stays kernel-side), the
 //! shared `tairix_help::BundleHelp` for the short-help switches, and
-//! `RtOutput`/`RtErrors`, which write the table to the inherited standard
+//! `Stdout`/`Stderr`, which write the table to the inherited standard
 //! output (with the omission advisory on fd 3, best-effort) and the
 //! diagnostics to standard error. The tool binds only to its inherited
 //! descriptors, never a console device, and holds no ambient authority.
@@ -37,10 +37,10 @@ mod program {
 
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::Errno;
-    use tairix_df::{parse, run, Output, PathProbe, USAGE};
+    use tairix_df::{parse, run, PathProbe, USAGE};
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_rt::File;
 
     /// The production [`PathProbe`]: a resolve-only open through the
@@ -57,37 +57,6 @@ mod program {
             File::open(path.as_bytes(), OpenFlags::empty())
                 .map(|_| ())
                 .map_err(Errno::from_syscall)
-        }
-    }
-
-    /// The production standard-output stream: the table goes to fd 1 and
-    /// the omission advisory to fd 3 (best-effort). The tool names only
-    /// descriptors its spawner chose, so the same binary drives a serial
-    /// terminal, a framebuffer console, or a future windowed terminal
-    /// unchanged.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-
-        fn info(&self, record: &[u8]) {
-            // fd 3 is ignorable by contract: unattached is a no-op and a
-            // short write is never an error a report depends on.
-            let _ = StdInfo.write_all(record);
-        }
-    }
-
-    /// The production standard-error stream: diagnostics go to fd 2,
-    /// keeping the table on fd 1 clean for pipes.
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
         }
     }
 
@@ -121,8 +90,8 @@ mod program {
             &IpcTransport,
             &RtProbe,
             &BundleHelp::new("df"),
-            &RtOutput,
-            &RtErrors,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(true) => 0,
             Ok(false) => 1,

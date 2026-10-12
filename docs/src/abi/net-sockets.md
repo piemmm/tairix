@@ -219,9 +219,17 @@ of `SocketDatagram` — carrying no per-message peer (the peer is fixed):
   (`PeerClosed` orderly EOF, `Reset`, `TimedOut`, or `Refused`), so a
   `recv` reaching end-of-stream can tell an orderly close from an abortive
   one (the receive half never ends silently). No event follows `Closed`;
-- `Accepted` — delivered to a *listening* socket's port, edge-triggered, one
-  per newly ready connection: the client responds by calling `Accept` on the
-  listener until it replies `WouldBlock`.
+- `Room` — after a `Send` the stack took only part of, once at least half the
+  send buffer is free again: the sender resends the rest on this event,
+  never on a timer;
+- `Accepted` — delivered to a *listening* socket's port when connections are
+  ready: the client calls `Accept` on the listener until it replies
+  `WouldBlock`, so several ready connections may share one `Accepted`.
+
+A frame decodes only as exactly its own encoding, with no bytes after it.
+Events wait for room in the client's port rather than being dropped: received
+bytes stay in the connection, whose window shuts on the peer until the client
+drains its port, so a slow reader throttles its peer instead of losing data.
 
 The client links `tairix_rt::net::stream_socket` / `connect` / `stream_send`
 / `listen` / `accept` / `shutdown` / `close` and drains events with `stream_recv` (which,

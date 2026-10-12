@@ -36,7 +36,7 @@ mod program {
     use tairix_abi::fs::{FS_PATH_MAX, FS_SYMLINK_MAX};
     use tairix_abi::{Errno, RealpathMode};
     use tairix_help::BundleHelp;
-    use tairix_readlink::{parse, run, Filesystem, Output, USAGE};
+    use tairix_readlink::{parse, run, Filesystem, USAGE};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
     /// The production [`Filesystem`] over `fs_readlink` and `fs_realpath`.
@@ -75,30 +75,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard output (fd 1):
-    /// the printed targets.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning. The io layer's error
-            // carries no errno, so it collapses onto the same code the
-            // kernel uses where abi-v1 has no dedicated one.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The production diagnostics stream (fd 2), keeping the targets on fd 1
-    /// clean for pipes.
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -128,8 +104,8 @@ mod program {
             locale,
             &RtFilesystem,
             &BundleHelp::new("readlink"),
-            &RtOutput,
-            &RtErrors,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(true) => 0,
             Ok(false) => 1,

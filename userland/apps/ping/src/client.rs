@@ -16,9 +16,9 @@ use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Config, PayloadKind, Target};
 use crate::error::PingError;
-use crate::io::Output;
 use crate::net::{EchoEvent, PingIo};
 use crate::report::{self, RttStats};
+use crate::Output;
 
 /// The one-line usage banner, printed on a usage error and as the fallback
 /// when the bundled help document is unavailable.

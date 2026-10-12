@@ -16,7 +16,7 @@
 //! one lazily opened `lib/resolver` transport for the `-r` host-name
 //! lookups, the shared `tairix_help::BundleHelp` for the short-help switches,
 //! and
-//! `RtOutput`/`RtErrors`, which write the table to the inherited standard
+//! `Stdout`/`Stderr`, which write the table to the inherited standard
 //! output (with the omission advisory on fd 3, best-effort) and the
 //! diagnostics to standard error. The tool binds only to its inherited
 //! descriptors, never a console device, and holds no ambient authority.
@@ -37,41 +37,11 @@ mod program {
 
     use alloc::string::String;
 
-    use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
     use tairix_resolver::RtDnsTransport;
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stderr, Stdout, Write};
-    use tairix_ss::{parse, run, NameLookup, Output, USAGE};
-
-    /// The production standard-output stream: the table goes to fd 1 and
-    /// the omission advisory to fd 3 (best-effort). The tool names only
-    /// descriptors its spawner chose, so the same binary drives a serial
-    /// terminal, a framebuffer console, or a future windowed terminal
-    /// unchanged.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-
-        fn info(&self, record: &[u8]) {
-            // fd 3 is ignorable by contract: unattached is a no-op and a
-            // short write is never an error a report depends on.
-            let _ = StdInfo.write_all(record);
-        }
-    }
-
-    /// The production standard-error stream: diagnostics go to fd 2,
-    /// keeping the table on fd 1 clean for pipes.
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
+    use tairix_ss::{parse, run, NameLookup, USAGE};
 
     /// The production reverse-lookup seam: the shared `lib/resolver` stub
     /// resolver over **one** transport reused across the whole listing, so
@@ -119,8 +89,8 @@ mod program {
             &IpcTransport,
             &mut RtNames::default(),
             &BundleHelp::new("ss"),
-            &RtOutput,
-            &RtErrors,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(_) => 0,
             Err(err) => {

@@ -403,6 +403,29 @@ impl Write for StdInfo {
     }
 }
 
+/// A refused write keeps the kernel's own reason. An advisory record goes to
+/// fd 3, whichever stream carries it.
+impl tairix_util::output::Output for Stdout {
+    fn write_all(&self, bytes: &[u8]) -> core::result::Result<(), Errno> {
+        Write::write_all(&mut Self, bytes).map_err(Error::as_errno)
+    }
+
+    fn info(&self, record: &[u8]) {
+        let _ = Write::write_all(&mut StdInfo, record);
+    }
+}
+
+/// As for [`Stdout`].
+impl tairix_util::output::Output for Stderr {
+    fn write_all(&self, bytes: &[u8]) -> core::result::Result<(), Errno> {
+        Write::write_all(&mut Self, bytes).map_err(Error::as_errno)
+    }
+
+    fn info(&self, record: &[u8]) {
+        let _ = Write::write_all(&mut StdInfo, record);
+    }
+}
+
 /// Write `line` and a trailing newline to standard error (fd 2), best-effort.
 ///
 /// A tool routes a diagnostic (a usage banner, a failed-query message) here so
@@ -1028,6 +1051,43 @@ mod tests {
         let (number, args) = seam::last_call().expect("one trap");
         assert_eq!(number, crate::NUM_STREAM_WRITE);
         assert_eq!(args[0], u64::from(STDINFO));
+    }
+
+    #[test]
+    fn an_engines_refused_write_keeps_the_kernels_reason() {
+        use tairix_util::output::Output;
+        let streams: [(&dyn Output, u32); 2] = [(&Stdout, STDOUT), (&Stderr, STDERR)];
+        for (stream, fd) in streams {
+            seam::arm(refusal(Errno::BrokenPipe));
+            assert_eq!(stream.write_all(b"row\n"), Err(Errno::BrokenPipe));
+            let (number, args) = seam::last_call().expect("one trap");
+            assert_eq!((number, args[0]), (crate::NUM_STREAM_WRITE, u64::from(fd)));
+
+            seam::arm(0);
+            assert_eq!(
+                stream.write_all(b"row\n"),
+                Err(Errno::DeviceFault),
+                "a stream that takes nothing has stopped taking work"
+            );
+
+            seam::arm(4);
+            assert_eq!(stream.write_all(b"row\n"), Ok(()));
+        }
+    }
+
+    #[test]
+    fn an_engines_advisory_record_goes_to_fd_3_from_either_stream_and_never_fails() {
+        use tairix_util::output::Output;
+        let streams: [&dyn Output; 2] = [&Stdout, &Stderr];
+        for stream in streams {
+            seam::arm(refusal(Errno::NotFound));
+            stream.info(b"{}\n");
+            let (number, args) = seam::last_call().expect("one trap");
+            assert_eq!(
+                (number, args[0]),
+                (crate::NUM_STREAM_WRITE, u64::from(STDINFO))
+            );
+        }
     }
 
     #[test]

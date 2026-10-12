@@ -64,16 +64,4 @@ pub trait Input {
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 }
 
-/// Writes bytes to one of the tool's output streams.
-///
-/// The client uses two instances: standard output for the count rows, and
-/// standard error for the per-file diagnostics it reports before moving to
-/// the next operand.
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;

@@ -16,7 +16,7 @@
 //! (the owner-only rule and every per-inode and mount check stay
 //! kernel-side), the shared `tairix_help::BundleHelp`, which reads the
 //! tool's own bundle's `Help/` tree for the short-help switches, and
-//! `RtOutput`, which writes the `-v`/`-c` reports to the inherited standard
+//! `Stdout`, which writes the `-v`/`-c` reports to the inherited standard
 //! output. The tool binds only to its inherited descriptors, never a console
 //! device, and holds no ambient authority.
 //!
@@ -39,9 +39,7 @@ mod program {
 
     use tairix_abi::fs::{DirEntries, OpenFlags, FS_MODE_MASK};
     use tairix_abi::Errno;
-    use tairix_chmod::{
-        parse, run, ChmodError, Entry, EntryKind, FileSystem, Metadata, Output, USAGE,
-    };
+    use tairix_chmod::{parse, run, ChmodError, Entry, EntryKind, FileSystem, Metadata, USAGE};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_rt::File;
@@ -138,17 +136,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// Write the multi-line usage banner to fd 2 byte-exact (it carries its
     /// own trailing newline), best-effort on the already-failing path.
     fn report_usage() {
@@ -182,7 +169,7 @@ mod program {
             locale,
             &RtFileSystem::new(),
             &BundleHelp::new("chmod"),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             // `-f` suppressed the diagnostics; the exit status alone

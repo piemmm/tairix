@@ -9,11 +9,10 @@
 //! program's `main`.
 //!
 //! `main` collects the inherited argument vector, parses it with the pure
-//! [`tairix_sysinfo`] grammar, and runs the resulting command against the two
-//! production seams shared through `lib/procinfo`: `IpcTransport`, which
-//! carries the framed `sysinfo-v1` request to `/System/Services/sysinfod.app/Run` over
-//! the well-known IPC call endpoint, and `RtOutput`, which writes each
-//! rendered line to the inherited standard output (fd 1). The tool binds only
+//! [`tairix_sysinfo`] grammar, and runs the resulting command against
+//! `lib/procinfo`'s `IpcTransport`, which carries the framed `sysinfo-v1`
+//! request to `/System/Services/sysinfod.app/Run` over the well-known IPC call
+//! endpoint, and `Stdout`, which takes each rendered line. The tool binds only
 //! to its inherited descriptors, never a console device, and holds no ambient
 //! authority: `sysinfod` gates every query against the caller's kernel-attested
 //! origin.
@@ -34,9 +33,9 @@ mod program {
 
     use tairix_abi::time::Time64;
     use tairix_help::BundleHelp;
-    use tairix_procinfo::{IpcTransport, RtOutput};
+    use tairix_procinfo::IpcTransport;
     use tairix_rt::args;
-    use tairix_rt::io::write_stderr_line;
+    use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_sysinfo::{parse, run, USAGE};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -63,7 +62,7 @@ mod program {
         // provenance on the response, never the value itself.
         let now = tairix_rt::wall_time().map_or(Time64::UNIX_EPOCH, |reading| reading.time());
         let transport = IpcTransport;
-        let out = RtOutput;
+        let out = Stdout;
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         match run(

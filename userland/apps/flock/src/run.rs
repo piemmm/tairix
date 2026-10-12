@@ -32,7 +32,7 @@ mod program {
 
     use tairix_abi::{Errno, LockMode, LockRange, OpenFlags, WaitFlags, WaitStatus};
     use tairix_cmdres::{resolution_candidates, CommandEnv};
-    use tairix_flock::{parse, run, Mode, Output, Ran, Session, Wait, USAGE};
+    use tairix_flock::{parse, run, Mode, Ran, Session, Wait, USAGE};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_rt::File;
@@ -154,29 +154,6 @@ mod program {
         Ok(Ran::Exited(code))
     }
 
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtStdout;
-
-    impl Output for RtStdout {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning. The io layer's error
-            // carries no errno, so it collapses onto the same code the
-            // kernel uses where abi-v1 has no dedicated one.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The production [`Output`] for the `-v` notes: standard error, so a
-    /// note never contaminates the command's own output stream.
-    struct RtStderr;
-
-    impl Output for RtStderr {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// Report a usage error: the banner on the standard error stream,
     /// verbatim (it already ends in a newline).
     fn report_usage() {
@@ -208,8 +185,8 @@ mod program {
             locale,
             &session,
             &BundleHelp::new("flock"),
-            &RtStdout,
-            &RtStderr,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(status) => status,
             Err(err) => {

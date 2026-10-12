@@ -19,16 +19,7 @@ pub const USAGE: &str = "usage: seq [-f format] [-s string] [-w] [first [increme
 /// document through the same engine as any other command's.
 const OWN_WORD: &str = "seq";
 
-/// The output sink the sequence is pumped into. A failed write is fatal.
-pub trait Output {
-    /// Write all of `bytes`, or report that the sink no longer accepts
-    /// output.
-    ///
-    /// # Errors
-    ///
-    /// [`SeqError::Output`] when the sink stopped accepting bytes.
-    fn write_all(&self, bytes: &[u8]) -> Result<(), SeqError>;
-}
+pub use tairix_util::output::Output;
 
 /// Flush threshold for the output buffer: one write call delivers many
 /// numbers instead of one, without unbounded buffering.
@@ -53,7 +44,7 @@ pub fn run(
         Command::Help => {
             let bytes = own_short_help(help, locale, OWN_WORD)
                 .unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
-            return out.write_all(&bytes);
+            return out.write_all(&bytes).map_err(|_| SeqError::Output);
         }
         Command::Print(job) => job,
     };
@@ -218,7 +209,8 @@ fn seq_fast(a: &str, b: &str, step: u64, separator: u8, out: &dyn Output) -> Res
             // Hold the final byte back: the last separator of the whole
             // run must become the terminator, and only the next
             // comparison knows whether this number was the last.
-            out.write_all(&buf[..buf.len() - 1])?;
+            out.write_all(&buf[..buf.len() - 1])
+                .map_err(|_| SeqError::Output)?;
             let last = buf[buf.len() - 1];
             buf.clear();
             buf.push(last);
@@ -230,7 +222,7 @@ fn seq_fast(a: &str, b: &str, step: u64, separator: u8, out: &dyn Output) -> Res
         // Swap the trailing separator for the newline terminator.
         buf.pop();
         buf.push(b'\n');
-        out.write_all(&buf)?;
+        out.write_all(&buf).map_err(|_| SeqError::Output)?;
     }
     Ok(())
 }
@@ -292,7 +284,7 @@ fn print_numbers(
         let x0 = x;
         buf.extend_from_slice(format.render(x).as_bytes());
         if buf.len() >= FLUSH_LEN {
-            out.write_all(&buf)?;
+            out.write_all(&buf).map_err(|_| SeqError::Output)?;
             buf.clear();
         }
         if out_of_range {
@@ -313,7 +305,7 @@ fn print_numbers(
         buf.extend_from_slice(separator);
     }
     buf.push(b'\n');
-    out.write_all(&buf)
+    out.write_all(&buf).map_err(|_| SeqError::Output)
 }
 
 /// The extra-number rule: `x` (one step past LAST) is printed when its
@@ -340,6 +332,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::RefCell;
 
+    use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
 
     use super::{run, Output, USAGE};
@@ -353,7 +346,7 @@ mod tests {
     }
 
     impl Output for Sink {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), SeqError> {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
             self.written.borrow_mut().extend_from_slice(bytes);
             Ok(())
         }

@@ -34,6 +34,8 @@ path = "src/run.rs"
 # volume-identity fields the resolver reads, the `VolumeDetachRequest`
 # frame the detach seam encodes, and the fd-3 advisory record.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-?`/`--help`
 # switches use (plans/APPS.md).

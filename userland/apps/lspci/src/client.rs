@@ -15,7 +15,7 @@ use tairix_procinfo::{hwtree, Transport};
 
 use crate::command::{Command, NameMode, Options};
 use crate::error::LspciError;
-use crate::io::Output;
+use crate::Output;
 
 /// The one-line usage banner, printed on a usage error and as the
 /// fallback when the bundled help document is unavailable.

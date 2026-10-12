@@ -17,8 +17,7 @@
 //! account-directory request to `/System/Services/sysinfod.app/Run` over the
 //! well-known IPC call endpoint, the shared `tairix_help::BundleHelp`, which
 //! reads the tool's own bundle's `Help/` tree for the short-help switches,
-//! and `RtOutput`, which writes the name to the inherited standard output
-//! (fd 1). The tool binds only to its inherited descriptors, never a console
+//! and `Stdout`, which takes the name. The tool binds only to its inherited descriptors, never a console
 //! device, and holds no ambient authority.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
@@ -37,8 +36,8 @@ mod program {
 
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_procinfo::{IpcTransport, RtOutput};
-    use tairix_rt::io::write_stderr_line;
+    use tairix_procinfo::IpcTransport;
+    use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_whoami::{parse, run, Identity, USAGE};
 
     /// The production [`Identity`]: the caller's own kernel-attested origin
@@ -84,7 +83,7 @@ mod program {
             &SelfOrigin,
             &IpcTransport,
             &BundleHelp::new("whoami"),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

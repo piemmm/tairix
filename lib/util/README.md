@@ -54,6 +54,10 @@ code.
   `fstree` and TextEdit's hex view.
 * `lanes` — finding a byte eight lanes of a word at a time. Consumers:
   `lib/collections` and TextEdit.
+* `output` — the byte stream a command engine writes through (`Output`: every
+  byte or the stream's own refusal, and a best-effort fd-3 advisory record).
+  Consumers: the command apps' engines and `lib/procinfo`, which treats every
+  byte stream as a line sink; `lib/rt` implements it for the standard streams.
 * `argv` — resolving a value-taking option's attached or following value.
   Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry, with no

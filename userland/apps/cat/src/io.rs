@@ -41,16 +41,4 @@ pub trait Input {
     fn read(&self, buf: &mut [u8]) -> Result<usize, Errno>;
 }
 
-/// Writes rendered bytes to the terminal.
-///
-/// The client hands [`write_all`](Output::write_all) either a verbatim input
-/// chunk or a line-numbered transformation of it; the seam owns the whole
-/// write so a fixture can capture the exact byte stream.
-pub trait Output {
-    /// Write every byte of `bytes` to the terminal.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the console raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;

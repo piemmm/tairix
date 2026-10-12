@@ -72,7 +72,10 @@ pub fn socket(family: NetAddrFamily, deliver_port: u64) -> Result<SocketId, Errn
 /// [`Connected`](SocketStreamEvent::Connected), zero or more
 /// [`Data`](SocketStreamEvent::Data), and exactly one
 /// [`Closed`](SocketStreamEvent::Closed) to `deliver_port` over the
-/// connection's life (drain them with [`stream_recv`]).
+/// connection's life, and a [`Room`](SocketStreamEvent::Room) after each
+/// short [`stream_send`] (drain them with [`stream_recv`]). Received bytes the
+/// port has no room for wait in the connection, whose window shuts on the
+/// peer until the port drains.
 ///
 /// # Errors
 ///
@@ -92,9 +95,11 @@ pub fn stream_socket(family: NetAddrFamily, deliver_port: u64) -> Result<SocketI
 }
 
 /// Send stream bytes on a connected stream `socket`, returning the number
-/// of bytes the stack accepted into the connection's send buffer (which
-/// may be fewer than offered when the buffer is momentarily full — the
-/// caller resends the remainder). A stream `send` never carries a
+/// of bytes the stack accepted into the connection's send buffer. A full
+/// buffer takes fewer than offered, possibly none, and a
+/// [`Room`](SocketStreamEvent::Room) follows on the delivery port once at
+/// least half of it is free, so the caller resends the remainder on that
+/// event rather than on a timer. A stream `send` never carries a
 /// destination (the peer is fixed at [`connect`]).
 ///
 /// # Errors

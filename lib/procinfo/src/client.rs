@@ -1,13 +1,13 @@
 //! The production client seams that back the `sysinfo`, `ps`, and `top` `Run`
-//! binaries: the real IPC transport to the `sysinfod` service and the
-//! standard-output line sink. (The generic argument-vector and stderr-line
-//! helpers live in `tairix_rt` — the runtime owns them, not this client.)
+//! binaries: the real IPC transport to the `sysinfod` service. (The generic
+//! argument-vector and stderr-line helpers live in `tairix_rt` — the runtime
+//! owns them, not this client — and the standard streams are already
+//! [`Output`](crate::Output)s.)
 //!
-//! These are the concrete implementations of the [`Transport`](crate::Transport)
-//! and [`Output`](crate::Output) seams the tools' request/render logic runs
-//! against. Keeping them here, rather than in each tool's `Run` binary, is what
-//! stops three identical copies of the IPC call, the reply-frame unwrap, and
-//! the standard-output write loop from being pasted into sibling crates.
+//! This is the concrete implementation of the [`Transport`](crate::Transport)
+//! seam the tools' request/render logic runs against. Keeping it here, rather
+//! than in each tool's `Run` binary, is what stops identical copies of the IPC
+//! call and the reply-frame unwrap from being pasted into sibling crates.
 //!
 //! The module compiles only for a freestanding userland program (the
 //! `freestanding` cfg) that opts into the `program` feature, which pulls the
@@ -23,11 +23,10 @@ use tairix_abi::sysinfo::{decode_reply, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY};
 use tairix_abi::time::Time64;
 use tairix_abi::Errno;
 use tairix_resref::{KnownNamespace, NamespaceBacking, ResourceRef};
-use tairix_rt::io::{StdInfo, Stdout, Write};
 
 use crate::resolve::ResolveInfoError;
 use crate::valueread::read_value;
-use crate::{Output, Transport};
+use crate::Transport;
 
 /// The production [`Transport`]: carry a framed `sysinfo-v1` request to the
 /// `sysinfod` service over the synchronous
@@ -52,34 +51,6 @@ impl Transport for IpcTransport {
         // per-query Errno. A truncated or corrupt frame fails closed.
         let payload = decode_reply(&reply[..n])?;
         Ok(payload.to_vec())
-    }
-}
-
-/// The production [`Output`]: write each rendered line to the inherited
-/// standard output (fd 1) through `tairix-rt`, followed by a newline.
-///
-/// A tool binds to its inherited descriptor, never a console device, so the
-/// same binary works whatever the spawner backed fd 1 with. Output is
-/// best-effort: a stream that will accept no more bytes ends the write rather
-/// than spinning.
-pub struct RtOutput;
-
-impl Output for RtOutput {
-    fn write_line(&self, line: &str) -> Result<(), Errno> {
-        // The shared `tairix_rt::io` short-write loop — no procinfo-private
-        // copy (the charter forbids that duplication). Output is best-effort
-        // (a stream that accepts no more ends the write rather than spinning),
-        // so the fail-closed result is discarded.
-        let mut out = Stdout;
-        let _ = out.write_all(line.as_bytes());
-        let _ = out.write_all(b"\n");
-        Ok(())
-    }
-
-    fn info(&self, record: &[u8]) {
-        // fd 3 is ignorable by contract: unattached is a no-op and a short
-        // write is never an error a listing depends on.
-        let _ = StdInfo.write_all(record);
     }
 }
 

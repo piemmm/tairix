@@ -34,7 +34,7 @@ mod program {
     use tairix_abi::{Errno, UnlinkFlags};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-    use tairix_unlink::{parse, run, Filesystem, Output, USAGE};
+    use tairix_unlink::{parse, run, Filesystem, USAGE};
 
     /// The production [`Filesystem`] over `fs_unlink`.
     ///
@@ -50,19 +50,6 @@ mod program {
                 return Err(Errno::from_syscall(ret));
             }
             Ok(())
-        }
-    }
-
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning. The io layer's error
-            // carries no errno, so it collapses onto the same code the
-            // kernel uses where abi-v1 has no dedicated one.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
         }
     }
 
@@ -97,7 +84,7 @@ mod program {
             locale,
             &RtFilesystem,
             &BundleHelp::new("unlink"),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

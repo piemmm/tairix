@@ -24,7 +24,7 @@ use crate::command::{
     Sort, TimeField, TimeStyle,
 };
 use crate::error::LsError;
-use crate::io::{Entry, FinalLink, Listing, Metadata, Output};
+use crate::io::{Entry, FinalLink, Listing, Metadata, Output, Terminal};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `ls`'s own Help tree is unavailable.
@@ -65,7 +65,7 @@ pub fn run(
     term: Option<&str>,
     fs: &dyn Listing,
     help: &dyn HelpSource,
-    out: &dyn Output,
+    out: &dyn Terminal,
 ) -> Result<Outcome, LsError> {
     match command {
         Command::Help => short_help(locale, help, out).map(|()| Outcome::Complete),
@@ -225,7 +225,7 @@ fn list(
     now: Time64,
     term: Option<&str>,
     fs: &dyn Listing,
-    out: &dyn Output,
+    out: &dyn Terminal,
 ) -> Result<Outcome, LsError> {
     // The attested console width is the one signal that decides the GNU
     // arrangement, the quoting default, and (with `--color` and `TERM`) the
@@ -342,7 +342,7 @@ fn list_directories(
     dirs: Vec<(String, FileId)>,
     walk: &Walk<'_>,
     fs: &dyn Listing,
-    out: &dyn Output,
+    out: &dyn Terminal,
     buf: &mut String,
     first: &mut bool,
 ) -> Result<(Outcome, u64), LsError> {
@@ -506,12 +506,12 @@ fn operand_meta(path: &str, deref: Dereference, fs: &dyn Listing) -> Result<Meta
 }
 
 /// Report that a path could not be inspected, in the GNU shape.
-fn report(out: &dyn Output, path: &str, errno: Errno) {
+fn report(out: &dyn Terminal, path: &str, errno: Errno) {
     out.error(&format!("{OWN_WORD}: cannot access '{path}': {errno}"));
 }
 
 /// Report that a directory could not be read, in the GNU shape.
-fn report_unreadable(out: &dyn Output, path: &str, errno: Errno) {
+fn report_unreadable(out: &dyn Terminal, path: &str, errno: Errno) {
     out.error(&format!(
         "{OWN_WORD}: cannot open directory '{path}': {errno}"
     ));
@@ -519,7 +519,7 @@ fn report_unreadable(out: &dyn Output, path: &str, errno: Errno) {
 
 /// Report a directory `-R` reached again through a link back into its own
 /// chain, in the GNU shape.
-fn report_cycle(out: &dyn Output, path: &str) {
+fn report_cycle(out: &dyn Terminal, path: &str) {
     out.error(&format!(
         "{OWN_WORD}: not listing already-listed directory: '{path}'"
     ));
@@ -586,7 +586,7 @@ fn rows_for(
     deref: Dereference,
     painter: Painter,
     fs: &dyn Listing,
-    out: &dyn Output,
+    out: &dyn Terminal,
 ) -> Listed {
     let links = entry_links(deref);
     let wanted = needs_stat(options, links, painter.is_active());
@@ -1964,7 +1964,7 @@ mod tests {
         SizeFormat, Sort, TimeField, TimeStyle,
     };
     use crate::error::LsError;
-    use crate::io::{Entry, FinalLink, Listing, Metadata, Output};
+    use crate::io::{Entry, FinalLink, Listing, Metadata, Output, Terminal};
     use alloc::format;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
@@ -2395,7 +2395,7 @@ mod tests {
         /// The diagnostics the listing wrote to the error stream, in order.
         errors: RefCell<Vec<String>>,
         fail: bool,
-        /// The width [`Output::terminal_width`] reports; `None` models a
+        /// The width [`Terminal::terminal_width`] reports; `None` models a
         /// non-terminal stdout (a pipe/file), which is the default the
         /// non-column tests rely on.
         width: Option<usize>,
@@ -2470,12 +2470,14 @@ mod tests {
             Ok(())
         }
 
-        fn error(&self, message: &str) {
-            self.errors.borrow_mut().push(String::from(message));
-        }
-
         fn info(&self, record: &[u8]) {
             self.records.borrow_mut().push(record.to_vec());
+        }
+    }
+
+    impl Terminal for Recorder {
+        fn error(&self, message: &str) {
+            self.errors.borrow_mut().push(String::from(message));
         }
 
         fn terminal_width(&self) -> Option<usize> {

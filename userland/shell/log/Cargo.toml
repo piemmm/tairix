@@ -15,6 +15,8 @@ workspace = true
 # The stable `Errno` the seams speak, so the tool invents no parallel error
 # set and never links a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one system-log model: the segment reader, the record decoder + its
 # per-segment dictionary view, the boot/rich renderers, the segment verifier,
 # and the closed `Stream` vocabulary. The `log` tool renders and verifies

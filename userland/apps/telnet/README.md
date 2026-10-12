@@ -47,7 +47,6 @@ socket interface exposes no TCP urgent data.
 
 * `command` — the option grammar (`Command`/`Config`/`Target`) and its parser.
 * `error` — `TelnetError`, the fatal outcomes of `run`.
-* `io` — the `Output` seam.
 * `net` — the `TelnetIo` seam (resolve, connect, one ordered event stream,
   send, terminal controls) and `Endpoint`/`IoEvent`.
 * `nvt` — the RFC 854 command vocabulary, the incremental receive parser, and

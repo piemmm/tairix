@@ -32,23 +32,4 @@ pub trait Detacher {
     fn detach(&self, volume_id: [u8; VOLUME_ID_LEN], force: bool) -> Result<(), Errno>;
 }
 
-/// Writes bytes to the tool's output streams.
-///
-/// The client uses two plain instances (standard output for the short
-/// help, standard error for diagnostics); the standard-error instance
-/// also carries the fd-3 advisory writer for the `--force` suggestion.
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-
-    /// Write one advisory record to the standard information stream
-    /// (fd 3), best-effort: fd 3 is ignorable by contract, so failures
-    /// are dropped and never affect the outcome.
-    fn info(&self, record: &[u8]) {
-        let _ = record;
-    }
-}
+pub use tairix_util::output::Output;

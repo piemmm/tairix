@@ -15,7 +15,7 @@
 //! reads directories through the kernel-authorised `fs_*` syscalls (every
 //! per-inode and mount check stays kernel-side), the shared
 //! `tairix_help::BundleHelp`, which reads the tool's own bundle's `Help/`
-//! tree for the short-help switches, and `RtOutput`/`RtErrors`, which write
+//! tree for the short-help switches, and `Stdout`/`Stderr`, which write
 //! the usage rows to the inherited standard output and the diagnostics to
 //! standard error. The tool binds only to its inherited descriptors, never
 //! a console device, and holds no ambient authority.
@@ -38,9 +38,9 @@ mod program {
 
     use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::Errno;
-    use tairix_du::{parse, run, Entry, Metadata, Output, Walk, USAGE};
+    use tairix_du::{parse, run, Entry, Metadata, Walk, USAGE};
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_rt::File;
 
     /// The production [`Walk`]: the kernel-authorised `fs_*` view of the
@@ -92,30 +92,6 @@ mod program {
         }
     }
 
-    /// The production standard-output stream: the usage rows go to fd 1.
-    /// The tool names only descriptors its spawner chose, so the same
-    /// binary drives a serial terminal, a framebuffer console, or a future
-    /// windowed terminal unchanged.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The production standard-error stream: per-path diagnostics go to
-    /// fd 2, keeping the usage rows on fd 1 clean for pipes.
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -145,8 +121,8 @@ mod program {
             locale,
             &RtWalk,
             &BundleHelp::new("du"),
-            &RtOutput,
-            &RtErrors,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(true) => 0,
             Ok(false) => 1,

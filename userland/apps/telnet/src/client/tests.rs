@@ -11,11 +11,11 @@ use tairix_help::{HelpSource, SourceError};
 use super::{run, FALLBACK_TERM, USAGE};
 use crate::command::{Command, Config, Target};
 use crate::error::TelnetError;
-use crate::io::Output;
 use crate::net::{CloseReason, Endpoint, IoEvent, TelnetIo};
 use crate::nvt::{NvtEvent, Parser, DO, IAC, SB, SE, WILL};
 use crate::option;
 use crate::subneg::cmd;
+use crate::Output;
 
 /// A recording output stream.
 #[derive(Default)]
@@ -64,6 +64,11 @@ impl HelpSource for NoHelp {
 struct Fake {
     events: Vec<IoEvent>,
     sent: Vec<u8>,
+    /// Bytes the send buffer has room for until the next [`IoEvent::Room`];
+    /// `None` for no limit.
+    send_room: Option<usize>,
+    /// The `keyboard` argument of every `next_event`, in order.
+    keyboard_asked: Vec<bool>,
     connected: bool,
     /// Resolution refuses when this is set, so the unresolvable path is
     /// exercised without a resolver.
@@ -85,6 +90,8 @@ impl Fake {
         Self {
             events,
             sent: Vec::new(),
+            send_room: None,
+            keyboard_asked: Vec::new(),
             connected: false,
             resolve_fails: false,
             connect_error: None,
@@ -165,18 +172,33 @@ impl TelnetIo for Fake {
         self.connected
     }
 
-    fn next_event(&mut self) -> Result<IoEvent, Errno> {
-        if self.events.is_empty() {
-            // A script that runs out stands for a peer that vanished; the relay
-            // must treat that as a fatal receive rather than looping.
+    fn next_event(&mut self, keyboard: bool) -> Result<IoEvent, Errno> {
+        self.keyboard_asked.push(keyboard);
+        // A keystroke waits in its mailbox while the session refuses them.
+        let next = self.events.iter().position(|event| {
+            keyboard || !matches!(event, IoEvent::Keyboard(_) | IoEvent::KeyboardClosed)
+        });
+        // A script that runs out stands for a peer that vanished; the relay
+        // must treat that as a fatal receive rather than looping.
+        let Some(at) = next else {
             return Err(Errno::NotConnected);
+        };
+        let event = self.events.remove(at);
+        if event == IoEvent::Room {
+            self.send_room = None;
         }
-        Ok(self.events.remove(0))
+        Ok(event)
     }
 
-    fn send(&mut self, bytes: &[u8]) -> Result<(), Errno> {
-        self.sent.extend_from_slice(bytes);
-        Ok(())
+    fn send(&mut self, bytes: &[u8]) -> Result<usize, Errno> {
+        let taken = self
+            .send_room
+            .map_or(bytes.len(), |room| room.min(bytes.len()));
+        if let Some(room) = &mut self.send_room {
+            *room -= taken;
+        }
+        self.sent.extend_from_slice(&bytes[..taken]);
+        Ok(taken)
     }
 
     fn terminal_size(&mut self) -> Option<TerminalSize> {
@@ -421,6 +443,32 @@ fn a_terminal_type_request_is_answered_from_the_live_relay() {
         "{:?}",
         io.decoded()
     );
+}
+
+#[test]
+fn output_the_connection_cannot_take_waits_for_room_and_holds_the_keyboard() {
+    let mut io = Fake::new(alloc::vec![
+        // The server echoes, so the relay runs character-at-a-time.
+        IoEvent::Network(alloc::vec![IAC, WILL, option::ECHO]),
+        typed(b"ls -l"),
+        typed(b"\r"),
+        IoEvent::Room,
+        IoEvent::Closed(CloseReason::PeerClosed),
+    ]);
+    io.send_room = Some(4);
+    let out = Recorder::default();
+    let err = Recorder::default();
+    let result = run(to_host(), None, FALLBACK_TERM, &mut io, &NoHelp, &out, &err);
+    assert!(result.is_ok());
+    assert_eq!(
+        io.data(),
+        b"ls -l\r\0".to_vec(),
+        "every byte went, in order"
+    );
+    // The opening negotiation more than fills the room, so the keystrokes
+    // were not taken until `Room` let it go.
+    let refused = io.keyboard_asked.iter().filter(|&&asked| !asked).count();
+    assert!(refused >= 1, "keystrokes were held while output waited");
 }
 
 #[test]

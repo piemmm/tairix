@@ -37,7 +37,7 @@ mod program {
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_rt::File;
-    use tairix_stat::{parse, run, Filesystem, Mount, Mounts, Names, Output, Reporter, USAGE};
+    use tairix_stat::{parse, run, Filesystem, Mount, Mounts, Names, Reporter, USAGE};
 
     /// The production [`Filesystem`]: the kernel-authorised `fs_*` view. It
     /// adds no authority — every path resolution, per-inode permission, and
@@ -128,30 +128,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard output (fd 1):
-    /// the report.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning. The io layer's error
-            // carries no errno, so it collapses onto the same code the
-            // kernel uses where abi-v1 has no dedicated one.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The production diagnostics stream (fd 2), keeping the report on fd 1
-    /// clean for pipes.
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -175,8 +151,8 @@ mod program {
             }
         };
         let locale = tairix_help::user_locale();
-        let out = RtOutput;
-        let err = RtErrors;
+        let out = Stdout;
+        let err = Stderr;
         let reporter = Reporter {
             fs: &RtFilesystem,
             mounts: &RtMounts,

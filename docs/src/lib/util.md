@@ -206,6 +206,14 @@ and panic-free throughout.
   where the nth, and where the first and last lie in one pass — are built on
   it. `lib/collections`' group matching and TextEdit's piece table and line
   lookups use it.
+* `output` — `Output`, the byte stream a command engine writes its output and
+  diagnostics through, so a host test captures exactly what it renders and a
+  refused write is an ordinary result: `write_all` takes every byte or answers
+  the stream's own refusal, and `info` emits a best-effort advisory record on
+  fd 3, dropped by default. `lib/rt` implements it for `Stdout` and `Stderr`,
+  keeping the kernel's reason for a refused write and routing either stream's
+  advisory to fd 3, so a `Run` binary hands its engine the standard streams
+  themselves. `lib/procinfo` reads every byte stream as a line sink.
 * `utf8` — `sequence_len`, the length of the UTF-8 sequence a byte begins,
   or `None` for a byte no well-formed sequence begins with (Unicode Table
   3-7: a continuation byte, the always-overlong `0xC0`/`0xC1`, or a lead

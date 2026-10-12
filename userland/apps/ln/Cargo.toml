@@ -33,6 +33,8 @@ path = "src/run.rs"
 # The frozen `abi-v1` vocabulary: `Errno` for the wire-level cause of every
 # refusal, so this tool invents no parallel error set.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one path-spelling grammar: `leaf_name` names the link a bare
 # `ln -s target` creates and `join` places a link inside a destination
 # directory, so this tool carries no second path parser.

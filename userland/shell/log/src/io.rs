@@ -35,16 +35,4 @@ pub trait SegmentSource {
     fn read(&self, stream: Stream, index: usize) -> Result<Option<Vec<u8>>, Errno>;
 }
 
-/// Writes rendered bytes to the terminal.
-///
-/// The engine hands [`write_all`](Output::write_all) one fully-rendered line
-/// (or table row / JSON object / Markdown fragment) at a time, including its
-/// trailing newline, so a fixture can capture the exact byte stream.
-pub trait Output {
-    /// Write every byte of `bytes` to the terminal.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the console raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;

@@ -22,10 +22,8 @@
 //!
 //! * [`FileSource`] — read a byte range of a named file.
 //! * [`Input`] — read the next bytes of standard input.
-//! * [`Output`] — write to standard output, and diagnostics to standard
-//!   error.
-//! * [`Info`] — emit an advisory record to the standard information stream
-//!   (fd 3).
+//! * [`Output`] — write to standard output, diagnostics to standard error,
+//!   and an advisory record to the standard information stream (fd 3).
 //! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
 //!   short-help switches.
 //!
@@ -66,7 +64,7 @@
 //! * [`error`] — [`TailError`], the outcomes of [`parse`] and [`run`].
 //! * [`command`] — the [`Command`]/[`Job`]/[`Source`] shapes and their
 //!   [`parse`]r.
-//! * [`io`] — the [`FileSource`], [`Input`], [`Output`], and [`Info`] seams.
+//! * [`io`] — the [`FileSource`], [`Input`], and [`Output`] seams.
 //! * [`client`] — the [`run`] entry point and the selection engine.
 //!
 //! The bundle's `Help/` documents are **not** embedded in this crate: they
@@ -98,4 +96,4 @@ pub mod io;
 pub use client::{run, USAGE};
 pub use command::{parse, Command, Count, Follow, HeaderMode, Job, Source};
 pub use error::TailError;
-pub use io::{FileSource, Info, Input, Meta, Output, Watcher};
+pub use io::{FileSource, Input, Meta, Output, Watcher};

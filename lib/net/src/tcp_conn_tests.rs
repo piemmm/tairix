@@ -114,6 +114,72 @@ fn data_flows_both_directions() {
 }
 
 #[test]
+fn an_active_opener_reads_the_syn_ack_window_unscaled() {
+    let now = ms(0);
+    let small = TcpConfig {
+        receive_buffer: 4 * 1024,
+        ..config()
+    };
+    let mut client = Tcb::connect(config(), 40000, 80, 1000, now);
+    let mut server = Tcb::listen(small, 80, 0, 5000);
+    transfer(&mut client, &mut server, now);
+    transfer(&mut server, &mut client, now);
+    assert!(client.snd_wnd_shift > 0, "the handshake negotiated scaling");
+    assert_eq!(
+        client.snd_wnd,
+        4 * 1024,
+        "a SYN-ACK's window is never scaled"
+    );
+
+    assert_eq!(client.send(&[0u8; 10 * 1024]).unwrap(), 10 * 1024);
+    transfer(&mut client, &mut server, now);
+    assert!(
+        client.snd_nxt.distance_from(client.snd_una) <= 4 * 1024,
+        "the sender keeps within the window it was offered"
+    );
+}
+
+#[test]
+fn bytes_only_peeked_stay_held_and_keep_the_window_shut_until_taken() {
+    let now = ms(0);
+    let small = TcpConfig {
+        receive_buffer: 4 * 1024,
+        ..config()
+    };
+    let mut client = Tcb::connect(config(), 40000, 80, 1000, now);
+    let mut server = Tcb::listen(small, 80, 0, 5000);
+    settle(&mut client, &mut server, now);
+    let payload: Vec<u8> = (0..=250u8).cycle().take(10 * 1024).collect();
+    assert_eq!(client.send(&payload).unwrap(), payload.len());
+    settle(&mut client, &mut server, now);
+
+    let mut held = vec![0u8; payload.len()];
+    let n = server.peek(&mut held);
+    assert_eq!(n, small.receive_buffer, "the receiver holds a full window");
+    assert_eq!(server.peek(&mut held), n, "a peek takes nothing");
+    assert!(
+        client.send_queued() > 0,
+        "a shut window holds the rest at the sender"
+    );
+
+    let mut taken = Vec::new();
+    while taken.len() < payload.len() {
+        let n = server.peek(&mut held);
+        assert!(
+            n > 0,
+            "a window reopened by taking must let the sender resume"
+        );
+        // Take part of what is held, so later peeks start mid-buffer.
+        let take = n.min(1500);
+        taken.extend_from_slice(&held[..take]);
+        assert_eq!(server.consume(take), take);
+        settle(&mut client, &mut server, now);
+    }
+    assert_eq!(taken, payload);
+    assert_eq!(server.consume(1), 0, "nothing past what is held is taken");
+}
+
+#[test]
 fn orderly_close_reaches_time_wait_and_closed() {
     let now = ms(0);
     let (mut client, mut server) = handshake(now);

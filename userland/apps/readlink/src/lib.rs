@@ -257,18 +257,7 @@ pub trait Filesystem {
     fn realpath(&self, path: &str, mode: RealpathMode) -> Result<String, Errno>;
 }
 
-/// Writes rendered bytes to one of the tool's output streams.
-///
-/// The client uses two instances: standard output for the targets, and
-/// standard error for the per-operand diagnostics.
-pub trait Output {
-    /// Write all of `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises; a partial write is an error.
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// Run one [`Command`] against `fs`. `locale` is the user's `LANG`
 /// preference, if set; `help` is the tool's own `Help/` tree, read by the

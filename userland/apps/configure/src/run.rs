@@ -49,7 +49,7 @@ mod program {
         CONFIG_DIR as NET_CONFIG_DIR, CONFIG_PATH as NET_CONFIG_PATH,
         MAX_CONFIG_LEN as NET_MAX_CONFIG_LEN,
     };
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_sysconfig::{CONFIG_DIR, CONFIG_PATH, MAX_CONFIG_LEN};
 
     /// The production [`Store`] over the syscall-backed store file at
@@ -191,28 +191,6 @@ mod program {
         decode_status_reply(&reply[..len])
     }
 
-    /// The production [`tairix_configure::Output`] over the inherited
-    /// standard output (fd 1).
-    struct RtOutput;
-
-    impl tairix_configure::Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The diagnostic stream: a refused live apply is reported here, never on
-    /// the stdout a script parses.
-    struct RtDiagnostics;
-
-    impl tairix_configure::Output for RtDiagnostics {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -243,8 +221,8 @@ mod program {
             &NetworkFileStore,
             &StackPolicy,
             &BundleHelp::new("configure"),
-            &RtOutput,
-            &RtDiagnostics,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(()) => 0,
             Err(err @ (ConfigureError::Usage | ConfigureError::UnknownKey)) => {

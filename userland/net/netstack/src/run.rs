@@ -71,7 +71,7 @@ mod program {
     use tairix_net::stack::StackEvent;
     use tairix_netstack::{
         events, queue_tx, serve, BondChange, Caller, CryptoCookieSecret, Delivery, FrameBatch,
-        NetChannelClient, NetChannelTransport, Netstack, ServiceHint, SocketService, StreamIo,
+        NetChannelClient, NetChannelTransport, Netstack, ServiceHint, SocketService,
     };
     use tairix_rng::{FastRng, RandU64};
     use tairix_rt::changenotice::ChangeNotice;
@@ -341,8 +341,16 @@ mod program {
         let mut rooms: Vec<u64> = Vec::new();
         loop {
             // Whatever the last event was, a link it moved is told to the
-            // sockets whose memberships ride it before anything else is.
-            publish_links(&mut stack, &mut sockets, set, &mut rooms);
+            // sockets whose memberships ride it, and every stream event it
+            // left owed is posted, before anything else is.
+            let mut owed = publish_links(&mut stack, &mut sockets);
+            owed.extend(deliver_streams(
+                &mut stack,
+                &mut sockets,
+                &mut channels,
+                &secret,
+            ));
+            arm_rooms(set, &mut rooms, &owed);
             publish_state(&mut stack, &mut state_notice);
             // Renew before computing the park, so a deadline that has just
             // lapsed is renewed now rather than yielding a zero timeout the
@@ -395,7 +403,7 @@ mod program {
                     &mut socket_reply,
                 ),
                 PEER_EXIT_TOKEN => reclaim_exited(&mut stack, &mut sockets, &mut channels, &secret),
-                // The owed link events go out at the top of the loop.
+                // Owed link and stream events go out at the top of the loop.
                 PORT_ROOM_TOKEN => {}
                 other => serve_notify(&mut stack, &mut sockets, &mut channels, &secret, other),
             }
@@ -784,10 +792,6 @@ mod program {
                     }
                 }
                 let _ = tairix_rt::call_reply(NETSTACK_SOCKET_ENDPOINT, ticket, &reply[..out.len]);
-                // An `Accept` hands back the bytes the connection already
-                // buffered (its one-shot Connected and any early data); send
-                // them to the new child's delivery port.
-                emit_deliveries(&out.deliveries);
                 // Transmit any frames the operation produced (the datagram
                 // itself, a neighbour resolution, an IGMP/MLD report, or an
                 // ACK opened by an accept) out their interfaces and pump so
@@ -832,24 +836,41 @@ mod program {
         );
     }
 
-    /// Publish the links, tell each socket whose memberships ride one what
-    /// moved, and park on room in exactly the delivery ports that could not
-    /// take it all, so a link event is late but never lost.
-    fn publish_links(
+    /// Post one delivery frame to a client's port.
+    fn post(port: u64, frame: &[u8]) -> Result<(), Errno> {
+        match tairix_rt::ipc_send(port, frame) {
+            0 => Ok(()),
+            ret => Err(Errno::from_syscall(ret)),
+        }
+    }
+
+    /// Publish the links and tell each socket whose memberships ride one
+    /// what moved, returning the delivery ports that could not take it all.
+    fn publish_links(stack: &mut Netstack, sockets: &mut SocketService) -> Vec<u64> {
+        stack.publish_links();
+        sockets.tell_links(stack.links(), stack.link_epoch(), &mut post)
+    }
+
+    /// Post the stream events the sockets are owed and send the window
+    /// updates the bytes taken owe, returning the ports of every socket
+    /// still owed one.
+    fn deliver_streams(
         stack: &mut Netstack,
         sockets: &mut SocketService,
-        set: u64,
-        rooms: &mut Vec<u64>,
-    ) {
-        stack.publish_links();
-        let blocked = sockets.tell_links(stack.links(), stack.link_epoch(), &mut |port, frame| {
-            match tairix_rt::ipc_send(port, frame) {
-                0 => Ok(()),
-                ret => Err(Errno::from_syscall(ret)),
-            }
-        });
+        channels: &mut [Option<Channel>],
+        secret: &CryptoCookieSecret,
+    ) -> Vec<u64> {
+        let tx = sockets.deliver_owed(stack, now(), &mut post);
+        transmit_batch(stack, sockets, channels, secret, &tx);
+        sockets.owed_ports()
+    }
+
+    /// Park on room in exactly the delivery ports still owed an event, so
+    /// an event is late but never lost. Room is level-triggered, so a port
+    /// that has room already wakes the next wait at once.
+    fn arm_rooms(set: u64, rooms: &mut Vec<u64>, owed: &[u64]) {
         rooms.retain(|port| {
-            let owed = blocked.contains(port);
+            let owed = owed.contains(port);
             if !owed {
                 let _ = tairix_rt::waitset_ctl(
                     set,
@@ -861,7 +882,7 @@ mod program {
             }
             owed
         });
-        for port in blocked {
+        for &port in owed {
             if rooms.contains(&port) || rooms.try_reserve(1).is_err() {
                 continue;
             }
@@ -1154,22 +1175,9 @@ mod program {
         }
     }
 
-    /// Emit the stream events a connection produced to their clients'
-    /// async ports, and stage its egress frames onto their bound channels,
-    /// pumping each so the driver transmits them.
-    fn distribute(
-        stack: &mut Netstack,
-        sockets: &mut SocketService,
-        channels: &mut [Option<Channel>],
-        secret: &CryptoCookieSecret,
-        io: &StreamIo,
-    ) {
-        emit_deliveries(&io.deliveries);
-        transmit_batch(stack, sockets, channels, secret, &io.tx);
-    }
-
-    /// `ipc_send` each stream/datagram delivery to its socket's async port
-    /// (best-effort: a client that is gone simply drops it).
+    /// `ipc_send` each datagram delivery to its socket's async port. A
+    /// datagram the port has no room for is dropped, as a full UDP receive
+    /// queue drops one.
     fn emit_deliveries(deliveries: &[Delivery]) {
         for delivery in deliveries {
             let _ = tairix_rt::ipc_send(delivery.deliver_port, &delivery.datagram);
@@ -1274,7 +1282,6 @@ mod program {
                                 events::SYN_COOKIES_ENGAGED_MESSAGE,
                             );
                         }
-                        emit_deliveries(&io.deliveries);
                         for (name, frames) in &io.tx {
                             // A connection's frames are tagged by its logical
                             // interface; resolve a bond to its active member
@@ -1310,7 +1317,7 @@ mod program {
         now: Duration64,
     ) {
         let io = sockets.advance_streams(stack, now);
-        distribute(stack, sockets, channels, secret, &io);
+        transmit_batch(stack, sockets, channels, secret, &io.tx);
         // Advance every bond's failover health monitor (admitting recovered
         // members past their up-delay), audit whatever transition that
         // produced, and transmit the gratuitous announcements.

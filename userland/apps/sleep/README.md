@@ -55,7 +55,7 @@ unrecognised option, a missing operand, or an invalid time interval).
   seams, and the engine, with its unit tests (including the per-locale
   switch-drift pin over the on-disk `Help/` tree).
 - `src/run.rs` — the freestanding `Run` binary: wires the clock-backed
-  off-CPU `RtSleeper`, `RtOutput`, and `BundleHelp` to the pure core; an
+  off-CPU `RtSleeper`, `Stdout`, and `BundleHelp` to the pure core; an
   inert stub on the host.
 - `AppInfo.toml` — the signed-manifest source the app-bundle composer
   discovers.

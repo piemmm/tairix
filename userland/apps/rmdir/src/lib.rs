@@ -197,15 +197,7 @@ pub trait Filesystem {
     fn rmdir(&self, path: &str) -> Result<(), Errno>;
 }
 
-/// Writes rendered bytes to the terminal (fd 1).
-pub trait Output {
-    /// Write all of `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises; a partial write is an error.
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// Whether an operand's upward `-p` walk continues after one removal.
 enum Walk {

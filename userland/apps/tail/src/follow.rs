@@ -20,7 +20,7 @@ use crate::client::{
 };
 use crate::command::{Count, Follow, HeaderMode, Job, Source};
 use crate::error::TailError;
-use crate::io::{Info, Input, Output, Watcher};
+use crate::io::{Input, Output, Watcher};
 
 /// One followed file source's live state.
 struct FollowSource {
@@ -45,7 +45,6 @@ struct FollowSource {
 /// Run a follow (`-f`/`-F`): initial output for every source, then block on
 /// the change wait source and re-emit appended data until interrupted (or,
 /// with `--pid`, until the process dies).
-#[allow(clippy::too_many_arguments)]
 pub fn run_follow(
     job: &Job,
     mode: Follow,
@@ -53,7 +52,6 @@ pub fn run_follow(
     stdin: &dyn Input,
     out: &dyn Output,
     err: &dyn Output,
-    info: &dyn Info,
 ) -> Result<bool, TailError> {
     let show_headers = match job.headers {
         HeaderMode::Always => true,
@@ -105,7 +103,7 @@ pub fn run_follow(
     }
 
     if omitted_total > 0 {
-        emit_omission_record(info, omitted_total, lines, job.from_start);
+        emit_omission_record(out, omitted_total, lines, job.from_start);
     }
 
     // Nothing left to follow (only standard input, or every named source is
@@ -471,7 +469,7 @@ mod tests {
 
     use super::run_follow;
     use crate::command::{parse, Command, Follow, Job};
-    use crate::io::{Info, Input, Meta, Output, Watcher};
+    use crate::io::{Input, Meta, Output, Watcher};
 
     fn fid(node: u64) -> FileId {
         FileId {
@@ -642,13 +640,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct NoInfo;
-
-    impl Info for NoInfo {
-        fn emit(&self, _record: &[u8]) {}
-    }
-
     fn job(args: &[&str]) -> (Job, Follow) {
         match parse(args).expect("parses") {
             Command::Tail(job) => {
@@ -670,7 +661,7 @@ mod tests {
         let watcher = FakeWatcher::new(initial, script);
         let out = Sink::default();
         let err = Sink::default();
-        let ok = run_follow(&job, mode, &watcher, &NoStdin, &out, &err, &NoInfo)
+        let ok = run_follow(&job, mode, &watcher, &NoStdin, &out, &err)
             .expect("fixture streams never fail");
         let out_bytes = out.0.borrow().clone();
         let err_bytes = err.0.borrow().clone();

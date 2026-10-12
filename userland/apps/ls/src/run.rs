@@ -15,9 +15,9 @@
 //! reads directories through the kernel-authorised `fs_*` syscalls (every
 //! per-inode and mount check stays kernel-side), the shared
 //! `tairix_help::BundleHelp`, which reads the tool's own bundle's `Help/`
-//! tree for the short-help switches, and
-//! `RtOutput`, which writes the listing to the inherited standard output and
-//! the hidden-entries advisory to fd 3, best-effort. The tool binds only to
+//! tree for the short-help switches, and `Console`, which writes the listing
+//! to the inherited standard output and the hidden-entries advisory to fd 3,
+//! best-effort. The tool binds only to
 //! its inherited descriptors, never a console device, and holds no ambient
 //! authority.
 //!
@@ -41,8 +41,8 @@ mod program {
     use tairix_abi::time::Time64;
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_ls::{parse, run, Entry, FinalLink, Listing, Metadata, Output, USAGE};
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_ls::{parse, run, Entry, FinalLink, Listing, Metadata, Output, Terminal, USAGE};
+    use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_rt::File;
 
     /// The production [`Listing`]: the kernel-authorised `fs_*` view of the
@@ -122,32 +122,24 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard streams: the
-    /// listing goes to fd 1 and the advisory record to fd 3 (best-effort).
-    /// The tool names only descriptors its spawner chose, so the same
-    /// binary drives a serial terminal, a framebuffer console, or a future
-    /// windowed terminal unchanged.
-    struct RtOutput;
+    /// The production [`Terminal`]: the inherited standard streams.
+    struct Console;
 
-    impl Output for RtOutput {
+    impl Output for Console {
         fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-
-        fn error(&self, message: &str) {
-            // The reason a path was skipped goes to fd 2, where a reader and
-            // a script both see it while the listing itself still reaches
-            // fd 1. Best-effort: a console that will not take the diagnostic
-            // is not a reason to abandon the listing.
-            write_stderr_line(message);
+            Output::write_all(&Stdout, bytes)
         }
 
         fn info(&self, record: &[u8]) {
-            // fd 3 is ignorable by contract: unattached is a no-op and a
-            // short write is never an error a listing depends on.
-            let _ = StdInfo.write_all(record);
+            Output::info(&Stdout, record);
+        }
+    }
+
+    impl Terminal for Console {
+        fn error(&self, message: &str) {
+            // Best-effort: a console that will not take the diagnostic is
+            // not a reason to abandon the listing.
+            write_stderr_line(message);
         }
 
         fn terminal_width(&self) -> Option<usize> {
@@ -200,7 +192,7 @@ mod program {
             term,
             &RtListing,
             &BundleHelp::new("ls"),
-            &RtOutput,
+            &Console,
         ) {
             Ok(outcome) => outcome.exit_status(),
             Err(err) => {

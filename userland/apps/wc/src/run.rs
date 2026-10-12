@@ -16,7 +16,7 @@
 //! kernel-authorised `fs_*` syscalls (every per-inode and mount check stays
 //! kernel-side), `RtStdin`, which reads the inherited standard input, the
 //! shared `tairix_help::BundleHelp`, which reads the tool's own bundle's
-//! `Help/` tree for the short-help switches, and `RtOutput`/`RtErrors`,
+//! `Help/` tree for the short-help switches, and `Stdout`/`Stderr`,
 //! which write to the inherited standard output and standard error. The
 //! tool binds only to its inherited descriptors, never a console device,
 //! and holds no ambient authority.
@@ -40,9 +40,9 @@ mod program {
     use tairix_abi::fs::{FileKind, OpenFlags};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
+    use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout};
     use tairix_rt::File;
-    use tairix_wc::{parse, run, FileSource, Input, Output, SizeProbe, USAGE};
+    use tairix_wc::{parse, run, FileSource, Input, SizeProbe, USAGE};
 
     /// The production [`FileSource`]: the kernel-authorised `fs_*` view of
     /// the filesystem. It adds no authority — every path resolution,
@@ -107,27 +107,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(io::Error::as_errno)
-        }
-    }
-
-    /// The production diagnostic [`Output`] over the inherited standard
-    /// error (fd 2).
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(io::Error::as_errno)
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -159,8 +138,8 @@ mod program {
             &RtFileSource::new(),
             &RtStdin,
             &BundleHelp::new("wc"),
-            &RtOutput,
-            &RtErrors,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(true) => 0,
             Ok(false) => 1,

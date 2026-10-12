@@ -25,19 +25,8 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
-    use tairix_yes::{block, parse, pump, Command, Output, YesError, USAGE};
-
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), YesError> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| YesError::Output)
-        }
-    }
+    use tairix_rt::io::{write_stderr_line, Stdout};
+    use tairix_yes::{block, parse, pump, Command, USAGE};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
@@ -62,7 +51,7 @@ mod program {
             }
         };
         // The endless writer: it returns only once a write has failed.
-        pump(&block(&operands), &RtOutput);
+        pump(&block(&operands), &Stdout);
         write_stderr_line("yes: write error");
         1
     }

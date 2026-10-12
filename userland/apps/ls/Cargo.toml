@@ -34,6 +34,8 @@ path = "src/run.rs"
 # types for the hidden-entries advisory; `ls` invents no parallel error or
 # kind set and never links a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one path-spelling grammar: `join` places a child inside a directory,
 # so this tool carries no second path parser.
 tairix-path = { path = "../../../lib/path", version = "=0.0.0" }

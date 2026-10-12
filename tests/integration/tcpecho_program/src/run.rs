@@ -16,14 +16,16 @@
 //!    resource, no capability) and **open** a stream socket, delivering the
 //!    connection's `SocketStreamEvent`s to that port.
 //! 2. **Connect** to the host peer's passive TCP echo server over the shared
-//!    IPv6 link-local wire, retrying while the interface is still coming up at
-//!    boot (`NetworkUnreachable` — the driver may not be bound yet), so the
-//!    fixture never races the two-process autoload.
+//!    IPv6 link-local wire, trying again on each change to the interfaces
+//!    while the stack answers `NetworkUnreachable` at boot (the driver may not
+//!    be bound yet), so the fixture never races the two-process autoload.
 //! 3. **Stream** a fixed, deterministic byte run to the peer and **verify**
 //!    the peer echoes every byte back in order, re-deriving each expected byte
-//!    from the shared generator (no whole-transfer buffer). The peer injects
-//!    packet loss, so a passing run proves RFC 9293 retransmission carried the
-//!    stream across the two-process boundary — not just a clean link.
+//!    from the shared generator (no whole-transfer buffer). A send the buffer
+//!    takes only part of waits for the stack's `Room` while the echo keeps
+//!    being read. The peer injects packet loss, so a passing run proves RFC
+//!    9293 retransmission carried the stream across the two-process boundary
+//!    — not just a clean link.
 //! 4. On success **close** the socket, print the `TCPECHO PASS …` marker, and
 //!    exit `0`; the consuming vertical keys its PASS chain on that clean exit.
 //!
@@ -46,6 +48,7 @@
 mod program {
     use tairix_abi::net::{SocketAddr, SocketId, SocketStreamEvent, StreamCloseReason};
     use tairix_abi::net_ipc::NetAddrFamily;
+    use tairix_abi::notice::NoticeTopic;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::Errno;
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
@@ -72,23 +75,11 @@ mod program {
     /// request modest while the whole transfer fits the send window.
     const SEND_CHUNK: usize = 4096;
 
-    /// How many times to retry [`connect`] while the interface is still
-    /// coming up at boot (the virtio-net driver may not be bound to the stack
-    /// yet, so the stack has no egress and answers `NetworkUnreachable`).
-    const CONNECT_ATTEMPTS: u32 = 400;
-
-    /// One-shot park between connect retries and between send back-pressure
-    /// retries (a tickless timed wait, never a busy spin).
-    const RETRY_PARK_NANOS: u64 = 25_000_000;
-
-    /// Wait-set token for the delivery port (the client waits on exactly one
-    /// source, so any non-zero token identifies it).
+    /// Wait-set token for the delivery port.
     const DELIVER_TOKEN: u64 = 1;
 
-    /// One park slice while blocking for the next stream event: the client
-    /// gives the CPU up and is woken when the stack posts an event or this
-    /// one-shot timer elapses (whichever first) — never a busy poll.
-    const EVENT_PARK_NANOS: u64 = 200_000_000;
+    /// Wait-set token for the network-interfaces notice.
+    const NETWORK_TOKEN: u64 = 2;
 
     /// Overall deadline for one blocking-receive phase (awaiting the
     /// handshake, or draining the whole echoed transfer). Generous for the
@@ -107,16 +98,6 @@ mod program {
         }
     }
 
-    /// Park for `nanos` on a process-local wait-set with no registered
-    /// sources: it simply parks the task until the one-shot timeout elapses,
-    /// so the retry cadence gives the CPU up rather than spinning. Best-effort
-    /// — a refused wait-set (which should not happen) degrades to an immediate
-    /// return, and the bounded retry loop above still terminates.
-    fn park(set: u64, nanos: u64) {
-        let mut token = 0u64;
-        let _ = tairix_rt::waitset_wait(set, nanos, &mut token);
-    }
-
     /// Terminal failure: report the reason on standard error, then park
     /// forever off the run queue. This program must **never exit** on a
     /// failure — the consuming vertical arms its PASS chain on this process's
@@ -131,36 +112,51 @@ mod program {
         }
     }
 
-    /// Open the socket and connect to the peer, retrying through the boot-time
-    /// window in which the stack has no bound interface yet. Returns the
-    /// connected socket handle.
-    fn open_and_connect(set: u64) -> Result<SocketId, &'static str> {
+    /// Open the socket and connect to the peer. At boot the stack may have no
+    /// bound interface yet and answers `NetworkUnreachable`; each change to
+    /// the interfaces is a reason to try again, until the phase deadline.
+    /// Returns the connected socket handle.
+    fn open_and_connect() -> Result<SocketId, &'static str> {
+        let Ok(network) = u64::try_from(tairix_rt::waitset_create()) else {
+            return Err("tcpecho: wait-set create refused");
+        };
+        if tairix_rt::waitset_ctl(
+            network,
+            WaitSetOp::Add,
+            WaitSourceKind::SystemNotice,
+            u64::from(NoticeTopic::Network.as_u32()),
+            NETWORK_TOKEN,
+        ) != 0
+        {
+            return Err("tcpecho: network notice registration refused");
+        }
         let socket = stream_socket(NetAddrFamily::V6, DELIVER_PORT)
             .map_err(|_| "tcpecho: stream_socket refused")?;
         let peer = peer_addr();
-        for _ in 0..CONNECT_ATTEMPTS {
+        let deadline = tairix_rt::clock_get().saturating_add(PHASE_TIMEOUT_NANOS);
+        loop {
             match connect(socket, peer) {
                 Ok(()) => return Ok(socket),
-                // The interface is not up yet (driver still binding): wait and
-                // retry. Any other refusal is a real, non-transient failure.
-                Err(Errno::NetworkUnreachable) => park(set, RETRY_PARK_NANOS),
+                Err(Errno::NetworkUnreachable) => {
+                    if park_for_event(network, deadline).is_err() {
+                        return Err("tcpecho: network never came up (connect kept failing)");
+                    }
+                }
                 Err(_) => return Err("tcpecho: connect refused"),
             }
         }
-        Err("tcpecho: network never came up (connect kept failing)")
     }
 
-    /// Park on the delivery-port wait-set for the next event, failing if the
-    /// deadline passes. `ipc_recv` is non-blocking — an empty port is the
-    /// retryable `WouldBlock` — so a caller draining events matches
-    /// `Err(Errno::WouldBlock)` and calls this to give the CPU up until the
-    /// stack posts an event (or the one-shot timer elapses), never spinning.
+    /// Park on `set` until one of its sources is ready, failing once
+    /// `deadline_ns` passes. `ipc_recv` is non-blocking — an empty port is the
+    /// retryable `WouldBlock` — so a caller draining events parks here until
+    /// the stack posts one, never spinning.
     fn park_for_event(set: u64, deadline_ns: u64) -> Result<(), &'static str> {
-        if tairix_rt::clock_get() >= deadline_ns {
+        let now = tairix_rt::clock_get();
+        let mut token = 0u64;
+        if now >= deadline_ns || tairix_rt::waitset_wait(set, deadline_ns - now, &mut token) != 0 {
             return Err("tcpecho: timed out waiting for a stream event");
         }
-        let mut token = 0u64;
-        let _ = tairix_rt::waitset_wait(set, EVENT_PARK_NANOS, &mut token);
         Ok(())
     }
 
@@ -186,35 +182,35 @@ mod program {
                 Ok(SocketStreamEvent::Accepted { .. }) => {
                     return Err("tcpecho: unexpected Accepted event on a client socket")
                 }
+                Ok(SocketStreamEvent::Room { .. }) => {
+                    return Err("tcpecho: Room before the connection was established")
+                }
                 Err(Errno::WouldBlock) => park_for_event(set, deadline)?,
                 Err(_) => return Err("tcpecho: event receive failed"),
             }
         }
     }
 
-    /// Stream the whole deterministic transfer to the peer, retrying a
-    /// momentarily-full send buffer with a one-shot park rather than a spin.
-    fn send_all(socket: SocketId, set: u64) -> Result<(), &'static str> {
-        let mut chunk = [0u8; SEND_CHUNK];
-        let mut sent_bytes = 0usize;
-        while sent_bytes < TRANSFER_BYTES {
-            let len = core::cmp::min(SEND_CHUNK, TRANSFER_BYTES - sent_bytes);
-            fill_chunk(sent_bytes, &mut chunk[..len]);
-            match stream_send(socket, &chunk[..len]) {
-                Ok(0) => park(set, RETRY_PARK_NANOS),
-                Ok(accepted) => sent_bytes += accepted as usize,
-                Err(_) => return Err("tcpecho: stream_send refused"),
-            }
-        }
-        Ok(())
-    }
-
-    /// Receive and verify the whole echoed transfer, requiring every byte to
-    /// match the deterministic stream at its absolute offset.
-    fn receive_and_verify(set: u64, socket: SocketId, buf: &mut [u8]) -> Result<(), &'static str> {
+    /// Stream the whole deterministic transfer to the peer while verifying
+    /// its echo, every byte at its absolute offset. A send the buffer takes
+    /// only part of waits for `Room`, and the echo keeps being read meanwhile,
+    /// so neither direction can stall the other.
+    fn transfer(set: u64, socket: SocketId, buf: &mut [u8]) -> Result<(), &'static str> {
         let deadline = tairix_rt::clock_get().saturating_add(PHASE_TIMEOUT_NANOS);
-        let mut received = 0usize;
+        let mut chunk = [0u8; SEND_CHUNK];
+        let (mut offered, mut received) = (0usize, 0usize);
+        let mut room = true;
         while received < TRANSFER_BYTES {
+            if room && offered < TRANSFER_BYTES {
+                let len = core::cmp::min(SEND_CHUNK, TRANSFER_BYTES - offered);
+                fill_chunk(offered, &mut chunk[..len]);
+                let Ok(accepted) = stream_send(socket, &chunk[..len]) else {
+                    return Err("tcpecho: stream_send refused");
+                };
+                offered += accepted as usize;
+                room = accepted as usize == len;
+                continue;
+            }
             // As in `await_connected`, the `event` borrow of `buf` is confined
             // to the match arm; the `WouldBlock` arm parks and re-loops.
             match stream_recv(DELIVER_PORT, buf) {
@@ -223,6 +219,10 @@ mod program {
                         return Err("tcpecho: echoed byte did not match the sent stream");
                     }
                     received += payload.len();
+                }
+                Ok(SocketStreamEvent::Room { socket: s }) if s == socket => room = true,
+                Ok(SocketStreamEvent::Room { .. }) => {
+                    return Err("tcpecho: Room for a foreign socket")
                 }
                 Ok(SocketStreamEvent::Data { .. }) => {
                     return Err("tcpecho: data for a foreign socket")
@@ -272,11 +272,10 @@ mod program {
             return Err("tcpecho: wait-set port registration refused");
         }
 
-        let socket = open_and_connect(set)?;
+        let socket = open_and_connect()?;
         let mut buf = [0u8; DELIVER_MAX_PAYLOAD];
         await_connected(set, socket, &mut buf)?;
-        send_all(socket, set)?;
-        receive_and_verify(set, socket, &mut buf)?;
+        transfer(set, socket, &mut buf)?;
         // Orderly close of our half; the peer's teardown follows. A refused
         // close is not a data-integrity failure — the transfer already
         // verified — so it is reported but does not fail the run.

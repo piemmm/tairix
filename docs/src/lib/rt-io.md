@@ -42,6 +42,14 @@ The module also carries the one `write_stderr_line` helper every command app's
 `Run` binary reports diagnostics through (best-effort, never the data stream),
 so the line-to-fd-2 loop is written once.
 
+`Stdout` and `Stderr` also implement `tairix_util::output::Output`, the byte
+stream every command engine writes through, so a `Run` binary hands its engine
+the standard streams themselves rather than a wrapper of its own. A refused
+write keeps the kernel's own `Errno` (`Error::as_errno`), and an advisory record
+sent to either stream goes to fd 3. Where `Write` and `Output` are both in
+scope, `stream.write_all` resolves to `Output`'s by-reference method, so a `Run`
+binary that writes through `Write` does not import `Output`.
+
 ## fd-generic: one borrowed view, one owning handle
 
 `Stream::new` views a descriptor the process already owns (a standard stream, or

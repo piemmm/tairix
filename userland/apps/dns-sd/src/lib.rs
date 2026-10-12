@@ -75,15 +75,7 @@ pub trait Discovery {
     fn now(&self) -> u64;
 }
 
-/// A text stream.
-pub trait Output {
-    /// Write every byte of `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// The stream's refusal.
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// What is asked.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -30,7 +30,7 @@ mod program {
     use alloc::format;
 
     use tairix_abi::Errno;
-    use tairix_groupdel::{parse, run, Output, USAGE};
+    use tairix_groupdel::{parse, run, USAGE};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_useradmin::AdminChannel;
@@ -43,15 +43,6 @@ mod program {
     impl AdminChannel for RtChannel {
         fn call(&self, req: &[u8], out: &mut [u8]) -> Result<usize, Errno> {
             tairix_rt::users_admin(req, out).map_err(Errno::from_syscall)
-        }
-    }
-
-    /// The production [`Output`] over the inherited standard output.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
         }
     }
 
@@ -80,7 +71,7 @@ mod program {
             locale,
             &RtChannel,
             &BundleHelp::new("groupdel"),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

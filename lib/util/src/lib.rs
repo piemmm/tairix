@@ -66,6 +66,9 @@
 //!   `fstree` and the text editor's hex view.
 //! * [`lanes`] — finding a byte eight lanes of a word at a time, consumed
 //!   by `lib/collections` and the text editor.
+//! * [`output`] — the byte stream a command engine writes through, consumed
+//!   by the command apps' engines and implemented for the standard streams
+//!   by `lib/rt`.
 //! * [`utf8`] — which bytes begin a UTF-8 sequence and its length, consumed
 //!   by `lib/syntax`, `wc`, and the text editor, so a hand-written decoder never
 //!   admits a lead the standard rejects; and which characters hide or reorder
@@ -108,6 +111,7 @@ pub mod fmt;
 pub mod hexdump;
 pub mod lanes;
 pub mod mathf;
+pub mod output;
 pub mod retry;
 pub mod seconds;
 pub mod secret;

@@ -29,23 +29,4 @@ pub trait PathProbe {
     fn probe(&self, path: &str) -> Result<(), Errno>;
 }
 
-/// Writes bytes to the tool's output streams.
-///
-/// The client uses two plain instances (standard output for the table,
-/// standard error for diagnostics); the standard-output instance also
-/// carries the fd-3 advisory writer.
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-
-    /// Write one advisory record to the standard information stream
-    /// (fd 3), best-effort: fd 3 is ignorable by contract, so failures
-    /// are dropped and never affect the report.
-    fn info(&self, record: &[u8]) {
-        let _ = record;
-    }
-}
+pub use tairix_util::output::Output;

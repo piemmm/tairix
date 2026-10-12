@@ -1120,10 +1120,27 @@ impl Tcb {
     /// Copy up to `out.len()` bytes of in-order received data into `out`,
     /// returning the number copied and freeing that much receive window.
     pub fn recv(&mut self, out: &mut [u8]) -> usize {
-        let n = out.len().min(self.rx.len());
-        for slot in out.iter_mut().take(n) {
-            *slot = self.rx.pop_front().expect("rx has at least n bytes");
-        }
+        let n = self.peek(out);
+        self.consume(n)
+    }
+
+    /// Copy up to `out.len()` bytes of in-order received data into `out`
+    /// without taking them, returning the number copied.
+    #[must_use]
+    pub fn peek(&self, out: &mut [u8]) -> usize {
+        let (front, back) = self.rx.as_slices();
+        let first = front.len().min(out.len());
+        out[..first].copy_from_slice(&front[..first]);
+        let second = back.len().min(out.len() - first);
+        out[first..first + second].copy_from_slice(&back[..second]);
+        first + second
+    }
+
+    /// Take the first `n` received bytes (at most those held), freeing that
+    /// much receive window, and return how many were taken.
+    pub fn consume(&mut self, n: usize) -> usize {
+        let n = n.min(self.rx.len());
+        self.rx.drain(..n);
         // Freeing receive buffer may reopen a shrunk window; advertise the
         // reopened window promptly with an immediate ACK.
         if n > 0 {
@@ -1421,7 +1438,6 @@ impl Tcb {
             self.snd_una = seg.ack;
             self.drop_acked_data();
             self.snd_wl2 = seg.ack;
-            self.snd_wnd = u32::from(seg.window) << self.snd_wnd_shift;
             self.state = State::Established;
             self.became_established = true;
             self.cc.init(u32::from(self.send_mss));

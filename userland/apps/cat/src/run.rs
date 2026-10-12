@@ -16,7 +16,7 @@
 //! and stream references through the kernel, `info:`/`state:`/`stats:` values
 //! through the `sysinfod` broker, each checked under the caller's attested
 //! identity; `RtStdin`, which reads the inherited standard input; the shared
-//! `tairix_help::BundleHelp` for the short-help switches; and `RtOutput`,
+//! `tairix_help::BundleHelp` for the short-help switches; and `Stdout`,
 //! which writes the stream to the inherited standard output. The tool binds
 //! only to its inherited descriptors, never a console device, and holds no
 //! ambient authority.
@@ -38,10 +38,10 @@ mod program {
     use core::cell::RefCell;
 
     use tairix_abi::Errno;
-    use tairix_cat::{parse, run, FileSource, Input, Output, USAGE};
+    use tairix_cat::{parse, run, FileSource, Input, USAGE};
     use tairix_help::BundleHelp;
     use tairix_procinfo::{NamedSource, OpenError};
-    use tairix_rt::io::{self, write_stderr_line, Read, Stdin, Stdout, Write};
+    use tairix_rt::io::{self, write_stderr_line, Read, Stdin, Stdout};
 
     /// The production [`FileSource`]: the shared open-by-name view of a
     /// readable source. It adds no authority — every path check stays
@@ -106,17 +106,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(io::Error::as_errno)
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -142,7 +131,7 @@ mod program {
             &RtFileSource::new(),
             &RtStdin,
             &BundleHelp::new("cat"),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

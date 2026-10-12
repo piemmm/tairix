@@ -14,7 +14,7 @@
 //! one `RtDnsTransport`-backed `Resolver` reused across the A and AAAA
 //! lookups (so the delivery port is bound once), the shared
 //! `tairix_help::BundleHelp` for the short-help switches, and
-//! `RtOutput`/`RtErrors`, which write the answers to the inherited standard
+//! `Stdout`/`Stderr`, which write the answers to the inherited standard
 //! output and the diagnostics to standard error. The tool binds only to its
 //! inherited descriptors, never a console device, and holds no ambient
 //! authority (the UDP socket is capability-gated stack-side).
@@ -33,34 +33,11 @@ mod program {
 
     use alloc::format;
 
-    use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_host::{parse, run, Command, Output, Resolver, USAGE};
+    use tairix_host::{parse, run, Command, Resolver, USAGE};
     use tairix_net::dns::{LookupType, Resolution};
     use tairix_resolver::{ResolveError, RtDnsTransport};
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-
-    /// The production standard-output stream: the answers go to fd 1. The
-    /// tool names only descriptors its spawner chose, so the same binary
-    /// drives a serial terminal, a framebuffer console, or a future windowed
-    /// terminal unchanged.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The production standard-error stream: diagnostics go to fd 2, keeping
-    /// the answers on fd 1 clean for pipes.
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
     /// The production [`Resolver`]: one socket-backed transport, reused across
     /// the lookup's record types so the delivery port is bound only once.
@@ -116,21 +93,14 @@ mod program {
             Command::Lookup(_) => match RtDnsTransport::open() {
                 Ok(udp) => {
                     let mut resolver = RtResolver { udp };
-                    run(command, locale, &mut resolver, &help, &RtOutput, &RtErrors)
+                    run(command, locale, &mut resolver, &help, &Stdout, &Stderr)
                 }
                 Err(err) => {
                     write_stderr_line(&format!("host: cannot open a DNS socket: {err}"));
                     return 2;
                 }
             },
-            Command::Help => run(
-                command,
-                locale,
-                &mut NoResolver,
-                &help,
-                &RtOutput,
-                &RtErrors,
-            ),
+            Command::Help => run(command, locale, &mut NoResolver, &help, &Stdout, &Stderr),
         };
         match result {
             Ok(true) => 0,

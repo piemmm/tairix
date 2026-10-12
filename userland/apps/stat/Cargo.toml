@@ -32,6 +32,8 @@ path = "src/run.rs"
 # The frozen wire vocabulary: `FileStat`, `FileKind`, `VolumeStats`,
 # `Time64`, `Errno`, and the one `mode_string` renderer `ls` also prints.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one civil-date breakdown: `%x`/`%y`/`%z`/`%w`
 # decompose a `Time64` through the same `CivilTime` `ls`'s date column and
 # the login clock use, never a second calendar.

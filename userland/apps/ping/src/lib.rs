@@ -68,12 +68,11 @@ extern crate alloc;
 pub mod client;
 pub mod command;
 pub mod error;
-pub mod io;
 pub mod net;
 mod report;
 
 pub use client::{run, RunSummary, USAGE};
 pub use command::{parse, Command, Config, HostTarget, ParseError, PayloadKind, Target};
 pub use error::PingError;
-pub use io::Output;
 pub use net::{EchoEvent, PingIo};
+pub use tairix_util::output::Output;

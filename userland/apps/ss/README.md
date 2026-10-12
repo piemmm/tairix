@@ -32,7 +32,6 @@ the tool exits rather than printing an empty table.
 
 * `command` — the option grammar (`Command`/`Options`) and its parser.
 * `error` — `SsError`, the outcomes of `run`.
-* `io` — the `Output` seam.
 * `client` — the `run` entry point, filtering, and rendering.
 * `run.rs` — the freestanding `Run` binary (pure-Rust, `tairix-rt`).
 

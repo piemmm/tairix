@@ -17,7 +17,7 @@ use tairix_procinfo::{for_each_net_socket, net_stack_defence, Transport, WalkSte
 
 use crate::command::{Command, Options};
 use crate::error::SsError;
-use crate::io::Output;
+use crate::Output;
 
 /// The reverse-lookup seam `-r` drives.
 ///
@@ -382,7 +382,7 @@ mod tests {
     use super::{run, NameLookup, USAGE};
     use crate::command::{parse, Options};
     use crate::error::SsError;
-    use crate::io::Output;
+    use crate::Output;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;

@@ -49,3 +49,7 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # syscall-backed own-bundle `HelpSource` (`BundleHelp`), shared by every
 # command app.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+
+[dev-dependencies]
+# The refusal a failing-stream fixture answers with.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

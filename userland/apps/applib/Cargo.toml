@@ -36,6 +36,8 @@ path = "src/run.rs"
 # the `stdinfo` record type for the fd-3 advisory records. Never a kernel
 # or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one installed-bundle walk: `rescan` discovers bundles through the shared
 # store walk — its roots in resolution precedence, its depth and entry
 # containment bounds, its fail-closed-per-bundle rule, and its bounded manifest

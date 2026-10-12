@@ -96,16 +96,7 @@ pub trait Resolver {
     fn resolve(&mut self, name: &str, record_type: LookupType) -> Result<Resolution, ResolveError>;
 }
 
-/// The text output seam: standard output for answers, standard error for
-/// diagnostics.
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// A parsed `host` invocation.
 #[derive(Clone, Debug, Eq, PartialEq)]

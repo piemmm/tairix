@@ -46,6 +46,8 @@ pub enum IoEvent {
     Keyboard(Vec<u8>),
     /// The local terminal reached end of input; nothing more will be typed.
     KeyboardClosed,
+    /// The connection has room again for bytes it could not take.
+    Room,
     /// The connection ended.
     Closed(CloseReason),
 }
@@ -72,21 +74,24 @@ pub trait TelnetIo {
     fn connected(&self) -> bool;
 
     /// Block until the next event, giving the CPU up meanwhile (never a spin).
+    /// Keystrokes are taken only when `keyboard` is set: the session clears it
+    /// while output waits for room, so typing cannot outrun the connection.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] a fatal wait or receive raised. A transient empty mailbox
     /// is not an error — the implementation parks and retries.
-    fn next_event(&mut self) -> Result<IoEvent, Errno>;
+    fn next_event(&mut self, keyboard: bool) -> Result<IoEvent, Errno>;
 
-    /// Transmit `bytes` on the connection, retrying a momentarily-full send
-    /// buffer until every byte is accepted.
+    /// Offer `bytes` to the connection, returning how many it took; never
+    /// waits. A full send buffer takes fewer, possibly none, and an
+    /// [`IoEvent::Room`] follows.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the send raised — [`Errno::NotConnected`] once the peer
     /// has gone, or a transport failure.
-    fn send(&mut self, bytes: &[u8]) -> Result<(), Errno>;
+    fn send(&mut self, bytes: &[u8]) -> Result<usize, Errno>;
 
     /// The terminal's current character grid, or [`None`] when the console
     /// cannot attest one (a serial line, whose far-end terminal the kernel

@@ -68,9 +68,8 @@ extern crate alloc;
 pub mod client;
 pub mod command;
 pub mod error;
-pub mod io;
 
 pub use client::{run, NameLookup, USAGE};
 pub use command::{parse, Command, Options, ParseError};
 pub use error::SsError;
-pub use io::Output;
+pub use tairix_util::output::Output;

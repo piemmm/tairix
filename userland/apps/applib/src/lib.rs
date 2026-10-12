@@ -279,20 +279,7 @@ pub trait Store {
     fn write(&self, document: &Document) -> Result<(), Errno>;
 }
 
-/// Writes the tool's terminal output and advisory records.
-pub trait Output {
-    /// Write every byte of `bytes` to standard output.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed consumer).
-    fn out(&self, bytes: &[u8]) -> Result<(), Errno>;
-
-    /// Emit one framed `stdinfo` record on fd 3. Best-effort by the stream
-    /// contract: a missing or refusing consumer is silently ignored, and a
-    /// record never changes the command's result.
-    fn info(&self, bytes: &[u8]);
-}
+pub use tairix_util::output::Output;
 
 /// The catalog documents an invocation can reach.
 pub struct Stores<'a> {
@@ -502,7 +489,7 @@ pub fn run(
             // build without the bundle's documents) so `-h` never fails.
             let bytes = own_short_help(help, locale, OWN_WORD)
                 .unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
-            output.out(&bytes).map_err(AppLibError::Output)
+            output.write_all(&bytes).map_err(AppLibError::Output)
         }
         Command::List { category } => list(stores, output, category),
         Command::Add(request) => add(stores, bundles, output, &request),
@@ -570,7 +557,9 @@ fn list(
             text.push('\n');
         }
     }
-    output.out(text.as_bytes()).map_err(AppLibError::Output)
+    output
+        .write_all(text.as_bytes())
+        .map_err(AppLibError::Output)
 }
 
 /// `applib add`: register (or update) one bundle in the target catalog,

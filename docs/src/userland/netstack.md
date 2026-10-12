@@ -357,10 +357,19 @@ costs neither a parse nor a wake. A stream socket owns one pure `tairix_net::tcp
 per connection: `Connect` actively opens it (CSPRNG ISN, egress interface
 chosen once), inbound `StackEvent::TcpSegment`s drive it, and the service
 turns the results into segment egress (through `Stack::send_tcp`) and
-client-visible `SocketStreamEvent`s (`Connected`/`Data`/`Closed`). Stream
-timers (retransmit, delayed ACK, persist, user timeout, TIME-WAIT) fold
-into the wait-set deadline and run on the timer wake, so the stream path is
-event-driven with no polling.
+client-visible `SocketStreamEvent`s (`Connected`/`Data`/`Room`/`Closed`,
+and a listener's `Accepted`). Stream timers (retransmit, delayed ACK,
+persist, user timeout, TIME-WAIT) fold into the wait-set deadline and run on
+the timer wake, so the stream path is event-driven with no polling.
+
+A socket whose client is owed an event is listed, and the service posts
+what each is owed at the top of every loop pass (`deliver_owed`). Received
+bytes leave a connection only once a post of them lands, so a client whose
+port is full shuts the connection's window on the peer instead of losing
+acknowledged bytes; the service parks on `PortRoom` for every port still
+owed (level-triggered, so a port that drained wakes it at once) and resumes
+there. A send the buffer takes only part of owes the client one `Room` once
+half the buffer is free.
 
 ## Observability
 

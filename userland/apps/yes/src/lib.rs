@@ -68,18 +68,7 @@ pub enum YesError {
     Output,
 }
 
-/// The output sink the endless writer pumps into. A failed write is the
-/// tool's one stop condition, so the error carries no detail beyond the
-/// fact of the failure.
-pub trait Output {
-    /// Write all of `bytes`, or report that the sink no longer accepts
-    /// output.
-    ///
-    /// # Errors
-    ///
-    /// [`YesError::Output`] when the sink stopped accepting bytes.
-    fn write_all(&self, bytes: &[u8]) -> Result<(), YesError>;
-}
+pub use tairix_util::output::Output;
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
@@ -159,11 +148,8 @@ pub fn block(operands: &[String]) -> Vec<u8> {
 ///
 /// [`YesError::Output`] when the sink stopped accepting bytes.
 pub fn pump(block: &[u8], out: &dyn Output) -> YesError {
-    loop {
-        if let Err(err) = out.write_all(block) {
-            return err;
-        }
-    }
+    while out.write_all(block).is_ok() {}
+    YesError::Output
 }
 
 #[cfg(test)]
@@ -174,6 +160,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::Cell;
+
+    use tairix_abi::Errno;
 
     use super::{block, parse, pump, Command, Output, YesError, BLOCK_LEN};
 
@@ -254,9 +242,9 @@ mod tests {
     }
 
     impl Output for Closing {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), YesError> {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
             if self.remaining.get() == 0 {
-                return Err(YesError::Output);
+                return Err(Errno::BrokenPipe);
             }
             self.remaining.set(self.remaining.get() - 1);
             self.written.borrow_mut().extend_from_slice(bytes);

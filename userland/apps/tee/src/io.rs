@@ -50,16 +50,4 @@ pub trait FileSink {
     fn write(&self, id: usize, bytes: &[u8]) -> Result<(), Errno>;
 }
 
-/// Writes bytes to one of the tool's output streams.
-///
-/// The client uses two instances: standard output for the copied data, and
-/// standard error for the per-output diagnostics it reports per the
-/// selected output-error mode.
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed consumer).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;

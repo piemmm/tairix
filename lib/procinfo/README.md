@@ -16,7 +16,10 @@ other (`AGENTS.md` §17.4); this `lib/*` crate is the permitted shared home.
 The crate provides:
 
 - `Transport` and `Output` — the object-safe seams a tool injects, so its
-  request/render logic runs against in-memory fixtures with no kernel.
+  request/render logic runs against in-memory fixtures with no kernel. Every
+  byte stream (`tairix_util::output::Output`, the standard streams among
+  them) is a line `Output`: each line, then its newline, a refused write
+  reported with the stream's own reason.
 - `encode_request` / `call` / `CallError` — framing a `sysinfo-v1` request
   and mapping a capability denial onto a distinguished error.
 - `ListError` — the shared error type for the paged-list walks, returned by
@@ -99,8 +102,6 @@ binary lands):
   `/System/Services/sysinfod.app/Run` over the well-known `SYSINFO_ENDPOINT` IPC call
   (`tairix_rt::ipc_call`) and unwraps the reply frame (`decode_reply`),
   surfacing a per-query refusal as the exact `Errno`.
-- `RtOutput` — an `Output` that writes each rendered line to the inherited
-  standard output (fd 1) through `tairix-rt`.
 - `NamedSource` / `OpenError` — the one open-by-name path for a readable
   source a tool was given: a path or stream reference through the kernel, an
   `info:`/`state:`/`stats:` value through the broker (which no kernel backing

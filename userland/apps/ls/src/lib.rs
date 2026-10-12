@@ -19,8 +19,9 @@
 //! injected seams:
 //!
 //! * [`Listing`] — stat a path and read a directory's entries.
-//! * [`Output`] — write the rendered listing to the terminal and advisory
-//!   records to the standard information stream (fd 3).
+//! * [`Terminal`] — write the rendered listing to the terminal, a skipped
+//!   path's reason to the error stream, and advisory records to the standard
+//!   information stream (fd 3).
 //! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
 //!   short-help switches.
 //!
@@ -61,7 +62,7 @@
 //!
 //! * [`error`] — [`LsError`], the outcomes of [`run`].
 //! * [`command`] — the [`Command`] shape and its [`parse`]r.
-//! * [`io`] — the [`Listing`] and [`Output`] seams and the
+//! * [`io`] — the [`Listing`] and [`Terminal`] seams and the
 //!   [`Entry`]/[`Metadata`] data they carry.
 //! * [`client`] — the [`run`] entry point and the listing/formatting engine.
 //!
@@ -92,4 +93,4 @@ pub mod io;
 pub use client::{run, Outcome, USAGE};
 pub use command::{parse, Command, Dereference};
 pub use error::LsError;
-pub use io::{Entry, FinalLink, Listing, Metadata, Output};
+pub use io::{Entry, FinalLink, Listing, Metadata, Output, Terminal};

@@ -960,6 +960,7 @@ dependencies = [
  "tairix-help",
  "tairix-proglib",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1180,6 +1181,7 @@ dependencies = [
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1197,6 +1199,7 @@ dependencies = [
  "tairix-help",
  "tairix-path",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1205,6 +1208,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-path",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1373,6 +1377,7 @@ dependencies = [
  "tairix-help",
  "tairix-path",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1648,6 +1653,7 @@ dependencies = [
  "tairix-help",
  "tairix-net",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2350,6 +2356,7 @@ dependencies = [
  "tairix-cmdres",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2464,6 +2471,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-path",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2536,6 +2544,7 @@ dependencies = [
  "tairix-rt",
  "tairix-useradmin",
  "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -2587,6 +2596,7 @@ dependencies = [
  "tairix-net",
  "tairix-resolver",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3096,6 +3106,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3114,6 +3125,7 @@ dependencies = [
  "tairix-help",
  "tairix-path",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3152,6 +3164,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-log",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3166,6 +3179,7 @@ dependencies = [
  "tairix-path",
  "tairix-rt",
  "tairix-termcap",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -3178,6 +3192,7 @@ dependencies = [
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3189,6 +3204,7 @@ dependencies = [
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3213,6 +3229,7 @@ dependencies = [
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3227,6 +3244,7 @@ dependencies = [
  "tairix-help",
  "tairix-path",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3302,6 +3320,7 @@ dependencies = [
  "tairix-help",
  "tairix-path",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3505,6 +3524,7 @@ dependencies = [
 name = "tairix-printf"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -3606,6 +3626,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3667,6 +3688,7 @@ dependencies = [
  "tairix-help",
  "tairix-path",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3677,6 +3699,7 @@ dependencies = [
  "tairix-help",
  "tairix-path",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3768,6 +3791,7 @@ dependencies = [
 name = "tairix-seq"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -3788,6 +3812,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-path",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3880,6 +3905,7 @@ dependencies = [
  "tairix-procinfo",
  "tairix-resolver",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3902,6 +3928,7 @@ dependencies = [
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -4083,6 +4110,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -4095,6 +4123,7 @@ dependencies = [
  "tairix-net",
  "tairix-resolver",
  "tairix-rt",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -7684,6 +7713,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -7694,6 +7724,7 @@ dependencies = [
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -7735,6 +7766,7 @@ dependencies = [
  "tairix-rt",
  "tairix-useradmin",
  "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -8192,8 +8224,10 @@ dependencies = [
 name = "tairix-yes"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]

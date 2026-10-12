@@ -26,8 +26,8 @@ mod program {
     use tairix_audio::stream::{devices, set_control, DeviceControl};
     use tairix_audioctl::{parse, run, Sound, OWN_WORD, USAGE};
     use tairix_help::BundleHelp;
-    use tairix_procinfo::{IpcTransport, RtOutput};
-    use tairix_rt::io::{write_stderr_line, Stderr, Write};
+    use tairix_procinfo::IpcTransport;
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
     /// The audio service over its live transport.
     struct RtSound(RtAudio);
@@ -70,7 +70,7 @@ mod program {
             &mut RtSound(RtAudio::new()),
             &IpcTransport,
             &BundleHelp::new(OWN_WORD),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

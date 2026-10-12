@@ -14,7 +14,7 @@
 //! the `RtPingIo` seam — name resolution through the shared `lib/resolver`
 //! stub resolver, the echo socket over `tairix_rt::net`, and payload entropy
 //! from `lib/rng`'s fast generator seeded by the kernel CSPRNG — the shared
-//! `tairix_help::BundleHelp` for the short-help switches, and `RtOutput`,
+//! `tairix_help::BundleHelp` for the short-help switches, and `Stdout`,
 //! which writes the per-reply lines and statistics to the inherited standard
 //! output and diagnostics to standard error. The tool binds only to its
 //! inherited descriptors, never a console device, and holds no ambient
@@ -42,29 +42,11 @@ mod program {
     use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_ping::{parse, run, Command, EchoEvent, Output, PingError, PingIo, USAGE};
+    use tairix_ping::{parse, run, Command, EchoEvent, PingError, PingIo, USAGE};
     use tairix_resolver::TargetFailure;
     use tairix_rng::{FastRng, RandU64};
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
     use tairix_rt::net::EchoSocket;
-
-    /// The production standard-output stream.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The production standard-error stream.
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
 
     /// The production [`PingIo`]: the monotonic clock and the shared echo
     /// socket, over the `tairix-rt` syscall wrappers.
@@ -208,10 +190,10 @@ mod program {
         let help = BundleHelp::new("ping");
         let is_help = matches!(command, Command::Help);
         let result = if is_help {
-            run(command, locale, &mut NoNet, &help, &RtOutput, &RtErrors)
+            run(command, locale, &mut NoNet, &help, &Stdout, &Stderr)
         } else {
             match RtPingIo::open() {
-                Ok(mut io) => run(command, locale, &mut io, &help, &RtOutput, &RtErrors),
+                Ok(mut io) => run(command, locale, &mut io, &help, &Stdout, &Stderr),
                 Err(err) => Err(err),
             }
         };

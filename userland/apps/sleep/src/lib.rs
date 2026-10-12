@@ -139,20 +139,7 @@ pub trait Sleeper {
     fn sleep(&self, seconds: f64);
 }
 
-/// The terminal sink the short help is written to.
-///
-/// The production implementation writes the inherited standard output
-/// (fd 1); tests capture the lines. A single injected seam keeps the engine
-/// free of ambient I/O and makes "the terminal refused the write" an
-/// ordinary, testable failure.
-pub trait Output {
-    /// Write one line (the callee appends the terminating newline).
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the underlying write raises.
-    fn write_line(&self, line: &str) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
@@ -294,8 +281,7 @@ pub fn run(
 /// from its own bundle's `Help/` tree through the one shared engine; when no
 /// document can be served (a build without the bundle's documents) the usage
 /// banner stands in — the tool's own text, not fabricated help content — so
-/// `-h` never fails. The rendered page is written as one multi-line
-/// `write_line`; the seam owns the final newline.
+/// `-h` never fails. The page ends in exactly one newline.
 fn short_help(
     locale: Option<&str>,
     help: &dyn HelpSource,
@@ -306,7 +292,8 @@ fn short_help(
         .as_deref()
         .and_then(|bytes| core::str::from_utf8(bytes).ok())
         .unwrap_or(USAGE);
-    out.write_line(text.trim_end_matches('\n'))
+    out.write_all(text.trim_end_matches('\n').as_bytes())
+        .and_then(|()| out.write_all(b"\n"))
         .map_err(SleepError::Output)
 }
 
@@ -315,7 +302,7 @@ mod tests {
     extern crate std;
 
     use alloc::format;
-    use alloc::string::{String, ToString};
+    use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
@@ -353,27 +340,27 @@ mod tests {
         }
     }
 
-    /// Captures written lines; optionally refuses every write.
+    /// Captures written bytes; optionally refuses every write.
     struct Sink {
-        lines: RefCell<Vec<String>>,
+        bytes: RefCell<Vec<u8>>,
         closed: bool,
     }
 
     impl Sink {
         fn new() -> Self {
             Self {
-                lines: RefCell::new(Vec::new()),
+                bytes: RefCell::new(Vec::new()),
                 closed: false,
             }
         }
     }
 
     impl Output for Sink {
-        fn write_line(&self, line: &str) -> Result<(), Errno> {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
             if self.closed {
                 return Err(Errno::NotFound);
             }
-            self.lines.borrow_mut().push(line.to_string());
+            self.bytes.borrow_mut().extend_from_slice(bytes);
             Ok(())
         }
     }
@@ -498,7 +485,7 @@ mod tests {
         )
         .expect("runs");
         assert_eq!(recorder.seconds.get(), Some(42.0));
-        assert!(out.lines.borrow().is_empty());
+        assert!(out.bytes.borrow().is_empty());
     }
 
     #[test]
@@ -507,14 +494,14 @@ mod tests {
         let out = Sink::new();
         run(Command::Help, None, &recorder, &NoHelp, &out).expect("help served");
         assert_eq!(recorder.seconds.get(), None);
-        assert_eq!(&*out.lines.borrow(), &[USAGE]);
+        assert_eq!(*out.bytes.borrow(), format!("{USAGE}\n").into_bytes());
     }
 
     #[test]
     fn a_closed_terminal_is_an_output_error() {
         let recorder = Recorder::default();
         let out = Sink {
-            lines: RefCell::new(Vec::new()),
+            bytes: RefCell::new(Vec::new()),
             closed: true,
         };
         let outcome = run(Command::Help, None, &recorder, &NoHelp, &out);

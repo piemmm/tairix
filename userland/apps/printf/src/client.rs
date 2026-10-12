@@ -19,16 +19,7 @@ pub const USAGE: &str = "usage: printf format [argument...]";
 /// Help document through the same engine as any other command's.
 const OWN_WORD: &str = "printf";
 
-/// One of the tool's output streams. A failed write is fatal.
-pub trait Output {
-    /// Write all of `bytes`, or report that the stream no longer accepts
-    /// output.
-    ///
-    /// # Errors
-    ///
-    /// [`PrintfError::Output`] when the stream stopped accepting bytes.
-    fn write_all(&self, bytes: &[u8]) -> Result<(), PrintfError>;
-}
+pub use tairix_util::output::Output;
 
 /// Run one [`Command`], writing formatted data to `out` and diagnostics
 /// to `err`. `locale` is the user's `LANG` preference, if set; `help` is
@@ -54,7 +45,7 @@ pub fn run(
         Command::Help => {
             let bytes = own_short_help(help, locale, OWN_WORD)
                 .unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
-            out.write_all(&bytes)?;
+            out.write_all(&bytes).map_err(|_| PrintfError::Output)?;
             return Ok(0);
         }
         Command::Print { format, arguments } => (format, arguments),
@@ -74,9 +65,10 @@ pub fn run(
         );
         // Whatever the pass rendered stands, even before a fatal error —
         // GNU's exit flushes its stream the same way.
-        out.write_all(&buffer)?;
+        out.write_all(&buffer).map_err(|_| PrintfError::Output)?;
         for diagnostic in &diagnostics {
-            err.write_all(format!("printf: {}\n", diagnostic.message).as_bytes())?;
+            err.write_all(format!("printf: {}\n", diagnostic.message).as_bytes())
+                .map_err(|_| PrintfError::Output)?;
             if diagnostic.severity == Severity::Error {
                 status = 1;
             }
@@ -94,7 +86,8 @@ pub fn run(
                         "printf: warning: ignoring excess arguments, starting with '{first}'\n"
                     )
                     .as_bytes(),
-                )?;
+                )
+                .map_err(|_| PrintfError::Output)?;
             }
             break;
         }
@@ -116,6 +109,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
 
     /// A recording sink.
@@ -123,7 +117,7 @@ mod tests {
     struct Sink(RefCell<Vec<u8>>);
 
     impl Output for Sink {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), PrintfError> {
+        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
             self.0.borrow_mut().extend_from_slice(bytes);
             Ok(())
         }

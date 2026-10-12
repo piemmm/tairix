@@ -35,6 +35,8 @@ path = "src/run.rs"
 # frozen `Errno`, so it invents no parallel error set and never links
 # a kernel or driver crate.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one help engine: locale fallback, the bounded structured-Markdown
 # parser, and the shared own-bundle short-help render the `-h`/`-?`
 # switches use (plans/APPS.md §4, §6).

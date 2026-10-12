@@ -35,7 +35,7 @@ mod program {
 
     use tairix_abi::{Errno, InputMode, OpenFlags};
     use tairix_help::BundleHelp;
-    use tairix_passwd::{parse, run, Output, SaltSource, Terminal, USAGE};
+    use tairix_passwd::{parse, run, SaltSource, Terminal, USAGE};
     use tairix_rt::io::{write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_useradmin::AdminChannel;
     use tairix_users::{Salt, SALT_LEN};
@@ -100,15 +100,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard output.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// Program entry point.
     ///
     /// Exit codes: `0` on success, `1` on a refused or failed
@@ -130,7 +121,7 @@ mod program {
             &BundleHelp::new("passwd"),
             &RtTerminal,
             &RtSalt,
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

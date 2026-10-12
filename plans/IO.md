@@ -91,8 +91,10 @@ done items):
   `tairix_rt::io::{Stdout, Stderr, Write}`, and the duplicated loops are
   deleted: `userland/shell/elsh` (`RtConsole`), `userland/session/login`
   (`RtPrompt`), `userland/system/init` (the
-  banner write), and `lib/procinfo` (`RtOutput` / `write_stderr_line`, which
-  back `sysinfo` / `ps` / `top`). The curses standard-streams channel lives
+  banner write), and `lib/procinfo` (`write_stderr_line`, which backs
+  `sysinfo` / `ps` / `top`); every command engine's output stream is the one
+  `tairix_util::output::Output`, implemented for the standard streams in
+  `lib/rt`. The curses standard-streams channel lives
   once as `tairix_curses::StreamTty` (`lib/curses`, feature `program`),
   linked by every full-screen program (`top`, `vim`, `edit`, `fstree`,
   `login`) instead of a per-app `Tty` copy, and writes through the same

@@ -14,7 +14,7 @@ use tairix_abi::driver::net_ring::{
 use tairix_abi::driver::BufferClass;
 use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, EchoOutcome, ShutdownHow,
-    SocketAddr, SocketId, SocketRequest, SocketStreamEvent, SocketType,
+    SocketAddr, SocketId, SocketRequest, SocketStreamEvent, SocketType, SOCKET_MAX_DATAGRAM,
 };
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetAddrState, NetBondConfigMsg, NetBondMemberRecord, NetBondMode, NetDnsServers,
@@ -35,7 +35,7 @@ use tairix_net::icmp::IcmpErrorKind;
 use tairix_net::stack::{EchoProbe, Stack, StackConfig, StackEvent, StackOutput, TxFrame};
 
 use crate::channel::{FrameService, LocalFrameService};
-use crate::socket::{Delivery, SocketService, PER_SOCKET_OVERHEAD};
+use crate::socket::{Delivery, Post, SocketService, PER_SOCKET_OVERHEAD};
 use crate::{serve, Caller, Netstack};
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
@@ -3377,16 +3377,38 @@ fn stage_batch(fs: &mut LocalFrameService<'_, PeerTcpNet>, batch: &FrameBatch) {
 
 /// Pump the client interface for a bounded number of rounds at `now`,
 /// routing every engine event through the socket service (stream segments
-/// and datagrams alike) and staging the resulting egress frames, returning
-/// the deliveries. A doorbell may leave a SYN-ACK on the RX ring the same
-/// `service_interface` did not re-harvest, so it iterates a fixed count
-/// rather than stopping on a quiet round; at a fixed `now` the extra rounds
-/// are idle.
+/// and datagrams alike), posting the stream events each round leaves owed to
+/// ports that always have room, and staging the resulting egress frames,
+/// returning the deliveries.
 fn pump_client(
     ns: &mut Netstack,
     svc: &mut SocketService,
     fs: &mut LocalFrameService<'_, PeerTcpNet>,
     now: Duration64,
+) -> Vec<Delivery> {
+    let mut posted = Vec::new();
+    let mut datagrams = pump_client_into(ns, svc, fs, now, &mut |port, frame| {
+        posted.push(Delivery {
+            deliver_port: port,
+            datagram: frame.to_vec(),
+        });
+        Ok(())
+    });
+    datagrams.extend(posted);
+    datagrams
+}
+
+/// As [`pump_client`], stream events going through `post`, returning the
+/// datagram deliveries. A doorbell may leave a SYN-ACK on the RX ring the same
+/// `service_interface` did not re-harvest, so it iterates a fixed count
+/// rather than stopping on a quiet round; at a fixed `now` the extra rounds
+/// are idle.
+fn pump_client_into(
+    ns: &mut Netstack,
+    svc: &mut SocketService,
+    fs: &mut LocalFrameService<'_, PeerTcpNet>,
+    now: Duration64,
+    post: &mut Post<'_>,
 ) -> Vec<Delivery> {
     let secret = test_cookie_secret();
     let mut deliveries = Vec::new();
@@ -3396,7 +3418,6 @@ fn pump_client(
             .expect("pump");
         let io = svc.advance_streams(ns, now);
         stage_batch(fs, &io.tx);
-        deliveries.extend(io.deliveries);
         for event in &outcome.events {
             match event {
                 StackEvent::UdpDatagram { .. } => {
@@ -3411,11 +3432,12 @@ fn pump_client(
                     let io =
                         svc.on_tcp_segment(ns, *source, *destination, *ecn, segment, now, &secret);
                     stage_batch(fs, &io.tx);
-                    deliveries.extend(io.deliveries);
                 }
                 _ => {}
             }
         }
+        let tx = svc.deliver_owed(ns, now, post);
+        stage_batch(fs, &tx);
     }
     deliveries
 }
@@ -3502,6 +3524,49 @@ impl<'r> StreamFixture<'r> {
     /// Run the link to quiescence, returning the client deliveries.
     fn pump(&mut self) -> Vec<Delivery> {
         pump_client(&mut self.ns, &mut self.svc, &mut self.fs, self.now)
+    }
+
+    /// Run the link to quiescence, stream events going to a client port
+    /// with room for `room` more of them; returns those it took.
+    fn pump_into_room(&mut self, room: usize) -> Vec<Delivery> {
+        let mut taken = Vec::new();
+        pump_client_into(
+            &mut self.ns,
+            &mut self.svc,
+            &mut self.fs,
+            self.now,
+            &mut |port, frame| {
+                if taken.len() == room {
+                    return Err(Errno::WouldBlock);
+                }
+                taken.push(Delivery {
+                    deliver_port: port,
+                    datagram: frame.to_vec(),
+                });
+                Ok(())
+            },
+        );
+        taken
+    }
+
+    /// Offer `payload` to `socket` without pumping, returning how much of it
+    /// the send buffer took.
+    fn offer(&mut self, socket: u32, payload: &[u8]) -> usize {
+        let mut response = [0u8; 64];
+        let reply = self
+            .serve(
+                SocketRequest::Send {
+                    socket,
+                    dest: None,
+                    interface: None,
+                    payload,
+                },
+                &mut response,
+            )
+            .expect("send");
+        stage_batch(&mut self.fs, &reply.tx);
+        usize::try_from(decode_send_reply(&response[..reply.len]).expect("send answered"))
+            .expect("accepted fits")
     }
 
     /// Close the peer's side of the connection.
@@ -3804,6 +3869,132 @@ fn stream_connect_and_echo_over_the_pump() {
         b"hello over tcp",
         "the peer echoed the stream bytes"
     );
+}
+
+/// The `Room` events delivered for `socket`.
+fn rooms_for(deliveries: &[Delivery], socket: u32) -> usize {
+    deliveries
+        .iter()
+        .filter(|d| SocketStreamEvent::parse(&d.datagram) == Ok(SocketStreamEvent::Room { socket }))
+        .count()
+}
+
+/// Bytes the client's port has no room for stay in the connection, shutting
+/// its window on the peer, and reach the client whole and in order as the
+/// port drains. Draining them into posts the port refused lost them, though
+/// the peer had them acknowledged.
+#[test]
+fn received_bytes_a_full_port_cannot_take_stay_in_the_connection_and_arrive_whole() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let sid = fx.established_stream();
+    let payload: Vec<u8> = (0..=250u8).cycle().take(48 * 1024).collect();
+    let mut sent = 0;
+    while sent < payload.len() {
+        let end = (sent + SOCKET_MAX_DATAGRAM).min(payload.len());
+        sent += fx.offer(sid, &payload[sent..end]);
+    }
+
+    let first = fx.pump_into_room(2);
+    assert_eq!(first.len(), 2, "the port took what it had room for");
+    assert_eq!(
+        fx.svc.owed_ports(),
+        [DELIVER_PORT],
+        "the rest is still owed"
+    );
+
+    let mut received = stream_data(&first, sid);
+    for _ in 0..256 {
+        if received.len() >= payload.len() {
+            break;
+        }
+        received.extend(stream_data(&fx.pump_into_room(2), sid));
+    }
+    assert_eq!(received, payload, "every echoed byte arrived, in order");
+    assert!(fx.svc.owed_ports().is_empty());
+}
+
+/// A send the stack took only part of owes the client one `Room` once at
+/// least half the send buffer is free again, so the sender waits on its port
+/// for the rest rather than retrying on a timer.
+#[test]
+fn a_send_the_stack_took_only_part_of_owes_one_room_once_half_the_buffer_is_free() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let sid = fx.established_stream();
+    let limit = fx.svc.send_window_of(sid).expect("a connected stream");
+    let chunk = vec![0x5Au8; SOCKET_MAX_DATAGRAM];
+    let mut queued = 0;
+    while queued < limit {
+        queued += fx.offer(sid, &chunk);
+    }
+    assert_eq!(fx.offer(sid, &chunk), 0, "a full send buffer takes nothing");
+
+    let deliveries = fx.pump();
+    assert_eq!(
+        rooms_for(&deliveries, sid),
+        1,
+        "one Room answers the short sends"
+    );
+    assert_eq!(rooms_for(&fx.pump(), sid), 0, "and no more follow it");
+}
+
+/// A `Room` a full port cannot take stays owed and lands once it drains.
+#[test]
+fn a_room_a_full_port_cannot_take_lands_once_it_drains() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let sid = fx.established_stream();
+    let limit = fx.svc.send_window_of(sid).expect("a connected stream");
+    let chunk = vec![0x5Au8; SOCKET_MAX_DATAGRAM];
+    let mut queued = 0;
+    while queued < limit {
+        queued += fx.offer(sid, &chunk);
+    }
+    assert_eq!(fx.offer(sid, &chunk), 0, "a full send buffer takes nothing");
+
+    let held = fx.pump_into_room(0);
+    assert!(held.is_empty());
+    assert_eq!(
+        fx.svc.owed_ports(),
+        [DELIVER_PORT],
+        "the Room is still owed"
+    );
+    let mut rooms = 0;
+    for _ in 0..64 {
+        rooms += rooms_for(&fx.pump_into_room(usize::MAX), sid);
+        if fx.svc.owed_ports().is_empty() {
+            break;
+        }
+    }
+    assert_eq!(rooms, 1);
+}
+
+/// Shutting the receive side drops what a full port left held, so the window
+/// reopens with the shutdown rather than at the peer's next probe.
+#[test]
+fn a_read_shutdown_drops_what_a_full_port_left_held_and_reopens_the_window() {
+    let mut region = rings_region();
+    let mut fx = StreamFixture::new(&mut region);
+    let sid = fx.established_stream();
+    assert_eq!(fx.offer(sid, b"echo me"), 7);
+    assert!(
+        fx.pump_into_room(0).is_empty(),
+        "the echo is held for a full port"
+    );
+    assert_eq!(fx.svc.owed_ports(), [DELIVER_PORT]);
+
+    assert_eq!(
+        fx.shutdown(sid, ShutdownHow::Read),
+        Ok(true),
+        "the reopened window goes out with the shutdown"
+    );
+    let delivered = fx.pump_into_room(usize::MAX);
+    assert!(
+        stream_data(&delivered, sid).is_empty(),
+        "a shut receive side delivers nothing"
+    );
+    assert!(fx.svc.owed_ports().is_empty());
 }
 
 /// POSIX `shutdown(SHUT_WR)`: the FIN goes out, the socket survives, and the

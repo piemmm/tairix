@@ -51,14 +51,4 @@ pub trait GroupDb {
     fn create(&self, spec: &GroupSpec<'_>) -> Result<(), Errno>;
 }
 
-/// Writes rendered bytes to the terminal.
-///
-/// `groupadd` is silent on success; this seam carries only the usage banner.
-pub trait Output {
-    /// Write every byte of `bytes` to the terminal.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the console raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;

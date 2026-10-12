@@ -125,13 +125,13 @@ struct MemOutput {
 }
 
 impl Output for MemOutput {
-    fn out(&self, bytes: &[u8]) -> Result<(), Errno> {
+    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
         self.out.borrow_mut().extend_from_slice(bytes);
         Ok(())
     }
 
-    fn info(&self, bytes: &[u8]) {
-        self.info.borrow_mut().extend_from_slice(bytes);
+    fn info(&self, record: &[u8]) {
+        self.info.borrow_mut().extend_from_slice(record);
     }
 }
 

@@ -32,6 +32,8 @@ path = "src/run.rs"
 # The audited ABI vocabulary: `Errno`, the hardware-tree `HwNode` /
 # `HwMatchKey` wire records, and the fd-3 advisory record.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one PCI/USB ID-database engine: the alloc-free `DevIds` decoder over
 # the compiled table this bundle ships as `Resources/usb.ids.bin`. The
 # `textdb` import/vetting half is generator-side only and stays off here.

@@ -48,7 +48,7 @@ a usage error.
   and the lookup engine, with its unit tests (including the per-locale
   switch-drift pin over the on-disk `Help/` tree).
 - `src/run.rs` — the freestanding `Run` binary: wires `self_origin`,
-  `IpcTransport`, `RtOutput`, and `BundleHelp` to the pure core; an inert
+  `IpcTransport`, `Stdout`, and `BundleHelp` to the pure core; an inert
   stub on the host.
 - `AppInfo.toml` — the signed-manifest source the app-bundle composer
   discovers.

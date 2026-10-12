@@ -16,8 +16,8 @@
 //! mount check stays kernel-side), `RtStdin`, which reads the inherited
 //! standard input, the shared `tairix_help::BundleHelp`, which reads the
 //! tool's own bundle's `Help/` tree for the short-help switches, and
-//! `RtOutput`/`RtErrors`/`RtInfo`, which write to the inherited standard
-//! output, standard error, and standard information stream (fd 3). The tool
+//! `Stdout`/`Stderr`, which write to the inherited standard output and
+//! standard error, the advisory record going to fd 3. The tool
 //! binds only to its inherited descriptors, never a console device, and holds
 //! no ambient authority.
 //!
@@ -43,9 +43,9 @@ mod program {
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_procinfo::{for_each_process, IpcTransport, WalkStep};
-    use tairix_rt::io::{self, write_stderr_line, Read, StdInfo, Stderr, Stdin, Stdout, Write};
+    use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout};
     use tairix_rt::{waitset_create, waitset_ctl, waitset_wait, File};
-    use tairix_tail::{parse, run, FileSource, Info, Input, Meta, Output, Watcher, USAGE};
+    use tairix_tail::{parse, run, FileSource, Input, Meta, Watcher, USAGE};
 
     /// The production [`FileSource`]: the kernel-authorised `fs_*` view of the
     /// filesystem. It adds no authority — every path resolution, per-inode
@@ -96,38 +96,6 @@ mod program {
     impl Input for RtStdin {
         fn read(&self, buf: &mut [u8]) -> Result<usize, Errno> {
             Stdin.read(buf).map_err(io::Error::as_errno)
-        }
-    }
-
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting bytes
-            // fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(io::Error::as_errno)
-        }
-    }
-
-    /// The production diagnostic [`Output`] over the inherited standard error
-    /// (fd 2).
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(io::Error::as_errno)
-        }
-    }
-
-    /// The production [`Info`] over the inherited standard information stream
-    /// (fd 3). Advisory by contract: an unattached consumer or a short write
-    /// is a silent no-op and never affects the output or the exit status.
-    struct RtInfo;
-
-    impl Info for RtInfo {
-        fn emit(&self, record: &[u8]) {
-            let _ = StdInfo.write_all(record);
         }
     }
 
@@ -305,9 +273,8 @@ mod program {
             &RtStdin,
             &RtWatcher::new(),
             &BundleHelp::new("tail"),
-            &RtOutput,
-            &RtErrors,
-            &RtInfo,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(true) => 0,
             Ok(false) => 1,

@@ -27,23 +27,10 @@ mod program {
     use tairix_abi::net_ipc::{ip_from_parts, NetAddrFamily};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_procinfo::Output;
     use tairix_resolver::{RtDnsTransport, TargetFailure};
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_rt::net::EchoSocket;
     use tairix_traceroute::{parse, run, Answer, TraceIo, USAGE};
-
-    /// The production standard output.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_line(&self, line: &str) -> Result<(), Errno> {
-            Stdout
-                .write_all(line.as_bytes())
-                .and_then(|()| Stdout.write_all(b"\n"))
-                .map_err(|_| Errno::NotImplemented)
-        }
-    }
 
     /// The production [`TraceIo`]: one resolver transport for the target and
     /// every hop name, and the echo socket once the target resolved.
@@ -130,7 +117,7 @@ mod program {
             names: None,
             socket: None,
         };
-        match run(command, locale, &mut io, &help, &RtOutput) {
+        match run(command, locale, &mut io, &help, &Stdout) {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(&format!("traceroute: {err}"));

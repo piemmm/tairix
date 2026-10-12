@@ -55,25 +55,4 @@ pub trait Controller {
     fn call(&self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno>;
 }
 
-/// Writes bytes to the tool's output streams.
-///
-/// The client uses one instance for standard output (the rendered report),
-/// which also carries the fd-3 advisory writer, and one for standard error
-/// (diagnostics).
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-
-    /// Write one advisory record to the standard information stream (fd 3),
-    /// best-effort: fd 3 is ignorable by contract, so failures are dropped
-    /// and never affect the report or the exit status. The default drops the
-    /// record — the contract's "ignorable" form for a sink with no advisory
-    /// channel.
-    fn info(&self, record: &[u8]) {
-        let _ = record;
-    }
-}
+pub use tairix_util::output::Output;

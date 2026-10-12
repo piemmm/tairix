@@ -31,19 +31,8 @@ mod program {
     use alloc::format;
 
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
-    use tairix_seq::{parse, run, Output, SeqError, USAGE};
-
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), SeqError> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| SeqError::Output)
-        }
-    }
+    use tairix_rt::io::{write_stderr_line, Stdout};
+    use tairix_seq::{parse, run, SeqError, USAGE};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
@@ -70,7 +59,7 @@ mod program {
         let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
-        match run(command, locale, &BundleHelp::new("seq"), &RtOutput) {
+        match run(command, locale, &BundleHelp::new("seq"), &Stdout) {
             Ok(()) => 0,
             Err(SeqError::Output) => {
                 write_stderr_line("seq: write error");

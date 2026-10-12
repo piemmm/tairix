@@ -32,28 +32,8 @@ mod program {
     use alloc::format;
 
     use tairix_help::BundleHelp;
-    use tairix_printf::{parse, run, Output, PrintfError, USAGE};
-    use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
-
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtStdout;
-
-    impl Output for RtStdout {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), PrintfError> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| PrintfError::Output)
-        }
-    }
-
-    /// The production [`Output`] over the inherited standard error (fd 2).
-    struct RtStderr;
-
-    impl Output for RtStderr {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), PrintfError> {
-            Stderr.write_all(bytes).map_err(|_| PrintfError::Output)
-        }
-    }
+    use tairix_printf::{parse, run, PrintfError, USAGE};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
@@ -83,8 +63,8 @@ mod program {
             command,
             locale,
             &BundleHelp::new("printf"),
-            &RtStdout,
-            &RtStderr,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(status) => i32::from(status),
             Err(PrintfError::Output) => {

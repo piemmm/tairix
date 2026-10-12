@@ -49,13 +49,11 @@ mod program {
     use tairix_abi::{Errno, APPINFO_WIRE_MAX};
     use tairix_appconf::{Document, MAX_DOCUMENT_LEN};
     use tairix_appdata::RtHost;
-    use tairix_applib::{
-        parse, run, AppDataStore, AppLibError, Output, Store, Stores, OWN_WORD, USAGE,
-    };
+    use tairix_applib::{parse, run, AppDataStore, AppLibError, Store, Stores, OWN_WORD, USAGE};
     use tairix_appstore::{manifest_path, DirEntry, StoreReader};
     use tairix_help::BundleHelp;
     use tairix_proglib::LIBRARY_PATH;
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdout};
 
     /// The production [`Store`] over the machine-wide catalog document,
     /// read and replaced whole through the secured VFS. Every path
@@ -211,25 +209,6 @@ mod program {
         Ok(bytes)
     }
 
-    /// The production [`Output`]: listings on the inherited standard output
-    /// (fd 1), advisory records on the inherited `stdinfo` (fd 3,
-    /// best-effort by the stream contract).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn out(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-
-        fn info(&self, bytes: &[u8]) {
-            // fd 3 is advisory: a missing or refusing consumer never
-            // changes the command's result.
-            let _ = StdInfo.write_all(bytes);
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -277,7 +256,7 @@ mod program {
             &stores,
             &VfsBundles,
             &BundleHelp::new(OWN_WORD),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err @ AppLibError::Usage) => {

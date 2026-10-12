@@ -1459,10 +1459,11 @@ impl StreamCloseReason {
 /// the port the client named in [`SocketRequest::Socket`]; the client
 /// authenticates the stack's kernel-attested sender origin, then decodes.
 ///
-/// The three events form the client-visible connection lifecycle:
-/// [`Connected`](Self::Connected) once (the handshake completed),
+/// A connection's lifecycle is [`Connected`](Self::Connected) once,
 /// [`Data`](Self::Data) zero or more times (received in order), and
 /// [`Closed`](Self::Closed) exactly once at the end (stating why).
+/// [`Room`](Self::Room) answers a send the stack took only part of, and
+/// [`Accepted`](Self::Accepted) is a listener's.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SocketStreamEvent<'a> {
     /// The three-way handshake completed; the socket is established and
@@ -1488,11 +1489,19 @@ pub enum SocketStreamEvent<'a> {
     },
     /// A listening socket has at least one established connection ready to
     /// [`Accept`](SocketRequest::Accept). Delivered to the *listener's*
-    /// delivery port (edge-triggered, one per newly ready connection); the
-    /// client responds by calling [`Accept`](SocketRequest::Accept) on
-    /// `socket` until it replies [`Errno::WouldBlock`].
+    /// delivery port; the client calls [`Accept`](SocketRequest::Accept) on
+    /// `socket` until it replies [`Errno::WouldBlock`], so several ready
+    /// connections may share one.
     Accepted {
         /// The listening socket a connection is ready on.
+        socket: SocketId,
+    },
+    /// The send buffer has room again after a [`Send`](SocketRequest::Send)
+    /// the stack took only part of: at least half of it is free. One follows
+    /// each short send, so a sender waits on its port for the rest rather
+    /// than retrying on a timer.
+    Room {
+        /// The socket that may send again.
         socket: SocketId,
     },
 }
@@ -1505,6 +1514,8 @@ const STREAM_EV_DATA: u16 = 2;
 const STREAM_EV_CLOSED: u16 = 3;
 /// Wire event discriminant of [`SocketStreamEvent::Accepted`].
 const STREAM_EV_ACCEPTED: u16 = 4;
+/// Wire event discriminant of [`SocketStreamEvent::Room`].
+const STREAM_EV_ROOM: u16 = 5;
 
 impl<'a> SocketStreamEvent<'a> {
     /// Byte length of the fixed event header preceding any payload.
@@ -1563,17 +1574,23 @@ impl<'a> SocketStreamEvent<'a> {
                 put_u16(out, 6, STREAM_EV_ACCEPTED);
                 put_u32(out, 8, socket);
             }
+            Self::Room { socket } => {
+                put_u16(out, 6, STREAM_EV_ROOM);
+                put_u32(out, 8, socket);
+            }
         }
         Ok(total)
     }
 
-    /// Decode a stream event from `bytes`, failing closed.
+    /// Decode a stream event from exactly the bytes of one frame, failing
+    /// closed.
     ///
     /// # Errors
     ///
     /// * [`Errno::BufferTooSmall`] — `bytes` is shorter than the header or
     ///   the declared payload.
-    /// * [`Errno::BadMagic`] — wrong magic or a dirty reserved field.
+    /// * [`Errno::BadMagic`] — wrong magic, a dirty reserved field, or bytes
+    ///   past the end of the frame.
     /// * [`Errno::AbiVersionUnsupported`] — not `netsock-v1`.
     /// * [`Errno::OutOfRange`] — an unknown event kind or close reason.
     /// * [`Errno::LengthOutOfRange`] — a declared payload beyond
@@ -1590,9 +1607,10 @@ impl<'a> SocketStreamEvent<'a> {
         }
         let kind = read_u16(bytes, 6);
         let socket = read_u32(bytes, 8);
+        let header_only = bytes.len() == Self::HEADER_LEN;
         match kind {
             STREAM_EV_CONNECTED => {
-                if bytes[12] != 0 || bytes[13..Self::HEADER_LEN].iter().any(|&b| b != 0) {
+                if !header_only || bytes[12..Self::HEADER_LEN].iter().any(|&b| b != 0) {
                     return Err(Errno::BadMagic);
                 }
                 Ok(Self::Connected { socket })
@@ -1608,20 +1626,29 @@ impl<'a> SocketStreamEvent<'a> {
                 let payload = bytes
                     .get(Self::HEADER_LEN..Self::HEADER_LEN + payload_len)
                     .ok_or(Errno::BufferTooSmall)?;
+                if bytes.len() != Self::HEADER_LEN + payload_len {
+                    return Err(Errno::BadMagic);
+                }
                 Ok(Self::Data { socket, payload })
             }
             STREAM_EV_CLOSED => {
                 let reason = StreamCloseReason::from_u8(bytes[12])?;
-                if bytes[13..Self::HEADER_LEN].iter().any(|&b| b != 0) {
+                if !header_only || bytes[13..Self::HEADER_LEN].iter().any(|&b| b != 0) {
                     return Err(Errno::BadMagic);
                 }
                 Ok(Self::Closed { socket, reason })
             }
             STREAM_EV_ACCEPTED => {
-                if bytes[12] != 0 || bytes[13..Self::HEADER_LEN].iter().any(|&b| b != 0) {
+                if !header_only || bytes[12..Self::HEADER_LEN].iter().any(|&b| b != 0) {
                     return Err(Errno::BadMagic);
                 }
                 Ok(Self::Accepted { socket })
+            }
+            STREAM_EV_ROOM => {
+                if !header_only || bytes[12..Self::HEADER_LEN].iter().any(|&b| b != 0) {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::Room { socket })
             }
             _ => Err(Errno::OutOfRange),
         }
@@ -1824,11 +1851,22 @@ mod tests {
                 reason: StreamCloseReason::PeerClosed,
             },
             SocketStreamEvent::Accepted { socket: 42 },
+            SocketStreamEvent::Room { socket: 7 },
         ];
         for event in events {
             let mut out = [0u8; SocketStreamEvent::MAX_WIRE_LEN];
             let n = event.encode(&mut out).expect("encode");
             assert_eq!(SocketStreamEvent::parse(&out[..n]), Ok(event));
+            assert_eq!(
+                SocketStreamEvent::parse(&out[..=n]),
+                Err(Errno::BadMagic),
+                "a byte past the frame is not part of it"
+            );
+            if !matches!(event, SocketStreamEvent::Data { .. }) {
+                let mut dirty = out;
+                dirty[19] = 1;
+                assert_eq!(SocketStreamEvent::parse(&dirty[..n]), Err(Errno::BadMagic));
+            }
         }
         // A Data event truncated past its declared payload fails closed.
         let data = SocketStreamEvent::Data {

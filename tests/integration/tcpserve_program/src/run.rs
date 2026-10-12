@@ -274,13 +274,17 @@ mod program {
                 Ok(SocketStreamEvent::Accepted { .. }) => {
                     return Err("tcpserve: Accepted event on a connection socket")
                 }
+                Ok(SocketStreamEvent::Room { socket }) if socket == child => {}
+                Ok(SocketStreamEvent::Room { .. }) => {
+                    return Err("tcpserve: Room for a foreign socket")
+                }
                 Err(Errno::WouldBlock) => {}
                 Err(_) => return Err("tcpserve: connection event receive failed"),
             }
 
             // Echo whatever we have buffered, draining what the send buffer
-            // accepts (the rest is retried on the next pass as ACKs free
-            // room). A refused send is a real failure.
+            // accepts; the stack answers a short send with `Room`, which wakes
+            // the park below for the rest. A refused send is a real failure.
             if !pending.is_empty() {
                 match stream_send(child, &pending) {
                     Ok(0) => {}
@@ -301,8 +305,8 @@ mod program {
                 return Err("tcpserve: peer closed before the whole transfer arrived");
             }
 
-            // Nothing to do until the next event or the send buffer drains:
-            // park (bounded by the phase deadline) rather than spin.
+            // Nothing to do until the next event: park (bounded by the phase
+            // deadline) rather than spin.
             park_for_event(set, deadline, "tcpserve: timed out serving the transfer")?;
         }
     }

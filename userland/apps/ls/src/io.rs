@@ -127,16 +127,11 @@ pub trait Listing {
     fn read_dir(&self, path: &str) -> Result<Vec<Entry>, Errno>;
 }
 
-/// Writes rendered bytes to the terminal, and advisory records to the
-/// standard information stream.
-pub trait Output {
-    /// Write every byte of `bytes` to the terminal.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the console raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
+pub use tairix_util::output::Output;
 
+/// The terminal a listing is written to: its byte stream, and what the
+/// listing asks of the terminal itself.
+pub trait Terminal: Output {
     /// Write one diagnostic line to the error stream (fd 2), best-effort.
     ///
     /// This is how a listing *keeps going* past an entry it could not
@@ -146,11 +141,6 @@ pub trait Output {
     /// records that it happened and exits non-zero; a failure to write the
     /// diagnostic itself is not worth failing the listing over.
     fn error(&self, message: &str);
-
-    /// Emit one framed `stdinfo` record on fd 3, best-effort: advisory by
-    /// contract, so a missing consumer or short write is silently a no-op
-    /// and never affects the listing or the exit status.
-    fn info(&self, record: &[u8]);
 
     /// The character-cell width of the terminal backing standard output, if
     /// it is an attestable text console; `None` when standard output is a

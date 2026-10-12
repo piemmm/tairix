@@ -10,7 +10,7 @@ use tairix_util::tailwindow::{ByteWindow, LineWindow};
 
 use crate::command::{Command, Count, HeaderMode, Job, Source};
 use crate::error::TailError;
-use crate::io::{FileSource, Info, Input, Output, Watcher};
+use crate::io::{FileSource, Input, Output, Watcher};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `tail`'s own Help tree is unavailable.
@@ -143,8 +143,8 @@ impl Engine {
 /// Run one [`Command`], reading its sources through `files`/`stdin` and
 /// writing the selected bytes to `out`. `locale` is the user's `LANG`
 /// preference, if set; `help` is the tool's own `Help/` tree, read by the
-/// short-help switches; `err` receives the per-file diagnostics; `info`
-/// receives the fd-3 advisory.
+/// short-help switches; `err` receives the per-file diagnostics, and `out`
+/// the fd-3 advisory.
 ///
 /// Returns `Ok(true)` when every source was served, `Ok(false)` when at
 /// least one source failed (it was diagnosed on `err` and the run moved to
@@ -164,7 +164,6 @@ pub fn run(
     help: &dyn HelpSource,
     out: &dyn Output,
     err: &dyn Output,
-    info: &dyn Info,
 ) -> Result<bool, TailError> {
     let job = match command {
         Command::Help => {
@@ -180,7 +179,7 @@ pub fn run(
     // as they grow, blocking on the kernel's file-change wait source between
     // emissions — never a busy poll.
     if let Some(mode) = job.follow {
-        return crate::follow::run_follow(&job, mode, watcher, stdin, out, err, info);
+        return crate::follow::run_follow(&job, mode, watcher, stdin, out, err);
     }
 
     let show_headers = match job.headers {
@@ -217,7 +216,7 @@ pub fn run(
     }
 
     if omitted_total > 0 {
-        emit_omission_record(info, omitted_total, lines, job.from_start);
+        emit_omission_record(out, omitted_total, lines, job.from_start);
     }
     Ok(all_ok)
 }
@@ -312,7 +311,7 @@ fn serve_path(
 /// Emit the fd-3 advisory that leading content was not shown: a tool or user
 /// then knows the output is a tail view and is not exhaustive. Advisory only
 /// — never affects the output, ordering, or exit status.
-pub(crate) fn emit_omission_record(info: &dyn Info, omitted: u64, lines: bool, from_start: bool) {
+pub(crate) fn emit_omission_record(out: &dyn Output, omitted: u64, lines: bool, from_start: bool) {
     let (unit, units) = if lines {
         ("line", "lines")
     } else {
@@ -346,7 +345,7 @@ pub(crate) fn emit_omission_record(info: &dyn Info, omitted: u64, lines: bool, f
     .with_ai(&ai);
     let mut buf = [0u8; 512];
     if let Ok(len) = record.write_jsonl(&mut buf) {
-        info.emit(&buf[..len]);
+        out.info(&buf[..len]);
     }
 }
 
@@ -372,7 +371,7 @@ mod tests {
     use super::{run, USAGE};
     use crate::command::{parse, Command};
     use crate::error::TailError;
-    use crate::io::{FileSource, Info, Input, Output};
+    use crate::io::{FileSource, Input, Output};
 
     /// An in-memory filesystem serving reads in bounded slices so a streamed
     /// file crosses several read calls.
@@ -440,20 +439,35 @@ mod tests {
         }
     }
 
-    /// A capturing output stream.
+    /// A capturing output stream, its fd-3 records kept apart.
     #[derive(Default)]
-    struct Sink(RefCell<Vec<u8>>);
+    struct Sink {
+        bytes: RefCell<Vec<u8>>,
+        records: RefCell<Vec<Vec<u8>>>,
+    }
 
     impl Sink {
         fn bytes(&self) -> Vec<u8> {
-            self.0.borrow().clone()
+            self.bytes.borrow().clone()
+        }
+
+        fn records(&self) -> Vec<String> {
+            self.records
+                .borrow()
+                .iter()
+                .map(|r| String::from_utf8(r.clone()).expect("record is UTF-8"))
+                .collect()
         }
     }
 
     impl Output for Sink {
         fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            self.0.borrow_mut().extend_from_slice(bytes);
+            self.bytes.borrow_mut().extend_from_slice(bytes);
             Ok(())
+        }
+
+        fn info(&self, record: &[u8]) {
+            self.records.borrow_mut().push(record.to_vec());
         }
     }
 
@@ -463,26 +477,6 @@ mod tests {
     impl Output for BrokenSink {
         fn write_all(&self, _bytes: &[u8]) -> Result<(), Errno> {
             Err(Errno::NotImplemented)
-        }
-    }
-
-    /// A capturing fd-3 sink.
-    #[derive(Default)]
-    struct InfoSink(RefCell<Vec<Vec<u8>>>);
-
-    impl InfoSink {
-        fn records(&self) -> Vec<String> {
-            self.0
-                .borrow()
-                .iter()
-                .map(|r| String::from_utf8(r.clone()).expect("record is UTF-8"))
-                .collect()
-        }
-    }
-
-    impl Info for InfoSink {
-        fn emit(&self, record: &[u8]) {
-            self.0.borrow_mut().push(record.to_vec());
         }
     }
 
@@ -548,7 +542,6 @@ mod tests {
     ) -> (bool, Vec<u8>, String, Vec<String>) {
         let out = Sink::default();
         let err = Sink::default();
-        let info = InfoSink::default();
         let ok = run(
             command(args),
             None,
@@ -558,14 +551,13 @@ mod tests {
             &NoHelp,
             &out,
             &err,
-            &info,
         )
         .expect("fixture output streams never fail");
         (
             ok,
             out.bytes(),
             String::from_utf8(err.bytes()).expect("stderr is UTF-8"),
-            info.records(),
+            out.records(),
         )
     }
 
@@ -772,7 +764,6 @@ mod tests {
             &NoHelp,
             &BrokenSink,
             &Sink::default(),
-            &InfoSink::default(),
         );
         assert_eq!(result, Err(TailError::Output(Errno::NotImplemented)));
     }

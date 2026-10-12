@@ -70,7 +70,6 @@ next request's turn — parks until its own deadline.
 
 * `command` — the option grammar (`Command`/`Config`) and its parser.
 * `error` — `PingError`, the fatal outcomes of `run`.
-* `io` — the `Output` seam.
 * `net` — the `PingIo` seam (name resolution, clock, echo socket, payload
   entropy, wait/park) and the owned `EchoEvent`; a target that names no
   address fails with `lib/resolver`'s shared `TargetFailure`.

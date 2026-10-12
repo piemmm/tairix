@@ -6,6 +6,13 @@ This page documents the ones that have landed (`sysinfo`, `ps`, `man`,
 `getcap`, `setcap`, `true`, `false`, `yes`, `basename`, and `dirname`)
 and is extended as the others (`mount`, …) arrive.
 
+Every tool's `Output` below is the one shared byte stream,
+`tairix_util::output::Output`: its engine writes through it, a test captures
+it, and a `Run` binary hands the engine `Stdout` and `Stderr` themselves,
+whose implementation in `lib/rt` reports a refused write with the kernel's
+own reason. A tool whose engine renders whole lines (`sysinfo`, `ps`,
+`whoami`) takes `lib/procinfo`'s line `Output`, which every byte stream is.
+
 ## `sysinfo` — the System Information CLI (`userland/shell/sysinfo`)
 
 `tairix-sysinfo` is the single command-line tool that exposes the System
@@ -1579,7 +1586,7 @@ outside world are injected seams, the same discipline as `cat`'s
   the long format's columns, the `-S` size sort, `-F`'s execute-bit check,
   and `-L`'s resolution is paid only when one of them asks for it, and a
   link's target is read only by the format that prints it.
-- `Output` — write the rendered listing to the terminal, a skipped path's
+- `Terminal` — write the rendered listing to the terminal, a skipped path's
   reason to the error stream, and advisory records to the standard
   information stream (fd 3), best-effort.
 - `tairix_help::HelpSource` — the tool's own `Help/` tree, read by the

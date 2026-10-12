@@ -40,7 +40,7 @@ mod program {
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_useradd::db::{AdminChannel, Entropy, UsersAdminDb};
-    use tairix_useradd::{parse, run, Output, USAGE};
+    use tairix_useradd::{parse, run, USAGE};
 
     /// The production [`AdminChannel`]: the `users_admin` syscall. It adds
     /// no authority — the capability check and every record rule stay
@@ -73,17 +73,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
     /// Write the multi-line usage banner to fd 2 byte-exact (it carries its
     /// own trailing newline), best-effort on the already-failing path.
     fn report_usage() {
@@ -112,7 +101,7 @@ mod program {
         let db = UsersAdminDb::new(&RtChannel, &RtEntropy);
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
-        match run(command, locale, &db, &BundleHelp::new("useradd"), &RtOutput) {
+        match run(command, locale, &db, &BundleHelp::new("useradd"), &Stdout) {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(&format!("useradd: {err}"));

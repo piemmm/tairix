@@ -18,7 +18,7 @@
 //! standard input (consent only on a leading `y`/`Y`; an unreadable reply is
 //! never consent), the shared `tairix_help::BundleHelp`, which reads the
 //! tool's own bundle's `Help/` tree for the short-help switches, and
-//! `RtOutput`, which writes `-v` reports to the inherited standard output.
+//! `Stdout`, which writes `-v` reports to the inherited standard output.
 //! The tool binds only to its inherited descriptors, never a console device,
 //! and holds no ambient authority.
 //!
@@ -41,9 +41,7 @@ mod program {
 
     use tairix_abi::fs::{DirEntries, OpenFlags};
     use tairix_abi::{Errno, FileKind};
-    use tairix_cp::{
-        parse, run, Entry, EntryKind, FileSystem, Follow, Output, Probe, Prompt, USAGE,
-    };
+    use tairix_cp::{parse, run, Entry, EntryKind, FileSystem, Follow, Probe, Prompt, USAGE};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{self, write_stderr_line, Read, Stderr, Stdin, Stdout, Write};
     use tairix_rt::File;
@@ -327,17 +325,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(io::Error::as_errno)
-        }
-    }
-
     /// Write the multi-line usage banner to fd 2 byte-exact (it carries its
     /// own trailing newline), best-effort on the already-failing path.
     fn report_usage() {
@@ -370,7 +357,7 @@ mod program {
             &RtFileSystem::new(),
             &RtPrompt,
             &BundleHelp::new("cp"),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

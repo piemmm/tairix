@@ -246,6 +246,21 @@ impl Session {
         core::mem::take(&mut self.wire)
     }
 
+    /// Put back what the connection did not take of `wire`, a
+    /// [`take_wire`](Self::take_wire): all but its first `sent` bytes, ahead
+    /// of anything queued since.
+    pub fn requeue_wire(&mut self, mut wire: Vec<u8>, sent: usize) {
+        wire.drain(..sent.min(wire.len()));
+        wire.append(&mut self.wire);
+        self.wire = wire;
+    }
+
+    /// Whether bytes wait to be transmitted.
+    #[must_use]
+    pub fn wire_pending(&self) -> bool {
+        !self.wire.is_empty()
+    }
+
     /// Take the bytes to write to the user's terminal.
     pub fn take_screen(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.screen)

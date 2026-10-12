@@ -14,8 +14,8 @@
 //! command against the production seams: the clock-backed `RtSleeper`,
 //! which parks the task off-CPU for the requested interval, the shared
 //! `tairix_help::BundleHelp`, which reads the tool's own bundle's `Help/`
-//! tree for the short-help switches, and `RtOutput`, which writes the
-//! short help to the inherited standard output (fd 1). The tool binds only
+//! tree for the short-help switches, and `Stdout`, which takes the short
+//! help. The tool binds only
 //! to its inherited descriptors, never a console device, and holds no
 //! ambient authority.
 //!
@@ -33,11 +33,11 @@ mod program {
 
     use alloc::format;
 
-    use tairix_abi::{Delay, Errno};
+    use tairix_abi::Delay;
     use tairix_help::BundleHelp;
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, Stdout};
     use tairix_rt::ClockDelay;
-    use tairix_sleep::{parse, run, Output, SleepError, Sleeper, USAGE};
+    use tairix_sleep::{parse, run, SleepError, Sleeper, USAGE};
 
     /// Microseconds in one second — the seconds → park-unit factor.
     const MICROS_PER_SECOND: f64 = 1_000_000.0;
@@ -88,23 +88,6 @@ mod program {
         }
     }
 
-    /// The production [`Output`]: the inherited standard output (fd 1).
-    ///
-    /// A single line plus its terminating newline, over the shared
-    /// `tairix_rt::io` short-write loop; a stream that stops accepting bytes
-    /// fails closed rather than spinning, and the failure is surfaced so a
-    /// short-help write error becomes a non-zero exit.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_line(&self, line: &str) -> Result<(), Errno> {
-            let mut out = Stdout;
-            out.write_all(line.as_bytes())
-                .map_err(|_| Errno::BrokenPipe)?;
-            out.write_all(b"\n").map_err(|_| Errno::BrokenPipe)
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -136,7 +119,7 @@ mod program {
             locale,
             &RtSleeper,
             &BundleHelp::new("sleep"),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(SleepError::Output(_)) => {

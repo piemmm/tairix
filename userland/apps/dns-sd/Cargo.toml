@@ -25,6 +25,8 @@ path = "src/run.rs"
 [dependencies]
 # The discovery channel's vocabulary: typed queries, entries, answers.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The `Output` stream the engine writes through.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The discovery client: sessions, the doorbell park, and its error type.
 tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0" }
 # The one help engine behind `-?`/`--help`.

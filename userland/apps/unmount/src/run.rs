@@ -17,7 +17,7 @@
 //! issues the `volume_detach` syscall (the kernel checks `CAP_FS_MOUNT`
 //! and audits every decision — no authority lives here), the shared
 //! `tairix_help::BundleHelp` for the short-help switches, and
-//! `RtOutput`/`RtErrors`, which write to the inherited standard streams
+//! `Stdout`/`Stderr`, which write to the inherited standard streams
 //! (with the `--force` advisory on fd 3, best-effort). The tool binds
 //! only to its inherited descriptors, never a console device, and holds
 //! no ambient authority.
@@ -40,8 +40,8 @@ mod program {
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
     use tairix_procinfo::IpcTransport;
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stderr, Stdout, Write};
-    use tairix_unmount::{parse, run, Detacher, Output, UnmountError, USAGE};
+    use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
+    use tairix_unmount::{parse, run, Detacher, UnmountError, USAGE};
 
     /// The production [`Detacher`]: encode the detach frame and issue the
     /// `volume_detach` syscall. It adds no authority — the kernel
@@ -61,33 +61,6 @@ mod program {
             } else {
                 Err(Errno::from_syscall(ret))
             }
-        }
-    }
-
-    /// The production standard-output stream (the short help).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-    }
-
-    /// The production standard-error stream: diagnostics go to fd 2 and
-    /// the `--force` advisory to fd 3 (best-effort).
-    struct RtErrors;
-
-    impl Output for RtErrors {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stderr.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-
-        fn info(&self, record: &[u8]) {
-            // fd 3 is ignorable by contract: unattached is a no-op and a
-            // short write is never an error the outcome depends on.
-            let _ = StdInfo.write_all(record);
         }
     }
 
@@ -122,8 +95,8 @@ mod program {
             &IpcTransport,
             &RtDetacher,
             &BundleHelp::new("unmount"),
-            &RtOutput,
-            &RtErrors,
+            &Stdout,
+            &Stderr,
         ) {
             Ok(()) => 0,
             Err(err @ UnmountError::Usage) => {

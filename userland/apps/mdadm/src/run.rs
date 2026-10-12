@@ -14,7 +14,7 @@
 //! production seams: the shared System Information client
 //! (`tairix_procinfo::raid_arrays` / `raid_members`) for the reads, a single
 //! `ipc_call` to the composer's control endpoint for the mutations, the shared
-//! `tairix_help::BundleHelp` for the short-help switches, and `RtOutput`, which
+//! `tairix_help::BundleHelp` for the short-help switches, and `Stdout`, which
 //! writes the report to the inherited standard output (with the advisory
 //! records on fd 3, best-effort) and diagnostics to standard error. The tool
 //! binds only to its inherited descriptors, never a console device, and holds
@@ -38,8 +38,8 @@ mod program {
     use tairix_abi::raid_admin::{RaidArrayRecord, RaidMemberRecord, RAID_CONTROL_ENDPOINT};
     use tairix_abi::Errno;
     use tairix_help::BundleHelp;
-    use tairix_mdadm::{parse, run, Controller, Output, Reader, USAGE};
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_mdadm::{parse, run, Controller, Reader, USAGE};
+    use tairix_rt::io::{write_stderr_line, Stdout};
 
     /// The command word this bundle is named by.
     const OWN_WORD: &str = "mdadm";
@@ -70,26 +70,6 @@ mod program {
         }
     }
 
-    /// The production standard-output stream: the report goes to fd 1 and the
-    /// advisory records to fd 3 (best-effort). The tool names only descriptors
-    /// its spawner chose, so the same binary drives a serial terminal, a
-    /// framebuffer console, or a future windowed terminal unchanged.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting bytes
-            // fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
-        }
-
-        fn info(&self, record: &[u8]) {
-            // fd 3 is ignorable by contract: unattached is a no-op and a short
-            // write is never an error the report depends on.
-            let _ = StdInfo.write_all(record);
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime is
     /// set up and routes its return value through the `exit` syscall.
     ///
@@ -117,7 +97,7 @@ mod program {
             &RtReader,
             &RtController,
             &BundleHelp::new(OWN_WORD),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

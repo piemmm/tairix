@@ -35,7 +35,7 @@ mod program {
 
     use tairix_abi::Errno;
     use tairix_groupadd::db::{AdminChannel, GroupsAdminDb};
-    use tairix_groupadd::{parse, run, Output, USAGE};
+    use tairix_groupadd::{parse, run, USAGE};
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
 
@@ -48,17 +48,6 @@ mod program {
     impl AdminChannel for RtChannel {
         fn call(&self, req: &[u8], out: &mut [u8]) -> Result<usize, Errno> {
             tairix_rt::users_admin(req, out).map_err(Errno::from_syscall)
-        }
-    }
-
-    /// The production [`Output`] over the inherited standard output (fd 1).
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            // The shared short-write loop; a stream that stops accepting
-            // bytes fails closed rather than spinning.
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
         }
     }
 
@@ -89,13 +78,7 @@ mod program {
         let db = GroupsAdminDb::new(&RtChannel);
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
-        match run(
-            command,
-            locale,
-            &db,
-            &BundleHelp::new("groupadd"),
-            &RtOutput,
-        ) {
+        match run(command, locale, &db, &BundleHelp::new("groupadd"), &Stdout) {
             Ok(()) => 0,
             Err(err) => {
                 write_stderr_line(&format!("groupadd: {err}"));

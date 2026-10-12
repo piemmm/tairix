@@ -214,15 +214,7 @@ pub trait Session {
     fn run(&self, word: &str, args: &[&str]) -> Result<Ran, Errno>;
 }
 
-/// A byte sink the engine writes through.
-pub trait Output {
-    /// Write every byte of `bytes`.
-    ///
-    /// # Errors
-    ///
-    /// [`Errno`] when the stream stopped accepting bytes.
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// Parse an argument vector into a [`Command`].
 ///

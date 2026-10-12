@@ -112,7 +112,7 @@ injected seams, mirroring the other userland crates (`cat`'s
   size sort, `-F`'s execute-bit check, and `-L`'s resolution is paid only
   when one of them asks for it, and a link's target is read only by the
   format that prints it.
-- `Output` — write the rendered listing to the terminal, a skipped path's
+- `Terminal` — write the rendered listing to the terminal, a skipped path's
   reason to the error stream, and advisory records to the standard
   information stream (fd 3), best-effort.
 - `tairix_help::HelpSource` — the tool's own `Help/` tree, read by the

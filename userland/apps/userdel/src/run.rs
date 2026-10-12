@@ -33,7 +33,7 @@ mod program {
     use tairix_help::BundleHelp;
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_useradmin::AdminChannel;
-    use tairix_userdel::{parse, run, Output, USAGE};
+    use tairix_userdel::{parse, run, USAGE};
 
     /// The production [`AdminChannel`]: the `users_admin` syscall. It adds
     /// no authority — every rule stays kernel-side, and a refusal surfaces
@@ -43,15 +43,6 @@ mod program {
     impl AdminChannel for RtChannel {
         fn call(&self, req: &[u8], out: &mut [u8]) -> Result<usize, Errno> {
             tairix_rt::users_admin(req, out).map_err(Errno::from_syscall)
-        }
-    }
-
-    /// The production [`Output`] over the inherited standard output.
-    struct RtOutput;
-
-    impl Output for RtOutput {
-        fn write_all(&self, bytes: &[u8]) -> Result<(), Errno> {
-            Stdout.write_all(bytes).map_err(|_| Errno::NotImplemented)
         }
     }
 
@@ -80,7 +71,7 @@ mod program {
             locale,
             &RtChannel,
             &BundleHelp::new("userdel"),
-            &RtOutput,
+            &Stdout,
         ) {
             Ok(()) => 0,
             Err(err) => {

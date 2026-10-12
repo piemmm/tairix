@@ -56,8 +56,8 @@ The crate is both this request/render library and the `Run` entry-point
 binary (`tairix-ps-run`, `src/run.rs`) a shell spawns. Built for a Tier-1
 target it is a freestanding pure-Rust program: it links the `tairix-rt`
 runtime, collects its inherited arguments, parses them, and runs the command
-against the production seams shared through `lib/procinfo`
-(`IpcTransport` over the `sysinfo` IPC endpoint, `RtOutput` over fd 1). It is
+against `lib/procinfo`'s `IpcTransport` over the `sysinfo` IPC endpoint and
+`Stdout`. It is
 registered at `/System/Commands/ps.app/Run` and holds only `CAP_CONSOLE_WRITE`; every
 per-query scope is enforced by `sysinfod` against the caller's kernel-attested
 origin. On the host it is an inert stub, so the library stays fully testable.

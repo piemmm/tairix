@@ -207,18 +207,7 @@ pub trait FileSystem {
     fn remove_file(&self, path: &str) -> Result<(), Errno>;
 }
 
-/// Writes rendered bytes to the terminal.
-///
-/// `cp` is silent on success unless `-v` reports each copy; this seam also
-/// carries the usage banner.
-pub trait Output {
-    /// Write every byte of `bytes` to the terminal.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the console raises (e.g. a closed terminal).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// Asks the interactive confirmation question (`-i`).
 ///

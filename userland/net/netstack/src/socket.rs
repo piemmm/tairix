@@ -10,8 +10,9 @@
 //! originate datagrams and TCP segments, and owns each connection's
 //! [`Tcb`]. All I/O (the endpoint recv/reply, the delivery `ipc_send`, the
 //! CSPRNG draw) is the thin `Run`-binary glue's job; the engine takes its
-//! entropy through an injected closure and returns the frames and
-//! deliveries for the glue to move, so it stays host-testable.
+//! entropy through an injected closure, returns the frames and datagram
+//! deliveries for the glue to move, and posts stream events through a post
+//! the glue hands it, so it stays host-testable.
 //!
 //! # Security
 //!
@@ -100,6 +101,7 @@ use tairix_net::stack::{EchoProbe, StackEvent};
 use tairix_net::tcp::conn::{ResetReason, State, Tcb, TcpConfig};
 use tairix_net::tcp::listen::{CookieSecret, ListenConfig, Listener, ListenerStats, Peer};
 use tairix_net::tcp::{TcpSegment, TcpSegmentMeta};
+use tairix_util::fallible::filled;
 
 use crate::events;
 use crate::iface::{FrameBatch, Netstack, PublishedLink};
@@ -169,24 +171,33 @@ struct StreamConn {
     /// so `Connected` and `Closed` are each sent exactly once and no event
     /// follows `Closed`.
     notified: Notified,
-    /// Whether the client has issued `close`: the connection is being
-    /// torn down in the background and is reaped once fully closed. No
-    /// further events are delivered (the client is gone).
-    client_closed: bool,
+    /// Who the connection's events are for.
+    holder: Holder,
     /// Whether the client has shut the *receive* direction down. Received
     /// bytes are still drained from the connection — so the advertised
     /// window stays open and a still-sending peer is never stalled — but
     /// they are discarded instead of delivered. TCP has no wire signal for
     /// this, so the peer is not told.
     read_shutdown: bool,
-    /// Whether this connection has been claimed by the client. A connection
-    /// opened actively (via [`SocketRequest::Connect`]) is accepted at
-    /// birth; a connection produced passively by a [`Listener`] starts
-    /// **unaccepted** and delivers no client events until an
-    /// [`SocketRequest::Accept`] claims it (its received bytes buffer in the
-    /// bounded [`Tcb`] meanwhile), so the client never sees data for a
-    /// connection it has not yet taken.
-    accepted: bool,
+    /// Whether a send the stack took only part of is owed a
+    /// [`Room`](SocketStreamEvent::Room).
+    room_owed: bool,
+}
+
+/// Who a connection's events are for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    /// Produced by a [`Listener`] and not yet claimed with
+    /// [`Accept`](SocketRequest::Accept): no event is delivered, so the
+    /// client never sees data for a connection it has not taken, and its
+    /// received bytes buffer in the bounded [`Tcb`].
+    Pending,
+    /// The client's, from an active [`Connect`](SocketRequest::Connect) or
+    /// an `Accept`.
+    Client,
+    /// The client closed it, or exited: it is torn down in the background
+    /// and reaped once fully closed, and no event follows.
+    Closed,
 }
 
 /// The one-shot client-facing lifecycle events already delivered for a
@@ -244,6 +255,9 @@ struct SocketEntry {
     /// socket so a change costs a difference rather than a re-sum of the
     /// table.
     accounted_bytes: u64,
+    /// Its position in the service's owed list while its client may be
+    /// owed an event.
+    owed_at: Option<usize>,
     /// The transport-specific state.
     proto: Proto,
 }
@@ -373,11 +387,6 @@ pub struct SocketReply {
     /// Frames to queue onto each named interface's TX ring (empty for a
     /// request that transmits nothing).
     pub tx: FrameBatch,
-    /// Stream events to deliver to clients' async ports as a *result of
-    /// serving the request itself* (the buffered `Connected`/`Data` a
-    /// newly [`Accept`](SocketRequest::Accept)ed connection already holds).
-    /// Empty for every other operation; the glue `ipc_send`s each.
-    pub deliveries: Vec<Delivery>,
     /// A principal this request gave its first socket. The glue watches it
     /// for exit, so the sockets it leaves behind are reclaimed rather than
     /// held — ports and all — for the rest of the boot.
@@ -401,8 +410,6 @@ pub struct Delivery {
 pub struct StreamIo {
     /// Frames to queue onto each named interface's TX ring.
     pub tx: FrameBatch,
-    /// Stream events to deliver to clients' async ports.
-    pub deliveries: Vec<Delivery>,
     /// Set on the pass where a listener's half-open backlog first
     /// overflowed and it fell back to stateless SYN cookies — the
     /// SYN-flood brake engaging, which the service audits once per
@@ -477,6 +484,11 @@ pub struct SocketService {
     port_assignments: u64,
     /// Member sockets whose told links may lag the published ones.
     behind: Vec<SocketId>,
+    /// Sockets whose client may be owed an event, each listed once. Its
+    /// capacity grows with the table, so listing never allocates.
+    owed: Vec<SocketId>,
+    /// A delivery pass's payload and frame buffers, kept between passes.
+    delivery_scratch: Vec<u8>,
     /// The link epoch every member socket was last marked behind for.
     links_seen: u64,
     /// Connection-defence totals of listeners that have since closed,
@@ -507,6 +519,8 @@ impl SocketService {
             next_id: 0,
             port_assignments: 0,
             behind: Vec::new(),
+            owed: Vec::new(),
+            delivery_scratch: Vec::new(),
             links_seen: 0,
             retired_defence: ListenerStats::default(),
         }
@@ -725,15 +739,7 @@ impl SocketService {
             SocketRequest::Accept {
                 socket,
                 deliver_port,
-            } => self.accept_socket(
-                interfaces,
-                audit,
-                owner,
-                socket,
-                deliver_port,
-                now,
-                response,
-            ),
+            } => self.accept_socket(audit, owner, socket, deliver_port, response),
             SocketRequest::SendEcho {
                 socket,
                 dest,
@@ -823,6 +829,7 @@ impl SocketService {
             local_addr: [0u8; 16],
             local_port: 0,
             accounted_bytes: 0,
+            owed_at: None,
             proto,
         })?;
         emit(
@@ -836,7 +843,6 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx: Vec::new(),
-            deliveries: Vec::new(),
             watch: None,
         })
     }
@@ -877,7 +883,6 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx: Vec::new(),
-            deliveries: Vec::new(),
             watch: None,
         })
     }
@@ -984,9 +989,10 @@ impl SocketService {
         let mut tx = FrameBatch::new();
         if matches!(self.sockets[index].proto, Proto::Stream(Some(_))) {
             if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
-                conn.client_closed = true;
+                conn.holder = Holder::Closed;
                 let _ = conn.tcb.close(now);
             }
+            self.settle_stream(index);
             // The connection lingers until teardown completes (the FIN is
             // retransmitted and TIME-WAIT observed in the background); it
             // is reaped once fully closed.
@@ -1020,7 +1026,7 @@ impl SocketService {
                     e.owner == listener_owner
                         && e.family == family
                         && e.local_port == port
-                        && matches!(&e.proto, Proto::Stream(Some(c)) if !c.accepted)
+                        && matches!(&e.proto, Proto::Stream(Some(c)) if c.holder == Holder::Pending)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -1043,7 +1049,6 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx,
-            deliveries: Vec::new(),
             watch: None,
         })
     }
@@ -1083,7 +1088,8 @@ impl SocketService {
             // A half-close is a FIN, which only TCP has.
             Proto::Datagram(_) | Proto::Echo(_) => return Err(Errno::OutOfRange),
         }
-        let tx = if how.closes_write() {
+        let discarded = self.settle_stream(index);
+        let tx = if how.closes_write() || discarded {
             self.pump_stream(interfaces, index, now)
         } else {
             FrameBatch::new()
@@ -1092,7 +1098,6 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx,
-            deliveries: Vec::new(),
             watch: None,
         })
     }
@@ -1164,20 +1169,17 @@ impl SocketService {
     /// find the oldest connection the listener has completed but the client
     /// has not yet taken (an unaccepted child stream socket on the same
     /// port), rebind it to the caller-supplied delivery port, mark it
-    /// claimed, and hand back its new [`SocketId`]. Any bytes the peer
-    /// already sent are delivered on this reply.
+    /// claimed, and hand back its new [`SocketId`]. What the connection
+    /// already holds is owed to that port from now on.
     ///
     /// Replies [`Errno::WouldBlock`] when no connection is ready (the client
     /// waits for the next [`Accepted`](SocketStreamEvent::Accepted) event).
-    #[allow(clippy::too_many_arguments)]
     fn accept_socket(
         &mut self,
-        interfaces: &mut Netstack,
         audit: &dyn Sink,
         owner: ProcId,
         socket: SocketId,
         deliver_port: u64,
-        now: Duration64,
         response: &mut [u8],
     ) -> Result<SocketReply, Errno> {
         if deliver_port == 0 {
@@ -1202,7 +1204,7 @@ impl SocketService {
             e.owner == owner
                 && e.family == family
                 && e.local_port == local_port
-                && matches!(&e.proto, Proto::Stream(Some(c)) if !c.accepted)
+                && matches!(&e.proto, Proto::Stream(Some(c)) if c.holder == Holder::Pending)
         }) else {
             // Nothing ready — a non-error "try again" the client waits on.
             return Err(Errno::WouldBlock);
@@ -1210,7 +1212,7 @@ impl SocketService {
         let child_id = self.sockets[child].id;
         self.sockets[child].deliver_port = deliver_port;
         if let Proto::Stream(Some(conn)) = &mut self.sockets[child].proto {
-            conn.accepted = true;
+            conn.holder = Holder::Client;
         }
         emit(
             audit,
@@ -1219,19 +1221,14 @@ impl SocketService {
             "socket connection accepted",
             &[],
         );
-        // Deliver whatever the connection already holds (the one-shot
-        // Connected, any buffered received bytes, a close it already saw)
-        // now that it has an owner and a delivery port.
-        let deliveries = self.collect_stream_events(child);
-        // Draining the receive buffer may have opened the window; pump any
-        // resulting ACK. `reap_if_done` never fires here (the client just
-        // took it and has not closed).
-        let tx = self.pump_stream(interfaces, child, now);
+        // Whatever the connection already holds (the one-shot Connected,
+        // buffered received bytes, a close it already saw) is owed now that
+        // it has an owner and a delivery port.
+        self.settle_stream(child);
         let len = encode_socket_reply(Ok(child_id), response)?;
         Ok(SocketReply {
             len,
-            tx,
-            deliveries,
+            tx: FrameBatch::default(),
             watch: None,
         })
     }
@@ -1282,7 +1279,6 @@ impl SocketService {
                 Ok(SocketReply {
                     len,
                     tx,
-                    deliveries: Vec::new(),
                     watch: None,
                 })
             }
@@ -1347,7 +1343,6 @@ impl SocketService {
                 Ok(SocketReply {
                     len,
                     tx,
-                    deliveries: Vec::new(),
                     watch: None,
                 })
             }
@@ -1412,10 +1407,9 @@ impl SocketService {
             peer,
             iface,
             notified: Notified::Nothing,
-            client_closed: false,
+            holder: Holder::Client,
             read_shutdown: false,
-            // An actively-opened connection is the client's from birth.
-            accepted: true,
+            room_owed: false,
         })));
         self.index_entry(index);
         self.reaccount(index);
@@ -1426,7 +1420,6 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx,
-            deliveries: Vec::new(),
             watch: None,
         })
     }
@@ -1443,7 +1436,10 @@ impl SocketService {
     ) -> Result<SocketReply, Errno> {
         let accepted = match &mut self.sockets[index].proto {
             Proto::Stream(Some(conn)) => match conn.tcb.send(payload) {
-                Ok(n) => n,
+                Ok(n) => {
+                    conn.room_owed |= n < payload.len();
+                    n
+                }
                 // The connection has closed or reset: no more may be sent.
                 Err(_) => return Err(Errno::NotConnected),
             },
@@ -1455,7 +1451,6 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx,
-            deliveries: Vec::new(),
             watch: None,
         })
     }
@@ -1536,14 +1531,13 @@ impl SocketService {
             if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
                 conn.tcb.on_segment(&seg, ecn, now);
             }
+            self.settle_stream(index);
             let tx = self.pump_stream(interfaces, index, now);
-            let deliveries = self.collect_stream_events(index);
             self.reap_if_done(index);
             #[cfg(test)]
             self.assert_indices_agree();
             return StreamIo {
                 tx,
-                deliveries,
                 cookies_engaged: false,
             };
         }
@@ -1596,8 +1590,7 @@ impl SocketService {
         };
         io.tx
             .extend(route_segments_to(interfaces, source, &emitted, now));
-        io.deliveries
-            .extend(self.drain_listener_accepts(interfaces, lindex, now));
+        self.drain_listener_accepts(interfaces, lindex, now);
         io
     }
 
@@ -1640,9 +1633,8 @@ impl SocketService {
 
     /// Drain every connection the listener at `lindex` has completed into a
     /// new **pending** child stream socket (owned by the same principal,
-    /// on the same local port), and deliver one
-    /// [`Accepted`](SocketStreamEvent::Accepted) readiness event per child
-    /// to the listener's port. Child creation is bounded by the socket
+    /// on the same local port), and owe the listener's client an
+    /// [`Accepted`](SocketStreamEvent::Accepted) for them. Child creation is bounded by the socket
     /// quota: at the ceiling the completed connections stay queued in the
     /// listener (which itself RSTs further completions once its bounded
     /// accept queue fills) — fail closed, never an unbounded table.
@@ -1651,15 +1643,13 @@ impl SocketService {
         interfaces: &mut Netstack,
         lindex: usize,
         now: Duration64,
-    ) -> Vec<Delivery> {
+    ) {
         let owner = self.sockets[lindex].owner;
         let owner_pid = self.sockets[lindex].owner_pid;
         let deliver_port = self.sockets[lindex].deliver_port;
         let family = self.sockets[lindex].family;
         let local_port = self.sockets[lindex].local_port;
-        let listener_id = self.sockets[lindex].id;
         let settings = interfaces.settings();
-        let mut out = Vec::new();
         loop {
             if self.budget_exhausted(&settings, owner) {
                 break;
@@ -1702,6 +1692,7 @@ impl SocketService {
                 local_addr: [0u8; 16],
                 local_port,
                 accounted_bytes: 0,
+                owed_at: None,
                 proto: Proto::Stream(Some(Box::new(StreamConn {
                     tcb: {
                         // A listener template does not know the egress link,
@@ -1720,10 +1711,9 @@ impl SocketService {
                     peer,
                     iface,
                     notified: Notified::Nothing,
-                    client_closed: false,
+                    holder: Holder::Pending,
                     read_shutdown: false,
-                    // Passive: the client must claim it with `Accept`.
-                    accepted: false,
+                    room_owed: false,
                 }))),
             });
             // A child the table cannot index is a connection nothing could
@@ -1732,21 +1722,14 @@ impl SocketService {
             if child.is_err() {
                 break;
             }
-            push_stream_event(
-                &mut out,
-                deliver_port,
-                &SocketStreamEvent::Accepted {
-                    socket: listener_id,
-                },
-            );
+            self.owe(lindex);
         }
-        out
     }
 
     /// Drive every connected stream's timers at `now` (retransmit, delayed
     /// ACK, persist, user timeout, TIME-WAIT), returning the egress frames
-    /// and client events. Fully-closed client-closed connections are
-    /// reaped.
+    /// and listing each socket a timer left owing its client an event.
+    /// Fully-closed client-closed connections are reaped.
     #[must_use]
     pub fn advance_streams(&mut self, interfaces: &mut Netstack, now: Duration64) -> StreamIo {
         let mut io = StreamIo::default();
@@ -1757,8 +1740,8 @@ impl SocketService {
                     if let Proto::Stream(Some(conn)) = &mut self.sockets[i].proto {
                         conn.tcb.advance(now);
                     }
+                    self.settle_stream(i);
                     io.tx.extend(self.pump_stream(interfaces, i, now));
-                    io.deliveries.extend(self.collect_stream_events(i));
                     if self.reap_if_done(i) {
                         // A reap swap-removed this slot; re-examine it.
                         continue;
@@ -1766,8 +1749,7 @@ impl SocketService {
                 }
                 Proto::Listen(_) => {
                     io.tx.extend(self.advance_listener(interfaces, i, now));
-                    io.deliveries
-                        .extend(self.drain_listener_accepts(interfaces, i, now));
+                    self.drain_listener_accepts(interfaces, i, now);
                 }
                 // A datagram socket, an echo socket, and an unconnected
                 // stream socket have no timers to advance.
@@ -1794,80 +1776,191 @@ impl SocketService {
             .min_by_key(|d| (d.secs(), d.subsec_nanos()))
     }
 
-    /// Collect the client-visible events a connection now owes: the
-    /// one-shot `Connected`, any received stream bytes in order, and the
-    /// one-shot `Closed` (once, stating why). No event follows `Closed`.
-    fn collect_stream_events(&mut self, index: usize) -> Vec<Delivery> {
-        let deliver_port = self.sockets[index].deliver_port;
-        let id = self.sockets[index].id;
-        let mut out = Vec::new();
+    /// After the connection at `index` moved: discard what its client will
+    /// never read, and list it if its client is owed an event. Answers
+    /// whether bytes were discarded, which reopens the window.
+    fn settle_stream(&mut self, index: usize) -> bool {
         let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto else {
-            return out;
+            return false;
         };
-        // A connection produced by a listener but not yet claimed with
-        // `Accept` has no owner to hear its events: hold them (its received
-        // bytes buffer in the bounded TCB) until it is accepted, so the
-        // client never sees data for a connection it has not taken.
-        if !conn.accepted {
-            return out;
+        let discarded = discard_unread(conn);
+        if stream_event_due(conn) {
+            self.owe(index);
         }
-        if conn.notified == Notified::Closed {
-            return out;
+        discarded
+    }
+
+    /// List the socket at `index` as one whose client may be owed an event.
+    fn owe(&mut self, index: usize) {
+        if self.sockets[index].owed_at.is_some() {
+            return;
+        }
+        // Within the capacity reserved as the table grew, so no allocation.
+        self.sockets[index].owed_at = Some(self.owed.len());
+        self.owed.push(self.sockets[index].id);
+    }
+
+    /// Take the socket at `index` off the owed list.
+    fn unlist(&mut self, index: usize) {
+        if let Some(at) = self.sockets[index].owed_at.take() {
+            self.unlist_at(at);
+        }
+    }
+
+    /// Drop the owed list's entry at `at`, repairing the position of the
+    /// entry swapped into its place.
+    fn unlist_at(&mut self, at: usize) {
+        self.owed.swap_remove(at);
+        let moved = self.owed.get(at).and_then(|id| self.by_id.get(id)).copied();
+        if let Some(position) = moved {
+            self.sockets[position].owed_at = Some(at);
+        }
+    }
+
+    /// Give each socket whose client may be owed an event what it is owed,
+    /// through `post`.
+    ///
+    /// A connection's events go in order — its `Connected`, its received
+    /// bytes, a `Room`, its `Closed` — and a listener's is one `Accepted`.
+    /// A port with no room takes the rest once it drains: received bytes
+    /// leave the connection only when a post of them lands, so the window
+    /// shuts on the peer rather than the bytes being lost, and the socket
+    /// stays owed. Returns the frames the pass owes the wire: the windows
+    /// the taken bytes reopened.
+    pub fn deliver_owed(
+        &mut self,
+        interfaces: &mut Netstack,
+        now: Duration64,
+        post: &mut Post<'_>,
+    ) -> FrameBatch {
+        let mut tx = FrameBatch::default();
+        if self.owed.is_empty() {
+            return tx;
+        }
+        let mut scratch = core::mem::take(&mut self.delivery_scratch);
+        if scratch.is_empty() {
+            // Nothing is taken without it, so a pass refused memory leaves
+            // every socket owed for the next.
+            let Some(fresh) = filled(SOCKET_MAX_DATAGRAM + SocketStreamEvent::MAX_WIRE_LEN, 0u8)
+            else {
+                return tx;
+            };
+            scratch = fresh;
+        }
+        let (payload, frame) = scratch.split_at_mut(SOCKET_MAX_DATAGRAM);
+        let mut at = 0;
+        while let Some(&id) = self.owed.get(at) {
+            let Some(&index) = self.by_id.get(&id) else {
+                self.unlist_at(at);
+                continue;
+            };
+            let (paid, took) = self.pay_one(index, payload, frame, post);
+            if took {
+                tx.extend(self.pump_stream(interfaces, index, now));
+            }
+            match paid {
+                Paid::InFull => self.unlist(index),
+                Paid::Blocked => at += 1,
+            }
+        }
+        self.delivery_scratch = scratch;
+        #[cfg(test)]
+        self.assert_indices_agree();
+        tx
+    }
+
+    /// The delivery ports of every socket still owed an event, each once:
+    /// the ports to wait on for room.
+    #[must_use]
+    pub fn owed_ports(&self) -> Vec<u64> {
+        let mut ports: Vec<u64> = self
+            .owed
+            .iter()
+            .filter_map(|id| self.by_id.get(id))
+            .map(|&index| self.sockets[index].deliver_port)
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
+    /// Post what the socket at `index` is owed, stopping at a port with no
+    /// room; also answers whether received bytes were taken, which reopens
+    /// the window.
+    fn pay_one(
+        &mut self,
+        index: usize,
+        payload: &mut [u8],
+        frame: &mut [u8],
+        post: &mut Post<'_>,
+    ) -> (Paid, bool) {
+        let entry = &mut self.sockets[index];
+        let (to, socket) = (entry.deliver_port, entry.id);
+        let mut landed = |event: &SocketStreamEvent<'_>, frame: &mut [u8]| match event.encode(frame)
+        {
+            Ok(len) => !matches!(post(to, &frame[..len]), Err(Errno::WouldBlock)),
+            // A bounded event always encodes; one that did not is dropped
+            // rather than delivered malformed.
+            Err(_) => true,
+        };
+        let conn = match &mut entry.proto {
+            Proto::Listen(_) => {
+                let paid = if landed(&SocketStreamEvent::Accepted { socket }, frame) {
+                    Paid::InFull
+                } else {
+                    Paid::Blocked
+                };
+                return (paid, false);
+            }
+            Proto::Stream(Some(conn)) => conn,
+            _ => return (Paid::InFull, false),
+        };
+        let mut took = discard_unread(conn);
+        if conn.holder != Holder::Client || conn.notified == Notified::Closed {
+            return (Paid::InFull, took);
         }
         if conn.tcb.is_established() && conn.notified == Notified::Nothing {
+            if !landed(&SocketStreamEvent::Connected { socket }, frame) {
+                return (Paid::Blocked, took);
+            }
             conn.notified = Notified::Connected;
-            push_stream_event(
-                &mut out,
-                deliver_port,
-                &SocketStreamEvent::Connected { socket: id },
-            );
         }
-        // Deliver every in-order received byte before any close, in
-        // bounded chunks. Draining the receive buffer keeps the advertised
-        // window open (the client's port queue is the app buffer) — so a
-        // read-shutdown socket keeps draining too, discarding what it reads
-        // instead of stalling a peer that is still sending.
         loop {
-            let mut buf = [0u8; SOCKET_MAX_DATAGRAM];
-            let n = conn.tcb.recv(&mut buf);
+            let n = conn.tcb.peek(payload);
             if n == 0 {
                 break;
             }
-            if conn.read_shutdown {
-                continue;
+            let data = SocketStreamEvent::Data {
+                socket,
+                payload: &payload[..n],
+            };
+            if !landed(&data, frame) {
+                return (Paid::Blocked, took);
             }
-            push_stream_event(
-                &mut out,
-                deliver_port,
-                &SocketStreamEvent::Data {
-                    socket: id,
-                    payload: &buf[..n],
-                },
-            );
+            conn.tcb.consume(n);
+            took = true;
         }
-        let reason = if let Some(r) = conn.tcb.reset_reason() {
-            Some(map_reset(r))
-        } else if peer_closed(conn.tcb.state()) {
-            Some(StreamCloseReason::PeerClosed)
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
+        if conn.room_owed && has_room(&conn.tcb) {
+            if !landed(&SocketStreamEvent::Room { socket }, frame) {
+                return (Paid::Blocked, took);
+            }
+            conn.room_owed = false;
+        }
+        if let Some(reason) = close_reason(&conn.tcb) {
+            if !landed(&SocketStreamEvent::Closed { socket, reason }, frame) {
+                return (Paid::Blocked, took);
+            }
             conn.notified = Notified::Closed;
-            push_stream_event(
-                &mut out,
-                deliver_port,
-                &SocketStreamEvent::Closed { socket: id, reason },
-            );
+            conn.room_owed = false;
         }
-        out
+        (Paid::InFull, took)
     }
 
     /// Reap a client-closed stream once its teardown has fully completed
     /// (RFC 9293 CLOSED). Returns whether the slot was removed.
     fn reap_if_done(&mut self, index: usize) -> bool {
         let done = matches!(&self.sockets[index].proto,
-            Proto::Stream(Some(c)) if c.client_closed && matches!(c.tcb.state(), State::Closed));
+            Proto::Stream(Some(c)) if c.holder == Holder::Closed && matches!(c.tcb.state(), State::Closed));
         if done {
             self.remove_at(index);
         }
@@ -1917,7 +2010,6 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx,
-            deliveries: Vec::new(),
             watch: None,
         })
     }
@@ -1955,7 +2047,6 @@ impl SocketService {
         Ok(SocketReply {
             len,
             tx,
-            deliveries: Vec::new(),
             watch: None,
         })
     }
@@ -2086,7 +2177,7 @@ impl SocketService {
                 }
             }
             Proto::Stream(Some(conn)) => {
-                conn.client_closed = true;
+                conn.holder = Holder::Closed;
                 conn.tcb.abort(now);
                 tx = self.pump_stream(interfaces, position, now);
             }
@@ -2603,6 +2694,10 @@ impl SocketService {
         self.sockets
             .try_reserve(1)
             .map_err(|_| Errno::OutOfMemory)?;
+        let listable = self.sockets.len() + 1;
+        self.owed
+            .try_reserve(listable.saturating_sub(self.owed.len()))
+            .map_err(|_| Errno::OutOfMemory)?;
         self.sockets.push(entry);
         let index = self.sockets.len() - 1;
         self.index_entry(index);
@@ -2636,6 +2731,7 @@ impl SocketService {
     /// other socket changes position and only its `by_id` row is repaired
     /// — every other index is keyed to a handle, not a position.
     fn remove_at(&mut self, index: usize) {
+        self.unlist(index);
         self.unindex_entry(index);
         self.bytes_total = self
             .bytes_total
@@ -2787,18 +2883,52 @@ fn broadcast_consumer_ports(sockets: &[SocketEntry]) -> impl Iterator<Item = u16
     })
 }
 
-/// Encode a stream event and push it as a delivery to `deliver_port`. A
-/// bounded, valid event always encodes; an encode failure is dropped
-/// rather than delivering a malformed frame (fail closed).
-fn push_stream_event(out: &mut Vec<Delivery>, deliver_port: u64, event: &SocketStreamEvent<'_>) {
-    let mut buf = alloc::vec![0u8; SocketStreamEvent::MAX_WIRE_LEN];
-    if let Ok(len) = event.encode(&mut buf) {
-        buf.truncate(len);
-        out.push(Delivery {
-            deliver_port,
-            datagram: buf,
-        });
+/// How far one socket's client was brought to what it is owed.
+enum Paid {
+    /// It holds everything it is owed.
+    InFull,
+    /// Its port had no room; the rest waits for it to drain.
+    Blocked,
+}
+
+/// Whether the connection's client is owed an event it can be given now.
+fn stream_event_due(conn: &StreamConn) -> bool {
+    if conn.holder != Holder::Client || conn.notified == Notified::Closed {
+        return false;
     }
+    (conn.tcb.is_established() && conn.notified == Notified::Nothing)
+        || conn.tcb.recv_len() > 0
+        || (conn.room_owed && has_room(&conn.tcb))
+        || close_reason(&conn.tcb).is_some()
+}
+
+/// Why the connection ended, once it has.
+fn close_reason(tcb: &Tcb) -> Option<StreamCloseReason> {
+    if let Some(reason) = tcb.reset_reason() {
+        Some(map_reset(reason))
+    } else if peer_closed(tcb.state()) {
+        Some(StreamCloseReason::PeerClosed)
+    } else {
+        None
+    }
+}
+
+/// Whether a sender waiting for room may be told of it: at least half the
+/// send buffer is free, so one wake carries a useful amount and an ACK
+/// freeing a few bytes wakes no one.
+fn has_room(tcb: &Tcb) -> bool {
+    tcb.send_available() >= tcb.send_buffer_limit() / 2
+}
+
+/// Take the received bytes of a connection whose client will never read
+/// them — it closed, or shut its receive side — so a still-sending peer is
+/// never stalled; answers whether any were taken.
+fn discard_unread(conn: &mut StreamConn) -> bool {
+    if !(conn.holder == Holder::Closed || conn.read_shutdown) {
+        return false;
+    }
+    let held = conn.tcb.recv_len();
+    conn.tcb.consume(held) > 0
 }
 
 /// The pseudo-header context for a segment received from `source` to our
@@ -2978,7 +3108,6 @@ fn status_reply(response: &mut [u8]) -> Result<SocketReply, Errno> {
     Ok(SocketReply {
         len: STATUS_REPLY_LEN,
         tx: Vec::new(),
-        deliveries: Vec::new(),
         watch: None,
     })
 }

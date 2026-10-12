@@ -309,15 +309,7 @@ pub trait NetPolicy {
     fn apply_bond(&self, config: &NetBondConfigMsg) -> Result<(), Errno>;
 }
 
-/// Writes bytes to one of the tool's output streams.
-pub trait Output {
-    /// Write every byte of `bytes` to the stream.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the stream raises (e.g. a closed consumer).
-    fn write_all(&self, bytes: &[u8]) -> Result<(), Errno>;
-}
+pub use tairix_util::output::Output;
 
 /// Parse `args` (the tool's arguments, excluding the program name) into a
 /// [`Command`].
