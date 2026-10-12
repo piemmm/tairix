@@ -8,7 +8,9 @@
 //! doing. The neighbour cache and routes change with no event to wake on, so
 //! while a window is open the map is re-read on a one-shot deadline; the
 //! discovery service rings the map's doorbell port, a member of the event
-//! wait-set, when its answers move. On the host it is an inert stub.
+//! wait-set, when its answers move. A spread of services moving out or in owes
+//! frames, each a one-shot deadline beside the refresh one. On the host it is
+//! an inert stub.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -18,6 +20,7 @@
 mod program {
     extern crate alloc;
 
+    use alloc::boxed::Box;
     use alloc::collections::{BTreeMap, BTreeSet};
     use alloc::format;
     use alloc::string::{String, ToString};
@@ -31,27 +34,28 @@ mod program {
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::waitset::WaitSourceKind;
-    use tairix_abi::window_ipc::{AppBarClick, WindowEvent};
+    use tairix_abi::window_ipc::{
+        AppBarClick, ClipboardKind, MenuOutcome, WindowEvent, WindowRegion,
+    };
     use tairix_abi::{Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
     use tairix_devids::{DbKind, DevIds};
     use tairix_discovery::{DiscoveryError, RtTransport, Session};
-    use tairix_font::BitmapFont;
     use tairix_geometry::Rect;
     use tairix_input::InputEvent;
     use tairix_netmap::{
-        layout, win_sizing, AdvertisedService, Discovery, Inventory, MapView, Snapshot, WIN_HEIGHT,
-        WIN_WIDTH,
+        layout, win_sizing, AdvertisedService, Command, Discovery, Inventory, MapView, NodeMenu,
+        Reaction, Snapshot, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_procinfo::IpcTransport;
     use tairix_resolver::RtDnsTransport;
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::PrivatePort;
-    use tairix_theme::{TextRole, ThemeRegistry};
+    use tairix_theme::ThemeRegistry;
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        key_input_event, pinch_input_events, pointer_input_events, pointer_point,
-        scroll_input_events, Desktop, EventDrain, EventError, EventMailbox, EventSource, Parked,
-        WindowClient, WindowEvents,
+        clipboard, damage_in, key_input_event, pinch_input_events, pointer_input_events,
+        pointer_point, scroll_input_events, DeclaredTip, Desktop, EventDrain, EventError,
+        EventMailbox, EventSource, Parked, WindowClient, WindowEvents,
     };
 
     /// The name this program states its refusals under.
@@ -203,16 +207,43 @@ mod program {
         Worker<Option<RtDnsTransport>, IpAddr, Named, tairix_util::defer::JobQueue<IpAddr, Named>>;
 
     /// The production event source: the app's own authenticated mailbox,
-    /// parked on with the worker's wake and the refresh deadline.
+    /// parked on with the worker's wake until the earlier of the refresh and
+    /// the next animation frame.
     struct RtEventSource<'a> {
         mailbox: EventMailbox,
         set: u64,
         reader: &'a ReadWorker,
         namer: &'a NameWorker,
         doorbell: Option<&'a PrivatePort>,
-        deadline_ns: &'a Cell<Option<u64>>,
+        deadlines: &'a Deadlines,
         desktop_moved: &'a Cell<bool>,
         rung: &'a Cell<bool>,
+    }
+
+    /// The two one-shot deadlines the loop parks against, each `None` when
+    /// unarmed: the next re-read of the network, and the next animation frame.
+    #[derive(Default)]
+    struct Deadlines {
+        refresh_ns: Cell<Option<u64>>,
+        frame_ns: Cell<Option<u64>>,
+    }
+
+    impl Deadlines {
+        fn earliest(&self) -> Option<u64> {
+            match (self.refresh_ns.get(), self.frame_ns.get()) {
+                (Some(refresh), Some(frame)) => Some(refresh.min(frame)),
+                (refresh, frame) => refresh.or(frame),
+            }
+        }
+
+        /// Whether `cell`'s deadline has come at `now`, disarming it if so.
+        fn take_due(cell: &Cell<Option<u64>>, now: u64) -> bool {
+            let due = cell.get().is_some_and(|deadline| now >= deadline);
+            if due {
+                cell.set(None);
+            }
+            due
+        }
     }
 
     impl RtEventSource<'_> {
@@ -243,7 +274,7 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let woken = match self.deadline_ns.get() {
+            let woken = match self.deadlines.earliest() {
                 Some(deadline) => match app::park_until(self.set, deadline)? {
                     Some(woken) => woken,
                     None => return Ok(Parked::Interrupted),
@@ -325,6 +356,10 @@ mod program {
         discovery_notice: Option<String>,
         /// Why hosts are not named by DNS, if they cannot be.
         naming_notice: Option<String>,
+        /// The context menu asked for and not yet answered, by its open id.
+        menu: Option<(u64, Box<NodeMenu>)>,
+        /// The tooltip last declared over the window.
+        tip: DeclaredTip,
     }
 
     impl NetMap {
@@ -347,23 +382,133 @@ mod program {
                 .window
                 .open(event_endpoint, &self.mode, title, sizing)
                 .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
+            self.tip = DeclaredTip::new();
             self.view.resize(self.canvas());
-            if self.present().is_err() {
+            let whole = DamageRect::full(&self.mode);
+            if self.present(tairix_rt::clock_get(), whole).is_err() {
                 let _ = self.window.close();
                 return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
             Ok(server)
         }
 
-        fn present(&mut self) -> Result<(), Errno> {
+        /// Draw `area` of the map as it stands at `now_ns`, and present it.
+        fn present(&mut self, now_ns: u64, area: DamageRect) -> Result<(), Errno> {
             let scale = self.desktop.scale();
             let theme = self.themes.active();
-            let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
             let view = &mut self.view;
-            self.window
-                .present(DamageRect::full(&self.mode), |surface| {
-                    view.render(surface, scale, theme, font);
-                })
+            self.window.present(area, |surface| {
+                view.render(surface, scale, theme, now_ns);
+            })
+        }
+
+        /// What a frame that only moves services repaints, or `None` with
+        /// nothing of it in the window.
+        fn frame_area(&mut self) -> Option<DamageRect> {
+            let rect = self
+                .view
+                .frame_damage(self.desktop.scale(), self.themes.active())?;
+            damage_in(&self.mode, rect)
+        }
+
+        /// Ask the desktop for the menu the view built, at the press that
+        /// asked for it. The answer arrives as one `MenuClosed` naming the id
+        /// minted here; a refusal is an answer, reported, and the map draws no
+        /// menu of its own.
+        fn open_menu(&mut self, asked: Result<Box<NodeMenu>, Errno>) {
+            let menu = match asked {
+                Ok(menu) => menu,
+                Err(err) => {
+                    app::report(APP_NAME, format_args!("menu not built ({err}); not shown"));
+                    return;
+                }
+            };
+            let Some(window_id) = self.window.window_id() else {
+                return;
+            };
+            let at = menu.anchor();
+            let anchor = match WindowRegion::new(at.x, at.y, 0, 0) {
+                Ok(anchor) => anchor,
+                Err(err) => {
+                    app::report(
+                        APP_NAME,
+                        format_args!("menu anchor refused ({err}); not shown"),
+                    );
+                    return;
+                }
+            };
+            match self
+                .window
+                .client()
+                .open_menu(window_id, anchor, menu.model())
+            {
+                Ok(open_id) => self.menu = Some((open_id, menu)),
+                Err(err) => app::report(APP_NAME, format_args!("menu refused ({err}); not shown")),
+            }
+        }
+
+        /// Act on the desktop's one answer to the menu opened as `open_id`,
+        /// answering whether the picture changed. An answer naming any other
+        /// open settles a gesture already over, so acting on it would run a
+        /// stale command.
+        fn menu_closed(&mut self, open_id: u64, outcome: MenuOutcome, now_ns: u64) -> bool {
+            let Some((asked, menu)) = self.menu.take() else {
+                return false;
+            };
+            if asked != open_id {
+                self.menu = Some((asked, menu));
+                return false;
+            }
+            match outcome {
+                // A row id this map never declared names no command.
+                MenuOutcome::Chosen(item) => match menu.command(item) {
+                    Some(Command::Steer(steer)) => self.view.steer(steer, now_ns),
+                    Some(Command::Copy(text)) => {
+                        self.copy(text);
+                        false
+                    }
+                    None => false,
+                },
+                // The menu declares no quick-entry field.
+                MenuOutcome::Entered(_) | MenuOutcome::Dismissed => false,
+                MenuOutcome::Refused(reason) => {
+                    let why = reason.describe();
+                    app::report(APP_NAME, format_args!("no menu was shown: {why}"));
+                    false
+                }
+            }
+        }
+
+        /// Put `text` on the desktop clipboard from the map's window.
+        fn copy(&mut self, text: &str) {
+            let Some(window_id) = self.window.window_id() else {
+                return;
+            };
+            let put = clipboard::put(
+                self.window.client(),
+                window_id,
+                ClipboardKind::Text,
+                text.as_bytes(),
+            );
+            if let Err(err) = put {
+                app::report(APP_NAME, format_args!("nothing was copied ({err})"));
+            }
+        }
+
+        /// Declare the tooltip for the plate under the pointer, or withdraw
+        /// the last one.
+        fn declare_tip(&mut self, now_ns: u64) {
+            let Some(window_id) = self.window.window_id() else {
+                return;
+            };
+            let wanted = self.view.tip(self.desktop.scale(), now_ns);
+            self.tip.declare(
+                self.window.client(),
+                window_id,
+                wanted
+                    .as_ref()
+                    .map(|(region, line)| (*region, line.as_str())),
+            );
         }
 
         fn adopt(&mut self, answer: Answer) {
@@ -409,36 +554,37 @@ mod program {
             self.view.set_notices(notices);
         }
 
-        fn apply(&mut self, event: &WindowEvent) -> Acted {
+        /// Feed the input `event` carries to the view, opening any menu it
+        /// asks for, and answer whether the picture changed; `None` for an
+        /// event that carries no input.
+        fn route_input(&mut self, event: &WindowEvent, now_ns: u64) -> Option<bool> {
             let scale = self.desktop.scale();
-            let route = |view: &mut MapView, inputs: &mut dyn Iterator<Item = InputEvent>| {
-                inputs.fold(false, |changed, input| {
-                    view.on_input(&input, scale) | changed
-                })
+            let held = |modifiers| key_input_event(KeyInput::ModifiersChanged { modifiers });
+            let mut asked = None;
+            let view = &mut self.view;
+            let mut route = |inputs: &mut dyn Iterator<Item = InputEvent>| {
+                let mut changed = false;
+                for input in inputs {
+                    match view.on_input(&input, scale, now_ns) {
+                        Reaction::Idle => {}
+                        Reaction::Repaint => changed = true,
+                        Reaction::Menu(menu) => asked = Some(menu),
+                    }
+                }
+                changed
             };
             let changed = match *event {
-                WindowEvent::CloseRequested { .. } => return Acted::Close,
-                WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => {
-                    return Acted::Quit
-                }
-                WindowEvent::AppBarDefault => return Acted::Open,
-                WindowEvent::Key { key, .. } => {
-                    route(&mut self.view, &mut core::iter::once(key_input_event(key)))
-                }
+                WindowEvent::Key { key, .. } => route(&mut core::iter::once(key_input_event(key))),
                 WindowEvent::Pointer {
                     x,
                     y,
                     action,
                     modifiers,
                     ..
-                } => {
-                    let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
-                    route(
-                        &mut self.view,
-                        &mut core::iter::once(held)
-                            .chain(pointer_input_events(action, pointer_point(x, y))),
-                    )
-                }
+                } => route(
+                    &mut core::iter::once(held(modifiers))
+                        .chain(pointer_input_events(action, pointer_point(x, y))),
+                ),
                 WindowEvent::Scrolled {
                     x,
                     y,
@@ -446,27 +592,39 @@ mod program {
                     dy,
                     modifiers,
                     ..
-                } => {
-                    let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
-                    route(
-                        &mut self.view,
-                        &mut core::iter::once(held).chain(scroll_input_events(
-                            pointer_point(x, y),
-                            dx,
-                            dy,
-                        )),
-                    )
-                }
+                } => route(
+                    &mut core::iter::once(held(modifiers)).chain(scroll_input_events(
+                        pointer_point(x, y),
+                        dx,
+                        dy,
+                    )),
+                ),
                 WindowEvent::Pinch {
                     x,
                     y,
                     phase,
                     scale: ratio,
                     ..
-                } => route(
-                    &mut self.view,
-                    &mut pinch_input_events(pointer_point(x, y), phase, ratio),
-                ),
+                } => route(&mut pinch_input_events(pointer_point(x, y), phase, ratio)),
+                _ => return None,
+            };
+            if let Some(menu) = asked {
+                self.open_menu(menu);
+            }
+            Some(changed)
+        }
+
+        fn apply(&mut self, event: &WindowEvent, now_ns: u64) -> Acted {
+            let changed = match *event {
+                WindowEvent::CloseRequested { .. } => return Acted::Close,
+                WindowEvent::AppBarMenu { item } if tairix_window::is_quit(item) => {
+                    return Acted::Quit
+                }
+                WindowEvent::AppBarDefault => return Acted::Open,
+                WindowEvent::Key { .. }
+                | WindowEvent::Pointer { .. }
+                | WindowEvent::Scrolled { .. }
+                | WindowEvent::Pinch { .. } => self.route_input(event, now_ns).unwrap_or(false),
                 WindowEvent::Resized {
                     width_px,
                     height_px,
@@ -488,11 +646,13 @@ mod program {
                     self.window.release_frames();
                     false
                 }
-                // The map opens no documents, menus, pickers, drags or layer
+                WindowEvent::MenuClosed {
+                    open_id, outcome, ..
+                } => self.menu_closed(open_id, outcome, now_ns),
+                // The map opens no documents, pickers, drags or layer
                 // surfaces, so none of their answers can arrive for it.
                 WindowEvent::AlternateCloseRequested { .. }
                 | WindowEvent::AppBarMenu { .. }
-                | WindowEvent::MenuClosed { .. }
                 | WindowEvent::TerrainChanged { .. }
                 | WindowEvent::LayerPointer { .. }
                 | WindowEvent::ToolMoved { .. }
@@ -647,7 +807,7 @@ mod program {
         app_state: &mut NetMap,
         workers: &Workers<'_>,
         event_endpoint: u64,
-        deadline_ns: &Cell<Option<u64>>,
+        deadlines: &Deadlines,
         desktop_moved: &Cell<bool>,
         rung: &Cell<bool>,
         mut events: WindowEvents<RtEventSource<'_>>,
@@ -687,10 +847,16 @@ mod program {
                 }
             }
 
+            let now = tairix_rt::clock_get();
             let mut repaint = false;
             if desktop_moved.replace(false) {
                 match app::adopt_desktop(&mut app_state.desktop, &mut app_state.themes) {
-                    Ok(changed) => repaint |= changed,
+                    Ok(changed) => {
+                        app_state
+                            .view
+                            .set_motion(app_state.themes.active().motion());
+                        repaint |= changed;
+                    }
                     Err(err) => {
                         app::report(APP_NAME, format_args!("desktop change refused: {err}"));
                     }
@@ -708,8 +874,9 @@ mod program {
                         outstanding.read = false;
                         read_landed = true;
                         if app_state.window.is_open() {
-                            deadline_ns
-                                .set(Some(tairix_rt::clock_get().saturating_add(REFRESH_NS)));
+                            deadlines
+                                .refresh_ns
+                                .set(Some(now.saturating_add(REFRESH_NS)));
                         }
                     }
                     Answer::Discovered(ref discovered) => {
@@ -748,11 +915,13 @@ mod program {
                 app_state.loaded = true;
             }
             for event in &burst {
-                match app_state.apply(event) {
+                match app_state.apply(event, now) {
                     Acted::Quit => return 0,
                     Acted::Close => {
                         let _ = app_state.window.close();
-                        deadline_ns.set(None);
+                        app_state.menu = None;
+                        deadlines.refresh_ns.set(None);
+                        deadlines.frame_ns.set(None);
                     }
                     Acted::Open => {
                         if app_state.open(event_endpoint).is_ok() {
@@ -763,17 +932,36 @@ mod program {
                     Acted::Idle => {}
                 }
             }
-            let due = deadline_ns
-                .get()
-                .is_some_and(|deadline| tairix_rt::clock_get() >= deadline);
-            if due {
-                deadline_ns.set(None);
+            if Deadlines::take_due(&deadlines.refresh_ns, now) {
                 outstanding.ask_read(workers.reader);
             }
+            let frame_due = Deadlines::take_due(&deadlines.frame_ns, now);
             outstanding.ask_discover(workers.reader, &app_state.inventory);
-            if repaint && app_state.present().is_err() {
-                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
+            // A frame that only moves services repaints what they can reach;
+            // anything else may have moved the whole map.
+            let area = if repaint {
+                Some(DamageRect::full(&app_state.mode))
+            } else if frame_due {
+                app_state.frame_area()
+            } else {
+                None
+            };
+            if let Some(area) = area {
+                if app_state.present(now, area).is_err() {
+                    return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
+                }
+            } else if frame_due {
+                // Nothing that moves is in sight, so nothing is drawn, but the
+                // movement still runs its course.
+                app_state.view.settle(now);
             }
+            if (area.is_some() || frame_due) && app_state.window.is_open() {
+                let next = app_state.view.next_frame_in(now);
+                deadlines
+                    .frame_ns
+                    .set(next.map(|wait| now.saturating_add(wait)));
+            }
+            app_state.declare_tip(now);
             // Only once the frame carrying the first read is presented: the
             // session serves a window's requests in order, so the new title
             // reaches the screen with that frame rather than over the empty one.
@@ -900,17 +1088,20 @@ mod program {
 
         declare_app_bar(window.client(), event_endpoint);
         let canvas = Rect::new(0, 0, mode.width_px, mode.height_px);
+        let view = MapView::new(canvas, themes.active().motion());
         let mut state = NetMap {
             window,
             desktop,
             themes,
-            view: MapView::new(canvas),
+            view,
             inventory: Inventory::new(),
             mode,
             loaded: false,
             read_notices: Vec::new(),
             discovery_notice,
             naming_notice: None,
+            menu: None,
+            tip: DeclaredTip::new(),
         };
         // The map was started to be looked at, so a first window that will
         // not open leaves it nothing to be; later ones are a click on its slot.
@@ -919,7 +1110,7 @@ mod program {
             Err(code) => return code,
         };
 
-        let deadline_ns = Cell::new(None);
+        let deadlines = Deadlines::default();
         let desktop_moved = Cell::new(false);
         let rung = Cell::new(false);
         let events = WindowEvents::new(RtEventSource {
@@ -928,7 +1119,7 @@ mod program {
             reader: &reader,
             namer: &namer,
             doorbell: doorbell.as_ref(),
-            deadline_ns: &deadline_ns,
+            deadlines: &deadlines,
             desktop_moved: &desktop_moved,
             rung: &rung,
         });
@@ -940,7 +1131,7 @@ mod program {
                 discovering,
             },
             event_endpoint,
-            &deadline_ns,
+            &deadlines,
             &desktop_moved,
             &rung,
             events,

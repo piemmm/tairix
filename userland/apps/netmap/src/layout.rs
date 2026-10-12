@@ -8,6 +8,9 @@
 //! what makes the view reproducible and the layout testable. It is not a
 //! force-directed simulation: a map wants a stable, legible arrangement, not
 //! jitter.
+//!
+//! A service takes no ring and no share of a wedge: it is folded into the
+//! host that offers it, at that host's position, until the view spreads it.
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
@@ -16,7 +19,7 @@ use core::f64::consts::TAU;
 use tairix_geometry::Point;
 use tairix_util::mathf;
 
-use crate::model::{Map, NodeId, NodeKind};
+use crate::model::{EdgeKind, Map, NodeId, NodeKind};
 
 /// Graph-space distance between adjacent concentric rings.
 pub const RING_STEP: i32 = 240;
@@ -37,17 +40,33 @@ pub fn layout(map: &mut Map) {
 /// Every node's laid-out position, computed over a borrow of the map so the
 /// ordering reads each node's key in place rather than a copy of it.
 fn positions(map: &Map) -> BTreeMap<NodeId, Point> {
-    let ids: Vec<NodeId> = map.nodes().iter().map(|n| n.id).collect();
+    let on_rings = |id: &NodeId| {
+        map.node(*id)
+            .is_some_and(|node| node.kind != NodeKind::Service)
+    };
+    let ids: Vec<NodeId> = map
+        .nodes()
+        .iter()
+        .filter(|n| n.kind != NodeKind::Service)
+        .map(|n| n.id)
+        .collect();
+    let Some(&first) = ids.first() else {
+        return BTreeMap::new();
+    };
     let key = |id: &NodeId| map.node(*id).map(|node| &node.key);
     let root = map
         .nodes()
         .iter()
         .find(|n| n.kind == NodeKind::LocalHost)
-        .map_or(ids[0], |n| n.id);
+        .map_or(first, |n| n.id);
 
     let mut adjacency: BTreeMap<NodeId, Vec<NodeId>> =
         ids.iter().map(|&id| (id, Vec::new())).collect();
-    for edge in map.edges() {
+    for edge in map
+        .edges()
+        .iter()
+        .filter(|edge| on_rings(&edge.from) && on_rings(&edge.to))
+    {
         adjacency.entry(edge.from).or_default().push(edge.to);
         adjacency.entry(edge.to).or_default().push(edge.from);
     }
@@ -60,7 +79,13 @@ fn positions(map: &Map) -> BTreeMap<NodeId, Point> {
 
     let (depth, children) = breadth_first_tree(root, &ids, &adjacency);
     let weights = subtree_weights(&ids, &depth, &children);
-    radial_positions(root, &depth, &children, &weights)
+    let mut positions = radial_positions(root, &depth, &children, &weights);
+    for edge in map.edges().iter().filter(|e| e.kind == EdgeKind::Serves) {
+        if let Some(&host) = positions.get(&edge.from) {
+            positions.entry(edge.to).or_insert(host);
+        }
+    }
+    positions
 }
 
 /// The BFS spanning tree from `root` over key-sorted `adjacency`: each node's
@@ -140,8 +165,8 @@ fn radial_positions(
         positions.insert(
             node,
             Point::new(
-                round(radius * mathf::cos(mid)),
-                round(radius * mathf::sin(mid)),
+                mathf::round_i32(radius * mathf::cos(mid)),
+                mathf::round_i32(radius * mathf::sin(mid)),
             ),
         );
         if let Some(kids) = children.get(&node) {
@@ -171,21 +196,6 @@ fn radial_positions(
 )]
 fn weight_fraction(weight: u64, total: u64) -> f64 {
     weight as f64 / total as f64
-}
-
-/// Round a finite coordinate to the nearest integer, away from zero on a tie,
-/// saturating at the ends of `i32`.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "a float-to-int `as` cast saturates, and every caller's value is a coordinate"
-)]
-pub(crate) fn round(value: f64) -> i32 {
-    let adjusted = if value >= 0.0 {
-        value + 0.5
-    } else {
-        value - 0.5
-    };
-    adjusted as i32
 }
 
 #[cfg(test)]

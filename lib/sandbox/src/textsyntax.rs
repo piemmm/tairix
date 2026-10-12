@@ -217,11 +217,7 @@ fn dispatch(request: &[u8]) -> Option<Vec<u8>> {
 
 /// `message` cut to [`MAX_MESSAGE_LEN`] at a character boundary.
 fn clipped(message: &str) -> &str {
-    let mut end = message.len().min(MAX_MESSAGE_LEN);
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    &message[..end]
+    &message[..message.floor_char_boundary(MAX_MESSAGE_LEN)]
 }
 
 /// Colour `lines`, the first of which starts in `state`, each in the state

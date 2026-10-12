@@ -30,17 +30,27 @@ Art Gerät er zu sein scheint und was darauf läuft, samt wie sicher sich die
 Karte ist und warum —, und klicken Sie auf eine leere Stelle, um die Details
 wieder zu schließen. Namen erscheinen überall, wo Platz für sie ist.
 
+Ein Host, der Dienste anbietet, trägt ihre Anzahl auf einem kleinen Abzeichen.
+Lassen Sie den Zeiger auf einem Knoten ruhen, um seinen vollen Namen zu sehen,
+und auf einem solchen Host, um seine Dienste genannt zu bekommen; klicken Sie
+auf den Host, um seine Dienste um ihn herum aufzufächern, und klicken Sie
+erneut darauf, klicken Sie anderswohin oder drücken Sie `Escape`, um sie
+wieder einzuklappen. Klicken Sie mit der Nebentaste auf einen Knoten, um sein
+Menü zu öffnen: seine Dienste zeigen oder ausblenden oder seine Adresse,
+seinen Namen oder seine Hardwareadresse kopieren — bei einem Dienst seine
+Adresse mit Port, bei einem Webdienst seine URL.
+
 Die Karte wird über die Systeminformations-API und den Erkennungsdienst
 gelesen, und ihre Hosts werden von den eingestellten DNS-Servern benannt oder
 mit dem Namen, den sich die Geräte selbst geben; sie kontaktiert nie selbst
 einen Host und wird alle paar Sekunden neu gelesen, solange ihr Fenster offen
-ist. Neben den Hosts zeigt sie die Dienste, die Geräte im lokalen Netz
-anbieten — Drucker, Dateifreigaben, Mediaplayer —, jeden unter dem Host, der
-ihn anbietet. Schnittstellenadressen und Routen erfordern
-`CAP_SYSINFO_GLOBAL`; Hardwareadressen und der Nachbarcache erfordern
-`CAP_SYSINFO_HW`; angebotene Dienste erfordern `CAP_NET_DISCOVER_ALL`; das
-Benennen von Hosts per DNS erfordert `CAP_NET`. Fehlt eine davon, sagt die
-Karte, was sie nicht zeigen kann, und zeichnet den Rest.
+ist. Außerdem sammelt sie die Dienste, die Geräte im lokalen Netz anbieten —
+Drucker, Dateifreigaben, Mediaplayer —, und ordnet jeden dem Host zu, der ihn
+anbietet. Schnittstellenadressen und Routen erfordern `CAP_SYSINFO_GLOBAL`;
+Hardwareadressen und der Nachbarcache erfordern `CAP_SYSINFO_HW`; angebotene
+Dienste erfordern `CAP_NET_DISCOVER_ALL`; das Benennen von Hosts per DNS
+erfordert `CAP_NET`. Fehlt eine davon, sagt die Karte, was sie nicht zeigen
+kann, und zeichnet den Rest.
 
 Netmap wird aus der Programmbibliothek des Desktops oder per Name aus einer
 Shell gestartet und benötigt eine laufende grafische Sitzung; ohne sie meldet es

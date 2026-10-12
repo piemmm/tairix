@@ -306,35 +306,44 @@ pub fn damage_in(mode: &DisplayMode, rect: Rect) -> Option<DamageRect> {
 /// is not asked for again until the one wanted changes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DeclaredTip {
-    region: Option<Rect>,
+    declared: Option<(WindowRegion, TooltipText)>,
 }
 
 impl DeclaredTip {
     /// No tip asked for yet.
     #[must_use]
     pub const fn new() -> Self {
-        Self { region: None }
+        Self { declared: None }
     }
 
     /// Ask for `wanted` — the region a tip covers and its line — over window
     /// `window_id`, or for no tip at all, unless it is what was last asked.
+    ///
+    /// A line or region the wire cannot carry asks for no tip, so the one
+    /// last declared is withdrawn rather than left explaining something else.
     pub fn declare<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
         window_id: u64,
         wanted: Option<(Rect, &str)>,
     ) {
-        let region = wanted.map(|(rect, _)| rect);
-        if region == self.region {
+        let wanted = wanted.and_then(|(rect, text)| {
+            let region =
+                WindowRegion::new(rect.left(), rect.top(), rect.width, rect.height).ok()?;
+            Some((region, TooltipText::new(text).ok()?))
+        });
+        if wanted == self.declared {
             return;
         }
-        self.region = region;
-        let (rect, text) = wanted.unwrap_or((Rect::EMPTY, ""));
-        if let (Ok(anchor), Ok(text)) = (
-            WindowRegion::new(rect.left(), rect.top(), rect.width, rect.height),
-            TooltipText::new(text),
-        ) {
-            let _ = client.set_tooltip(window_id, anchor, text);
+        self.declared = wanted;
+        let sent = match wanted {
+            Some(pair) => Ok(pair),
+            None => {
+                WindowRegion::new(0, 0, 0, 0).and_then(|region| Ok((region, TooltipText::new("")?)))
+            }
+        };
+        if let Ok((region, text)) = sent {
+            let _ = client.set_tooltip(window_id, region, text);
         }
     }
 }

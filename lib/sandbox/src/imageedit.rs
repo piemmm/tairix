@@ -586,11 +586,7 @@ impl EditSession {
 /// `name` no longer than [`MAX_LAYER_NAME`] bytes, cut at a character's
 /// boundary.
 fn layer_name(name: &str) -> &str {
-    let mut end = name.len().min(MAX_LAYER_NAME);
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    &name[..end]
+    &name[..name.floor_char_boundary(MAX_LAYER_NAME)]
 }
 
 fn edit_limits() -> DecodeLimits {

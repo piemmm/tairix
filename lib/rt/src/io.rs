@@ -481,10 +481,7 @@ impl<const CAP: usize> Default for FixedFmtBuf<CAP> {
 impl<const CAP: usize> core::fmt::Write for FixedFmtBuf<CAP> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let room = CAP.saturating_sub(self.len);
-        let mut take = s.len().min(room);
-        while take > 0 && !s.is_char_boundary(take) {
-            take -= 1;
-        }
+        let take = s.floor_char_boundary(room);
         self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
         self.len += take;
         Ok(())

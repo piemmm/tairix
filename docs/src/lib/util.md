@@ -199,6 +199,12 @@ and panic-free throughout.
   shows a byte in the character column only when it prints, so no byte from
   a file reaches a display as a control. `fstree`'s hex view and TextEdit's
   hex view read the one definition.
+* `join` — `join_within`, one bounded line from a list: every item joined with
+  `, ` when they all fit, else the longest run of whole items from the front
+  that leaves room for `, and N more` (or `N more` alone when no item fits
+  beside it), so a list is never cut mid-item and never runs past its bound.
+  `lib/procinfo`'s multi-valued readings (routes, neighbours, servers) and
+  `netmap`'s host tooltip read the one rule.
 * `lanes` — the portable eight-bytes-at-a-time byte search, for a target
   whose vector unit is off and whose byte loops are therefore not vectorised:
   `equal_lanes` marks a word's lanes holding a byte exactly (no borrow can

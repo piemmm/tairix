@@ -68,10 +68,10 @@ printable Unicode as DNS-SD names are written, but every control and every
 character that formats, joins or hides text escaped, so no label can pass for
 another by an invisible difference.
 
-A service is drawn under the node at one of its host's addresses — a
-neighbour, a router, or this machine — under a neighbour made for it when only
-discovery knows the host, and under its interface until the host's addresses
-are known. A host is labelled with its reverse DNS name, else with what the
+A service belongs to the node at one of its host's addresses — a neighbour, a
+router, or this machine — to a neighbour made for it when only discovery knows
+the host, and to its interface until the host's addresses are known. It is
+folded into that node until the user spreads it (see *Services*, below). A host is labelled with its reverse DNS name, else with what the
 segment calls it, else with its address; both names are kept as facts. Reverse
 DNS runs on a worker of its own, one lookup at a time, so a slow resolver never
 holds up a refresh; each routable address is looked up once per run. A
@@ -111,7 +111,9 @@ router the routing table names and the neighbour cache resolves is drawn once,
 with its hardware address. Default routes are projected first, so a next hop
 that carries both the default route and named routes is drawn as the gateway.
 The layout is a deterministic radial tree around this machine, so the same
-network always draws the same way.
+network always draws the same way. Services take no place on it: each is
+folded into its host, so a host advertising a dozen services lays out as one
+offering none.
 
 Nodes are drawn at a constant size whatever the zoom, each as its glyph in
 white on a round plate of the hue of what it is, the badge hues the desktop's
@@ -128,7 +130,7 @@ penguin for Linux, the Android robot's head, a four-paned window for Windows,
 the looped square for Apple's systems.
 
 Every name that has room is drawn, the selection's first and then in the map's
-own order (this machine, its interfaces, networks, routers, hosts, services):
+own order (this machine, its interfaces, networks, routers, hosts):
 plates and names are placed into an index of the canvas and a name that would
 overlap either is left out, so a zoomed-out map is never a smear of text and a
 sparse one is named at any zoom.
@@ -136,6 +138,71 @@ sparse one is named at any zoom.
 The view keeps the whole map in sight as it changes — fitted with a margin,
 never magnified past its own size — until it is panned or zoomed; from then on a
 refresh leaves it where it was put, and `Home` fits it again.
+
+## Services
+
+A host that advertises services wears their count on a pill at its upper
+shoulder (`9+` past nine), and its tooltip names it and the services it
+offers by type — `printer.local — 4 services: http (2), ipp, uscan` — whole
+entries only, ending `and N more` at the tooltip's one-line bound. Every
+other node's tooltip is its full name, which the label pass may have had no
+room for. The map declares the tip for the plate under the pointer through
+the seat's one tooltip (`plans/TOOLTIPS.md`), asking again only when the plate
+or its line changes, and declares none while a drag, a pinch or a spread is
+moving.
+
+Clicking a host that offers services spreads them around it: each stands on an
+arc of fixed on-screen size around the host, fanned away from this machine so
+they clear the line that leads in, nearer arcs filled first, ordered by
+identity so the same services always spread the same way. They travel out from
+under the host's plate over the theme's panel-opening time, smoothed at both
+ends; with reduced motion they land at once. Clicking the spread host again
+folds them, and so do selecting anything else, clicking empty space and
+`Escape`. A fold that interrupts a spread reverses from where it stands. A
+spread service can be selected like any node, and keeps its host spread. Each
+frame of the movement is a one-shot deadline folded into the window's park
+beside the refresh, never a poll; a map at rest arms nothing.
+
+A spread is drawn over the map, which is laid out — names included — as if
+nothing were spread: the lines to the services, their plates, and their names
+on a backing of the canvas colour, then the host on top. So a moving service
+changes nothing beyond its spread's reach, and a frame that only moves
+services repaints and presents that reach rather than the window.
+
+One placement says where every plate stands at a given instant, and drawing,
+hit-testing and the tooltip all read it, so a plate is clicked where it is
+drawn — the topmost one under the pointer — including mid-movement. The detail
+panel covers the map beneath it: nothing under it is clicked or tipped.
+
+## The context menu
+
+A secondary press opens the menu of the node under it, of the selected node
+when it lands on the detail panel, or of the map on empty canvas. The map
+builds the model and the desktop places, draws, grabs and answers it once
+(`plans/NEW-MENUS.md`); the map acts only on the answer naming its own open.
+
+| Row | Offered on | Does |
+|---|---|---|
+| *Show Services* / *Hide Services* | a host offering services | spreads or folds them |
+| *Copy Address* | a host known by one family of address; a service | the address; for a service `host:port`, an IPv6 host in brackets |
+| *Copy IPv4 Address*, *Copy IPv6 Address* | a host known by both families | the first of each, a routable IPv6 address before a link-local one |
+| *Copy URL* | a `_http._tcp` or `_https._tcp` service | its URL |
+| *Copy Name* | a node named other than by its address | its name |
+| *Copy Hardware Address* | a node whose MAC is known | its MAC |
+| *Copy Network* | a network | its prefix |
+| *Fit Map to Window* | every menu | as `Home` |
+
+A URL is built only from parts valid in one, since every part of it was
+authored by an unauthenticated peer: the host is the service's IPv4 address,
+else a routable IPv6 address in brackets, else its advertised name when that
+is a plain DNS name (a link-local address alone would need a zone the URL
+cannot carry portably); the port is written unless it is the scheme's own; and
+the `TXT` record's `path` is used only when it is an absolute URI path as it
+stands — anything else is dropped, never encoded into something the peer did
+not say. Copying puts the text on the desktop clipboard from the map's window;
+a refused menu or copy is reported on the standard error stream and the map
+carries on. *Open in Browser* waits on a web browser and a desktop URL hand-off
+(`plans/NETMAP.md` NM2e).
 
 ## Input
 
@@ -147,7 +214,9 @@ refresh leaves it where it was put, and `Home` fits it again.
 | Pinch | Zoom about the pinch, relative to where it began; a cancelled pinch returns there |
 | `Home` | Fit the whole map, and keep it fitted as it changes |
 | Click a node | Show its details |
-| Click empty space | Put the details away |
+| Click a host offering services | Show its details and spread its services; again folds them |
+| Click empty space, `Escape` | Put the details away and fold any spread |
+| Secondary click | The context menu |
 
 A burst of input is drained and drawn once.
 

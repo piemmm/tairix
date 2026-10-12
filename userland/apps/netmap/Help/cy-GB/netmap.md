@@ -28,15 +28,24 @@ wneuthurwr, a oes modd ei gyrraedd, pa fath o ddyfais y mae'n ymddangos ei fod
 a beth sy'n rhedeg arno, gyda pha mor sicr yw'r map a pham — a chliciwch le
 gwag i gau'r manylion. Mae enwau'n ymddangos lle bynnag y mae lle iddynt.
 
+Mae gwesteiwr sy'n hysbysebu gwasanaethau yn dangos faint ar fathodyn bach.
+Gadewch i'r pwyntydd orffwys ar nod i weld ei enw llawn, ac ar westeiwr o'r
+fath i weld ei wasanaethau wedi'u henwi; cliciwch y gwesteiwr i daenu ei
+wasanaethau o'i amgylch, a chliciwch ef eto, cliciwch rywle arall, neu pwyswch
+`Escape` i'w plygu'n ôl. Cliciwch nod â'r botwm eilaidd i agor ei ddewislen:
+dangos neu guddio ei wasanaethau, neu gopïo ei gyfeiriad, ei enw neu ei
+gyfeiriad caledwedd — ar gyfer gwasanaeth, ei gyfeiriad a'i borth, ac ar gyfer
+gwasanaeth gwe, ei URL.
+
 Darllenir y map drwy'r API Gwybodaeth System a'r gwasanaeth darganfod, a
 rhoddir enwau i'w westeiwyr gan y gweinyddion DNS sydd wedi'u gosod neu gan yr
 enw y mae'r dyfeisiau'n ei roi arnynt eu hunain; nid yw byth yn cysylltu â
 gwesteiwr ei hun, ac fe'i darllenir eto bob ychydig eiliadau tra bo'i ffenestr
-ar agor. Wrth ymyl y gwesteiwyr mae'n dangos y gwasanaethau y mae dyfeisiau'n
-eu hysbysebu ar y cyswllt lleol — argraffwyr, ffolderi a rennir, chwaraewyr
-cyfryngau — pob un o dan y gwesteiwr sy'n ei gynnig. Mae cyfeiriadau
-rhyngwyneb a llwybrau angen `CAP_SYSINFO_GLOBAL`; mae cyfeiriadau caledwedd a
-storfa'r cymdogion angen `CAP_SYSINFO_HW`; mae gwasanaethau a hysbysebir angen
+ar agor. Mae hefyd yn casglu'r gwasanaethau y mae dyfeisiau'n eu hysbysebu ar
+y cyswllt lleol — argraffwyr, ffolderi a rennir, chwaraewyr cyfryngau — ac yn
+cadw pob un gyda'r gwesteiwr sy'n ei gynnig. Mae cyfeiriadau rhyngwyneb a
+llwybrau angen `CAP_SYSINFO_GLOBAL`; mae cyfeiriadau caledwedd a storfa'r
+cymdogion angen `CAP_SYSINFO_HW`; mae gwasanaethau a hysbysebir angen
 `CAP_NET_DISCOVER_ALL`; mae enwi gwesteiwyr drwy DNS angen `CAP_NET`. Heb un
 ohonynt, mae'r map yn dweud beth na all ei ddangos ac yn llunio'r gweddill.
 

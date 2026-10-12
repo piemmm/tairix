@@ -19,15 +19,15 @@ use tairix_abi::net_ipc::{
     address_parts, ip_from_parts, ip_network, NetInterfaceFactsRecord, NetInterfaceStateRecord,
     NetNeighborRecord, NetNeighborState, NetRouteRecord,
 };
-use tairix_procinfo::{render_ip, render_mac};
+use tairix_procinfo::render_ip;
 
 use tairix_net::mdns::is_link_local_address;
 
 use crate::discover::AdvertisedService;
 use crate::infer::{infer, Role, Signals};
 use crate::model::{
-    Classification, DeviceClass, EdgeKind, InterfaceName, Liveness, Map, NodeId, NodeKey, NodeKind,
-    OsFamily,
+    Classification, DeviceClass, EdgeKind, Endpoint, InterfaceName, Liveness, Map, NodeId, NodeKey,
+    NodeKind, OsFamily,
 };
 
 /// One interface's accrued observations: its facts page, its state page, or
@@ -156,7 +156,6 @@ impl Inventory {
             hosts: BTreeMap::new(),
             local_addrs: BTreeSet::new(),
             roles: BTreeMap::new(),
-            macs: BTreeMap::new(),
             served: BTreeMap::new(),
             inventory: self,
         };
@@ -214,10 +213,9 @@ struct Builder<'a> {
     hosts: BTreeMap<IpAddr, NodeId>,
     /// This machine's own addresses, so a service it advertises is its.
     local_addrs: BTreeSet<IpAddr>,
-    /// What each host is to classify by: the routing role it plays, its
-    /// hardware address, the services it advertises.
+    /// What each host is to classify by beside its own hardware address: the
+    /// routing role it plays and the services it advertises.
     roles: BTreeMap<NodeId, Role>,
-    macs: BTreeMap<NodeId, [u8; 6]>,
     served: BTreeMap<NodeId, Vec<&'a AdvertisedService>>,
     inventory: &'a Inventory,
 }
@@ -267,7 +265,7 @@ impl<'a> Builder<'a> {
             return;
         };
         if let Some(facts) = &observation.facts {
-            self.map.set_fact(iface, "mac", &render_mac(facts.mac));
+            self.map.set_mac(iface, facts.mac);
             self.map.set_fact(iface, "mtu", &format!("{}", facts.mtu));
             self.map.set_fact(iface, "kind", facts.kind.name());
         }
@@ -405,14 +403,7 @@ impl<'a> Builder<'a> {
             return;
         };
         if let Some(mac) = neighbor.mac {
-            let rendered = render_mac(mac);
-            if assigned_oui(mac).is_some() {
-                self.map.set_fact(node, "mac", &rendered);
-            } else {
-                self.map
-                    .set_fact(node, "mac", &format!("{rendered} (locally administered)"));
-            }
-            self.macs.insert(node, mac);
+            self.map.set_mac(node, mac);
         }
         self.map.set_fact(node, "neighbor", neighbor.state.name());
         if neighbor.state == NetNeighborState::Reachable {
@@ -477,12 +468,17 @@ impl<'a> Builder<'a> {
             return;
         };
         self.map.set_label(node, &service.instance);
-        self.map.set_fact(node, "service", &service.service);
-        self.map
-            .set_fact(node, "port", &format!("{}", service.port));
-        self.map.set_fact(node, "host", &service.host);
-        if !service.text.is_empty() {
-            self.map.set_fact(node, "txt", &service.text.join(" "));
+        self.map.set_endpoint(
+            node,
+            Endpoint {
+                service_type: service.service.clone(),
+                port: service.port,
+                host: service.host.clone(),
+                text: service.text.clone(),
+            },
+        );
+        for addr in &service.addresses {
+            self.map.add_addr(node, *addr);
         }
         self.map.set_liveness(node, Liveness::Advertised);
         self.map.link(owner, node, EdgeKind::Serves);
@@ -495,18 +491,16 @@ impl<'a> Builder<'a> {
     /// name the organisation its hardware address was assigned to.
     fn classify(&mut self) {
         let inventory = self.inventory;
-        let hosts: Vec<NodeId> = self
+        let hosts: Vec<(NodeId, Option<[u8; 6]>)> = self
             .map
             .nodes()
             .iter()
             .filter(|node| is_host(node.kind))
-            .map(|node| node.id)
+            .map(|node| (node.id, node.mac))
             .collect();
-        for id in hosts {
-            let vendor = self
-                .macs
-                .get(&id)
-                .and_then(|mac| assigned_oui(*mac))
+        for (id, mac) in hosts {
+            let vendor = mac
+                .and_then(assigned_oui)
                 .and_then(|oui| inventory.vendors.get(&oui))
                 .map(String::as_str);
             if let Some(vendor) = vendor {

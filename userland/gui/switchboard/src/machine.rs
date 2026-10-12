@@ -221,10 +221,7 @@ fn fitted<const MAX: usize>(raw: &[u8]) -> Option<BoundedText<1, MAX>> {
     if let Ok(name) = BoundedText::new(&text) {
         return Some(name);
     }
-    let mut end = MAX.checked_sub(ELLIPSIS.len())?.min(text.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = text.floor_char_boundary(MAX.checked_sub(ELLIPSIS.len())?);
     let mut cut = String::from(&text[..end]);
     cut.push_str(ELLIPSIS);
     BoundedText::new(&cut).ok()

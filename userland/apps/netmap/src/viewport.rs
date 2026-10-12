@@ -1,5 +1,5 @@
 //! The graph-space viewport: the pan offset and zoom the GUI drives, and the
-//! window↔graph mapping and hit-testing built on them.
+//! window↔graph mapping built on them.
 //!
 //! Zoom is an integer per-mille factor; the pan is the graph-space point shown
 //! at the window's centre. Zoom about an anchor keeps the graph point under the
@@ -9,7 +9,7 @@
 
 use tairix_geometry::Point;
 
-use crate::model::{Map, NodeId};
+use crate::model::Map;
 
 /// Smallest zoom, 0.1×.
 pub const MIN_ZOOM_PER_MILLE: u32 = 100;
@@ -159,23 +159,6 @@ impl Viewport {
             .unwrap_or(u32::MAX)
             .clamp(MIN_ZOOM_PER_MILLE, DEFAULT_ZOOM_PER_MILLE);
         self.center = Point::new(min.x.midpoint(max.x), min.y.midpoint(max.y));
-    }
-
-    /// The node whose drawn centre is nearest `window`, within `max_dist_px`.
-    #[must_use]
-    pub fn nearest_node(&self, map: &Map, window: Point, max_dist_px: u32) -> Option<NodeId> {
-        let limit = i64::from(max_dist_px) * i64::from(max_dist_px);
-        let mut best: Option<(NodeId, i64)> = None;
-        for node in map.nodes() {
-            let at = self.to_window(node.pos);
-            let dx = i64::from(at.x) - i64::from(window.x);
-            let dy = i64::from(at.y) - i64::from(window.y);
-            let distance = dx * dx + dy * dy;
-            if distance <= limit && best.is_none_or(|(_, d)| distance < d) {
-                best = Some((node.id, distance));
-            }
-        }
-        best.map(|(id, _)| id)
     }
 }
 

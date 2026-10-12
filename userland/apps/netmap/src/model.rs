@@ -187,6 +187,42 @@ pub enum Liveness {
     Unreachable,
 }
 
+/// Where a service is reached, as its host advertised it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Endpoint {
+    /// Its DNS-SD service type, as `_ipp._tcp`, display-safe.
+    pub service_type: String,
+    /// The port it is reached on.
+    pub port: u16,
+    /// The host name it advertised, display-safe.
+    pub host: String,
+    /// Each `TXT` string it publishes, display-safe.
+    pub text: Vec<String>,
+}
+
+impl Endpoint {
+    /// The type's own name, `ipp` for `_ipp._tcp`: what a list of services
+    /// is short enough to name a host's by.
+    #[must_use]
+    pub fn short_type(&self) -> &str {
+        let name = self
+            .service_type
+            .strip_prefix('_')
+            .unwrap_or(&self.service_type);
+        name.split_once('.').map_or(name, |(head, _)| head)
+    }
+
+    /// The value of the `TXT` key `key`, matched without regard to case as
+    /// DNS-SD keys are; `None` when it is absent or a bare key.
+    #[must_use]
+    pub fn text_value(&self, key: &str) -> Option<&str> {
+        self.text.iter().find_map(|entry| {
+            let (name, value) = entry.split_once('=')?;
+            name.eq_ignore_ascii_case(key).then_some(value)
+        })
+    }
+}
+
 /// One node on the map.
 #[derive(Clone, Debug)]
 pub struct Node {
@@ -200,6 +236,10 @@ pub struct Node {
     pub label: String,
     /// The addresses accrued for it.
     pub addrs: Vec<IpAddr>,
+    /// Its hardware address, when one is known.
+    pub mac: Option<[u8; 6]>,
+    /// Where it is reached, for a service.
+    pub endpoint: Option<Endpoint>,
     /// Key/value facts accrued for it (both sides already display-safe).
     pub facts: Vec<(String, String)>,
     /// The passively-inferred class driving its icon.
@@ -327,6 +367,8 @@ impl Map {
             kind,
             label: String::new(),
             addrs: Vec::new(),
+            mac: None,
+            endpoint: None,
             facts: Vec::new(),
             classification: Classification::default(),
             evidence: Vec::new(),
@@ -342,7 +384,7 @@ impl Map {
     /// Set a node's display label, truncated to [`MAX_LABEL_LEN`] on a `char`
     /// boundary. The caller supplies already-escaped text.
     pub fn set_label(&mut self, id: NodeId, label: &str) {
-        let capped = truncate_on_char_boundary(label, MAX_LABEL_LEN);
+        let capped = &label[..label.floor_char_boundary(MAX_LABEL_LEN)];
         if let Some(node) = self.node_mut(id) {
             node.label.clear();
             node.label.push_str(capped);
@@ -355,6 +397,20 @@ impl Map {
             if node.addrs.len() < MAX_NODE_ADDRS && !node.addrs.contains(&addr) {
                 node.addrs.push(addr);
             }
+        }
+    }
+
+    /// Record a node's hardware address.
+    pub fn set_mac(&mut self, id: NodeId, mac: [u8; 6]) {
+        if let Some(node) = self.node_mut(id) {
+            node.mac = Some(mac);
+        }
+    }
+
+    /// Record where a service node is reached.
+    pub fn set_endpoint(&mut self, id: NodeId, endpoint: Endpoint) {
+        if let Some(node) = self.node_mut(id) {
+            node.endpoint = Some(endpoint);
         }
     }
 
@@ -416,19 +472,6 @@ impl Map {
         self.edge_set.insert(triple);
         true
     }
-}
-
-/// The largest prefix of `s` that fits in `max_bytes` and ends on a `char`
-/// boundary.
-fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 #[cfg(test)]

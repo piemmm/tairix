@@ -27,12 +27,20 @@ what kind of device it appears to be and what it runs, with how sure the map
 is and why — and click empty space to put the details away. Names appear
 wherever there is room for them.
 
+A host that advertises services wears how many on a small badge. Rest the
+pointer on any node to see its full name, and on such a host to see its
+services named; click the host to spread its services around it, and click it
+again, click elsewhere, or press `Escape` to fold them away. Click a node with
+the secondary button for its menu: show or hide its services, or copy its
+address, name, or hardware address — for a service, its address and port, and
+for a web service, its URL.
+
 The map is read through the System Information API and the discovery service,
 and the hosts on it are named by the configured DNS servers or by what the
 devices call themselves; it never contacts a host itself, and it is read again
-every few seconds while its window is open. Beside the hosts it shows the
-services devices advertise on the local link — printers, file shares, media
-players — each under the host that offers it. Interface addresses and routes
+every few seconds while its window is open. It also gathers the services
+devices advertise on the local link — printers, file shares, media players —
+and keeps each with the host that offers it. Interface addresses and routes
 need `CAP_SYSINFO_GLOBAL`; hardware addresses and the neighbour cache need
 `CAP_SYSINFO_HW`; advertised services need `CAP_NET_DISCOVER_ALL`; naming
 hosts by DNS needs `CAP_NET`. Without one, the map says what it cannot show

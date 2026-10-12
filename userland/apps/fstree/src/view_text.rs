@@ -667,11 +667,7 @@ fn wrap_segments(text: &str, cols: usize) -> Vec<String> {
         // A double-width glyph wider than the budget cannot make
         // progress; take one character rather than loop forever.
         let taken = if piece.is_empty() && !rest.is_empty() {
-            let mut end = 1;
-            while !rest.is_char_boundary(end) {
-                end += 1;
-            }
-            &rest[..end]
+            &rest[..rest.ceil_char_boundary(1)]
         } else {
             piece
         };

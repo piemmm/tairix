@@ -5,27 +5,40 @@
 //! not a scaled picture — so zooming spreads the network out rather than
 //! inflating it, and labels appear once the nodes are far enough apart to
 //! carry them.
+//!
+//! A service is folded into its host until the user spreads it: the host wears
+//! a count of what it offers and names it in its tooltip, and a click fans the
+//! services out around it. One placement says where every plate stands, and
+//! drawing, clicking and the tooltip all read it, so a plate is hit where it
+//! is drawn.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::f64::consts::FRAC_PI_2;
 use core::ops::Range;
 
 use tairix_abi::net_ipc::address_parts;
 use tairix_abi::touch::PINCH_SCALE_ONE;
+use tairix_abi::window_ipc::TOOLTIP_TEXT_MAX;
+use tairix_abi::Errno;
 use tairix_controls::{wheel_steps, Fact, FactList, WHEEL_STEP};
 use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{badge, builtin_icon, BadgeHue, IconKind, PlateShape};
 use tairix_input::{InputEvent, Key, NamedKey, PinchPhase, PointerButton};
-use tairix_procinfo::render_ip;
+use tairix_procinfo::{render_ip, render_mac};
 use tairix_raster::{Canvas, Color, ScanScratch, Surface, SUBPIXEL};
-use tairix_theme::Theme;
+use tairix_theme::motion::smoothstep;
+use tairix_theme::{Fade, MotionInteraction, MotionTheme, TextRole, Theme};
+use tairix_util::join::join_within;
 use tairix_util::mathf;
 
 use crate::infer::{Evidence, Seen};
-use crate::layout::round;
+use crate::ingest::assigned_oui;
+use crate::menu::{elide, menu, NodeMenu, Steer, Subject};
 use crate::model::{
     DeviceClass, EdgeKind, Liveness, Map, Node, NodeId, NodeKey, NodeKind, OsFamily,
 };
@@ -64,6 +77,30 @@ const EMBLEM_INK: Color = Color::rgb(0x2a, 0x2a, 0x30);
 /// change replaces wholesale, so a bound this size is never reached in steady
 /// use.
 const MAX_CACHED_RASTERS: usize = 96;
+/// How far from a spread host's centre its nearest services stand, in logical
+/// pixels: clear of its plate, its count and their own plates.
+const SPREAD_FIRST_ARC: u32 = 68;
+/// How much further out each further arc of services stands, in logical
+/// pixels: a plate and the name under it.
+const SPREAD_ARC_STEP: u32 = 64;
+/// How far apart two services on one arc stand, in logical pixels: two
+/// plates with their halos, and a gap.
+const SPREAD_PITCH: u32 = 52;
+/// The widest an arc of services reaches, in thousandths of a radian (three
+/// quarters of a turn), centred on the host's outward direction: the quarter
+/// it leaves open is where the line into the host arrives.
+const SPREAD_ARC_MILLIRADIANS: u32 = 4712;
+/// Hosts whose services are drawn at once: the one spreading, and the one
+/// still folding.
+const MAX_SPREADS: usize = 2;
+/// What a host's count reads for each number of services it states exactly;
+/// a host offering more reads [`COUNT_MORE`].
+const COUNTS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+/// What a host offering more services than [`COUNTS`] states reads.
+const COUNT_MORE: &str = "9+";
+/// How far a spread service's backing reaches past its name, in logical
+/// pixels.
+const BACKING_PAD: u32 = 2;
 
 /// A primary press in progress.
 #[derive(Clone, Copy, Debug)]
@@ -71,6 +108,43 @@ struct Press {
     origin: Point,
     last: Point,
     dragged: bool,
+}
+
+/// A host whose services are out, or on their way out or in.
+#[derive(Clone, Debug)]
+struct Spread {
+    host: NodeKey,
+    /// How far out its services are: none at `0`, all the way at `u8::MAX`.
+    fade: Fade,
+}
+
+/// Which plates a plate is drawn over: the map's own, then the services a
+/// spread host has out, then the spread hosts, which cover their services as
+/// those leave and return.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layer {
+    Map,
+    Service,
+    SpreadHost,
+}
+
+/// One plate the view draws: the node, where its centre is, and its layer.
+#[derive(Clone, Copy, Debug)]
+struct Plate {
+    id: NodeId,
+    at: Point,
+    layer: Layer,
+}
+
+/// What an input event asks of the shell the view runs in.
+#[derive(Debug)]
+pub enum Reaction {
+    /// Nothing visible changed.
+    Idle,
+    /// The picture changed and wants painting.
+    Repaint,
+    /// Open this context menu, or the reason it could not be built.
+    Menu(Result<Box<NodeMenu>, Errno>),
 }
 
 /// The map as the user sees and steers it.
@@ -91,9 +165,20 @@ pub struct MapView {
     /// The density last drawn or steered at, which a fit's margin is sized by.
     scale: Scale,
     notices: Vec<String>,
-    /// The hue of the host each service is offered by, which the service
-    /// wears.
-    service_hues: BTreeMap<NodeId, BadgeHue>,
+    /// The host each service is offered by.
+    owners: BTreeMap<NodeId, NodeId>,
+    /// Each host's services, ordered by identity.
+    offered: BTreeMap<NodeId, Vec<NodeId>>,
+    /// The hosts whose services are drawn, oldest first.
+    spreads: Vec<Spread>,
+    motion: MotionTheme,
+    /// Every plate the view draws, in drawing order.
+    plates: Vec<Plate>,
+    /// Where the detail panel was last drawn: it covers the map under it, so
+    /// nothing there is hit or tipped.
+    panel: Option<Rect>,
+    /// A spread host's services' offsets from its centre, kept between uses.
+    offsets: Vec<(i32, i32)>,
     unit_circle: Vec<(f64, f64)>,
     painter: Painter,
 }
@@ -104,7 +189,10 @@ pub struct MapView {
 struct Painter {
     plates: BTreeMap<(IconKind, BadgeHue, u32), Surface>,
     glyphs: BTreeMap<(IconKind, u32, [u8; 4]), Surface>,
+    /// What the map's own names keep clear of.
     occupancy: Occupancy,
+    /// What a spread's names keep clear of.
+    overlay: Occupancy,
     scratch: ScanScratch,
     polygon: Vec<(i32, i32)>,
 }
@@ -213,9 +301,9 @@ pub struct Look {
 }
 
 impl MapView {
-    /// An empty view over `canvas`.
+    /// An empty view over `canvas`, animating at the pace `motion` sets.
     #[must_use]
-    pub fn new(canvas: Rect) -> Self {
+    pub fn new(canvas: Rect, motion: MotionTheme) -> Self {
         let unit_circle = (0..CIRCLE_VERTICES)
             .map(|i| {
                 let angle = core::f64::consts::TAU * f64::from(u32::try_from(i).unwrap_or(0))
@@ -237,7 +325,13 @@ impl MapView {
             follow: true,
             scale: Scale::ONE,
             notices: Vec::new(),
-            service_hues: BTreeMap::new(),
+            owners: BTreeMap::new(),
+            offered: BTreeMap::new(),
+            spreads: Vec::new(),
+            motion,
+            plates: Vec::new(),
+            panel: None,
+            offsets: Vec::new(),
             unit_circle,
             painter: Painter::default(),
         }
@@ -262,24 +356,58 @@ impl MapView {
         self.map.node(self.map.id_for(key)?)
     }
 
-    /// Show `map`, already laid out. The selection follows its node across
-    /// the rebuild by identity, and is dropped only if the node is gone.
+    /// Whether `host`'s services are out, or on their way out.
+    #[must_use]
+    pub fn is_spread(&self, host: &NodeKey) -> bool {
+        self.spreads
+            .iter()
+            .any(|spread| spread.host == *host && spread.fade.target() == u8::MAX)
+    }
+
+    /// Show `map`, already laid out. The selection and the spread services
+    /// follow their nodes across the rebuild by identity, and are dropped only
+    /// if the nodes are gone.
     pub fn set_map(&mut self, map: Map) {
-        self.service_hues = map
+        self.owners.clear();
+        self.offered.clear();
+        for edge in map
             .edges()
             .iter()
             .filter(|edge| edge.kind == EdgeKind::Serves)
-            .filter_map(|edge| Some((edge.to, node_look(map.node(edge.from)?).hue)))
-            .collect();
+        {
+            self.owners.insert(edge.to, edge.from);
+            self.offered.entry(edge.from).or_default().push(edge.to);
+        }
+        let key = |id: &NodeId| map.node(*id).map(|node| &node.key);
+        for services in self.offered.values_mut() {
+            services.sort_unstable_by(|a, b| key(a).cmp(&key(b)));
+        }
         self.map = map;
+        let (map, offered) = (&self.map, &self.offered);
+        self.spreads.retain(|spread| {
+            map.id_for(&spread.host)
+                .is_some_and(|id| offered.contains_key(&id))
+        });
         if self
             .selected
             .as_ref()
             .is_some_and(|key| self.map.id_for(key).is_none())
         {
-            self.selected = None;
+            self.deselect();
         }
         self.reframe();
+    }
+
+    /// Clear the selection, answering whether there was one. Its panel goes
+    /// with it.
+    fn deselect(&mut self) -> bool {
+        self.panel = None;
+        self.selected.take().is_some()
+    }
+
+    /// Whether `at` lies on the detail panel rather than the map.
+    fn on_panel(&self, at: Point) -> bool {
+        self.panel.is_some_and(|panel| panel.contains(at))
     }
 
     /// Keep the whole map in sight while the view follows it, else keep the
@@ -293,9 +421,23 @@ impl MapView {
         }
     }
 
+    /// Fit the whole map and keep following it, answering whether the view
+    /// moved.
+    fn fit(&mut self) -> bool {
+        let before = (self.viewport.zoom(), self.viewport.center());
+        self.follow = true;
+        self.reframe();
+        before != (self.viewport.zoom(), self.viewport.center())
+    }
+
     /// The lines stated under the map: what a source could not tell, and why.
     pub fn set_notices(&mut self, notices: Vec<String>) {
         self.notices = notices;
+    }
+
+    /// Animate at the pace `motion` sets from the next change on.
+    pub fn set_motion(&mut self, motion: MotionTheme) {
+        self.motion = motion;
     }
 
     /// Move the view onto a resized canvas.
@@ -310,10 +452,10 @@ impl MapView {
     fn hue(&self, node: &Node) -> BadgeHue {
         match node.kind {
             NodeKind::Service => self
-                .service_hues
+                .owners
                 .get(&node.id)
-                .copied()
-                .unwrap_or(BadgeHue::Grey),
+                .and_then(|host| self.map.node(*host))
+                .map_or(BadgeHue::Grey, |host| node_look(host).hue),
             _ => node_look(node).hue,
         }
     }
@@ -322,19 +464,25 @@ impl MapView {
         Point::new(at.x - self.canvas.left(), at.y - self.canvas.top())
     }
 
-    /// Route one input event, answering whether the picture changed.
-    pub fn on_input(&mut self, event: &InputEvent, scale: Scale) -> bool {
+    /// Route one input event arriving at `now_ns`, answering what it asks of
+    /// the shell.
+    pub fn on_input(&mut self, event: &InputEvent, scale: Scale, now_ns: u64) -> Reaction {
         self.scale = scale;
-        match *event {
+        let changed = match *event {
             InputEvent::KeyPressed {
                 key: Key::Named(NamedKey::Home),
                 modifiers,
             } => {
                 self.ctrl = modifiers.ctrl;
-                let before = (self.viewport.zoom(), self.viewport.center());
-                self.follow = true;
-                self.reframe();
-                before != (self.viewport.zoom(), self.viewport.center())
+                self.fit()
+            }
+            InputEvent::KeyPressed {
+                key: Key::Named(NamedKey::Escape),
+                modifiers,
+            } => {
+                self.ctrl = modifiers.ctrl;
+                let deselected = self.deselect();
+                self.fold_all(now_ns) | deselected
             }
             InputEvent::ModifiersChanged { modifiers }
             | InputEvent::KeyPressed { modifiers, .. }
@@ -355,7 +503,10 @@ impl MapView {
             }
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
-            } => self.released(scale),
+            } => self.released(scale, now_ns),
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary,
+            } => return Reaction::Menu(self.context_menu(scale, now_ns)),
             InputEvent::PointerPressed { .. } | InputEvent::PointerReleased { .. } => false,
             InputEvent::PointerScrolled { dx, dy } => {
                 if self.ctrl {
@@ -369,6 +520,21 @@ impl MapView {
                 scale: ratio,
                 at,
             } => self.pinch(phase, ratio, at),
+        };
+        if changed {
+            Reaction::Repaint
+        } else {
+            Reaction::Idle
+        }
+    }
+
+    /// Carry out what a menu row asked of the view, answering whether the
+    /// picture changed.
+    pub fn steer(&mut self, steer: &Steer, now_ns: u64) -> bool {
+        match steer {
+            Steer::ShowServices(host) => self.spread(host, now_ns),
+            Steer::HideServices(host) => self.fold(host, now_ns),
+            Steer::Fit => self.fit(),
         }
     }
 
@@ -392,25 +558,195 @@ impl MapView {
         dx != 0 || dy != 0
     }
 
-    fn released(&mut self, scale: Scale) -> bool {
+    fn released(&mut self, scale: Scale, now_ns: u64) -> bool {
         let Some(press) = self.press.take() else {
             return false;
         };
         if press.dragged {
             return false;
         }
-        let hit = self
-            .viewport
-            .nearest_node(
-                &self.map,
-                self.local(self.pointer),
-                scale.scale_length(NODE_RADIUS),
-            )
+        self.clicked(scale, now_ns)
+    }
+
+    /// A click selects what it lands on. On a host with services it spreads
+    /// them, or folds them when that host was already selected and spread; on
+    /// a spread service it keeps its host spread; anywhere else it folds every
+    /// spread, and on empty canvas it clears the selection too.
+    fn clicked(&mut self, scale: Scale, now_ns: u64) -> bool {
+        if self.on_panel(self.pointer) {
+            return false;
+        }
+        self.lay_plates(scale, now_ns);
+        let Some(node) = self
+            .hit(self.pointer, scale.scale_length(NODE_RADIUS))
+            .and_then(|plate| self.map.node(plate.id))
+        else {
+            let deselected = self.deselect();
+            return self.fold_all(now_ns) | deselected;
+        };
+        let (id, key) = (node.id, node.key.clone());
+        let again = self.selected.as_ref() == Some(&key);
+        let host = self
+            .owners
+            .get(&id)
+            .and_then(|host| self.map.node(*host))
+            .map(|host| host.key.clone());
+        let spread = if self.offered.contains_key(&id) {
+            if again && self.is_spread(&key) {
+                self.fold(&key, now_ns)
+            } else {
+                self.spread(&key, now_ns)
+            }
+        } else if let Some(host) = host {
+            self.spread(&host, now_ns)
+        } else {
+            self.fold_all(now_ns)
+        };
+        self.selected = Some(key);
+        spread || !again
+    }
+
+    /// The menu for whatever the secondary press landed on, anchored at it:
+    /// the node under it, the selected node when it is the panel describing
+    /// that node, else the map's own.
+    fn context_menu(&mut self, scale: Scale, now_ns: u64) -> Result<Box<NodeMenu>, Errno> {
+        self.lay_plates(scale, now_ns);
+        let pressed = if self.on_panel(self.pointer) {
+            self.selected.as_ref().and_then(|key| self.map.id_for(key))
+        } else {
+            self.hit(self.pointer, scale.scale_length(NODE_RADIUS))
+                .map(|plate| plate.id)
+        };
+        let subject = pressed
             .and_then(|id| self.map.node(id))
-            .map(|node| node.key.clone());
-        let changed = hit != self.selected;
-        self.selected = hit;
-        changed
+            .map(|node| Subject {
+                node,
+                services: self.offered.get(&node.id).map_or(0, Vec::len),
+                spread: self.is_spread(&node.key),
+            });
+        menu(subject, self.pointer).map(Box::new)
+    }
+
+    /// Spread `host`'s services and fold every other host's, answering whether
+    /// anything is now on its way somewhere new. A host with no services has
+    /// nothing to spread.
+    fn spread(&mut self, host: &NodeKey, now_ns: u64) -> bool {
+        if !self
+            .map
+            .id_for(host)
+            .is_some_and(|id| self.offered.contains_key(&id))
+        {
+            return false;
+        }
+        let duration = self.motion.duration(MotionInteraction::PanelOpen);
+        let mut changed = false;
+        for other in self.spreads.iter_mut().filter(|other| other.host != *host) {
+            changed |= retarget(&mut other.fade, now_ns, duration, 0);
+        }
+        if let Some(open) = self.spreads.iter_mut().find(|open| open.host == *host) {
+            return retarget(&mut open.fade, now_ns, duration, u8::MAX) | changed;
+        }
+        if self.spreads.len() >= MAX_SPREADS {
+            // Every spread left is folding by now; the oldest snaps shut.
+            self.spreads.remove(0);
+        }
+        self.spreads.push(Spread {
+            host: host.clone(),
+            fade: Fade::start(now_ns, duration, 0, u8::MAX),
+        });
+        true
+    }
+
+    /// Fold `host`'s services back in.
+    fn fold(&mut self, host: &NodeKey, now_ns: u64) -> bool {
+        let duration = self.motion.duration(MotionInteraction::PanelOpen);
+        self.spreads
+            .iter_mut()
+            .find(|spread| spread.host == *host)
+            .is_some_and(|spread| retarget(&mut spread.fade, now_ns, duration, 0))
+    }
+
+    /// Fold every spread host's services back in.
+    fn fold_all(&mut self, now_ns: u64) -> bool {
+        let duration = self.motion.duration(MotionInteraction::PanelOpen);
+        self.spreads.iter_mut().fold(false, |changed, spread| {
+            retarget(&mut spread.fade, now_ns, duration, 0) | changed
+        })
+    }
+
+    /// Nanoseconds until the next animation frame is due, or `None` when
+    /// nothing is moving.
+    #[must_use]
+    pub fn next_frame_in(&self, now_ns: u64) -> Option<u64> {
+        self.spreads
+            .iter()
+            .filter_map(|spread| spread.fade.next_frame_in(now_ns))
+            .min()
+    }
+
+    /// The tooltip for the plate under the pointer: the region it covers and
+    /// its one line. None while a gesture or an animation is under way, since
+    /// a tip would chase a moving plate.
+    pub fn tip(&mut self, scale: Scale, now_ns: u64) -> Option<(Rect, String)> {
+        let moving = self.spreads.iter().any(|spread| spread.fade.running());
+        if self.press.is_some() || self.pinch_from.is_some() || moving {
+            return None;
+        }
+        if self.on_panel(self.pointer) {
+            return None;
+        }
+        self.lay_plates(scale, now_ns);
+        let radius = scale.scale_length(NODE_RADIUS);
+        let plate = self.hit(self.pointer, radius)?;
+        let node = self.map.node(plate.id)?;
+        Some((plate_rect(plate.at, radius), self.tip_line(node)))
+    }
+
+    /// What a node's tooltip says: a service's name, type and port; a host's
+    /// name and the services it offers; anything else's full name.
+    fn tip_line(&self, node: &Node) -> String {
+        let line = match (&node.endpoint, self.offered.get(&node.id)) {
+            (Some(endpoint), _) => format!(
+                "{} — {}, port {}",
+                node.label,
+                endpoint.short_type(),
+                endpoint.port
+            ),
+            (None, Some(services)) => self.offering(&node.label, services),
+            (None, None) => node.label.clone(),
+        };
+        elide(&line, TOOLTIP_TEXT_MAX)
+    }
+
+    /// `label`, how many services it offers, and their types, each once with
+    /// how many instances of it there are when more than one.
+    fn offering(&self, label: &str, services: &[NodeId]) -> String {
+        let mut types: BTreeMap<&str, usize> = BTreeMap::new();
+        for endpoint in services
+            .iter()
+            .filter_map(|id| self.map.node(*id)?.endpoint.as_ref())
+        {
+            *types.entry(endpoint.short_type()).or_default() += 1;
+        }
+        let noun = if services.len() == 1 {
+            "service"
+        } else {
+            "services"
+        };
+        let head = format!(
+            "{} — {} {noun}: ",
+            elide(label, TOOLTIP_TEXT_MAX / 2),
+            services.len()
+        );
+        let entries = types.iter().map(|(name, &count)| {
+            if count > 1 {
+                format!("{name} ({count})")
+            } else {
+                String::from(*name)
+            }
+        });
+        let list = join_within(entries, TOOLTIP_TEXT_MAX.saturating_sub(head.len()));
+        format!("{head}{list}")
     }
 
     fn wheel_pan(&mut self, dx: i32, dy: i32) -> bool {
@@ -475,8 +811,9 @@ impl MapView {
         self.viewport.zoom() != before
     }
 
-    /// Draw the whole canvas into `surface`.
-    pub fn render(&mut self, surface: &mut Surface, scale: Scale, theme: &Theme, font: BitmapFont) {
+    /// Draw the whole canvas into `surface` as it stands at `now_ns`, then let
+    /// go of every animation that frame finished.
+    pub fn render(&mut self, surface: &mut Surface, scale: Scale, theme: &Theme, now_ns: u64) {
         if scale != self.scale {
             self.scale = scale;
             self.reframe();
@@ -491,20 +828,33 @@ impl MapView {
                 Color::from(theme.palette().surface),
             );
         }
+        let body = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
         let radius = scale.scale_length(NODE_RADIUS);
         let frame = Frame {
             radius,
             bounds: canvas_bounds(canvas, radius),
             selected: self.selected.as_ref().and_then(|key| self.map.id_for(key)),
         };
-        self.draw_edges(surface, scale);
+        self.lay_plates(scale, now_ns);
+        self.draw_map_edges(surface, scale);
         self.painter.occupancy.reset(canvas);
-        self.draw_nodes(surface, frame, theme);
-        self.draw_labels(surface, frame, scale, theme, font);
-        if let Some(node) = self.selected() {
-            let facts = node_facts(node);
-            draw_panel(surface, canvas, &facts, &node.label, scale, theme, font);
+        self.draw_plates(surface, frame, theme, Layer::Map);
+        self.mark_plates(frame, Layer::Map, Pass::Map);
+        self.mark_plates(frame, Layer::SpreadHost, Pass::Map);
+        self.draw_names(surface, frame, scale, theme, body, Pass::Map);
+        if !self.spreads.is_empty() {
+            self.draw_spread_lines(surface, scale);
+            self.painter.overlay.reset(canvas);
+            self.draw_plates(surface, frame, theme, Layer::Service);
+            self.mark_plates(frame, Layer::Service, Pass::Spread);
+            self.mark_plates(frame, Layer::SpreadHost, Pass::Spread);
+            self.draw_names(surface, frame, scale, theme, body, Pass::Spread);
+            self.draw_plates(surface, frame, theme, Layer::SpreadHost);
         }
+        self.panel = self.selected().and_then(|node| {
+            let facts = node_facts(node);
+            draw_panel(surface, canvas, &facts, &node.label, scale, theme, body)
+        });
         draw_notices(
             surface,
             canvas,
@@ -512,101 +862,403 @@ impl MapView {
             self.map.truncated(),
             scale,
             theme,
-            font,
+            body,
         );
+        self.settle(now_ns);
     }
 
-    /// Where `node` is drawn on the canvas.
+    /// Let go of every animation finished by `now_ns`: a host whose services
+    /// came all the way out keeps them there, and one whose services are all
+    /// the way in is no longer spread. [`render`](Self::render) does this once
+    /// it has drawn the frame; a shell whose due frame had nothing in sight to
+    /// draw calls it itself.
+    pub fn settle(&mut self, now_ns: u64) {
+        for spread in &mut self.spreads {
+            if spread.fade.running() && spread.fade.strength(now_ns) == spread.fade.target() {
+                spread.fade.settle();
+            }
+        }
+        self.spreads
+            .retain(|spread| spread.fade.running() || spread.fade.target() != 0);
+    }
+
+    /// Where every plate stands at `now_ns`, in drawing order: the map's own
+    /// nodes that are in sight, then each spread host's services as far out as
+    /// its spread has come, then the spread hosts themselves.
+    fn lay_plates(&mut self, scale: Scale, now_ns: u64) {
+        let bounds = canvas_bounds(self.canvas, scale.scale_length(NODE_RADIUS));
+        let mut hosts = [None; MAX_SPREADS];
+        for (slot, spread) in hosts.iter_mut().zip(&self.spreads) {
+            *slot = self.map.id_for(&spread.host);
+        }
+        let mut plates = core::mem::take(&mut self.plates);
+        let mut offsets = core::mem::take(&mut self.offsets);
+        plates.clear();
+        for node in self.map.nodes() {
+            if node.kind == NodeKind::Service || hosts.contains(&Some(node.id)) {
+                continue;
+            }
+            let at = self.window_point(node);
+            if bounds.contains(at) {
+                plates.push(Plate {
+                    id: node.id,
+                    at,
+                    layer: Layer::Map,
+                });
+            }
+        }
+        for (spread, host) in self.spreads.iter().zip(hosts) {
+            let Some(host) = host.and_then(|id| self.map.node(id)) else {
+                continue;
+            };
+            let Some(services) = self.offered.get(&host.id) else {
+                continue;
+            };
+            let out = i64::from(smoothstep(spread.fade.strength(now_ns)));
+            if out == 0 {
+                continue;
+            }
+            let centre = self.window_point(host);
+            spread_offsets(services.len(), outward(host.pos), scale, &mut offsets);
+            let travel = |offset: i32| {
+                i32::try_from(i64::from(offset) * out / i64::from(u8::MAX)).unwrap_or(offset)
+            };
+            for (&id, &(dx, dy)) in services.iter().zip(&offsets) {
+                plates.push(Plate {
+                    id,
+                    at: Point::new(
+                        centre.x.saturating_add(travel(dx)),
+                        centre.y.saturating_add(travel(dy)),
+                    ),
+                    layer: Layer::Service,
+                });
+            }
+        }
+        for host in hosts.into_iter().flatten() {
+            if let Some(node) = self.map.node(host) {
+                plates.push(Plate {
+                    id: host,
+                    at: self.window_point(node),
+                    layer: Layer::SpreadHost,
+                });
+            }
+        }
+        self.plates = plates;
+        self.offsets = offsets;
+    }
+
+    /// The topmost laid plate whose disc of `radius` holds `at`.
+    fn hit(&self, at: Point, radius: u32) -> Option<Plate> {
+        let limit = i64::from(radius) * i64::from(radius);
+        self.plates.iter().rev().copied().find(|plate| {
+            let dx = i64::from(plate.at.x) - i64::from(at.x);
+            let dy = i64::from(plate.at.y) - i64::from(at.y);
+            dx * dx + dy * dy <= limit
+        })
+    }
+
+    /// Where `node` is drawn on the canvas when it is not out of a spread host.
     fn window_point(&self, node: &Node) -> Point {
         let at = self.viewport.to_window(node.pos);
         Point::new(at.x + self.canvas.origin.x, at.y + self.canvas.origin.y)
     }
 
-    /// Every edge, as a line in the hue of the node it leads to; the default
-    /// route and named routes heavier.
-    fn draw_edges(&self, surface: &mut Surface, scale: Scale) {
-        let thin = i32::try_from(scale.scale_length(2)).unwrap_or(2) * SUBPIXEL;
-        let thick = i32::try_from(scale.scale_length(3)).unwrap_or(3) * SUBPIXEL;
+    /// The rectangle a frame that only moves services must repaint: all that
+    /// every moving spread can reach — its host, its services' plates at their
+    /// farthest, the lines to them and the names under them — clipped to the
+    /// canvas, or `None` when nothing in sight moves. The map beneath a spread
+    /// is laid out as if nothing were spread, so nothing outside it changes.
+    pub fn frame_damage(&mut self, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+        let radius = scale.scale_length(NODE_RADIUS);
+        let reach = to_i32(plate_reach(radius));
+        let pad = scale.scale_length(BACKING_PAD);
+        let side = reach.max(to_i32(
+            scale.scale_length(LABEL_WIDTH) / 2 + font.text_width(ELLIPSIS) + pad,
+        ));
+        let below = reach.max(to_i32(radius + radius / 3 + font.line_height() + pad));
+        let mut offsets = core::mem::take(&mut self.offsets);
+        let mut damage: Option<Rect> = None;
+        for spread in self.spreads.iter().filter(|spread| spread.fade.running()) {
+            let Some(host) = self
+                .map
+                .id_for(&spread.host)
+                .and_then(|id| self.map.node(id))
+            else {
+                continue;
+            };
+            let Some(services) = self.offered.get(&host.id) else {
+                continue;
+            };
+            spread_offsets(services.len(), outward(host.pos), scale, &mut offsets);
+            let (left, right, top, bottom) =
+                offsets
+                    .iter()
+                    .fold((0, 0, 0, 0), |(left, right, top, bottom), &(dx, dy)| {
+                        (left.min(dx), right.max(dx), top.min(dy), bottom.max(dy))
+                    });
+            let centre = self.window_point(host);
+            let x = centre.x.saturating_add(left).saturating_sub(side);
+            let y = centre.y.saturating_add(top).saturating_sub(reach);
+            let far_x = centre.x.saturating_add(right).saturating_add(side);
+            let far_y = centre.y.saturating_add(bottom).saturating_add(below);
+            let reached = Rect::new(
+                x,
+                y,
+                u32::try_from(far_x.saturating_sub(x)).unwrap_or(0),
+                u32::try_from(far_y.saturating_sub(y)).unwrap_or(0),
+            );
+            damage = Some(damage.map_or(reached, |so_far| so_far.union(&reached)));
+        }
+        self.offsets = offsets;
+        damage
+            .map(|damage| damage.intersection(&self.canvas))
+            .filter(|damage| !damage.is_empty())
+    }
+
+    /// Every edge between the map's own nodes, each in the hue of the node it
+    /// leads to; the default route and named routes heavier.
+    fn draw_map_edges(&self, surface: &mut Surface, scale: Scale) {
+        let thin = line_weight(scale, 2);
+        let thick = line_weight(scale, 3);
         for edge in self.map.edges() {
             let (Some(from), Some(to)) = (self.map.node(edge.from), self.map.node(edge.to)) else {
                 continue;
             };
-            let (a, b) = (self.window_point(from), self.window_point(to));
+            if from.kind == NodeKind::Service || to.kind == NodeKind::Service {
+                continue;
+            }
             let weight = match edge.kind {
                 EdgeKind::Default | EdgeKind::Routes => thick,
                 _ => thin,
             };
-            surface.stroke_polyline(
-                &[
-                    (a.x * SUBPIXEL, a.y * SUBPIXEL),
-                    (b.x * SUBPIXEL, b.y * SUBPIXEL),
-                ],
+            stroke(
+                surface,
+                self.window_point(from),
+                self.window_point(to),
                 weight,
-                self.hue(to).middle(),
+                self.hue(to),
             );
         }
     }
 
-    /// Every node in sight, each plate marked in the occupancy index so no
-    /// name is drawn over it.
-    fn draw_nodes(&mut self, surface: &mut Surface, frame: Frame, theme: &Theme) {
-        for node in self.map.nodes() {
-            let centre = self.window_point(node);
-            if !frame.bounds.contains(centre) {
+    /// The line from each spread host to each of its services that is out, in
+    /// the host's hue.
+    fn draw_spread_lines(&self, surface: &mut Surface, scale: Scale) {
+        let thin = line_weight(scale, 2);
+        for plate in self
+            .plates
+            .iter()
+            .filter(|plate| plate.layer == Layer::Service)
+        {
+            let host = self
+                .owners
+                .get(&plate.id)
+                .and_then(|host| self.map.node(*host));
+            if let Some(host) = host {
+                stroke(
+                    surface,
+                    self.window_point(host),
+                    plate.at,
+                    thin,
+                    node_look(host).hue,
+                );
+            }
+        }
+    }
+
+    /// Every laid plate of `layer` that is in sight.
+    fn draw_plates(&mut self, surface: &mut Surface, frame: Frame, theme: &Theme, layer: Layer) {
+        let small = BitmapFont::for_role(theme.fonts(), TextRole::Caption, self.scale);
+        for plate in self.plates.iter().filter(|plate| plate.layer == layer) {
+            if !frame.bounds.contains(plate.at) {
                 continue;
             }
-            let look = Look {
-                hue: self.hue(node),
-                ..node_look(node)
+            let Some(node) = self.map.node(plate.id) else {
+                continue;
             };
-            self.painter.node(
-                surface,
-                &self.unit_circle,
-                centre,
-                frame.radius,
+            let badge = Badge {
                 node,
-                look,
-                frame.selected == Some(node.id),
-                theme,
-            );
+                centre: plate.at,
+                radius: frame.radius,
+                look: Look {
+                    hue: self.hue(node),
+                    ..node_look(node)
+                },
+                selected: frame.selected == Some(node.id),
+                services: self.offered.get(&node.id).map_or(0, Vec::len),
+            };
             self.painter
-                .occupancy
-                .mark(plate_rect(centre, frame.radius));
+                .node(surface, &self.unit_circle, &badge, theme, small);
         }
     }
 
-    /// Every name that has room, the selection's first and then in the map's
-    /// own order, none drawn over a plate or another name.
-    fn draw_labels(
+    /// Mark every laid plate of `layer` in `pass`'s occupancy, so none of its
+    /// names is drawn over one.
+    fn mark_plates(&mut self, frame: Frame, layer: Layer, pass: Pass) {
+        let occupancy = self.painter.occupancy_for(pass);
+        for plate in self.plates.iter().filter(|plate| plate.layer == layer) {
+            if frame.bounds.contains(plate.at) {
+                occupancy.mark(plate_rect(plate.at, frame.radius));
+            }
+        }
+    }
+
+    /// Every name in `pass` that has room, the selection's first, none drawn
+    /// over a plate or another name of that pass. The map's names belong to
+    /// its own nodes and the spread hosts; a spread's names belong to the
+    /// services out, and stand on a backing so they read over the map beneath.
+    fn draw_names(
         &mut self,
         surface: &mut Surface,
         frame: Frame,
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
+        pass: Pass,
     ) {
         let selected = frame.selected;
-        let labels = selected.and_then(|id| self.map.node(id)).into_iter().chain(
-            self.map
-                .nodes()
-                .iter()
-                .filter(|node| Some(node.id) != selected),
-        );
-        for node in labels {
-            let centre = self.window_point(node);
-            if !frame.bounds.contains(centre) {
+        let ours = |plate: &&Plate| (plate.layer == Layer::Service) == (pass == Pass::Spread);
+        let chosen = self
+            .plates
+            .iter()
+            .filter(ours)
+            .filter(|plate| Some(plate.id) == selected);
+        let rest = self
+            .plates
+            .iter()
+            .filter(ours)
+            .filter(|plate| Some(plate.id) != selected);
+        let pad = scale.scale_length(BACKING_PAD);
+        let occupancy = self.painter.occupancy_for(pass);
+        for plate in chosen.chain(rest) {
+            if !frame.bounds.contains(plate.at) {
                 continue;
             }
-            let Some(label) = Label::plan(font, centre, frame.radius, &node.label, scale) else {
+            let Some(node) = self.map.node(plate.id) else {
                 continue;
             };
-            if Some(node.id) == selected {
-                self.painter.occupancy.mark(label.rect);
-            } else if !self.painter.occupancy.claim(label.rect) {
+            let Some(label) = Label::plan(font, plate.at, frame.radius, &node.label, scale) else {
                 continue;
+            };
+            let footprint = match pass {
+                Pass::Map => label.rect,
+                Pass::Spread => grown(label.rect, pad),
+            };
+            if Some(node.id) == selected {
+                occupancy.mark(footprint);
+            } else if !occupancy.claim(footprint) {
+                continue;
+            }
+            if pass == Pass::Spread {
+                fill_backing(surface, footprint, theme);
             }
             label.draw(surface, font, theme);
         }
+    }
+}
+
+/// Which of a frame's two name passes a plate's name belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pass {
+    /// The map's own nodes, laid out as if nothing were spread.
+    Map,
+    /// The services spread hosts have out, over the map.
+    Spread,
+}
+
+/// A line from `a` to `b`, `weight` subpixels wide, in `hue`.
+fn stroke(surface: &mut Surface, a: Point, b: Point, weight: i32, hue: BadgeHue) {
+    surface.stroke_polyline(
+        &[
+            (a.x * SUBPIXEL, a.y * SUBPIXEL),
+            (b.x * SUBPIXEL, b.y * SUBPIXEL),
+        ],
+        weight,
+        hue.middle(),
+    );
+}
+
+/// A line `logical` pixels wide at `scale`, in subpixels.
+fn line_weight(scale: Scale, logical: u32) -> i32 {
+    to_i32(scale.scale_length(logical)).saturating_mul(SUBPIXEL)
+}
+
+fn to_i32(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+/// `rect` grown by `by` on every side.
+fn grown(rect: Rect, by: u32) -> Rect {
+    let inset = to_i32(by);
+    Rect::new(
+        rect.left().saturating_sub(inset),
+        rect.top().saturating_sub(inset),
+        rect.width.saturating_add(by * 2),
+        rect.height.saturating_add(by * 2),
+    )
+}
+
+/// The canvas-coloured pill a spread service's name stands on.
+fn fill_backing(surface: &mut Surface, backing: Rect, theme: &Theme) {
+    if let Some((x, y)) = backing.surface_origin() {
+        surface.fill_round_rect(
+            x,
+            y,
+            backing.width,
+            backing.height,
+            backing.height / 2,
+            Color::from(theme.palette().surface),
+        );
+    }
+}
+
+/// Send `fade` toward `to` from the strength it stands at, answering whether
+/// that is somewhere new for it to go.
+fn retarget(fade: &mut Fade, now_ns: u64, duration_ms: u16, to: u8) -> bool {
+    if fade.target() == to {
+        return false;
+    }
+    *fade = Fade::start(now_ns, duration_ms, fade.strength(now_ns), to);
+    true
+}
+
+/// The direction away from this machine at graph point `pos`, in radians;
+/// straight up for this machine itself.
+fn outward(pos: Point) -> f64 {
+    if pos == Point::ORIGIN {
+        -FRAC_PI_2
+    } else {
+        mathf::atan2(f64::from(pos.y), f64::from(pos.x))
+    }
+}
+
+/// Where each of `count` services stands around its host when fully spread,
+/// as offsets from the host's centre in device pixels at `scale`: on arcs
+/// centred on `outward`, the nearest [`SPREAD_FIRST_ARC`] out and each further
+/// one [`SPREAD_ARC_STEP`] beyond, each holding as many as fit along it
+/// [`SPREAD_PITCH`] apart.
+fn spread_offsets(count: usize, outward: f64, scale: Scale, out: &mut Vec<(i32, i32)>) {
+    out.clear();
+    let pitch = scale.scale_length(SPREAD_PITCH).max(1);
+    let step = scale.scale_length(SPREAD_ARC_STEP).max(1);
+    let mut radius = scale.scale_length(SPREAD_FIRST_ARC).max(1);
+    while out.len() < count {
+        let carries =
+            u64::from(SPREAD_ARC_MILLIRADIANS) * u64::from(radius) / (1000 * u64::from(pitch)) + 1;
+        let here = usize::try_from(carries)
+            .unwrap_or(usize::MAX)
+            .min(count - out.len());
+        let gap = f64::from(pitch) / f64::from(radius);
+        let first = outward - gap * f64::from(u32::try_from(here - 1).unwrap_or(0)) / 2.0;
+        for place in 0..here {
+            let angle = first + gap * f64::from(u32::try_from(place).unwrap_or(0));
+            out.push((
+                mathf::round_i32(f64::from(radius) * mathf::cos(angle)),
+                mathf::round_i32(f64::from(radius) * mathf::sin(angle)),
+            ));
+        }
+        radius = radius.saturating_add(step);
     }
 }
 
@@ -621,28 +1273,41 @@ struct Frame {
     selected: Option<NodeId>,
 }
 
+/// One node's whole badge as a frame draws it.
+struct Badge<'a> {
+    node: &'a Node,
+    centre: Point,
+    radius: u32,
+    look: Look,
+    selected: bool,
+    /// How many services the node offers, which its count states.
+    services: usize,
+}
+
 impl Painter {
+    fn occupancy_for(&mut self, pass: Pass) -> &mut Occupancy {
+        match pass {
+            Pass::Map => &mut self.occupancy,
+            Pass::Spread => &mut self.overlay,
+        }
+    }
+
     /// A node's halo (accented when selected), its badge, the liveness light
-    /// on one shoulder and its system's emblem on the other.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one node's whole drawing context, each part used once"
-    )]
+    /// on one lower shoulder, its system's emblem on the other, and the count
+    /// of the services it offers on its upper shoulder.
     fn node(
         &mut self,
         surface: &mut Surface,
         unit_circle: &[(f64, f64)],
-        centre: Point,
-        radius: u32,
-        node: &Node,
-        look: Look,
-        selected: bool,
+        badge: &Badge<'_>,
         theme: &Theme,
+        small: BitmapFont,
     ) {
         let palette = theme.palette();
+        let (centre, radius) = (badge.centre, badge.radius);
         // A halo in the canvas colour parts the plate from the edges passing
         // under it; a selected node's is the accent, and wider.
-        let (halo, halo_width) = if selected {
+        let (halo, halo_width) = if badge.selected {
             (Color::from(palette.accent), radius / 5)
         } else {
             (Color::from(palette.surface), radius / 10)
@@ -655,30 +1320,30 @@ impl Painter {
             halo,
         );
         let r = i32::try_from(radius).unwrap_or(0);
-        if let Some(plate) = self.plate(look.glyph, look.hue, radius * 2) {
+        if let Some(plate) = self.plate(badge.look.glyph, badge.look.hue, radius * 2) {
             surface.blit(centre.x - r, centre.y - r, plate);
         }
 
         let shoulder = i32::try_from(radius * 7 / 10).unwrap_or(0);
-        if let Some(emblem) = os_emblem(node.classification.os) {
+        if let Some(emblem) = os_emblem(badge.node.classification.os) {
             let at = Point::new(centre.x - shoulder, centre.y + shoulder);
-            let badge = (radius / 2).max(2);
+            let sticker = (radius / 2).max(2);
             self.disc(
                 surface,
                 unit_circle,
                 at,
-                badge + 1,
+                sticker + 1,
                 Color::from(palette.surface),
             );
-            self.disc(surface, unit_circle, at, badge, EMBLEM_PLATE);
-            let side = badge * 8 / 5;
+            self.disc(surface, unit_circle, at, sticker, EMBLEM_PLATE);
+            let side = sticker * 8 / 5;
             let inset = i32::try_from(side / 2).unwrap_or(0);
             if let Some(glyph) = self.glyph(emblem, side, EMBLEM_INK) {
                 surface.blit(at.x - inset, at.y - inset, glyph);
             }
         }
 
-        let light = match node.liveness {
+        let light = match badge.node.liveness {
             Liveness::Reachable => Some(Color::from(palette.success)),
             Liveness::Unreachable => Some(Color::from(palette.danger)),
             Liveness::Advertised => Some(Color::from(palette.accent)),
@@ -696,6 +1361,12 @@ impl Painter {
             );
             self.disc(surface, unit_circle, dot, dot_radius, light);
         }
+
+        if badge.services > 0 {
+            let count = COUNTS.get(badge.services).copied().unwrap_or(COUNT_MORE);
+            let at = Point::new(centre.x + shoulder, centre.y - shoulder);
+            draw_count(surface, at, count, theme, small);
+        }
     }
 
     fn disc(
@@ -712,7 +1383,7 @@ impl Painter {
         self.polygon.extend(
             unit_circle
                 .iter()
-                .map(|&(c, s)| (cx + round(r * c), cy + round(r * s))),
+                .map(|&(c, s)| (cx + mathf::round_i32(r * c), cy + mathf::round_i32(r * s))),
         );
         Canvas::fill_polygon_subpixel(surface, &self.polygon, ink, &mut self.scratch);
     }
@@ -743,6 +1414,50 @@ impl Painter {
         }
         self.glyphs.get(&key)
     }
+}
+
+/// A host's count of services: `text` on an accent pill centred at `at`,
+/// rimmed in the canvas colour so it reads apart from the plate under it.
+fn draw_count(surface: &mut Surface, at: Point, text: &str, theme: &Theme, font: BitmapFont) {
+    let palette = theme.palette();
+    let height = font.line_height();
+    let width = (font.text_width(text) + height / 2).max(height);
+    let pill = Rect::new(
+        at.x - i32::try_from(width / 2).unwrap_or(0),
+        at.y - i32::try_from(height / 2).unwrap_or(0),
+        width,
+        height,
+    );
+    let (Ok(left), Ok(top)) = (
+        u32::try_from(pill.left().saturating_sub(1)),
+        u32::try_from(pill.top().saturating_sub(1)),
+    ) else {
+        return;
+    };
+    surface.fill_round_rect(
+        left,
+        top,
+        width + 2,
+        height + 2,
+        height / 2 + 1,
+        Color::from(palette.surface),
+    );
+    surface.fill_round_rect(
+        left + 1,
+        top + 1,
+        width,
+        height,
+        height / 2,
+        Color::from(palette.accent),
+    );
+    let pen = pill.left() + i32::try_from((width - font.text_width(text)) / 2).unwrap_or(0);
+    font.draw_text(
+        surface,
+        pen,
+        pill.top(),
+        text,
+        Color::from(palette.on_accent),
+    );
 }
 
 /// How a node is drawn: what it is when that is fixed, else what passive
@@ -802,7 +1517,7 @@ pub fn os_emblem(os: OsFamily) -> Option<IconKind> {
 /// What the detail panel says of a node.
 fn node_facts(node: &Node) -> Vec<Fact> {
     let mut facts =
-        Vec::with_capacity(3 + node.addrs.len() + node.facts.len() + node.evidence.len());
+        Vec::with_capacity(8 + node.addrs.len() + node.facts.len() + node.evidence.len());
     facts.push(Fact::new("Kind", kind_name(node.kind)));
     let class = node.classification;
     if class.device != DeviceClass::Unknown {
@@ -820,6 +1535,23 @@ fn node_facts(node: &Node) -> Vec<Fact> {
     for addr in &node.addrs {
         let (family, bytes) = address_parts(*addr);
         facts.push(Fact::new("Address", render_ip(family, &bytes)));
+    }
+    if let Some(mac) = node.mac {
+        let rendered = render_mac(mac);
+        let shown = if assigned_oui(mac).is_some() {
+            rendered
+        } else {
+            format!("{rendered} (locally administered)")
+        };
+        facts.push(Fact::new("Hardware address", shown));
+    }
+    if let Some(endpoint) = &node.endpoint {
+        facts.push(Fact::new("Service type", endpoint.service_type.as_str()));
+        facts.push(Fact::new("Port", format!("{}", endpoint.port)));
+        facts.push(Fact::new("Host", endpoint.host.as_str()));
+        if !endpoint.text.is_empty() {
+            facts.push(Fact::new("TXT data", endpoint.text.join(" ")));
+        }
     }
     for (key, value) in &node.facts {
         facts.push(Fact::new(fact_label(key), value.as_str()));
@@ -906,17 +1638,12 @@ fn class_name(class: DeviceClass) -> &'static str {
 
 fn fact_label(key: &str) -> &str {
     match key {
-        "mac" => "Hardware address",
         "vendor" => "Made by",
         "mtu" => "MTU",
         "kind" => "Link",
         "neighbor" => "Reachability",
         "dns name" => "DNS name",
         "local name" => "Local name",
-        "service" => "Service type",
-        "port" => "Port",
-        "host" => "Host",
-        "txt" => "TXT data",
         other => other,
     }
 }
@@ -933,10 +1660,15 @@ fn canvas_bounds(canvas: Rect, radius: u32) -> Rect {
     )
 }
 
+/// How far a node's plate and its widest halo reach from its centre.
+fn plate_reach(radius: u32) -> u32 {
+    radius + radius / 5 + 1
+}
+
 /// The square a node's plate and halo cover.
 fn plate_rect(centre: Point, radius: u32) -> Rect {
-    let reach = radius + radius / 5 + 1;
-    let half = i32::try_from(reach).unwrap_or(0);
+    let reach = plate_reach(radius);
+    let half = to_i32(reach);
     Rect::new(centre.x - half, centre.y - half, reach * 2, reach * 2)
 }
 
@@ -982,6 +1714,8 @@ impl<'a> Label<'a> {
     }
 }
 
+/// The detail panel in the canvas's top-right corner, answering the rectangle
+/// it covers, or `None` when the canvas has no room for one.
 #[allow(
     clippy::too_many_arguments,
     reason = "the panel's whole drawing context, each part used once"
@@ -994,14 +1728,14 @@ fn draw_panel(
     scale: Scale,
     theme: &Theme,
     font: BitmapFont,
-) {
+) -> Option<Rect> {
     let palette = theme.palette();
     let margin = scale.scale_length(12);
     let width = scale
         .scale_length(PANEL_WIDTH)
         .min(canvas.width.saturating_sub(margin * 2));
     if width == 0 {
-        return;
+        return None;
     }
     let list = FactList::new(facts.to_vec());
     let title_height = font.line_height() + margin;
@@ -1010,7 +1744,7 @@ fn draw_panel(
     let x = canvas.right() - i32::try_from(width + margin).unwrap_or(0);
     let y = canvas.top() + i32::try_from(margin).unwrap_or(0);
     let (Ok(px), Ok(py)) = (u32::try_from(x), u32::try_from(y)) else {
-        return;
+        return None;
     };
     surface.fill_round_rect(
         px,
@@ -1041,6 +1775,7 @@ fn draw_panel(
         scale,
         theme,
     );
+    Some(Rect::new(x, y, width, height))
 }
 
 fn draw_notices(

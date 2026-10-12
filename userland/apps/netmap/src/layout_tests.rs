@@ -103,3 +103,47 @@ fn an_orphan_node_is_still_placed() {
     assert_eq!(map.node(local).unwrap().pos, Point::ORIGIN);
     assert_ne!(map.node(orphan).unwrap().pos, Point::ORIGIN);
 }
+
+/// This machine with two hosts on a ring, the first of them offering
+/// `services` services.
+fn hosts_offering(services: usize) -> Map {
+    let mut map = Map::new();
+    let local = map
+        .intern(NodeKey::LocalHost, NodeKind::LocalHost, 0)
+        .unwrap();
+    let mut hosts = Vec::new();
+    for n in [2, 3] {
+        let key = NodeKey::Neighbour(IpAddr::V4(Ipv4Addr::new(10, 0, 0, n)));
+        let host = map.intern(key, NodeKind::Neighbour, 0).unwrap();
+        map.link(local, host, crate::model::EdgeKind::OnLink);
+        hosts.push(host);
+    }
+    for i in 0..services {
+        let key = NodeKey::Service(alloc::format!("svc{i}._http._tcp"));
+        let service = map.intern(key, NodeKind::Service, 0).unwrap();
+        map.link(hosts[0], service, crate::model::EdgeKind::Serves);
+    }
+    map
+}
+
+#[test]
+fn a_service_is_folded_into_its_host_and_takes_no_wedge() {
+    let mut bare = hosts_offering(0);
+    layout(&mut bare);
+    let mut busy = hosts_offering(12);
+    layout(&mut busy);
+    let host = |map: &Map, n: u8| {
+        let key = NodeKey::Neighbour(IpAddr::V4(Ipv4Addr::new(10, 0, 0, n)));
+        map.node(map.id_for(&key).unwrap()).unwrap().pos
+    };
+    for n in [2, 3] {
+        assert_eq!(
+            host(&bare, n),
+            host(&busy, n),
+            "twelve services move no host"
+        );
+    }
+    for node in busy.nodes().iter().filter(|n| n.kind == NodeKind::Service) {
+        assert_eq!(node.pos, host(&busy, 2), "{:?} sits on its host", node.key);
+    }
+}

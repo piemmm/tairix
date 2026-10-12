@@ -278,10 +278,12 @@ server and every app's client can never drift apart.
   and close marks, and paints what the view reports inside each into that
   window alone. The view hears it has the keyboard while the window or any of
   its tool windows does.
-- **A tooltip is asked for once per tool** (`DeclaredTip`): the region a
-  window last asked a tip for, so pointer samples over one tool cost no
-  further request, and a session that refuses tips is not asked again until
-  the tip wanted changes.
+- **A tooltip is asked for once per tool** (`DeclaredTip`): the region and
+  line a window last asked a tip for, so pointer samples over one tool cost no
+  further request, a line that changes over the same region is asked for
+  again, a line the wire cannot carry withdraws the last tip rather than
+  leaving it standing, and a session that refuses tips is not asked again
+  until the tip wanted changes.
 
 The wire format itself lives in `tairix_abi::window_ipc`; this crate adds
 the behaviour. Both halves are host-proven in `src/tests.rs` against an

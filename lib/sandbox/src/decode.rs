@@ -351,11 +351,7 @@ impl RegionList {
 
 /// Clamp a name to the reply bound at a character boundary.
 fn bounded_name(name: &str) -> String {
-    let mut end = name.len().min(MAX_NAME);
-    while end > 0 && !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    String::from(&name[..end])
+    String::from(&name[..name.floor_char_boundary(MAX_NAME)])
 }
 
 fn summarise_rxe(image: &[u8]) -> Result<ContainerSummary, DecodeRefusal> {

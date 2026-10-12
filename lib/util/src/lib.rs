@@ -64,6 +64,9 @@
 //!   editor's document queue, so no surface invents a second deferral scheme.
 //! * [`hexdump`] — the canonical offset/hex/ASCII dump row, consumed by
 //!   `fstree` and the text editor's hex view.
+//! * [`join`] — one bounded line from a list, whole items then how many were
+//!   left out, consumed by `lib/procinfo`'s multi-valued readings and the
+//!   network map's host tooltip.
 //! * [`lanes`] — finding a byte eight lanes of a word at a time, consumed
 //!   by `lib/collections` and the text editor.
 //! * [`output`] — the byte stream a command engine writes through, consumed
@@ -109,6 +112,7 @@ pub mod defer;
 pub mod fallible;
 pub mod fmt;
 pub mod hexdump;
+pub mod join;
 pub mod lanes;
 pub mod mathf;
 pub mod output;

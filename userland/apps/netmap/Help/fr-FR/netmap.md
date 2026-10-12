@@ -31,14 +31,23 @@ avec le degré de certitude de la carte et ses raisons — et cliquez dans le
 vide pour ranger ces détails. Les noms apparaissent partout où ils ont la
 place.
 
+Un hôte qui annonce des services en porte le nombre sur un petit badge.
+Laissez le pointeur sur un nœud pour voir son nom complet, et sur un tel hôte
+pour voir ses services nommés ; cliquez sur l'hôte pour déployer ses services
+autour de lui, puis cliquez de nouveau dessus, cliquez ailleurs ou appuyez sur
+`Escape` pour les replier. Cliquez sur un nœud avec le bouton secondaire pour
+ouvrir son menu : afficher ou masquer ses services, ou copier son adresse, son
+nom ou son adresse matérielle — pour un service, son adresse et son port, et
+pour un service web, son URL.
+
 La carte est lue au travers de l'API d'information système et du service de
 découverte, et ses hôtes sont nommés par les serveurs DNS configurés ou par le
 nom que les appareils se donnent eux-mêmes ; elle ne contacte jamais elle-même
 un hôte, et elle est relue toutes les quelques secondes tant que sa fenêtre
-est ouverte. À côté des hôtes, elle montre les services que les appareils
-annoncent sur le lien local — imprimantes, partages de fichiers, lecteurs
-multimédias —, chacun sous l'hôte qui l'offre. Les adresses d'interface et les
-routes exigent `CAP_SYSINFO_GLOBAL` ; les adresses matérielles et le cache des
+est ouverte. Elle recueille aussi les services que les appareils annoncent sur
+le lien local — imprimantes, partages de fichiers, lecteurs multimédias — et
+range chacun avec l'hôte qui l'offre. Les adresses d'interface et les routes
+exigent `CAP_SYSINFO_GLOBAL` ; les adresses matérielles et le cache des
 voisins exigent `CAP_SYSINFO_HW` ; les services annoncés exigent
 `CAP_NET_DISCOVER_ALL` ; nommer les hôtes par DNS exige `CAP_NET`. Sans l'une
 d'elles, la carte dit ce qu'elle ne peut pas montrer et dessine le reste.

@@ -52,6 +52,10 @@ code.
   decode queue.
 * `hexdump` — the canonical offset/hex/ASCII dump row. Consumers:
   `fstree` and TextEdit's hex view.
+* `join` — one bounded line from a list: every item when they all fit, else
+  the longest run of whole items that leaves room for `, and N more`.
+  Consumers: `lib/procinfo`'s multi-valued readings and `netmap`'s host
+  tooltip.
 * `lanes` — finding a byte eight lanes of a word at a time. Consumers:
   `lib/collections` and TextEdit.
 * `output` — the byte stream a command engine writes through (`Output`: every
@@ -66,7 +70,7 @@ code.
   a turn at a time. Consumers: `lib/audio`, `lib/countryside`, `lib/cursor`,
   `lib/fontface`,
   `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`,
-  `lib/theme`, `cinder`, WinterSun, and the desktop session's
+  `lib/theme`, `cinder`, `netmap`, WinterSun, and the desktop session's
   screensavers.
 * `retry` — `RetryLadder`, a bounded doubling one-shot schedule for
   waiting on something with no readiness event, and `RestartPacer`, a

@@ -3617,14 +3617,7 @@ pub fn log_emit(record: &[u8]) -> i64 {
 /// whole record whose message or field exceeds the `abi-v1` bound, [`LogSink`]
 /// trims it to the largest valid prefix so the line still reaches the log.
 fn clamp_utf8(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    &s[..s.floor_char_boundary(max)]
 }
 
 /// The first event id of the range `lib/rt` owns.

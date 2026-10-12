@@ -691,10 +691,7 @@ pub fn new_layer_name(layers: &[Layer]) -> Result<String, OutOfMemory> {
 /// [`OutOfMemory`] when the name cannot be held.
 pub fn copy_name(name: &str) -> Result<String, OutOfMemory> {
     const COPY: &str = " copy";
-    let mut keep = name.len().min(MAX_LAYER_NAME - COPY.len());
-    while !name.is_char_boundary(keep) {
-        keep -= 1;
-    }
+    let keep = name.floor_char_boundary(MAX_LAYER_NAME - COPY.len());
     let mut copy = String::new();
     copy.try_reserve_exact(keep + COPY.len())
         .map_err(|_| OutOfMemory)?;

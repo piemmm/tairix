@@ -310,11 +310,7 @@ const fn permitted_before_keys(msg: u8) -> bool {
 /// The largest prefix of `text` of at most `max` bytes that ends on a
 /// character boundary.
 fn clip(text: &str, max: usize) -> &str {
-    let mut end = text.len().min(max);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
+    &text[..text.floor_char_boundary(max)]
 }
 
 /// Read a `string`, reporting where its bytes sit in `whole`.

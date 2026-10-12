@@ -26,13 +26,24 @@ the shipped code are the same code.
 - `ingest` — `Inventory`, the source of truth, and `Inventory::build`, which
   projects interfaces, subnets, neighbours, routers, the gateway and services
   into a fresh `Map`, one node per device, and classifies every host.
-- `layout` — the deterministic radial tree around this machine.
+- `layout` — the deterministic radial tree around this machine, with each
+  service folded into the host that offers it.
 - `viewport` — the graph-space `Viewport`: fit, anchor-holding zoom, clamped
-  pan, hit-testing.
+  pan.
 - `view` — `MapView`: drag, wheel and two-finger scroll pan, `Ctrl`+wheel and
-  pinch zoom, `Home` to fit, selection, and the renderer: hued badges, OS
-  emblems, lines in the hue they lead to, and names placed where they have
-  room.
+  pinch zoom, `Home` to fit, selection, a click spreading a host's services
+  around it (animated at the theme's pace) and folding them again, the
+  tooltip line for the plate under the pointer, and the renderer: hued badges,
+  OS emblems, a host's count of services, lines in the hue they lead to, and
+  names placed where they have room. One placement says where every plate
+  stands; drawing, hit-testing and the tooltip all read it.
+- `menu` — the context menu a secondary press opens, built as the desktop's
+  menu model: show or hide a host's services, copy its address, name or
+  hardware address, a service's `host:port` or web URL, a network, and fit the
+  map. A URL is built only from parts valid in one.
+
+Copying uses the desktop clipboard from the map's window. *Open in Browser*
+waits on a web browser and a desktop URL hand-off (`plans/NETMAP.md` NM2e).
 
 ## Capabilities
 
@@ -60,10 +71,13 @@ per device; the discovery walk and its bounds; every inference rule table, its
 matching boundaries, the combination of evidence and ties, and that every
 maker rule names an organisation the committed registry lists; maker naming
 and its notice; the layout's determinism; the viewport's round trip, fit,
-anchor-holding zoom, pan clamping and hit-testing; every gesture and the fit
-that follows the map until steered; the selection across a rebuild; the glyphs,
-hues and emblems; label placement; refused sources becoming notices; and
-drawing.
+anchor-holding zoom and pan clamping; every gesture and the fit that follows
+the map until steered; the selection across a rebuild; folded services, the
+spread and fold with their animation and its interruption, reduced motion,
+the spread's geometry, hit-testing what is drawn, and the panel covering the
+map; tooltip lines and their bound; every context menu, its commands, and
+URL composition from hostile parts; the glyphs, hues, emblems and count;
+label placement; refused sources becoming notices; and drawing.
 
 The `netmap_qemu_aarch64` vertical opens the map from the program library on a
 booted desktop whose NIC has autoconfigured against a router-advertising peer,

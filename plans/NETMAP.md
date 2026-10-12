@@ -20,10 +20,12 @@ ahead of it (§2.4).
 
 | id | What it is | Status |
 |---|---|---|
-| NM1 | The pure `tairix-netmap` engine: the complete map model (every node/edge kind, the device-class/OS-guess field), ingest from the landed interface facts/state, the deterministic radial layout over the full model, the graph-space viewport (zoom/pan/anchor), hit-testing | done |
+| NM1 | The pure `tairix-netmap` engine: the complete map model (every node/edge kind, the device-class/OS-guess field), ingest from the landed interface facts/state, the deterministic radial layout over the full model, the graph-space viewport (zoom/pan/anchor) | done |
 | NM2 | The GUI app: the `Run` binary, the window, the map renderer drawing the device glyphs, pointer/scroll/pinch routing, the System Information reads on a worker off the loop, the bundle (manifest, 256² icon master, Help×13), docs | done |
 | NM2b | Advertised services and names on the map: the discovery-v1 browse/resolve ingest (`Session` on the app's own port, `CAP_NET` + `CAP_NET_DISCOVER_ALL`) with peer-authored labels escaped, and reverse DNS for host labels | done |
 | NM2c | The live QEMU vertical: open `netmap` from the Library on the graphical desktop with a router-advertising link peer, and assert the interface, subnet and gateway tiers against a screendump | done |
+| NM2d | Services folded into their host: no service is drawn until asked for — a host wears a count of what it offers and names it in its tooltip, a click spreads its services around it (animated) and folds them again, and a secondary press opens the node's or the map's context menu through the desktop's one menu chain (show/hide services, copy address, name, hardware address, network and URL, fit the map) | done |
+| NM2e | *Open in Browser* on an `http`/`https` service's context menu: the service's URL handed to the application that opens its scheme | blocked — TAIRiX ships no web browser, and the desktop has no URL hand-off (a scheme a bundle declares it opens, and an open request carrying a URL); both lie outside this plan |
 | NM-ICONS | The first-class device-class icon vocabulary (desktop, laptop, server, router, switch, access point, printer, phone, NAS, IoT, the local host, unknown) in `lib/icon`, shared and scalable, drawn by the map and reusable desktop-wide | done |
 | NM-S1 | Neighbour-cache read seam (ARP + NDP): `lib/net` iterator, the `NetNeighborRecord` ABI + `NET_NEIGHBORS` query, netstack serve, `lib/procinfo` resolver + `state:net/<iface>/neighbors`; engine L2-adjacency ingest | done |
 | NM-S2 | Routing-table + gateway read seam, and router discovery: `NetRouteRecord` ABI + `NET_ROUTES` query, netstack serve, `lib/procinfo` resolver + `state:net/<iface>/routes` (keeps NETWORK §5's promise), the RA-learned IPv6 default routers; engine router/gateway ingest | done |
@@ -179,7 +181,8 @@ rendered through a viewport. The model is deliberately small and total.
   gateway. Given the same graph the layout is byte-identical, which is what
   makes it testable and the viewport reproducible. It is not a force-directed
   simulation (non-deterministic, unbounded, hard to test); a map wants a
-  stable, legible arrangement, not jitter.
+  stable, legible arrangement, not jitter. A service is not on a ring: it is
+  folded into its host until the user spreads it (NM2d).
 - **The viewport** maps graph-space to window-space through an integer zoom
   (per-mille, clamped to a documented range) and a pan offset, with
   anchor-preserving zoom (`zoom_about(factor, anchor)`) so a pinch or
@@ -187,8 +190,8 @@ rendered through a viewport. The model is deliberately small and total.
   `userland/apps/view`'s `Viewport::zoom_about` keeps, re-expressed for graph
   coordinates (the arithmetic is the same *shape*, but the space differs, so
   it is a sibling, not a shared type). `pan_by` and `clamp_pan` bound the pan
-  to the laid-out extent plus a margin. Hit-testing maps a window point back to
-  the nearest node within its drawn radius.
+  to the laid-out extent plus a margin. Hit-testing is the view's, against the
+  plates it draws (NM2d).
 - **All bounds are fixed security/containment bounds, not capacities a machine
   scales (§24.4):** the maximum node and edge counts, the maximum label
   length, the maximum hops a path holds. A source that would exceed one is
@@ -257,8 +260,8 @@ minimalism test is met by *not* minting anything.
   breadth-first rings `RING_STEP` apart, children ordered by `NodeKey`, wedges
   shared by subtree leaf count; unreachable nodes hang off the root.
 - `viewport` — the graph-space `Viewport`: window↔graph mapping, the
-  anchor-holding `set_zoom_about` (pinch and Ctrl+wheel), `pan_by`,
-  `clamp_pan` to the laid-out extent plus a margin, and `nearest_node`.
+  anchor-holding `set_zoom_about` (pinch and Ctrl+wheel), `pan_by`, and
+  `clamp_pan` to the laid-out extent plus a margin.
 
 ### NM2 — the GUI app
 
@@ -279,8 +282,10 @@ minimalism test is met by *not* minting anything.
   Plates and then names are placed into an `Occupancy` index (exact boxes,
   bucketed by cell, every table reused between frames): the selection's name
   first, then the map's own order, each only where it overlaps no plate and no
-  earlier name. The selected node's facts — its guesses with their confidence
-  and every piece of evidence — are a `lib/controls` `FactList`.
+  earlier name; a spread's names are a pass of their own (NM2d). The selected
+  node's facts — its
+  guesses with their confidence and every piece of evidence — are a
+  `lib/controls` `FactList`.
 - `run.rs`: the window over `tairix_window::app`, every read on a
   `tairix_rt::work::Worker` whose wake joins the event wait-set, one present
   per drained burst, and the re-read on a one-shot deadline (`REFRESH_NS`) only
@@ -357,6 +362,109 @@ minimalism test is met by *not* minting anything.
 - The guest passes on `APP_LOADED` naming the bundle, then the window's create
   reply, then `netmap`'s own `exit`. A map that dies before drawing data exits
   without a dump, so it cannot pass.
+
+### NM2d — services folded into their host
+
+A printer typically advertises IPP, IPPS, its web console, raw printing and
+scanning. Drawn as nodes, those stand five plates on the outer ring, each
+taking a wedge from its neighbours. A map of a busy segment then becomes a
+crowd of services that hides the hosts. So a service is a fact *about* its
+host until the user asks to see it:
+
+- **Folded is the default.** `layout` puts no `Service` node on a ring: each
+  sits at its host's position, so a host with twenty services lays out exactly
+  as one with none. A folded service is not drawn, has no edge or name drawn,
+  and cannot be hit. The model is unchanged: services stay nodes, keep their
+  facts and feed the inference. Only their drawing is gated.
+- **The host says what it offers.** A host with services wears a count pip on
+  its upper shoulder, capped at `9+`; the two lower shoulders already carry the
+  liveness light and the OS emblem. Its tooltip — the seat's one line,
+  `plans/TOOLTIPS.md` — names the host and its distinct service types in short
+  form: `printer.local — 4 services: http, ipp, ipps, uscan`. The line holds
+  whole entries only and ends `and N more` at the line's bound. Every other
+  node's tooltip is its full name, since the label pass may have had no room
+  for it. Tips are declared through `DeclaredTip`, so pointer samples over one
+  plate ask once, and none is declared while a drag or pinch is under way.
+- **A click spreads, and folds.** A primary click on a host with services
+  selects it and spreads its services around it. Clicking the spread host
+  again folds them and keeps it selected. Selecting anything else, clicking
+  empty space, or pressing `Escape` folds them. A spread service can be
+  selected, and selecting it keeps its host spread. At most one host is spread
+  at a time: the one folding finishes as the next spreads, and past two the
+  older snaps shut.
+- **The spread is drawn in window space and is deterministic.** Services stand
+  on concentric arcs of fixed on-screen radius around the host, centred on the
+  host's outward direction (away from this machine). They fan away from the
+  edge that leads in, and stay legible at any zoom. Each arc holds what it can
+  carry at one plate pitch. Services are ordered by `NodeKey`, so the same
+  services always spread the same way.
+- **The animation uses the shared motion machinery.** A spread is a
+  `tairix_theme::motion::Fade` of the `PanelOpen` duration, running from the
+  strength on screen to full or to none. A fold that interrupts a spread
+  therefore reverses from where it stands rather than jumping. Positions follow
+  the smoothstep of the strength. The services travel out from under the
+  host's plate and are drawn beneath it. Reduced motion is a zero duration: the
+  spread lands at once and no frame is owed. Frames are one-shot deadlines
+  (`next_frame_in`) folded into the loop's park beside the refresh deadline,
+  never a poll, and a settled map arms nothing.
+- **A spread is an overlay, so a frame repaints only what it moves.** The map
+  beneath is laid out — its names included — as if nothing were spread: a
+  spread's lines, plates and names are drawn over it, its names on a backing
+  of the canvas colour in an occupancy pass of their own, and the spread host
+  on top. A moving service therefore changes nothing outside the reach of its
+  spread, and a frame that only moves services presents that reach
+  (`frame_damage`) rather than the window.
+- **What is drawn is what is hit.** One placement says where every plate
+  stands at an instant, and drawing, hit-testing and the tooltip all read it.
+  A press finds the topmost plate under the pointer, so a spread service is
+  clicked where it is seen, mid-animation included. The detail panel covers
+  the map beneath it: nothing under it is hit or tipped.
+- **The context menu is the desktop's.** A secondary press asks for the menu of
+  the node under the pointer, of the selected node when it lands on that
+  node's panel, or of the map itself on empty canvas, anchored at the press (`WindowClient::open_menu`, `plans/NEW-MENUS.md`). The desktop
+  places, draws, grabs and answers once with `MenuClosed`. The map acts only on
+  the answer naming its own open id. The pure engine builds the `AppMenu`,
+  titled with the node's name, and the command each row stands for:
+  - *Show Services* or *Hide Services* on a host that has services.
+  - On a host, *Copy Address*, or one row per family when it has both (the
+    first address of each, a routable IPv6 address preferred).
+  - *Copy Name* when the node is named, and *Copy Hardware Address* when its
+    MAC is known.
+  - On a service, *Copy Address* as `host:port` with an IPv6 host bracketed,
+    and *Copy URL* for `_http._tcp` and `_https._tcp`.
+  - On a network, *Copy Network*.
+  - *Fit Map to Window* on every menu.
+- **A URL is built only from parts that are valid in one.** The host is an
+  IPv4 or routable IPv6 address, else the advertised host name when it is a
+  plain DNS name. The port is written unless it is the scheme's default. The
+  `TXT` `path` is used only when every byte of it is a URI path character; a
+  peer-authored path that is anything else is dropped, never percent-encoded
+  into something the peer did not say.
+- **Copying goes to the desktop clipboard** (`tairix_window::clipboard::put`)
+  from the focused window. A refused menu or clipboard is reported and the map
+  carries on.
+- **A node's hardware address is typed.** `Node::mac` holds it and the panel
+  renders it, so *Copy Hardware Address* copies the address rather than
+  re-parsing a display string.
+- **`DeclaredTip` compares the line as well as the region.** A host whose
+  services change under a resting pointer then re-declares its tip, and a line
+  the wire cannot carry withdraws the last one rather than leaving it standing
+  (fail closed).
+
+### NM2e — *Open in Browser*
+
+An `http`/`https` service's menu offers *Open in Browser* once two
+prerequisites exist, and this plan builds neither:
+
+- a web browser bundle;
+- a desktop URL hand-off: a way for a bundle to declare the URL schemes it
+  opens beside the MIME types its `associations` already list, and an open
+  request through the desktop's single-instance funnel (`hand_over_launch`)
+  that carries a URL rather than a path.
+
+With both in place, the row hands the URL *Copy URL* already builds to the
+first installed bundle claiming its scheme, and is absent when none does.
+Until then the menu offers *Copy URL* and no row that could not act.
 
 ### NM-ICONS — the device-class icon vocabulary
 

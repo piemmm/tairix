@@ -30,17 +30,26 @@ cosa esegue, con quanto la mappa ne è sicura e perché — e fate clic su uno
 spazio vuoto per chiudere i dettagli. I nomi compaiono ovunque ci sia spazio
 per loro.
 
+Un host che annuncia servizi ne mostra il numero su un piccolo distintivo.
+Lasciate il puntatore su un nodo per vederne il nome completo, e su un host di
+questo tipo per vederne nominati i servizi; fate clic sull'host per aprire a
+ventaglio i suoi servizi attorno a esso, e fate di nuovo clic su di esso, fate
+clic altrove o premete `Escape` per richiuderli. Fate clic su un nodo con il
+pulsante secondario per il suo menu: mostrare o nascondere i suoi servizi,
+oppure copiarne l'indirizzo, il nome o l'indirizzo hardware — per un servizio,
+il suo indirizzo e la porta, e per un servizio web, il suo URL.
+
 La mappa viene letta tramite l'API di informazioni di sistema e il servizio di
 rilevamento, e i suoi host ricevono il nome dai server DNS configurati o
 quello che i dispositivi si danno da sé; non contatta mai direttamente un
 host, e viene riletta ogni pochi secondi finché la sua finestra è aperta.
-Accanto agli host mostra i servizi che i dispositivi annunciano sul
-collegamento locale — stampanti, condivisioni di file, lettori multimediali —
-ciascuno sotto l'host che lo offre. Gli indirizzi delle interfacce e le rotte
-richiedono `CAP_SYSINFO_GLOBAL`; gli indirizzi hardware e la cache dei vicini
-richiedono `CAP_SYSINFO_HW`; i servizi annunciati richiedono
-`CAP_NET_DISCOVER_ALL`; dare un nome agli host tramite DNS richiede `CAP_NET`.
-Senza una di esse, la mappa dice cosa non può mostrare e disegna il resto.
+Raccoglie anche i servizi che i dispositivi annunciano sul collegamento locale
+— stampanti, condivisioni di file, lettori multimediali — e tiene ciascuno con
+l'host che lo offre. Gli indirizzi delle interfacce e le rotte richiedono
+`CAP_SYSINFO_GLOBAL`; gli indirizzi hardware e la cache dei vicini richiedono
+`CAP_SYSINFO_HW`; i servizi annunciati richiedono `CAP_NET_DISCOVER_ALL`; dare
+un nome agli host tramite DNS richiede `CAP_NET`. Senza una di esse, la mappa
+dice cosa non può mostrare e disegna il resto.
 
 Netmap si avvia dalla Libreria dei programmi del desktop o per nome da una
 shell, e richiede una sessione grafica attiva; senza di essa segnala il rifiuto

@@ -29,8 +29,8 @@ use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState, ValidationState};
 use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul};
 use crate::text::{
-    close_gap, debug_buffer_identity, debug_bytes, debug_zeroize, owner_chord, zeroize_range,
-    Keystroke, SearchField, SecretField, TextAction, TextField,
+    close_gap, debug_buffer_identity, debug_bytes, debug_place_caret, debug_zeroize, owner_chord,
+    zeroize_range, Keystroke, SearchField, SecretField, TextAction, TextField,
 };
 
 const W: u32 = 200;
@@ -1651,4 +1651,21 @@ fn a_selection_given_at_opening_is_clamped_to_whole_characters() {
     past.set_focused(true);
     past.on_key(Key::Char('z'), NONE_MODS, bounds(), &mut sink());
     assert_eq!(past.text(), "az");
+}
+
+#[test]
+fn a_caret_placed_inside_a_character_lands_at_its_start() {
+    let mut field = TextField::new().with_text("aé日");
+    assert_eq!(debug_place_caret(&mut field, 2), 1, "inside é");
+    assert_eq!(debug_place_caret(&mut field, 4), 3, "inside 日");
+    assert_eq!(
+        debug_place_caret(&mut field, 6),
+        6,
+        "on a boundary it stays"
+    );
+    assert_eq!(
+        debug_place_caret(&mut field, 99),
+        6,
+        "past the end is the end"
+    );
 }

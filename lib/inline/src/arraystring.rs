@@ -10,15 +10,7 @@ use crate::CapacityError;
 /// The longest prefix of `s` that fits `max` bytes and ends on a character
 /// boundary.
 fn boundary_prefix(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    // Zero is always a boundary, so `end` names one and the slice holds.
-    &s[..end]
+    &s[..s.floor_char_boundary(max)]
 }
 
 /// A string of at most `N` bytes held inline, allocating nothing.

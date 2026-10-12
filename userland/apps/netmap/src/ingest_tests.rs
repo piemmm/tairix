@@ -67,10 +67,11 @@ fn one_interface_projects_host_interface_and_subnet() {
     assert_eq!(map.node(iface).unwrap().label, "eth0");
     assert_eq!(map.node(iface).unwrap().kind, NodeKind::Interface);
 
+    assert_eq!(
+        map.node(iface).unwrap().mac,
+        Some([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
+    );
     let facts = &map.node(iface).unwrap().facts;
-    assert!(facts
-        .iter()
-        .any(|(k, v)| k == "mac" && v == "02:11:22:33:44:55"));
     assert!(facts.iter().any(|(k, v)| k == "mtu" && v == "1500"));
 
     let subnet = map
@@ -221,10 +222,7 @@ fn a_neighbour_hangs_off_the_subnet_it_is_in_with_its_mac() {
     assert!(edge(&map, &subnet, &host, EdgeKind::OnLink));
     let node = map.node(map.id_for(&host).unwrap()).unwrap();
     assert_eq!(node.label, "192.168.1.7");
-    assert!(node
-        .facts
-        .iter()
-        .any(|(k, v)| k == "mac" && v == "02:00:00:00:00:07 (locally administered)"));
+    assert_eq!(node.mac, Some([2, 0, 0, 0, 0, 7]));
     assert_eq!(node.liveness, crate::model::Liveness::Reachable);
 }
 
@@ -326,7 +324,10 @@ fn the_gateway_is_one_node_with_its_neighbour_mac_and_leads_beyond() {
     assert_eq!(gw.kind, NodeKind::Gateway);
     assert_eq!(gw.classification.device, crate::model::DeviceClass::Router);
     assert_eq!(gw.evidence[0].seen, crate::infer::Seen::Gateway);
-    assert!(gw.facts.iter().any(|(k, _)| k == "mac"));
+    assert!(
+        gw.mac.is_some(),
+        "its neighbour entry gives the gateway its MAC"
+    );
     assert!(edge(
         &map,
         &NodeKey::Interface(eth0),
@@ -450,18 +451,16 @@ fn a_service_hangs_off_the_neighbour_it_is_advertised_at() {
     assert_eq!(service.kind, NodeKind::Service);
     assert_eq!(service.label, "Office Printer");
     assert_eq!(service.liveness, Liveness::Advertised);
-    for (key, value) in [
-        ("service", "_ipp._tcp"),
-        ("port", "631"),
-        ("host", "printer.local"),
-        ("txt", "txtvers=1 rp=ipp/print"),
-    ] {
-        assert!(
-            service.facts.iter().any(|(k, v)| k == key && v == value),
-            "{key}={value} in {:?}",
-            service.facts
-        );
-    }
+    assert_eq!(
+        service.endpoint,
+        Some(crate::model::Endpoint {
+            service_type: String::from("_ipp._tcp"),
+            port: 631,
+            host: String::from("printer.local"),
+            text: Vec::from([String::from("txtvers=1"), String::from("rp=ipp/print")]),
+        })
+    );
+    assert_eq!(service.addrs, [ip4(192, 168, 1, 20)], "reached at its host");
 }
 
 #[test]

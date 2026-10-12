@@ -40,7 +40,6 @@
 
 use alloc::format;
 use alloc::string::{String, ToString};
-use core::fmt::Write;
 
 use alloc::vec::Vec;
 use tairix_abi::origin::{Origin, TrustDomain};
@@ -59,6 +58,7 @@ use tairix_abi::sysinfo::{
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::{CapabilityId, Errno, LimitKind, ResourceLimit};
 use tairix_resref::{KnownNamespace, Op, ResourceRef};
+use tairix_util::join::join_within;
 
 use crate::cputime::for_each_cpu_time;
 use crate::human::cpu_feature_flags;
@@ -1379,30 +1379,12 @@ fn render_server_addrs(servers: &[NetServerAddr]) -> String {
 /// so the join keeps whole items in order while they fit and then says how many
 /// it left out, rather than failing the reading or cutting an item in half.
 fn joined_or_none<T: AsRef<str>>(items: impl IntoIterator<Item = T>) -> String {
-    const SEPARATOR: &str = ", ";
-    const ELISION_RESERVE: usize = ", and 4294967295 more".len();
-    let mut rendered = String::new();
-    let mut elided: u32 = 0;
-    for item in items {
-        let item = item.as_ref();
-        let separator = if rendered.is_empty() { "" } else { SEPARATOR };
-        let fits =
-            rendered.len() + separator.len() + item.len() + ELISION_RESERVE <= MAX_INFO_VALUE_LEN;
-        if elided == 0 && fits {
-            rendered.push_str(separator);
-            rendered.push_str(item);
-        } else {
-            elided = elided.saturating_add(1);
-        }
+    let joined = join_within(items, MAX_INFO_VALUE_LEN);
+    if joined.is_empty() {
+        String::from("none")
+    } else {
+        joined
     }
-    if elided > 0 {
-        let lead = if rendered.is_empty() { "" } else { ", and " };
-        // Writing into a String cannot fail.
-        let _ = write!(rendered, "{lead}{elided} more");
-    } else if rendered.is_empty() {
-        rendered.push_str("none");
-    }
-    rendered
 }
 
 /// Resolve `info:net/<bond>/members`: the bond's member aliases in

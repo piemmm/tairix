@@ -375,11 +375,7 @@ impl BitmapFont {
     /// [`width_to_offset`](Self::width_to_offset) against a client the caller
     /// already holds.
     fn width_to_offset_on(self, client: &mut impl FontClient, text: &str, byte: usize) -> u32 {
-        let mut end = byte.min(text.len());
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let head = &text[..end];
+        let head = &text[..text.floor_char_boundary(byte)];
         if self.monospace_advance_on(client).is_some() {
             return self.width_on(client, head);
         }
@@ -583,10 +579,7 @@ impl BitmapFont {
             return (from.byte, false, stop);
         };
         let end = from.over(&text[from.byte..stop]);
-        let mut kept = stop.saturating_sub(keep).max(from.byte);
-        while !text.is_char_boundary(kept) {
-            kept -= 1;
-        }
+        let kept = text.floor_char_boundary(stop.saturating_sub(keep).max(from.byte));
         let kept = from.over(&text[from.byte..kept]);
         let tail_room = (room / 2)
             .max(self.span_width_on(client, text, kept, end))

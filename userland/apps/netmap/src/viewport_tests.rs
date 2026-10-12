@@ -85,18 +85,6 @@ fn clamp_keeps_the_centre_within_the_extent() {
 }
 
 #[test]
-fn nearest_node_finds_the_node_under_a_point() {
-    let map = sample_map();
-    let vp = Viewport::new(800, 600);
-    let peer = map
-        .id_for(&NodeKey::Neighbour(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))))
-        .unwrap();
-    let at = vp.to_window(map.node(peer).unwrap().pos);
-    assert_eq!(vp.nearest_node(&map, at, 20), Some(peer));
-    assert_eq!(vp.nearest_node(&map, Point::new(-5000, -5000), 20), None);
-}
-
-#[test]
 fn fit_shows_the_whole_extent_inside_the_margin_and_never_magnifies() {
     let map = sample_map();
     let mut view = Viewport::new(120, 90);

@@ -29,15 +29,24 @@ parece ser e o que executa, com a certeza que o mapa tem e porquê — e clique
 num espaço vazio para fechar os detalhes. Os nomes aparecem onde houver espaço
 para eles.
 
+Um anfitrião que anuncia serviços mostra quantos num pequeno distintivo. Deixe
+o ponteiro sobre um nó para ver o seu nome completo, e sobre um anfitrião
+assim para ver os seus serviços nomeados; clique no anfitrião para abrir em
+leque os seus serviços à sua volta, e clique de novo nele, clique noutro sítio
+ou prima `Escape` para os recolher. Clique num nó com o botão secundário para
+abrir o seu menu: mostrar ou ocultar os seus serviços, ou copiar o seu
+endereço, nome ou endereço de hardware — num serviço, o seu endereço e porta,
+e num serviço web, o seu URL.
+
 O mapa é lido através da API de informação do sistema e do serviço de
 descoberta, e os seus anfitriões recebem o nome dado pelos servidores DNS
 configurados ou o que os próprios dispositivos se dão; nunca contacta ele
 próprio um anfitrião, e é lido de novo a cada poucos segundos enquanto a sua
-janela está aberta. Ao lado dos anfitriões mostra os serviços que os
-dispositivos anunciam na ligação local — impressoras, partilhas de ficheiros,
-leitores multimédia —, cada um sob o anfitrião que o oferece. Os endereços das
-interfaces e as rotas exigem `CAP_SYSINFO_GLOBAL`; os endereços de hardware e
-a cache de vizinhos exigem `CAP_SYSINFO_HW`; os serviços anunciados exigem
+janela está aberta. Reúne também os serviços que os dispositivos anunciam na
+ligação local — impressoras, partilhas de ficheiros, leitores multimédia — e
+guarda cada um com o anfitrião que o oferece. Os endereços das interfaces e as
+rotas exigem `CAP_SYSINFO_GLOBAL`; os endereços de hardware e a cache de
+vizinhos exigem `CAP_SYSINFO_HW`; os serviços anunciados exigem
 `CAP_NET_DISCOVER_ALL`; dar nome aos anfitriões por DNS exige `CAP_NET`. Sem
 alguma delas, o mapa diz o que não pode mostrar e desenha o resto.
 

@@ -23,7 +23,7 @@ use tairix_abi::window_ipc::{
     DragItems, DropOperation, DropSite, DropTarget, HandOverDocument, HandOverOutcome, LayerDepth,
     MenuOutcome, MenuRefusal, PickPurpose, PointerAction, PreviewOutcome, PreviewSubject,
     SaveEndings, TerrainPlate, TooltipText, WindowEvent, WindowRegion, WindowRequest,
-    APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX,
+    APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, TOOLTIP_TEXT_MAX,
     WINDOW_FOLDER_PICK_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
@@ -5198,6 +5198,58 @@ fn a_declared_tip_asks_once_per_tool_and_once_more_to_withdraw() {
     let host = &loopback.borrow().host;
     assert_eq!(host.tooltips.len(), 3, "{:?}", host.tooltips);
     assert_eq!(host.tooltips[2].2, String::new(), "the withdrawal");
+}
+
+#[test]
+fn a_declared_tip_asks_again_when_its_line_changes_over_the_same_region() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let host_plate = Rect::new(40, 40, 44, 44);
+    let mut tip = DeclaredTip::new();
+    tip.declare(
+        &mut client,
+        window,
+        Some((host_plate, "printer — 1 service: ipp")),
+    );
+    tip.declare(
+        &mut client,
+        window,
+        Some((host_plate, "printer — 2 services: http, ipp")),
+    );
+    let host = &loopback.borrow().host;
+    assert_eq!(host.tooltips.len(), 2, "{:?}", host.tooltips);
+    assert_eq!(host.tooltips[1].2, "printer — 2 services: http, ipp");
+}
+
+#[test]
+fn a_tip_the_wire_cannot_carry_withdraws_the_last_one() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut tip = DeclaredTip::new();
+    tip.declare(&mut client, window, Some((Rect::new(0, 0, 20, 20), "Copy")));
+    let unsendable = "x".repeat(TOOLTIP_TEXT_MAX + 1);
+    tip.declare(
+        &mut client,
+        window,
+        Some((Rect::new(20, 0, 20, 20), unsendable.as_str())),
+    );
+    {
+        let host = &loopback.borrow().host;
+        assert_eq!(host.tooltips.len(), 2, "{:?}", host.tooltips);
+        assert_eq!(
+            host.tooltips[1].2,
+            String::new(),
+            "the line it could not send withdrew the one before it at once"
+        );
+    }
+    tip.declare(&mut client, window, None);
+    assert_eq!(
+        loopback.borrow().host.tooltips.len(),
+        2,
+        "and nothing is left to withdraw"
+    );
 }
 
 #[test]

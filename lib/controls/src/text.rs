@@ -463,13 +463,7 @@ impl TextEditor {
     /// Select `range` of the buffer, each end clamped to the text and drawn
     /// back to a character boundary, the caret at its end.
     fn select(&mut self, range: core::ops::Range<usize>) {
-        let floor = |at: usize| {
-            let mut at = at.min(self.text.len());
-            while !self.text.is_char_boundary(at) {
-                at -= 1;
-            }
-            at
-        };
+        let floor = |at: usize| self.text.floor_char_boundary(at);
         self.anchor = floor(range.start);
         self.caret = floor(range.end).max(self.anchor);
     }
@@ -490,13 +484,8 @@ impl TextEditor {
     /// Set the caret to `byte` (clamped to a boundary), collapsing the
     /// selection unless `select` is set.
     fn place_caret(&mut self, byte: usize, select: bool) {
-        let byte = byte.min(self.text.len());
         // Snap onto a boundary in case the hit test rounded into a scalar.
-        let byte = if self.text.is_char_boundary(byte) {
-            byte
-        } else {
-            self.prev_boundary(byte)
-        };
+        let byte = self.text.floor_char_boundary(byte);
         self.caret = byte;
         if !select {
             self.anchor = byte;
@@ -2720,6 +2709,14 @@ impl TextArea {
 #[cfg(test)]
 pub(crate) fn debug_fits(field: &mut TextField, extra: usize) -> bool {
     field.core.editor.fits(extra)
+}
+
+/// Test-only: place `field`'s caret at `byte` as a pointer hit places it, and
+/// answer where it landed.
+#[cfg(test)]
+pub(crate) fn debug_place_caret(field: &mut TextField, byte: usize) -> usize {
+    field.core.editor.place_caret(byte, false);
+    field.core.editor.caret
 }
 
 /// Test-only: a [`TextArea`]'s laid-out geometry for `bounds` — the text

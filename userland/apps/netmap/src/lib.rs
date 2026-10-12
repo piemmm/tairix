@@ -4,8 +4,9 @@
 //! [`source`] reads, the advertised services [`discover`] keeps current, the
 //! passive [`mod@infer`]ence of what each host is, the [`ingest`] that projects
 //! them into it, the deterministic radial
-//! [`mod@layout`], the graph-space [`viewport`], and the interactive [`view`]
-//! that draws it and answers the pointer. The library performs no I/O of its
+//! [`mod@layout`], the graph-space [`viewport`], the interactive [`view`]
+//! that draws it and answers the pointer, and the context [`mod@menu`] a
+//! secondary press opens. The library performs no I/O of its
 //! own beyond reads and requests over injected seams; the `Run` binary is thin
 //! glue over `tairix-rt`, so the tested code and the shipped code are the same
 //! code.
@@ -23,6 +24,7 @@ pub mod discover;
 pub mod infer;
 pub mod ingest;
 pub mod layout;
+pub mod menu;
 pub mod model;
 pub mod source;
 pub mod view;
@@ -32,12 +34,13 @@ pub use discover::{AdvertisedService, Directory, Discovery};
 pub use infer::{infer, Evidence, Role, Seen, Signals};
 pub use ingest::{assigned_oui, InterfaceObservation, Inventory};
 pub use layout::{layout, RING_STEP};
+pub use menu::{Command, NodeMenu, Steer, Subject};
 pub use model::{
-    Classification, DeviceClass, Edge, EdgeKind, InterfaceName, Liveness, Map, Node, NodeId,
-    NodeKey, NodeKind, OsFamily, MAX_EDGES, MAX_LABEL_LEN, MAX_NODES,
+    Classification, DeviceClass, Edge, EdgeKind, Endpoint, InterfaceName, Liveness, Map, Node,
+    NodeId, NodeKey, NodeKind, OsFamily, MAX_EDGES, MAX_LABEL_LEN, MAX_NODES,
 };
 pub use source::Snapshot;
-pub use view::{node_look, os_emblem, Look, MapView, NODE_RADIUS};
+pub use view::{node_look, os_emblem, Look, MapView, Reaction, NODE_RADIUS};
 pub use viewport::{Viewport, DEFAULT_ZOOM_PER_MILLE, MAX_ZOOM_PER_MILLE, MIN_ZOOM_PER_MILLE};
 
 /// The map window's preferred width when it opens, in logical pixels at the

@@ -203,10 +203,7 @@ impl Title {
     /// [`MAX_TITLE`] bytes.
     #[must_use]
     pub fn from_text(text: &str) -> Self {
-        let mut end = text.len().min(MAX_TITLE);
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = text.floor_char_boundary(MAX_TITLE);
         let mut title = Self::new();
         title.bytes[..end].copy_from_slice(&text.as_bytes()[..end]);
         title.len = end;
