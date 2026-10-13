@@ -11,9 +11,9 @@ use tairix_log::EventId;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const DRVHOST_RANGE_START: u32 = 7_000;
+pub const DRVHOST_RANGE_START: u32 = tairix_log::registry::DRVHOST.start();
 /// Range end (exclusive) reserved for `drvhost` event identifiers.
-pub const DRVHOST_RANGE_END: u32 = 8_000;
+pub const DRVHOST_RANGE_END: u32 = tairix_log::registry::DRVHOST.end();
 
 /// A driver image was loaded successfully.
 pub const DRIVER_LOADED: EventId = EventId(7_001);

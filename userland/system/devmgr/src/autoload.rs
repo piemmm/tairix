@@ -29,10 +29,11 @@ use alloc::vec::Vec;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::{Errno, HwNode};
 use tairix_devmatch::{resolve, DriverCandidate, MatchResolution};
-use tairix_log::{log as log_event, Event, EventId, Field, Level, Sink};
+use tairix_log::{Field, Level, Sink};
 use tairix_util::fmt::{format_hex_u64, format_i32};
+use tairix_util::retry::RestartPacer;
 
-use crate::events;
+use crate::events::{audit_node, NodeEvent};
 use crate::store::{load_driver, unload_driver, CatalogueDriver, DriverStoreCall};
 
 /// The last match decision reported for a node, so an unchanged decision is
@@ -49,19 +50,26 @@ use crate::store::{load_driver, unload_driver, CatalogueDriver, DriverStoreCall}
 /// arrives).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NodeReport {
-    /// The node's winning driver is loaded ([`events::NODE_BOUND`]).
+    /// The node's winning driver is loaded ([`crate::events::NODE_BOUND`]).
     Bound,
-    /// The node matched no driver bind table ([`events::NODE_UNBOUND`]).
+    /// The node matched no driver bind table ([`crate::events::NODE_UNBOUND`]).
     Unbound,
-    /// Two drivers tied at the highest priority ([`events::NODE_TIE_REJECTED`]).
+    /// Two drivers tied at the highest priority ([`crate::events::NODE_TIE_REJECTED`]).
     TieRejected,
+    /// The node's driver loaded and then ended, leaving it undriven
+    /// ([`crate::events::NODE_DRIVER_ENDED`]). Never re-attempted.
+    Ended,
+    /// The node's driver ended for a failure a fresh instance may not meet,
+    /// and is reloaded once its restart falls due
+    /// ([`crate::events::NODE_DRIVER_RESTARTING`]).
+    Restarting,
     /// The winning driver did not load: the gate refused it
-    /// ([`events::NODE_LOAD_FAILED`]), the node left the tree first
-    /// ([`events::NODE_LOAD_RACED_REMOVAL`]), or another live driver holds it
-    /// ([`events::NODE_ALREADY_DRIVEN`]). Never re-attempted.
+    /// ([`crate::events::NODE_LOAD_FAILED`]), the node left the tree first
+    /// ([`crate::events::NODE_LOAD_RACED_REMOVAL`]), or another live driver holds it
+    /// ([`crate::events::NODE_ALREADY_DRIVEN`]). Never re-attempted.
     LoadFailed,
     /// The node waits for the supplier its links name
-    /// ([`events::NODE_HELD`]).
+    /// ([`crate::events::NODE_HELD`]).
     Held(u32),
 }
 
@@ -82,6 +90,70 @@ pub struct NodeDriver {
     pub bundle_id: u32,
     /// The loaded driver's handle the kernel returned.
     pub handle: u64,
+    /// The generation of the snapshot the driver was loaded against, which
+    /// predates the kernel marking the node driven.
+    pub bound_at: u64,
+    /// When the driver was loaded, on the monotonic clock.
+    pub loaded_ns: u64,
+}
+
+impl NodeDriver {
+    /// Whether `node`, as the snapshot of `generation` shows it, says this
+    /// driver ended: undriven in a snapshot taken after it was loaded.
+    #[must_use]
+    pub const fn ended(&self, node: &HwNode, generation: u64) -> bool {
+        !node.is_driven() && generation > self.bound_at
+    }
+}
+
+/// The restarts a node's driver may take before the device manager gives up
+/// on it.
+pub const RESTART_LIMIT: u32 = 3;
+
+/// The delay before a node's first restart, doubling with each after it, so a
+/// device given a moment to recover gets it and a crash loop stays slow.
+pub const RESTART_DELAY_NS: u64 = 500_000_000;
+
+/// The longest a restart waits.
+const RESTART_DELAY_CAP_NS: u64 = 30_000_000_000;
+
+/// How long a driver serves before its node's restarts are forgiven, so a
+/// fault once in a long while is recovered from every time.
+pub const RESTART_QUIET_NS: u64 = 60_000_000_000;
+
+/// A node whose driver ended for a failure a fresh instance may not meet,
+/// its restarts paced by the one restart schedule.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NodeRestart {
+    pacer: RestartPacer,
+    /// Restarts taken since the node's driver last served
+    /// [`RESTART_QUIET_NS`].
+    pub attempts: u32,
+    /// When the next reload falls due, while one is owed.
+    pub due_ns: Option<u64>,
+}
+
+impl NodeRestart {
+    const fn new() -> Self {
+        Self {
+            pacer: RestartPacer::new(RESTART_DELAY_NS, RESTART_DELAY_CAP_NS, RESTART_QUIET_NS),
+            attempts: 0,
+            due_ns: None,
+        }
+    }
+
+    /// Owe a restart for a driver loaded at `loaded_ns` that ended at
+    /// `now_ns`, answering whether the budget allows one.
+    fn failed(&mut self, loaded_ns: u64, now_ns: u64) -> bool {
+        self.pacer.started(loaded_ns);
+        let restart = self.pacer.failed(now_ns);
+        if restart.taken >= RESTART_LIMIT {
+            return false;
+        }
+        self.attempts = restart.taken + 1;
+        self.due_ns = Some(restart.at);
+        true
+    }
 }
 
 /// The driver bound to each node id, the hot-removal memory the reactive loop
@@ -106,6 +178,47 @@ pub struct AutoloadState {
     /// The suppliers each bound node's links name, so a supplier that
     /// vanishes takes its consumers down first.
     pub suppliers: BTreeMap<u32, Vec<u32>>,
+    /// The generation of the snapshot the passes run over.
+    pub generation: u64,
+    /// When the passes run, on the monotonic clock.
+    pub now_ns: u64,
+    /// Each node owed or recently given a restart.
+    pub restarts: BTreeMap<u32, NodeRestart>,
+}
+
+impl AutoloadState {
+    /// Whether any node of `nodes` bound to a driver says it ended.
+    #[must_use]
+    pub fn any_ended(&self, nodes: &[HwNode]) -> bool {
+        nodes.iter().any(|node| {
+            self.bindings
+                .get(&node.id())
+                .is_some_and(|binding| binding.ended(node, self.generation))
+        })
+    }
+
+    /// Whether a restart owed has fallen due.
+    #[must_use]
+    pub fn restart_due(&self) -> bool {
+        self.restarts
+            .values()
+            .any(|restart| restart.due_ns.is_some_and(|at| at <= self.now_ns))
+    }
+
+    /// When the soonest restart owed falls due.
+    #[must_use]
+    pub fn next_restart_ns(&self) -> Option<u64> {
+        self.restarts
+            .values()
+            .filter_map(|restart| restart.due_ns)
+            .min()
+    }
+}
+
+/// Whether a node reported `report` will never serve: its load was refused,
+/// or its driver ended.
+fn never_serves(report: Option<&NodeReport>) -> bool {
+    matches!(report, Some(NodeReport::LoadFailed | NodeReport::Ended))
 }
 
 /// Match every node of `nodes` against `catalogue` and load each winner's
@@ -155,14 +268,18 @@ pub fn match_and_load<C: DriverStoreCall + ?Sized>(
     }
 }
 
-/// How many nodes the passes so far have decided: bound, or refused for good.
-fn decided(state: &AutoloadState) -> usize {
-    state.bindings.len()
-        + state
-            .reported
-            .values()
-            .filter(|&&report| report == NodeReport::LoadFailed)
-            .count()
+/// How many nodes the passes so far have bound, and how many will never
+/// serve.
+///
+/// Kept apart because a driver that ended moves its node from the first to
+/// the second, which releases its consumers as any other decision does.
+fn decided(state: &AutoloadState) -> (usize, usize) {
+    let never = state
+        .reported
+        .values()
+        .filter(|&report| never_serves(Some(report)))
+        .count();
+    (state.bindings.len(), never)
 }
 
 /// One pass of [`match_and_load`] over every node.
@@ -194,7 +311,7 @@ fn match_and_load_once<C: DriverStoreCall + ?Sized>(
                 // packaging tie, or a load refusal stays visible — those are
                 // the actionable outcomes. Mirrors `events::NODE_OBSERVED`.
                 if changed(&mut state.reported, id, NodeReport::Unbound) {
-                    audit_node(sink, events::NODE_UNBOUND, Level::Debug, id, &[]);
+                    audit_node(sink, NodeEvent::Unbound, Level::Debug, id, &[]);
                 }
             }
             MatchResolution::Tie { priority } => {
@@ -203,7 +320,7 @@ fn match_and_load_once<C: DriverStoreCall + ?Sized>(
                     let priority_str = format_i32(i32::from(priority), &mut pbuf);
                     audit_node(
                         sink,
-                        events::NODE_TIE_REJECTED,
+                        NodeEvent::TieRejected,
                         Level::Warn,
                         id,
                         &[Field {
@@ -215,59 +332,37 @@ fn match_and_load_once<C: DriverStoreCall + ?Sized>(
             }
             MatchResolution::Winner { candidate, .. } => {
                 let bundle_id = catalogue[candidate].bundle_id;
-                let handle = if let Some(existing) = state.bindings.get(&id) {
-                    existing.handle
+                let (handle, bound_at, loaded_ns) = if let Some(&existing) = state.bindings.get(&id)
+                {
+                    if existing.ended(node, state.generation) {
+                        state.bindings.remove(&id);
+                        state.suppliers.remove(&id);
+                        driver_ended(node, &existing, state, sink);
+                        continue;
+                    }
+                    (existing.handle, existing.bound_at, existing.loaded_ns)
                 } else {
-                    // A changed device is republished under a new id, so a
-                    // failed load is never worth repeating for this one.
-                    if state.reported.get(&id) == Some(&NodeReport::LoadFailed) {
+                    let Some(handle) =
+                        load_unbound(&pass, at, bundle_id, store, reply_buf, state, sink)
+                    else {
                         continue;
-                    }
-                    if let Some(supplier) = holding_supplier(&pass, at, state) {
-                        if changed(&mut state.reported, id, NodeReport::Held(supplier)) {
-                            let mut sbuf = [0u8; 16];
-                            let supplier_str = format_hex_u64(u64::from(supplier), &mut sbuf);
-                            audit_node(
-                                sink,
-                                events::NODE_HELD,
-                                Level::Debug,
-                                id,
-                                &[Field {
-                                    key: "supplier",
-                                    value: tairix_log::FieldValue::Str(supplier_str),
-                                }],
-                            );
-                        }
-                        continue;
-                    }
-                    match load_driver(store, bundle_id, id, reply_buf) {
-                        Ok(handle) => handle,
-                        Err(errno) => {
-                            if changed(&mut state.reported, id, NodeReport::LoadFailed) {
-                                let (event, level) = load_refusal(errno);
-                                let mut ebuf = [0u8; 12];
-                                let errno_str = format_i32(errno.as_i32(), &mut ebuf);
-                                audit_node(
-                                    sink,
-                                    event,
-                                    level,
-                                    id,
-                                    &[Field {
-                                        key: "errno",
-                                        value: tairix_log::FieldValue::Str(errno_str),
-                                    }],
-                                );
-                            }
-                            continue;
-                        }
-                    }
+                    };
+                    (handle, state.generation, state.now_ns)
                 };
                 // Record (or refresh) which driver this node is bound to, so
                 // the hot-removal diff can tear it down if the node later
                 // vanishes (see `unload_vanished`). A node re-matched on a
                 // re-evaluation re-records the same binding; the entry is
                 // dropped only when the node disappears or its driver unloads.
-                state.bindings.insert(id, NodeDriver { bundle_id, handle });
+                state.bindings.insert(
+                    id,
+                    NodeDriver {
+                        bundle_id,
+                        handle,
+                        bound_at,
+                        loaded_ns,
+                    },
+                );
                 let named: Vec<u32> = suppliers_of(node).collect();
                 if !named.is_empty() {
                     state.suppliers.insert(id, named);
@@ -277,7 +372,7 @@ fn match_and_load_once<C: DriverStoreCall + ?Sized>(
                     let handle_str = format_hex_u64(handle, &mut hbuf);
                     audit_node(
                         sink,
-                        events::NODE_BOUND,
+                        NodeEvent::Bound,
                         Level::Info,
                         id,
                         &[Field {
@@ -287,6 +382,136 @@ fn match_and_load_once<C: DriverStoreCall + ?Sized>(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Load the winning driver `bundle_id` for the unbound node at `at`, unless
+/// its node will never serve, its restart is not yet due, or a supplier holds
+/// it, answering the loaded driver's handle.
+fn load_unbound<C: DriverStoreCall + ?Sized>(
+    pass: &Pass<'_>,
+    at: usize,
+    bundle_id: u32,
+    store: &mut C,
+    reply_buf: &mut [u8],
+    state: &mut AutoloadState,
+    sink: &dyn Sink,
+) -> Option<u64> {
+    let id = pass.nodes[at].id();
+    // A changed device is republished under a new id, so a failed load or an
+    // ended driver is never worth repeating for this one.
+    if never_serves(state.reported.get(&id)) {
+        return None;
+    }
+    if let Some(restart) = state.restarts.get_mut(&id) {
+        if restart.due_ns.is_some_and(|due| state.now_ns < due) {
+            return None;
+        }
+        // Taken now whatever this pass decides, so a held restart waits on
+        // its supplier rather than on a deadline already passed.
+        restart.due_ns = None;
+    }
+    if let Some(supplier) = holding_supplier(pass, at, state) {
+        if changed(&mut state.reported, id, NodeReport::Held(supplier)) {
+            let mut sbuf = [0u8; 16];
+            let supplier_str = format_hex_u64(u64::from(supplier), &mut sbuf);
+            audit_node(
+                sink,
+                NodeEvent::Held,
+                Level::Debug,
+                id,
+                &[Field {
+                    key: "supplier",
+                    value: tairix_log::FieldValue::Str(supplier_str),
+                }],
+            );
+        }
+        return None;
+    }
+    match load_driver(store, bundle_id, id, reply_buf) {
+        Ok(handle) => Some(handle),
+        Err(errno) => {
+            if changed(&mut state.reported, id, NodeReport::LoadFailed) {
+                let (event, level) = load_refusal(errno);
+                let mut ebuf = [0u8; 12];
+                let errno_str = format_i32(errno.as_i32(), &mut ebuf);
+                audit_node(
+                    sink,
+                    event,
+                    level,
+                    id,
+                    &[Field {
+                        key: "errno",
+                        value: tairix_log::FieldValue::Str(errno_str),
+                    }],
+                );
+            }
+            None
+        }
+    }
+}
+
+/// Record that the driver `ended`, bound to `node`, ended as the kernel
+/// recorded, and owe the node a restart where one may cure the ending.
+fn driver_ended(node: &HwNode, ended: &NodeDriver, state: &mut AutoloadState, sink: &dyn Sink) {
+    let id = node.id();
+    let ending = node.driver_ending();
+    let named = Field {
+        key: "ending",
+        value: tairix_log::FieldValue::Str(ending.name()),
+    };
+    let restart = if ending.merits_restart() {
+        let entry = state.restarts.entry(id).or_insert_with(NodeRestart::new);
+        entry
+            .failed(ended.loaded_ns, state.now_ns)
+            .then_some(*entry)
+    } else {
+        None
+    };
+    if let Some(restart) = restart {
+        let delay_ms = restart
+            .due_ns
+            .map_or(0, |at| at.saturating_sub(state.now_ns) / 1_000_000);
+        if changed(&mut state.reported, id, NodeReport::Restarting) {
+            audit_node(
+                sink,
+                NodeEvent::DriverRestarting,
+                Level::Warn,
+                id,
+                &[
+                    named,
+                    Field {
+                        key: "attempt",
+                        value: tairix_log::FieldValue::UnsignedInt(u64::from(restart.attempts)),
+                    },
+                    Field {
+                        key: "delay_ms",
+                        value: tairix_log::FieldValue::UnsignedInt(delay_ms),
+                    },
+                ],
+            );
+        }
+    } else {
+        let spent = state
+            .restarts
+            .remove(&id)
+            .filter(|_| ending.merits_restart())
+            .map(|restart| restart.attempts);
+        if changed(&mut state.reported, id, NodeReport::Ended) {
+            let restarts = Field {
+                key: "restarts",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(spent.unwrap_or(0))),
+            };
+            let fields = [named, restarts];
+            let len = if spent.is_some() { 2 } else { 1 };
+            audit_node(
+                sink,
+                NodeEvent::DriverEnded,
+                Level::Info,
+                id,
+                &fields[..len],
+            );
         }
     }
 }
@@ -315,7 +540,7 @@ fn match_and_load_once<C: DriverStoreCall + ?Sized>(
 /// Idempotent and fail-soft: an unload that the kernel reports already gone
 /// ([`Errno::NotFound`]) still drops the local binding; a transport failure
 /// is logged and the binding dropped so the stale driver is never
-/// re-derived. Every unload is audited ([`events::NODE_UNLOADED`]).
+/// re-derived. Every unload is audited ([`crate::events::NODE_UNLOADED`]).
 pub fn unload_vanished<C: DriverStoreCall + ?Sized>(
     present: &dyn Fn(u32) -> bool,
     store: &mut C,
@@ -324,6 +549,7 @@ pub fn unload_vanished<C: DriverStoreCall + ?Sized>(
     sink: &dyn Sink,
 ) {
     state.reported.retain(|&node_id, _| present(node_id));
+    state.restarts.retain(|&node_id, _| present(node_id));
     let gone: Vec<u32> = state
         .bindings
         .keys()
@@ -401,7 +627,7 @@ fn unload_one<C: DriverStoreCall + ?Sized>(
             Level::Warn
         }
     };
-    audit_node(sink, events::NODE_UNLOADED, level, node_id, &fields[..len]);
+    audit_node(sink, NodeEvent::Unloaded, level, node_id, &fields[..len]);
 }
 
 /// The node ids of the suppliers `node`'s links name.
@@ -454,7 +680,7 @@ impl<'n> Pass<'n> {
     /// consumers it serves in `role`: a driver matches it, it is not yet
     /// serving, and its load was not refused.
     fn holding_back(&self, supplier: u32, role: LinkRole, state: &AutoloadState) -> Option<usize> {
-        if state.reported.get(&supplier) == Some(&NodeReport::LoadFailed) {
+        if never_serves(state.reported.get(&supplier)) {
             return None;
         }
         let &found = self.position.get(&supplier)?;
@@ -573,7 +799,7 @@ fn wait_components(waits: &Waits) -> Vec<usize> {
 fn holding_supplier(pass: &Pass<'_>, at: usize, state: &AutoloadState) -> Option<u32> {
     links_of(&pass.nodes[at])
         .find(|&(supplier, role)| {
-            if state.reported.get(&supplier) == Some(&NodeReport::LoadFailed) {
+            if never_serves(state.reported.get(&supplier)) {
                 return false;
             }
             if !pass.position.contains_key(&supplier) {
@@ -589,11 +815,11 @@ fn holding_supplier(pass: &Pass<'_>, at: usize, state: &AutoloadState) -> Option
 /// before its driver was admitted, or that another live driver already
 /// holds, is the tree moving under the load rather than the gate refusing
 /// the image.
-fn load_refusal(errno: Errno) -> (EventId, Level) {
+fn load_refusal(errno: Errno) -> (NodeEvent, Level) {
     match errno {
-        Errno::DeviceOffline => (events::NODE_LOAD_RACED_REMOVAL, Level::Info),
-        Errno::Busy => (events::NODE_ALREADY_DRIVEN, Level::Info),
-        _ => (events::NODE_LOAD_FAILED, Level::Warn),
+        Errno::DeviceOffline => (NodeEvent::LoadRacedRemoval, Level::Info),
+        Errno::Busy => (NodeEvent::AlreadyDriven, Level::Info),
+        _ => (NodeEvent::LoadFailed, Level::Warn),
     }
 }
 
@@ -605,54 +831,16 @@ fn changed(reported: &mut ReportedNodes, id: u32, kind: NodeReport) -> bool {
     reported.insert(id, kind) != Some(kind)
 }
 
-/// Log one node decision under `id`, stamping the node id plus up to three
-/// event-specific fields (sized for the largest emitter — the fail-soft
-/// unload of a consumer carries a `handle`, its `supplier` and an `errno`).
-/// Fields past that are dropped rather than overrun.
-fn audit_node(sink: &dyn Sink, id: EventId, level: Level, node: u32, extra: &[Field<'_>]) {
-    let mut nbuf = [0u8; 16];
-    let node_str = format_hex_u64(u64::from(node), &mut nbuf);
-    let mut fields = [Field {
-        key: "node",
-        value: tairix_log::FieldValue::Str(node_str),
-    }; 4];
-    let mut len = 1;
-    for (slot, field) in fields[1..].iter_mut().zip(extra) {
-        *slot = *field;
-        len += 1;
-    }
-    log_event(
-        sink,
-        &Event {
-            level,
-            id,
-            message: event_message(id),
-            fields: &fields[..len],
-        },
-    );
-}
-
-fn event_message(id: EventId) -> &'static str {
-    match id {
-        x if x == events::NODE_BOUND => "node bound to driver",
-        x if x == events::NODE_UNBOUND => "node left unbound: no matching driver",
-        x if x == events::NODE_TIE_REJECTED => "node refused: unbroken bind-priority tie",
-        x if x == events::NODE_LOAD_FAILED => "node load failed: driver-store gate refused",
-        x if x == events::NODE_LOAD_RACED_REMOVAL => "node left the tree before its driver loaded",
-        x if x == events::NODE_ALREADY_DRIVEN => "node already held by a live driver",
-        x if x == events::NODE_UNLOADED => "driver unloaded: bound node vanished",
-        _ => "devmgr event",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events;
     use crate::testsink::RecordingSink;
 
     use alloc::vec;
     use core::cell::RefCell;
 
+    use tairix_abi::driver::DriverEnding;
     use tairix_abi::driver_store::{encode_error_reply, encode_unload_reply, StoreRequest};
     use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey};
     use tairix_abi::DriverBindKey;
@@ -689,13 +877,19 @@ mod tests {
     /// recorded unloads and the state, not the audit log.
     struct NullSink;
     impl Sink for NullSink {
-        fn write_event(&self, _event: &Event<'_>) {}
+        fn write_event(&self, _event: &tairix_log::Event<'_>) {}
     }
 
     fn bound(state: &mut AutoloadState, node: u32, bundle_id: u32, handle: u64) {
-        state
-            .bindings
-            .insert(node, NodeDriver { bundle_id, handle });
+        state.bindings.insert(
+            node,
+            NodeDriver {
+                bundle_id,
+                handle,
+                bound_at: 0,
+                loaded_ns: 0,
+            },
+        );
         state.reported.insert(node, NodeReport::Bound);
     }
 
@@ -955,6 +1149,44 @@ mod tests {
         node
     }
 
+    /// `node`, as the kernel shows it while a live driver holds it.
+    fn driven(mut node: HwNode) -> HwNode {
+        node.set_driven(true);
+        node
+    }
+
+    fn count(n: u32) -> usize {
+        usize::try_from(n).expect("a small count")
+    }
+
+    /// `node`, its last driver having ended as `ending`.
+    fn ended_as(mut node: HwNode, ending: DriverEnding) -> HwNode {
+        node.set_driver_ending(ending);
+        node
+    }
+
+    /// Run one reaction over `nodes`, at `generation` and `now_ns`.
+    fn react_at(
+        nodes: &[HwNode],
+        served: &[HwMatchKey],
+        store: &mut LoadingStore,
+        state: &mut AutoloadState,
+        sink: &RecordingSink,
+        (generation, now_ns): (u64, u64),
+    ) {
+        state.generation = generation;
+        state.now_ns = now_ns;
+        react(nodes, served, store, state, sink);
+    }
+
+    /// A fresh state whose passes run over the snapshot of `generation`.
+    fn at_generation(generation: u64) -> AutoloadState {
+        AutoloadState {
+            generation,
+            ..AutoloadState::default()
+        }
+    }
+
     /// Run one reaction over `nodes` with drivers for the keys in `served`.
     fn react(
         nodes: &[HwNode],
@@ -1110,5 +1342,243 @@ mod tests {
         );
         assert_eq!(store.loads, [5, 2], "no second load: its supplier is gone");
         assert_eq!(state.reported.get(&2), Some(&NodeReport::Held(5)));
+    }
+
+    #[test]
+    fn a_driver_that_ends_leaves_its_node_unbound_once_and_is_never_reloaded() {
+        let nodes = [linked(2, CONSUMER_KEY, &[])];
+        let mut store = LoadingStore::refusing(&[]);
+        let mut state = at_generation(1);
+        let sink = RecordingSink::new();
+        react(&nodes, &[CONSUMER_KEY], &mut store, &mut state, &sink);
+
+        state.generation = 2;
+        react(
+            &[driven(nodes[0])],
+            &[CONSUMER_KEY],
+            &mut store,
+            &mut state,
+            &sink,
+        );
+        assert!(
+            state.bindings.contains_key(&2),
+            "a driven node keeps its driver"
+        );
+
+        for generation in [3, 4] {
+            state.generation = generation;
+            react(&nodes, &[CONSUMER_KEY], &mut store, &mut state, &sink);
+        }
+        assert_eq!(store.loads, [2]);
+        assert!(
+            store.unloads.is_empty(),
+            "an ended driver has nothing to unload"
+        );
+        assert!(state.bindings.is_empty());
+        assert_eq!(state.reported.get(&2), Some(&NodeReport::Ended));
+        let ended = events::NODE_DRIVER_ENDED.0;
+        assert_eq!(sink.ids().iter().filter(|&&id| id == ended).count(), 1);
+        assert_eq!(sink.level_of(ended), Some(Level::Info));
+    }
+
+    #[test]
+    fn a_driver_that_fails_is_reloaded_when_due_until_its_budget_is_spent() {
+        let fresh = linked(2, CONSUMER_KEY, &[]);
+        let failed = [ended_as(fresh, DriverEnding::Failed)];
+        let keys = [CONSUMER_KEY];
+        let mut store = LoadingStore::refusing(&[]);
+        let mut state = at_generation(1);
+        let sink = RecordingSink::new();
+        react(&[fresh], &keys, &mut store, &mut state, &sink);
+        let (mut generation, mut now) = (1, 0);
+        for attempt in 0..RESTART_LIMIT {
+            generation += 1;
+            now += 1_000;
+            react_at(
+                &failed,
+                &keys,
+                &mut store,
+                &mut state,
+                &sink,
+                (generation, now),
+            );
+            assert_eq!(state.reported.get(&2), Some(&NodeReport::Restarting));
+            let due = state.next_restart_ns().expect("a restart is owed");
+            assert_eq!(due - now, RESTART_DELAY_NS << attempt);
+            react_at(
+                &failed,
+                &keys,
+                &mut store,
+                &mut state,
+                &sink,
+                (generation, due - 1),
+            );
+            assert_eq!(
+                store.loads.len(),
+                1 + count(attempt),
+                "not before it is due"
+            );
+            now = due;
+            react_at(
+                &failed,
+                &keys,
+                &mut store,
+                &mut state,
+                &sink,
+                (generation, now),
+            );
+            assert_eq!(store.loads.len(), 2 + count(attempt));
+            assert_eq!(state.next_restart_ns(), None, "nothing more is owed");
+        }
+        react_at(
+            &failed,
+            &keys,
+            &mut store,
+            &mut state,
+            &sink,
+            (generation + 1, now + 1_000),
+        );
+        assert_eq!(state.reported.get(&2), Some(&NodeReport::Ended));
+        react_at(
+            &failed,
+            &keys,
+            &mut store,
+            &mut state,
+            &sink,
+            (generation + 2, u64::MAX),
+        );
+        assert_eq!(store.loads.len(), 1 + count(RESTART_LIMIT));
+        let restarting = events::NODE_DRIVER_RESTARTING.0;
+        assert_eq!(sink.level_of(restarting), Some(Level::Warn));
+        assert_eq!(
+            sink.field_of(restarting, "ending").as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            sink.field_of(restarting, "delay_ms").as_deref(),
+            Some("500")
+        );
+        let restarts = sink.field_of(events::NODE_DRIVER_ENDED.0, "restarts");
+        assert_eq!(restarts.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn a_driver_that_served_past_the_quiet_period_has_its_restarts_forgiven() {
+        let fresh = linked(2, CONSUMER_KEY, &[]);
+        let crashed = [ended_as(fresh, DriverEnding::Crashed)];
+        let keys = [CONSUMER_KEY];
+        let mut store = LoadingStore::refusing(&[]);
+        let mut state = at_generation(1);
+        let sink = RecordingSink::new();
+        react(&[fresh], &keys, &mut store, &mut state, &sink);
+        react_at(&crashed, &keys, &mut store, &mut state, &sink, (2, 1_000));
+        let due = state.next_restart_ns().expect("a restart is owed");
+        react_at(&crashed, &keys, &mut store, &mut state, &sink, (2, due));
+        assert_eq!(state.restarts.get(&2).map(|r| r.attempts), Some(1));
+
+        react_at(
+            &crashed,
+            &keys,
+            &mut store,
+            &mut state,
+            &sink,
+            (3, due + RESTART_QUIET_NS),
+        );
+        let restart = state.restarts.get(&2).copied().expect("restarted again");
+        assert_eq!(
+            restart.attempts, 1,
+            "a fault once in a long while is forgiven"
+        );
+        assert_eq!(
+            restart.due_ns,
+            Some(due + RESTART_QUIET_NS + RESTART_DELAY_NS)
+        );
+    }
+
+    #[test]
+    fn a_driver_that_declines_or_is_refused_is_never_reloaded() {
+        for ending in [DriverEnding::Clean, DriverEnding::Refused] {
+            let fresh = linked(2, CONSUMER_KEY, &[]);
+            let mut store = LoadingStore::refusing(&[]);
+            let mut state = at_generation(1);
+            let sink = RecordingSink::new();
+            react(&[fresh], &[CONSUMER_KEY], &mut store, &mut state, &sink);
+            let ended = [ended_as(fresh, ending)];
+            react_at(
+                &ended,
+                &[CONSUMER_KEY],
+                &mut store,
+                &mut state,
+                &sink,
+                (2, 0),
+            );
+            react_at(
+                &ended,
+                &[CONSUMER_KEY],
+                &mut store,
+                &mut state,
+                &sink,
+                (3, u64::MAX),
+            );
+            assert_eq!(store.loads, [2], "{ending:?}");
+            assert_eq!(state.reported.get(&2), Some(&NodeReport::Ended));
+            let named = sink.field_of(events::NODE_DRIVER_ENDED.0, "ending");
+            assert_eq!(named.as_deref(), Some(ending.name()));
+        }
+    }
+
+    #[test]
+    fn a_supplier_owed_a_restart_holds_its_consumers_until_it_serves_again() {
+        let nodes = [linked(2, CONSUMER_KEY, &[5]), linked(5, SUPPLIER_KEY, &[])];
+        let drivers = [CONSUMER_KEY, SUPPLIER_KEY];
+        let mut store = LoadingStore::refusing(&[]);
+        let mut state = at_generation(1);
+        let sink = RecordingSink::new();
+        react(&nodes, &drivers, &mut store, &mut state, &sink);
+        let failed = [nodes[0], ended_as(nodes[1], DriverEnding::Failed)];
+        react_at(&failed, &drivers, &mut store, &mut state, &sink, (2, 0));
+        assert_eq!(state.reported.get(&2), Some(&NodeReport::Held(5)));
+        let due = state.next_restart_ns().expect("a restart is owed");
+        react_at(&failed, &drivers, &mut store, &mut state, &sink, (2, due));
+        assert_eq!(
+            store.loads,
+            [5, 5],
+            "the supplier, and still not its consumer"
+        );
+        let serving = [nodes[0], serving(nodes[1])];
+        react_at(&serving, &drivers, &mut store, &mut state, &sink, (3, due));
+        assert_eq!(store.loads, [5, 5, 2]);
+    }
+
+    #[test]
+    fn the_snapshot_a_driver_was_loaded_against_does_not_say_it_ended() {
+        let nodes = [linked(2, CONSUMER_KEY, &[])];
+        let mut store = LoadingStore::refusing(&[]);
+        let mut state = at_generation(5);
+        let sink = RecordingSink::new();
+        react(&nodes, &[CONSUMER_KEY], &mut store, &mut state, &sink);
+        assert!(!state.any_ended(&nodes));
+        react(&nodes, &[CONSUMER_KEY], &mut store, &mut state, &sink);
+        assert_eq!(store.loads, [2]);
+        assert_eq!(state.reported.get(&2), Some(&NodeReport::Bound));
+    }
+
+    #[test]
+    fn a_supplier_whose_driver_ends_releases_the_consumers_it_held() {
+        // The consumer sits first, so only a further pass can release it.
+        let nodes = [linked(2, CONSUMER_KEY, &[5]), linked(5, SUPPLIER_KEY, &[])];
+        let drivers = [CONSUMER_KEY, SUPPLIER_KEY];
+        let mut store = LoadingStore::refusing(&[]);
+        let mut state = at_generation(1);
+        let sink = RecordingSink::new();
+        react(&nodes, &drivers, &mut store, &mut state, &sink);
+        assert_eq!(state.reported.get(&2), Some(&NodeReport::Held(5)));
+
+        state.generation = 2;
+        assert!(state.any_ended(&nodes));
+        react(&nodes, &drivers, &mut store, &mut state, &sink);
+        assert_eq!(store.loads, [5, 2]);
+        assert_eq!(state.reported.get(&5), Some(&NodeReport::Ended));
+        assert!(state.bindings.contains_key(&2));
     }
 }

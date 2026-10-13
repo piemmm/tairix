@@ -9,9 +9,9 @@
 use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for `appmgr` event identifiers.
-pub const APPMGR_RANGE_START: u32 = 11_000;
+pub const APPMGR_RANGE_START: u32 = tairix_log::registry::APPMGR.start();
 /// Range end (exclusive) reserved for `appmgr` event identifiers.
-pub const APPMGR_RANGE_END: u32 = 12_000;
+pub const APPMGR_RANGE_END: u32 = tairix_log::registry::APPMGR.end();
 
 /// A bundle was accepted: its layout validated, its manifest verified, and
 /// its capability ceiling computed.

@@ -12,10 +12,10 @@ use tairix_log::EventId;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const TIMED_RANGE_START: u32 = 23_000;
+pub const TIMED_RANGE_START: u32 = tairix_log::registry::TIMED.start();
 
 /// Range end (exclusive) reserved for `timed` event identifiers.
-pub const TIMED_RANGE_END: u32 = 24_000;
+pub const TIMED_RANGE_END: u32 = tairix_log::registry::TIMED.end();
 
 /// The service came up and states what it decided about the clock: the reason
 /// the first query is urgent, or that the clock was believed and only the
@@ -95,5 +95,6 @@ pub const RTC_UNAVAILABLE: EventId = EventId(23_015);
 pub const RTC_WRITEBACK: EventId = EventId(23_016);
 
 /// The write-back of a validated sample to the RTC was refused. The machine
-/// clock is still correct; only the next boot loses the head start.
+/// clock is still correct; only the next boot loses the head start. A board
+/// with no clock chip records nothing.
 pub const RTC_WRITEBACK_REFUSED: EventId = EventId(23_017);

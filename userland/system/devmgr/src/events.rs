@@ -6,15 +6,16 @@
 //! `13000..14000`. Once shipped the numeric values must never be
 //! re-used or re-numbered — external audit-log consumers rely on them.
 
-use tairix_log::EventId;
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_util::fmt::format_hex_u64;
 
 /// Range start (inclusive) reserved for `devmgr` event identifiers.
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const DEVMGR_RANGE_START: u32 = 13_000;
+pub const DEVMGR_RANGE_START: u32 = tairix_log::registry::DEVMGR.start();
 /// Range end (exclusive) reserved for `devmgr` event identifiers.
-pub const DEVMGR_RANGE_END: u32 = 14_000;
+pub const DEVMGR_RANGE_END: u32 = tairix_log::registry::DEVMGR.end();
 
 /// A hardware-tree node was bound: its winning driver is loaded.
 pub const NODE_BOUND: EventId = EventId(13_001);
@@ -82,10 +83,9 @@ pub const NETWORK_SETTINGS_DELIVERY_FAILED: EventId = EventId(13_013);
 /// network stack and accepted (the `NetInterfaceConfigMsg` admin call
 /// succeeded). Recorded at `Info`: an interface's addressing came up.
 pub const NETWORK_IFCONFIG_DELIVERED: EventId = EventId(13_014);
-/// A per-interface configuration was read but the network stack refused it
-/// for a reason other than "interface not bound yet" (which is the silent,
-/// expected retry state). Retried on the next generation bump — never an
-/// error (fail-soft). Recorded at `Warn`.
+/// The network stack refused a per-interface configuration or a bond offered
+/// to an interface it holds. Offered again once its `network.conf` entry
+/// changes or another NIC binds, never on a timer. Recorded at `Warn`.
 pub const NETWORK_IFCONFIG_DELIVERY_FAILED: EventId = EventId(13_015);
 /// A managed ethernet interface in `network.conf` declares neither a
 /// `match.mac` nor a `match.node` identity selector, so the device manager
@@ -147,12 +147,117 @@ pub const DEVICES_SETTLED: EventId = EventId(13_026);
 pub const SETTLE_LAPSED: EventId = EventId(13_027);
 /// The service manager did not record the device manager's readiness.
 pub const READINESS_REFUSED: EventId = EventId(13_028);
+/// The driver bound to `node` ended and is not reloaded; the node is left
+/// unbound and holds no consumer. Carries the `ending` the kernel recorded,
+/// and the `restarts` spent when a restart budget ran out. Recorded at
+/// `Info`: the driver stated why it ended.
+pub const NODE_DRIVER_ENDED: EventId = EventId(13_029);
+/// The driver bound to `node` ended for a failure a fresh instance may not
+/// meet, so it is reloaded after `delay_ms`, restart `attempt` of the
+/// node's budget. Recorded at `Warn`.
+pub const NODE_DRIVER_RESTARTING: EventId = EventId(13_030);
+
+/// A decision about one node, so every one is recorded with its own id and
+/// message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NodeEvent {
+    Bound,
+    Unbound,
+    TieRejected,
+    LoadFailed,
+    LoadRacedRemoval,
+    AlreadyDriven,
+    Unloaded,
+    Held,
+    DriverEnded,
+    DriverRestarting,
+}
+
+impl NodeEvent {
+    #[cfg(test)]
+    const ALL: [Self; 10] = [
+        Self::Bound,
+        Self::Unbound,
+        Self::TieRejected,
+        Self::LoadFailed,
+        Self::LoadRacedRemoval,
+        Self::AlreadyDriven,
+        Self::Unloaded,
+        Self::Held,
+        Self::DriverEnded,
+        Self::DriverRestarting,
+    ];
+
+    const fn id(self) -> EventId {
+        match self {
+            Self::Bound => NODE_BOUND,
+            Self::Unbound => NODE_UNBOUND,
+            Self::TieRejected => NODE_TIE_REJECTED,
+            Self::LoadFailed => NODE_LOAD_FAILED,
+            Self::LoadRacedRemoval => NODE_LOAD_RACED_REMOVAL,
+            Self::AlreadyDriven => NODE_ALREADY_DRIVEN,
+            Self::Unloaded => NODE_UNLOADED,
+            Self::Held => NODE_HELD,
+            Self::DriverEnded => NODE_DRIVER_ENDED,
+            Self::DriverRestarting => NODE_DRIVER_RESTARTING,
+        }
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::Bound => "node bound to driver",
+            Self::Unbound => "node left unbound: no matching driver",
+            Self::TieRejected => "node refused: unbroken bind-priority tie",
+            Self::LoadFailed => "node load failed: the load gate refused",
+            Self::LoadRacedRemoval => "node left the tree before its driver loaded",
+            Self::AlreadyDriven => "node already held by a live driver",
+            Self::Unloaded => "driver unloaded: its node or a supplier vanished",
+            Self::Held => "node held until its supplier serves",
+            Self::DriverEnded => "node left unbound: its driver ended",
+            Self::DriverRestarting => "node's driver failed; reloading it",
+        }
+    }
+}
+
+/// The most fields a node decision carries beyond its node.
+const NODE_EVENT_DETAIL: usize = 3;
+
+/// Record `event` about `node` at `level` with up to [`NODE_EVENT_DETAIL`]
+/// fields of `extra`; fields past those are dropped rather than overrun.
+pub(crate) fn audit_node(
+    sink: &dyn Sink,
+    event: NodeEvent,
+    level: Level,
+    node: u32,
+    extra: &[Field<'_>],
+) {
+    let mut nbuf = [0u8; 16];
+    let mut fields = [Field {
+        key: "node",
+        value: FieldValue::Str(format_hex_u64(u64::from(node), &mut nbuf)),
+    }; 1 + NODE_EVENT_DETAIL];
+    let mut len = 1;
+    for (slot, field) in fields[1..].iter_mut().zip(extra) {
+        *slot = *field;
+        len += 1;
+    }
+    log(
+        sink,
+        &Event {
+            level,
+            id: event.id(),
+            message: event.message(),
+            fields: &fields[..len],
+        },
+    );
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testsink::RecordingSink;
 
-    const ALL: [EventId; 28] = [
+    const ALL: [EventId; 30] = [
         NODE_BOUND,
         NODE_UNBOUND,
         NODE_TIE_REJECTED,
@@ -181,6 +286,8 @@ mod tests {
         DEVICES_SETTLED,
         SETTLE_LAPSED,
         READINESS_REFUSED,
+        NODE_DRIVER_ENDED,
+        NODE_DRIVER_RESTARTING,
     ];
 
     #[test]
@@ -197,5 +304,40 @@ mod tests {
         for w in ids.windows(2) {
             assert_ne!(w[0], w[1], "duplicate devmgr EventId");
         }
+    }
+
+    #[test]
+    fn every_node_decision_has_its_own_id_and_message() {
+        for (at, event) in NodeEvent::ALL.iter().enumerate() {
+            assert!(ALL.contains(&event.id()));
+            for other in &NodeEvent::ALL[at + 1..] {
+                assert_ne!(event.id(), other.id());
+                assert_ne!(event.message(), other.message());
+            }
+        }
+    }
+
+    #[test]
+    fn a_node_decision_names_its_node_and_drops_detail_past_the_bound() {
+        let field = |key| Field {
+            key,
+            value: FieldValue::Str("x"),
+        };
+        let sink = RecordingSink::new();
+        audit_node(
+            &sink,
+            NodeEvent::DriverEnded,
+            Level::Info,
+            0x2a,
+            &[field("a"), field("b"), field("c"), field("d")],
+        );
+        assert_eq!(sink.ids(), [NODE_DRIVER_ENDED.0]);
+        let id = NODE_DRIVER_ENDED.0;
+        assert_eq!(
+            sink.field_of(id, "node").as_deref(),
+            Some("000000000000002a")
+        );
+        assert!(sink.field_of(id, "c").is_some());
+        assert!(sink.field_of(id, "d").is_none());
     }
 }

@@ -15,9 +15,9 @@ mod program {
     use tairix_abi::hwlink::{sole_link, LinkRole};
     use tairix_abi::DriverError;
     use tairix_drv_bus_i2c_bcm2835::{Bsc, BusWait, ParentClock, REQUIRED_CAPABILITIES};
-    use tairix_drvrt::serve::exit;
+    use tairix_drvrt::exit::{end, step, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use tairix_i2cbus::{bringup_failed, declared_speed, serve};
+    use tairix_i2cbus::{declared_speed, serve};
     use tairix_linkclient::{ClockClient, RtLinkCall};
 
     /// Park on the controller's bound interrupt line, the caller's remaining
@@ -52,19 +52,27 @@ mod program {
         let node = tairix_i2cbus::open(REQUIRED_CAPABILITIES.iter().copied().collect())?;
         let speed = declared_speed(&node)?;
         let Some(clock) = sole_link(node.resources(), LinkRole::Clock) else {
-            return Err(node.fail(exit::NO_RESOURCES, "i2c: the node links no parent clock"));
+            return Err(end(
+                DriverExit::NoResources,
+                &[step("i2c: the node links no parent clock")],
+            ));
         };
         let regs = node.map()?;
         node.host().bind_irq().map_err(|_| {
-            node.fail(
-                exit::BRINGUP_FAILED,
-                "i2c: the interrupt line could not be bound",
+            end(
+                DriverExit::BringupFailed,
+                &[step("i2c: the interrupt line could not be bound")],
             )
         })?;
         let wait = IrqWait(node.host());
         let parent = Vpu(ClockClient::new(RtLinkCall::new(clock.endpoint()), clock));
         let bsc = Bsc::new(&regs, &wait, parent, speed).map_err(|_| {
-            bringup_failed("i2c: the register window does not reach the controller")
+            end(
+                DriverExit::BringupFailed,
+                &[step(
+                    "i2c: the register window does not reach the controller",
+                )],
+            )
         })?;
         Ok(serve(&node, bsc))
     }

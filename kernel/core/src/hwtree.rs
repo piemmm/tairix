@@ -18,6 +18,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkStatus, FaultDomainState};
+use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwtree::{ancestor_imposed_status_by, HwResourceKind};
 use tairix_abi::{Errno, HwNode};
 
@@ -31,15 +32,41 @@ pub trait HwNodeLiveness: Sync {
 }
 
 /// The tree a driver is admitted against: whether its node still lives, and
-/// the record of whether the driver now driving it has settled.
+/// the record of whether a driver drives it and has settled.
 pub trait HwDriverTree: HwNodeLiveness {
-    /// Record that a new driver drives `node_id`, admitted before it can run.
+    /// Record that the driver admitted as `generation` drives `node_id`,
+    /// before it can run.
     ///
     /// One that cannot publish children (`publishes` false) has nothing to
     /// settle and is settled at once; one that can is unsettled until it
     /// says otherwise, so a child an earlier instance's settling would have
-    /// marked as arriving on a running machine is not misread as one.
-    fn driver_admitted(&self, node_id: u32, publishes: bool);
+    /// marked as arriving on a running machine is not misread as one. What
+    /// an earlier instance left — how it ended, the health it reported of
+    /// its fault domain — is its own view, and goes.
+    fn driver_admitted(&self, node_id: u32, generation: u64, publishes: bool);
+
+    /// Record that the driver admitted as `generation` no longer drives
+    /// `node_id`, and how it ended: neither driven nor settled, unless a
+    /// later driver already holds it.
+    fn driver_released(&self, node_id: u32, generation: u64, ending: DriverEnding);
+}
+
+/// The tree the kernel's driver releases are recorded in, installed by the
+/// boot path.
+static DRIVER_TREE: tairix_sync::OnceCell<&'static dyn HwDriverTree> = tairix_sync::OnceCell::new();
+
+/// Install the tree driver releases are recorded in. First-wins.
+pub fn install_driver_tree(tree: &'static dyn HwDriverTree) {
+    let _ = DRIVER_TREE.set(tree);
+}
+
+/// Record that `released`, a driver's node and admission, is driven no more,
+/// having ended as `ending`. Called with no address-space lock held: the tree
+/// takes its own.
+pub fn driver_released(released: Option<crate::aspace::LoadedDriver>, ending: DriverEnding) {
+    if let (Some(released), Ok(Some(tree))) = (released, DRIVER_TREE.get()) {
+        tree.driver_released(released.node, released.generation, ending);
+    }
 }
 
 /// The kernel-held discovered hardware tree the hardware-tree syscalls

@@ -319,6 +319,8 @@ pub enum DriverImageError {
     /// between `stat` and `read` (a short read); the partial bytes are
     /// discarded.
     ShortRead,
+    /// The kernel heap could not hold the bytes asked for.
+    OutOfMemory,
     /// The backing root-volume VFS refused the operation (not found,
     /// permission denied, driver I/O fault, …).
     Vfs(VfsError),
@@ -338,6 +340,7 @@ impl DriverImageError {
             // dedicated `EIO`, so it collapses onto `NotImplemented` as
             // `VfsError::Io` does.
             Self::ShortRead => Errno::NotImplemented,
+            Self::OutOfMemory => Errno::OutOfMemory,
             Self::Vfs(err) => err.to_errno(),
         }
     }
@@ -421,6 +424,29 @@ impl DriverImageReader {
     where
         F: FilesystemRead + FilesystemSecurity + ?Sized,
     {
+        self.read_image_prefix(fs, store_root, path, MAX_DRIVER_IMAGE_LEN, buf)
+    }
+
+    /// [`Self::read_image`], appending at most the first `len` bytes: a
+    /// reader of the manifest at the head of an image reads no program.
+    ///
+    /// The whole image is still held to [`MAX_DRIVER_IMAGE_LEN`], so an
+    /// image too large to load is refused here as there.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_image`].
+    pub fn read_image_prefix<F>(
+        &self,
+        fs: &mut F,
+        store_root: &str,
+        path: &str,
+        len: usize,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), DriverImageError>
+    where
+        F: FilesystemRead + FilesystemSecurity + ?Sized,
+    {
         if !path_within_store(store_root, path) {
             return Err(DriverImageError::OutsideStore);
         }
@@ -440,11 +466,15 @@ impl DriverImageReader {
         if info.size > MAX_DRIVER_IMAGE_LEN as u64 {
             return Err(DriverImageError::TooLarge);
         }
-        let size = usize::try_from(info.size).map_err(|_| DriverImageError::TooLarge)?;
+        let size = usize::try_from(info.size)
+            .map_err(|_| DriverImageError::TooLarge)?
+            .min(len);
 
         // Append into `buf`; unwind the reservation on any short read or
         // driver refusal so the buffer is unchanged on error.
         let start = buf.len();
+        buf.try_reserve_exact(size)
+            .map_err(|_| DriverImageError::OutOfMemory)?;
         buf.resize(start + size, 0);
         match self
             .vfs

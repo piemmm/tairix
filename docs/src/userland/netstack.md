@@ -225,11 +225,14 @@ configuration is applied. The apply is **atomic per interface**: the whole
 message is validated (unicast addresses, an on-subnet IPv4 gateway, a
 `≥ 1280` MTU override) before any state is touched, so a refusal leaves
 the interface untouched, and it is idempotent (re-applying the same
-configuration is a success, not a duplicate). Because interfaces bind
-asynchronously as their drivers come up, delivery of an interface not yet
-present returns `NotFound` and is retried silently on the next
-hardware-tree generation bump; a successful apply is recorded so it is not
-re-pushed (`devmgr` events `13_014`/`13_015`).
+configuration is a success, not a duplicate). Interfaces bind
+asynchronously as their drivers come up, so the device manager offers a
+configuration only once the NIC it names is bound — the stack answers each
+`BindDriver` with the interface's MAC, and both sides match a configuration
+through the one `NetInterfaceConfigMsg::selects` rule. A successful apply is
+recorded so it is not re-pushed, and a refusal is recorded once and offered
+again only when its entry changes or another NIC binds (`devmgr` events
+`13_014`/`13_015`).
 
 An image ships the addressing default its own hardware warrants, validated
 at build time through the same `lib/netconfig` engine the stack reads it

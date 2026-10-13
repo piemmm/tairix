@@ -59,6 +59,10 @@
 //!   (layering, concrete-scheduler naming, optional-desktop boundary)
 //! - `cfg-check` — rejects target-conditional compilation
 //!   outside the architecture ports and build glue
+//! - `event-ids` — every crate's event ids from its range in
+//!   `tairix_log::registry`, and no id defined by two crates
+//! - `driver-exits` — no crate built on the driver runtime declares an exit
+//!   code or exit module of its own
 //! - `help-lint` — lints every command app's discovered `Help/` tree
 //!   (plans/APPS.md §8.1): canonical `en-US/` presence, required-locale completeness,
 //!   structural bounds, cross-locale `OPTIONS` switch-key drift, the
@@ -96,7 +100,7 @@
 //!   produces a number
 //! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
 //!   so a failing PR fails fast: `fmt --check`, then the concurrent
-//!   static-gate group (`deps-check`, `cfg-check`, `help-lint`,
+//!   static-gate group (`deps-check`, `cfg-check`, `event-ids`, `driver-exits`, `help-lint`,
 //!   `spec-review`, `charter-cite`, `supply-chain`, `abi-check`, `c-header`,
 //!   `font-atlas`, `devids`, `model-check` —
 //!   all read-only, non-compiling checks run at once so their costs overlap),

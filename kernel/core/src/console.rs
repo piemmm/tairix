@@ -167,6 +167,18 @@ pub trait ConsoleWrite: Sync {
         Relocation::Refused
     }
 
+    /// Whether the boot still draws its own prompts on this console's screen
+    /// — the Supervisor window, a passphrase prompt — so a display engine
+    /// waits before taking the screen over: the mode set a takeover makes
+    /// blanks the sink while it re-locks, under the prompt.
+    ///
+    /// The default holds nothing. A console that offers a [`Self::surface`]
+    /// the boot draws its prompts on answers for it, and whatever lets go
+    /// pulses the console wait-queue as it does.
+    fn boot_holds_screen(&self) -> bool {
+        false
+    }
+
     /// Discard everything a finished session left on this console's display,
     /// so none of it can reach whoever uses the terminal next.
     ///

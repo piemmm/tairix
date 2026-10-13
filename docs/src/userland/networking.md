@@ -279,9 +279,9 @@ closing statistics block, in the familiar iputils shape.
 ```
 $ ping -c 3 gateway.example
 PING gateway.example (10.0.2.2) 56(84) bytes of data.
-64 bytes from gateway.example (10.0.2.2): icmp_seq=1 time=0.412 ms
-64 bytes from gateway.example (10.0.2.2): icmp_seq=2 time=0.388 ms
-64 bytes from gateway.example (10.0.2.2): icmp_seq=3 time=0.401 ms
+64 bytes from gateway.example (10.0.2.2): icmp_seq=1 ttl=64 time=0.412 ms
+64 bytes from gateway.example (10.0.2.2): icmp_seq=2 ttl=64 time=0.388 ms
+64 bytes from gateway.example (10.0.2.2): icmp_seq=3 ttl=64 time=0.401 ms
 
 --- gateway.example ping statistics ---
 3 packets transmitted, 3 received, 0% packet loss, time 2003ms
@@ -332,8 +332,6 @@ would spend the reserve for nothing.
 
 ### Deliberate divergences
 
-* No `ttl=` field on a reply line: the IP time-to-live is not exposed
-  through the echo-socket interface.
 * The peer is reverse-resolved once per run, so a reply line reads
   `<n> bytes from <name> (<address>)` when the address has a `PTR` record
   and carries the bare address when it does not; a reporting router is

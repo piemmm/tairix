@@ -575,8 +575,8 @@ reach the running `netstack` process. Done:
 - **The driver process** `drivers/network/virtio_net_driver` (freestanding
   `Run` binary + inert host stub): `RtDriverHost::from_grants_query` +
   `sole_register_window` + `MmioTransport::new` + `VirtioNet::open` bring-up,
-  claims the first free reserved device-channel endpoint bound
-  restricted-sender `{CAP_NET_RAW}`, emits the `netchan` hardware-tree node
+  binds its node's reserved device-channel endpoint restricted-sender
+  `{CAP_NET_RAW}`, emits the `netchan` hardware-tree node
   carrying that endpoint, and runs a wait-set loop over `{call endpoint,
   device IRQ}` driving the pure `NetChannelServer`. On an RX IRQ it
   `ack_interrupt`s and `ipc_send`s one `NetChannelNotify` to the stack's
@@ -1469,8 +1469,8 @@ the whole is too large for one change and each leaves the tree working.
   binary driving it over `tairix_rt::net` + `clock_get`/`waitset`, a
   13-locale `Help/` tree (help-lint clean), and a README. Options
   `-c/-i/-s/-W/-w/-4/-6/-n/-q` + `-?/--help`; the target is a literal IP
-  (no DNS in this plan — a hostname is a loud usage error). The reply line
-  omits `ttl=` (not exposed by the echo socket — a documented divergence).
+  or a host name resolved through `lib/resolver`. The reply line carries
+  `ttl=`, the hop limit the echo socket delivers with each reply.
   Registered in the kernel `program_manifests` pin and the harness discovery
   test. Covered by unit tests at every layer (ABI round-trip/fail-closed,
   netstack open-gate/send/deliver, engine loss/quiet/verify).
@@ -1596,11 +1596,13 @@ alias).
   mapping serves both and they cannot disagree about what a setting means.
   A managed non-bond iface without `match.mac`/`match.node` is rejected
   loud (event `13_016`).
-- **devmgr** (`netcfg`): `deliver_interface_configs` pushes each per
-  interface, retrying silently on `NotFound` (interface not bound yet) each
-  time the hardware tree moves or a volume is mounted, and recording each
-  success (events `13_014`/`13_015`). The plan is **re-read on every
-  reaction**, and a delivery
+- **devmgr** (`netcfg`): `deliver_interface_configs` offers a
+  configuration only once the stack holds what it names — a bound NIC its
+  selector matches (the stack answers `BindDriver` with the MAC), a bond's
+  members configured, a bond composed — so no absent interface is offered,
+  and records each success and each refusal (events `13_014`/`13_015`), a
+  refusal offered again only when its entry changes or another NIC binds.
+  The plan is **re-read on every reaction**, and a delivery
   mark is forgotten only for an interface whose message actually changed —
   so an administrator's live edit reaches the running stack while an
   untouched interface is not reconfigured for nothing. Reuses
@@ -2033,8 +2035,8 @@ Broadcom MAC driver can link neither. Both moved verbatim into the new
   `{call endpoint, device IRQ}`, `shm_map` on attach. Gated
   `cfg(target_os = "none")`, so the host build carries only the pure half and
   nothing pulls `tairix-rt` into a kernel graph.
-- `netchan::exit` — the reserved fail-closed exit codes (80–83) both NIC
-  driver binaries report, one definition.
+- Both NIC driver binaries end through `tairix_drvrt::exit`, the one driver
+  exit vocabulary, each ending recorded with its reason.
 - `NETCHAN_NODE_COMPATIBLE` moved into `lib/abi::driver::net_channel` beside
   the endpoint block, replacing a `devmgr` `const` plus a bare literal in the
   driver; `devmgr` and both drivers now name the one definition.

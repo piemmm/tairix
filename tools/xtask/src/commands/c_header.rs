@@ -723,6 +723,17 @@ fn hwtree_enum_macros(out: &mut String) {
     }
     out.push('\n');
 
+    out.push_str("/* How a node's last driver ended (uint8_t), kernel-recorded. */\n");
+    for ending in tairix_abi::driver::DriverEnding::ALL {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_HW_ENDING_{} ((uint8_t){}u)",
+            ending.name().to_ascii_uppercase(),
+            ending.as_u8()
+        );
+    }
+    out.push('\n');
+
     out.push_str("/* Match-key kinds (uint16_t). */\n");
     for (name, kind) in [
         ("COMPATIBLE", HwMatchKind::Compatible),
@@ -840,6 +851,8 @@ fn hwtree_structs(out: &mut String) {
          \x20   uint8_t resource_count;\n\
          \x20   uint8_t fault_health;\n\
          \x20   uint8_t served;\n\
+         \x20   uint8_t presence;\n\
+         \x20   uint8_t ending;\n\
          \x20   tairix_hw_match_key_t match_keys[TAIRIX_HW_NODE_MAX_MATCH_KEYS];\n\
          \x20   tairix_hw_resource_t resources[TAIRIX_HW_NODE_MAX_RESOURCES];\n\
          } tairix_hw_node_t;\n\n",
@@ -2330,6 +2343,17 @@ fn driver_emit_constants(out: &mut String) {
 /// and the [`DriverHandle`] sentinel (every value read from `lib/abi`).
 fn driver_emit_discriminants(out: &mut String) {
     use std::fmt::Write as _;
+    out.push_str("/* Driver exit statuses (int32_t): one vocabulary for every driver. */\n");
+    for &exit in tairix_abi::driver::DriverExit::ALL {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_DRIVER_EXIT_{} ((int32_t){})",
+            exit.name().to_ascii_uppercase(),
+            exit.code()
+        );
+    }
+    out.push('\n');
+
     out.push_str(
         "/* Driver execution domain (uint8_t); IN_KERNEL additionally needs CAP_DRV_KERNEL. */\n",
     );
@@ -4339,6 +4363,35 @@ mod tests {
             );
         }
         assert!(h.contains("typedef struct tairix_hw_node {"), "node struct");
+        for ending in tairix_abi::driver::DriverEnding::ALL {
+            assert!(
+                h.contains(&format!(
+                    "#define TAIRIX_HW_ENDING_{} ((uint8_t){}u)",
+                    ending.name().to_ascii_uppercase(),
+                    ending.as_u8()
+                )),
+                "{ending:?}: {h}"
+            );
+        }
+        // Every byte of the node's header is a field of the C struct.
+        let node = h
+            .split("typedef struct tairix_hw_node {")
+            .nth(1)
+            .and_then(|rest| rest.split("tairix_hw_match_key_t").next())
+            .expect("the node struct names its header fields first");
+        let header: usize = node
+            .lines()
+            .filter_map(|line| {
+                let ty = line.split_whitespace().next()?;
+                match ty {
+                    "uint32_t" => Some(4),
+                    "uint16_t" => Some(2),
+                    "uint8_t" => Some(1),
+                    _ => None,
+                }
+            })
+            .sum();
+        assert_eq!(header, HW_NODE_HEADER_LEN, "node header fields: {node}");
         // The flat record structs mirror their #[repr(C)] layout exactly,
         // so their wire size equals their in-memory size.
         assert_eq!(core::mem::size_of::<HwMatchKey>(), HwMatchKey::WIRE_LEN);
@@ -5411,6 +5464,8 @@ mod tests {
     fn driver_header_pins_layout_constants_and_discriminants() {
         let h = body("tairix_driver.h");
         assert!(h.contains("#ifndef TAIRIX_DRIVER_H"), "guard present");
+        assert!(h.contains("#define TAIRIX_DRIVER_EXIT_DEVICE_FAULT ((int32_t)85)"));
+        assert!(h.contains("#define TAIRIX_DRIVER_EXIT_DECLINED ((int32_t)0)"));
         assert!(h.contains("#include <stdint.h>"), "stdint included");
         // Reuses the syscall-table-hash length from the manifest header (no
         // re-declaration;).

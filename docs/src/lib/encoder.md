@@ -96,6 +96,7 @@ Every decision is logged with a stable event id:
 | Its holder ended | 24801 |
 | The connector moved | 24802 |
 | A request refused | 24803 |
-| The service ended | 24804 |
+
+The driver's ending is the driver runtime's record ([`tairix-drvrt`](drvrt.md)).
 
 The engine's half is [`tairix-linkclient`](linkclient.md)'s `EncoderClient`.

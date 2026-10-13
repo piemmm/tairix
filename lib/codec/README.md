@@ -13,8 +13,8 @@ driver runs around its `tairix_abi::driver::codec::Codec`. Stability tier:
   it has, so a restarted driver takes over at once — when the codec is
   stopped.
 - `serve` binds the endpoint under the node's codec duty and parks on it and
-  on peer exits, ending the driver with the audio class's shared exit code
-  and reason when it cannot.
+  on peer exits, ending the driver through `tairix_drvrt::exit`, its reason
+  recorded, when it cannot.
 
 Two drivers link it, `drivers/audio/pcm5102a` and `drivers/audio/pcm5122`,
 so the attestation and the holder rule are written once.

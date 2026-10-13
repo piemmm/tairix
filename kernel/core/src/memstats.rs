@@ -82,13 +82,9 @@ static PRESSURE_BAND_WAKE: PressureBandWake = PressureBandWake;
 /// backing every reclaimable cache derives its byte budget from
 /// (`CacheBudget::from_backing`). `0` means "not yet published".
 ///
-/// The kernel heap is now growable, so `tairix_kalloc::HEAP_BYTES` is only
-/// the *bootstrap* size, no longer the memory a cache should size itself
-/// against; a cache sized to the bootstrap slab would be a fixed ceiling
-/// that wastes RAM on a large machine and over-commits a small one. This
-/// value lets every cache scale its budget with the RAM the machine
-/// actually has (a proportional policy from one derivation), the
-/// growable-capacity discipline the charter requires.
+/// The heap grows, so its arena is no measure of what a cache may use: a
+/// cache sized to it would waste RAM on a large machine and over-commit a
+/// small one.
 static CACHE_BACKING_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 /// Publish the discovered physical-RAM size the cache budgets scale
@@ -100,10 +96,10 @@ pub fn set_cache_backing_bytes(bytes: usize) {
 
 /// The byte size a reclaimable cache derives its budget from
 /// (`CacheBudget::from_backing`): the discovered physical RAM once the
-/// boot path has published it, falling back to the bootstrap heap size
-/// before then (host tests, and the window before
-/// [`set_cache_backing_bytes`] runs) so a cache built early still gets a
-/// sane, non-zero budget.
+/// boot path has published it, falling back to
+/// [`tairix_kalloc::HEAP_BYTES`] before then (host tests, and the window
+/// before [`set_cache_backing_bytes`] runs) so a cache built early still gets
+/// a sane, non-zero budget.
 #[must_use]
 pub fn cache_backing_bytes() -> usize {
     match CACHE_BACKING_BYTES.load(Ordering::Acquire) {

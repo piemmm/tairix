@@ -10,9 +10,9 @@ use tairix_abi::usb_urb::{
     iso_notify_endpoint_for, IsoGrant, IsoStartParams, UsbSpeed, ISO_MAX_SLOTS, ISO_NOTIFY_LEN,
 };
 use tairix_abi::{DriverError, Errno, HwProperty, Origin, ProcId};
-use tairix_audiochan::{exit, fail};
 use tairix_drv_audio_usb_uac::engine::{UacTransport, UsbAudio};
 use tairix_drv_audio_usb_uac::REQUIRED_CAPABILITIES;
+use tairix_drvrt::exit::{end, error, step, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_usb::device::CTRL_DATA_LEN;
 use tairix_usb::transport::{read_configuration, UrbCall, UrbClient, UrbLink};
@@ -188,10 +188,9 @@ type Transport = (UrbLink<'static, IpcUrbCall>, u8, UsbSpeed, u64);
 fn map_transport() -> Result<Transport, i32> {
     let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
     let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-        return Err(fail(
-            exit::NO_HOST,
-            "usb-audio: the driver host could not be built",
-            None,
+        return Err(end(
+            DriverExit::NoHost,
+            &[step("usb-audio: the driver host could not be built")],
         ));
     };
     let speed = host
@@ -205,10 +204,11 @@ fn map_transport() -> Result<Transport, i32> {
         speed,
         host.shared_buffer(CTRL_DATA_LEN),
     ) else {
-        return Err(fail(
-            exit::NO_RESOURCES,
-            "usb-audio: the node carries no URB endpoint, shared buffer, interface or speed",
-            None,
+        return Err(end(
+            DriverExit::NoResources,
+            &[step(
+                "usb-audio: the node carries no URB endpoint, shared buffer, interface or speed",
+            )],
         ));
     };
     let client = UrbClient::new(IpcUrbCall { endpoint });
@@ -221,10 +221,11 @@ fn main() -> i32 {
         Err(code) => return code,
     };
     let Ok(config) = read_configuration(&mut |setup, data| link.control_in(setup, data)) else {
-        return fail(
-            exit::BRINGUP_FAILED,
-            "usb-audio: the configuration descriptor could not be read whole",
-            None,
+        return end(
+            DriverExit::BringupFailed,
+            &[step(
+                "usb-audio: the configuration descriptor could not be read whole",
+            )],
         );
     };
     let live = Live {
@@ -235,18 +236,19 @@ fn main() -> i32 {
     let mut audio = match UsbAudio::open(&config, interface, speed, live) {
         Ok(audio) => audio,
         Err(err) => {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "usb-audio: the audio function could not be opened",
-                Some(err),
+            return end(
+                DriverExit::BringupFailed,
+                &[
+                    step("usb-audio: the audio function could not be opened"),
+                    error(err),
+                ],
             )
         }
     };
     let Ok(origin) = tairix_rt::self_origin() else {
-        return fail(
-            exit::NO_HOST,
-            "usb-audio: this process's identity could not be read",
-            None,
+        return end(
+            DriverExit::NoHost,
+            &[step("usb-audio: this process's identity could not be read")],
         );
     };
     let mut wanted = [false; STREAM_ENDPOINTS];
@@ -265,21 +267,19 @@ fn main() -> i32 {
         let endpoint = number | if slot % 2 == 1 { 0x80 } else { 0 };
         let port = iso_notify_endpoint_for(origin.pid(), endpoint);
         if tairix_rt::port_bind(port, ISO_NOTIFY_LEN, capacity) != 0 {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "usb-audio: a stream's notify port could not be bound",
-                Some(DriverError::Busy),
+            return end(
+                DriverExit::BringupFailed,
+                &[
+                    step("usb-audio: a stream's notify port could not be bound"),
+                    error(DriverError::Busy),
+                ],
             );
         }
         // The port's id is derived from this process's pid, so only the host
         // controller serving the URB endpoint is admitted to it: no one else
         // can fill it and starve a stream of its notices.
         if let Err(errno) = tairix_rt::port_admit(port, urb_endpoint) {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "usb-audio: a stream's notify port could not be restricted to the host controller",
-                Some(DriverError::from_errno(errno)),
-            );
+            return end(DriverExit::BringupFailed, &[step("usb-audio: a stream's notify port could not be restricted to the host controller"), error(DriverError::from_errno(errno))]);
         }
         audio.transport_mut().ports[slot] = Some(port);
         wakes[count] = DeviceWake::Port(port);

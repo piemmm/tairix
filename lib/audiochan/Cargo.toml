@@ -43,6 +43,8 @@ tairix-rt = { path = "../rt", version = "=0.0.0" }
 # Structured audit logging over the `log_emit` syscall: the one-shot
 # "device channel published, serving" readiness beacon.
 tairix-log = { path = "../log", version = "=0.0.0" }
+# The one vocabulary a driver ends with.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0" }
 # The DMA client a cyclic stream's production channel (`cyclic::LinkDma`)
 # drives over the device's link.
 tairix-linkclient = { path = "../linkclient", version = "=0.0.0" }

@@ -48,7 +48,6 @@ ends the driver with a stable exit code and its reason logged.
 | Id | Level | Decision |
 |---|---|---|
 | 24300 | Info | serving |
-| 24301 | Error | ending, with the reason |
 | 24302 | Info | a clock set running, retuned, or raised or lowered to a floor |
 | 24303 | Info | a consumer joined an exact clock |
 | 24304 | Info | a clock returned with its last holder |
@@ -56,6 +55,9 @@ ends the driver with a stable exit code and its reason logged.
 | 24306 | Warn | a clock's old setting cut off mid-period |
 | 24307 | Error | a clock that would not change, left as it is |
 | 24308 | Warn | a request refused |
+| 24309 | Warn | a clock its last holder left that could not be returned, left running |
+
+A driver's ending is the driver runtime's record (`tairix_drvrt::exit`).
 
 ## Testing
 

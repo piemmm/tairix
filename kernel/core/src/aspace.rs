@@ -1571,6 +1571,8 @@ impl AddressSpaceRegistry {
     /// last thread — what lets the DMA quarantine trust a reset by it over
     /// memory an earlier instance carved.
     ///
+    /// Answers the admission's generation.
+    ///
     /// # Errors
     ///
     /// [`Errno::Busy`] while another driver holds `node_id`, and
@@ -1580,7 +1582,7 @@ impl AddressSpaceRegistry {
         task: ProcessId,
         node_id: u32,
         dma: crate::iommu::DmaPath,
-    ) -> Result<(), Errno> {
+    ) -> Result<u64, Errno> {
         if self.node_drivers.contains_key(&node_id) {
             return Err(Errno::Busy);
         }
@@ -1600,7 +1602,7 @@ impl AddressSpaceRegistry {
                 mastered: None,
             },
         );
-        Ok(())
+        Ok(generation)
     }
 
     /// Take hardware-tree `node` for a kernel driver for good: it is held by

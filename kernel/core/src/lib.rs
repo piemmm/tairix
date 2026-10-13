@@ -235,15 +235,15 @@ pub use driver_store::{
 };
 pub use filemap::{FileMap, NullFileMap, NULL_FILE_MAP};
 pub use fs::{
-    Access, AclEntry, AclWho, CachedFs, Credentials, FilesystemAlreadyInstalled, FilesystemService,
-    IdentityAlreadyInstalled, LateFilesystem, LateIdentity, Metadata, Mode, MountBacking,
-    MountPoint, MountTable, MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError,
-    VolumeForest, VolumePublishError, VolumeService, NULL_FILESYSTEM, NULL_VOLUME_FOREST,
-    NULL_VOLUME_SERVICE,
+    read_bootstrap_file, Access, AclEntry, AclWho, BootstrapFile, BootstrapReadError, CachedFs,
+    Credentials, FilesystemAlreadyInstalled, FilesystemService, IdentityAlreadyInstalled,
+    LateFilesystem, LateIdentity, Metadata, Mode, MountBacking, MountPoint, MountTable,
+    MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError, VolumeForest,
+    VolumePublishError, VolumeService, NULL_FILESYSTEM, NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
 pub use groups::{
     build_identity_table, load_groups_db, system_identity_table, GroupsDbSource, GroupsLoadError,
-    LateGroupsDb, NullGroupsDbSource, GROUPS_DB_PATH, NULL_GROUPS_DB,
+    LateGroupsDb, NullGroupsDbSource, GROUPS_DB, GROUPS_DB_PATH, NULL_GROUPS_DB,
 };
 pub use hwtree::{HwDriverTree, HwNodeLiveness, HwTreeSource, NullHwTreeSource, NULL_HW_TREE};
 pub use init::{kernel_main, InitError, KernelInitSpawner, Phase, SchedWaitQueueArch};
@@ -288,7 +288,7 @@ pub use rlimit::{authorize_set, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
 pub use seat::{
     seat_errno, PresentGate, SeatRegistry, KEYBOARD_CHANNEL_CAPACITY, NULL_SEAT_REGISTRY,
 };
-pub use sleep::{park_until, NotParkable};
+pub use sleep::{park_on_until, park_until, NotParkable};
 pub use sleeplock::{SleepGuard, SleepLock};
 pub use smp::{run_secondary, SecondaryExit};
 pub use spawn::{
@@ -307,7 +307,7 @@ pub use supervisor_system::{
     BootLogTail, SupervisorSystem,
 };
 pub use syscalls::{KernelDispatchHook, KernelSpawnCtx, KernelSyscallHandlers, LoadPlan};
-pub use syscfg::load_and_apply_system_config;
+pub use syscfg::{load_and_apply_system_config, SYSTEM_CONFIG};
 pub use traps::{on_reschedule_ipi, on_timer_tick, on_user_preempt_point};
 pub use useradmin::{
     LateUsersAdmin, NullUsersAdmin, UserAdminBacking, UserAdminEngine, UsersAdmin,
@@ -315,7 +315,7 @@ pub use useradmin::{
 };
 pub use users::{
     load_users_db, load_users_db_source, HeldUsersDbSource, LateUsersDb, NullUsersDbSource,
-    UsersDbAlreadyInstalled, UsersDbSource, UsersDbText, UsersLoadError, NULL_USERS_DB,
+    UsersDbAlreadyInstalled, UsersDbSource, UsersDbText, UsersLoadError, NULL_USERS_DB, USERS_DB,
     USERS_DB_PATH,
 };
 pub use waitq::{

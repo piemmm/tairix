@@ -23,7 +23,7 @@
  *     vector module's own `.balign 0x800` keeps it aligned.
  *   - the boot heap has a declared `.heap` (NOLOAD) section, as on
  *     riscv64. Left undeclared it is an orphan, which the linker may
- *     place as PROGBITS (64 MiB of zeros in the image) or drop, leaving
+ *     place as PROGBITS (the arena as zeros in the image) or drop, leaving
  *     the allocator a base backing no RAM; `KEEP` holds it when only a
  *     `const` address-of refers to it.
  */

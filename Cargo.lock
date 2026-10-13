@@ -1080,6 +1080,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-drvrt",
  "tairix-linkclient",
  "tairix-log",
  "tairix-rt",
@@ -1263,7 +1264,6 @@ name = "tairix-codec"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-audiochan",
  "tairix-drvrt",
  "tairix-log",
 ]
@@ -1643,6 +1643,7 @@ dependencies = [
  "tairix-drvrt",
  "tairix-log",
  "tairix-rt",
+ "tairix-util",
 ]
 
 [[package]]
@@ -1763,6 +1764,7 @@ name = "tairix-drv-bus-i2c-brcmstb"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-drvrt",
  "tairix-i2cbus",
  "tairix-rt",
 ]
@@ -1838,6 +1840,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-clock",
+ "tairix-drvrt",
  "tairix-fuzzseed",
  "tairix-rt",
 ]
@@ -1848,6 +1851,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-clock",
+ "tairix-drvrt",
  "tairix-rt",
 ]
 
@@ -2061,7 +2065,6 @@ name = "tairix-drv-rtc-ds3231"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-i2c",
  "tairix-linkclient",
@@ -2073,7 +2076,6 @@ name = "tairix-drv-rtc-goldfish"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-rt",
 ]
@@ -2083,7 +2085,6 @@ name = "tairix-drv-rtc-mc146818"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-rt",
 ]
@@ -2093,7 +2094,6 @@ name = "tairix-drv-rtc-pcf85063a"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-i2c",
  "tairix-linkclient",
@@ -2105,7 +2105,6 @@ name = "tairix-drv-rtc-pcf8523"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-i2c",
  "tairix-linkclient",
@@ -2117,7 +2116,6 @@ name = "tairix-drv-rtc-pl031"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-rt",
 ]
@@ -2127,7 +2125,6 @@ name = "tairix-drv-rtc-rpi"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-caps",
  "tairix-drvrt",
  "tairix-rt",
  "tairix-vcmailbox",
@@ -3343,6 +3340,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-drvrt",
  "tairix-log",
  "tairix-net",
  "tairix-rt",
@@ -6885,6 +6883,7 @@ dependencies = [
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
+ "tairix-kernel-core",
  "tairix-log",
  "tairix-test-stalltrace",
 ]

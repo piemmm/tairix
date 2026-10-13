@@ -12,9 +12,9 @@ use tairix_log::EventId;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const SEATMGR_RANGE_START: u32 = 14_000;
+pub const SEATMGR_RANGE_START: u32 = tairix_log::registry::SEATMGR.start();
 /// Range end (exclusive) reserved for `seatmgr` event identifiers.
-pub const SEATMGR_RANGE_END: u32 = 15_000;
+pub const SEATMGR_RANGE_END: u32 = tairix_log::registry::SEATMGR.end();
 
 /// A seat-administration request was authorised and forwarded to the
 /// kernel (which audits the switch/revoke itself with the seat and evicted

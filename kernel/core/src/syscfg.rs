@@ -29,7 +29,13 @@ use tairix_sysconfig::{CacheClass, SystemConfig, CONFIG_PATH, MAX_CONFIG_LEN};
 
 use crate::audit::{emit, AuditEvent};
 use crate::cache_control::CacheControl;
-use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
+use crate::fs::{read_bootstrap_file, BootstrapFile, BootstrapReadError, VfsError};
+
+/// `system.conf` as the boot reads it.
+pub const SYSTEM_CONFIG: BootstrapFile = BootstrapFile {
+    path: CONFIG_PATH,
+    max_len: MAX_CONFIG_LEN,
+};
 
 /// Read `system.conf` off the mounted root `fs`, parse it, and apply the
 /// operator's caching switches to `control` and the pointer-button chatter
@@ -53,7 +59,7 @@ pub fn load_and_apply_system_config<F>(fs: &mut F, control: &CacheControl, audit
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    let (config, source) = match read_bootstrap_file(fs, CONFIG_PATH, MAX_CONFIG_LEN) {
+    let (config, source) = match read_bootstrap_file(fs, SYSTEM_CONFIG) {
         Ok(buf) => match core::str::from_utf8(&buf).map(SystemConfig::parse) {
             Ok(Ok(config)) => (config, "store"),
             Ok(Err(_)) => {
@@ -88,6 +94,7 @@ const fn read_error_cause(err: BootstrapReadError) -> &'static str {
         BootstrapReadError::NotAFile => "not_a_file",
         BootstrapReadError::TooLarge => "too_large",
         BootstrapReadError::ShortRead => "short_read",
+        BootstrapReadError::OutOfMemory => "out_of_memory",
     }
 }
 

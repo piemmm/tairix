@@ -43,9 +43,9 @@
 use tairix_log::{log, Event, EventId, Level, Sink};
 
 /// Range start (inclusive) reserved for `arxfs` scrub event identifiers.
-pub const ARXFS_RANGE_START: u32 = 12_000;
+pub const ARXFS_RANGE_START: u32 = tairix_log::registry::ARXFS.start();
 /// Range end (exclusive) reserved for `arxfs` scrub event identifiers.
-pub const ARXFS_RANGE_END: u32 = 13_000;
+pub const ARXFS_RANGE_END: u32 = tairix_log::registry::ARXFS.end();
 
 /// A scrub pass finished and the volume verified clean (no faults found).
 pub const SCRUB_CLEAN: EventId = EventId(12_001);

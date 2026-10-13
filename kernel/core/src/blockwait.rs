@@ -52,10 +52,16 @@ use tairix_kernel_irq::{
     block_until_ready, IrqController, IrqTable, IrqWaitAbort, IrqWaiter, WaitOutcome,
 };
 use tairix_kernel_sec::ProcessId;
+use tairix_log::{Field, FieldValue, Level, Sink};
 
+use crate::audit::{emit, AuditEvent};
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
 use crate::waitq::{nearest_timed_deadline, wait_arch, IRQ_WAITQ};
+
+/// How long after its line fired a woken wait is recorded as late: a healthy
+/// kernel delivers a wake in microseconds.
+const LATE_WAKE_NS: u64 = 250_000_000;
 
 /// A bounded CPU-park a port supplies for contexts that cannot be
 /// scheduler-parked (see the module docs). It must return once the bound
@@ -87,6 +93,8 @@ pub struct IrqParkWaiter {
     controller: &'static (dyn IrqController + Sync),
     /// The port's bounded CPU-park for non-parkable contexts.
     fallback_park: Option<FallbackPark>,
+    /// Where a wake delivered late is recorded.
+    audit: &'static (dyn Sink + Sync),
 }
 
 impl IrqParkWaiter {
@@ -95,7 +103,7 @@ impl IrqParkWaiter {
     /// `table`/`handle` name `owner`'s binding, and `fallback_park` is the
     /// port's bounded CPU-park for contexts that cannot be
     /// scheduler-parked, or [`None`] for a waiter only a dispatched task
-    /// drives.
+    /// drives. A wake delivered late is recorded through `audit`.
     #[must_use]
     pub fn new(
         table: &'static IrqTable,
@@ -103,6 +111,7 @@ impl IrqParkWaiter {
         owner: ProcessId,
         controller: &'static (dyn IrqController + Sync),
         fallback_park: Option<FallbackPark>,
+        audit: &'static (dyn Sink + Sync),
     ) -> Self {
         Self {
             table,
@@ -110,6 +119,7 @@ impl IrqParkWaiter {
             owner,
             controller,
             fallback_park,
+            audit,
         }
     }
 
@@ -130,9 +140,71 @@ impl IrqParkWaiter {
     /// request* must always pass its device's per-request deadline, because
     /// the request's completion is the only other thing that could end the
     /// wait.
+    ///
+    /// A fire that took a quarter of a second or more to reach this wait is
+    /// recorded ([`AuditEvent::IrqWakeLate`]).
     #[must_use]
     pub fn park_wait(&self, timeout_ns: u64) -> WaitOutcome {
-        block_until_ready(self.table, self.handle, self.owner, timeout_ns, self)
+        let from = self.table.now_ns();
+        let outcome = block_until_ready(self.table, self.handle, self.owner, timeout_ns, self);
+        if let (WaitOutcome::Ready, Some(from)) = (outcome, from) {
+            self.record_if_late(from);
+        }
+        outcome
+    }
+
+    /// Record a fire that landed after `from`, when this wait began, yet
+    /// reached the waiter [`LATE_WAKE_NS`] or more after it, with when the
+    /// interrupt's deferred wake was performed: the table's clock is the
+    /// wait clock.
+    fn record_if_late(&self, from: u64) {
+        // A fire after `from` cannot reach us later than the wait lasted, so a
+        // prompt wake costs one clock read and no binding lookup.
+        let Some(now) = self
+            .table
+            .now_ns()
+            .filter(|&now| now.saturating_sub(from) >= LATE_WAKE_NS)
+        else {
+            return;
+        };
+        let Some(fired) = self.table.last_fire_ns(self.handle, self.owner) else {
+            return;
+        };
+        let late = now.saturating_sub(fired);
+        if fired <= from || late < LATE_WAKE_NS {
+            return;
+        }
+        let Some(line) = self.table.line_for(self.handle, self.owner) else {
+            return;
+        };
+        let drained = IRQ_WAITQ.drained_at_ns().filter(|&at| at >= fired);
+        let mut fields = [
+            Field {
+                key: "line",
+                value: FieldValue::UnsignedInt(u64::from(line)),
+            },
+            Field {
+                key: "late_ms",
+                value: FieldValue::UnsignedInt(late / 1_000_000),
+            },
+            Field {
+                key: "drained_ms",
+                value: FieldValue::Null,
+            },
+        ];
+        let len = match drained {
+            Some(at) => {
+                fields[2].value = FieldValue::UnsignedInt((at - fired) / 1_000_000);
+                3
+            }
+            None => 2,
+        };
+        emit(
+            self.audit,
+            Level::Warn,
+            AuditEvent::IrqWakeLate,
+            &fields[..len],
+        );
     }
 }
 
@@ -206,9 +278,10 @@ impl IrqParkWaiter {
 mod tests {
     use super::*;
 
-    use tairix_kernel_irq::MaskError;
+    use tairix_kernel_irq::{MaskError, MonotonicClock};
 
     use crate::test_boot;
+    use crate::test_sink::{with_log_level, TestSink};
 
     /// Permissive controller so `IrqTable::fire` can mask and the waiter
     /// can re-arm without an architecture port.
@@ -237,6 +310,30 @@ mod tests {
         panic!("this wait must not park at all");
     }
 
+    /// Fallback that raises the line, then lets its wake take `LATE_WAKE_NS`
+    /// to reach the waiter.
+    fn late_firing_fallback(table: &IrqTable, _handle: IrqHandle) {
+        test_boot::advance_clock(1_000);
+        table.fire(LINE, &OkController).expect("fires");
+        test_boot::advance_clock(LATE_WAKE_NS);
+    }
+
+    /// Fallback for a line that stays silent past `LATE_WAKE_NS`, then fires
+    /// and is woken at once.
+    fn idle_then_firing_fallback(table: &IrqTable, _handle: IrqHandle) {
+        test_boot::advance_clock(2 * LATE_WAKE_NS);
+        table.fire(LINE, &OkController).expect("fires");
+    }
+
+    /// The wait clock, which boot installs as the table's.
+    struct WaitClock;
+    impl MonotonicClock for WaitClock {
+        fn now_ns(&self) -> u64 {
+            wait_arch().map_or(0, crate::waitq::WaitQueueArch::now_ns)
+        }
+    }
+    static WAIT_CLOCK: WaitClock = WaitClock;
+
     const LINE: u32 = 9;
     const OWNER: ProcessId = ProcessId(31);
 
@@ -249,12 +346,30 @@ mod tests {
     /// not-parkable answer a host test with no dispatch loop must get — and
     /// the fallback is reached deterministically.
     fn bound_waiter(fallback: FallbackPark) -> (&'static IrqTable, IrqHandle, IrqParkWaiter) {
+        let (table, handle, waiter, _) = recorded_waiter(fallback);
+        (table, handle, waiter)
+    }
+
+    /// As [`bound_waiter`], the table on the wait clock as at boot, with the
+    /// sink the waiter records through.
+    fn recorded_waiter(
+        fallback: FallbackPark,
+    ) -> (
+        &'static IrqTable,
+        IrqHandle,
+        IrqParkWaiter,
+        &'static TestSink,
+    ) {
         let _ = test_boot::claim_scheduler();
         let table: &'static IrqTable =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
+        table.set_clock(&WAIT_CLOCK).expect("a fresh table");
         let out = table.bind(LINE, OWNER).expect("binds");
-        let waiter = IrqParkWaiter::new(table, out.handle, OWNER, &CONTROLLER, Some(fallback));
-        (table, out.handle, waiter)
+        let sink: &'static TestSink =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(TestSink::new()));
+        let waiter =
+            IrqParkWaiter::new(table, out.handle, OWNER, &CONTROLLER, Some(fallback), sink);
+        (table, out.handle, waiter, sink)
     }
 
     #[test]
@@ -289,12 +404,63 @@ mod tests {
         let table: &'static IrqTable =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
         let out = table.bind(LINE, OWNER).expect("binds");
-        let waiter = IrqParkWaiter::new(table, out.handle, OWNER, &CONTROLLER, None);
+        let waiter = IrqParkWaiter::new(
+            table,
+            out.handle,
+            OWNER,
+            &CONTROLLER,
+            None,
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(TestSink::new())),
+        );
         assert_eq!(
             waiter.park_wait(u64::MAX),
             WaitOutcome::Aborted(IrqWaitAbort::Unparkable),
             "never a spin"
         );
+    }
+
+    #[test]
+    fn a_fire_whose_wake_reaches_the_waiter_late_is_recorded() {
+        let (_table, _handle, waiter, sink) = recorded_waiter(late_firing_fallback);
+        with_log_level(Level::Trace, || {
+            assert_eq!(waiter.park_wait(u64::MAX), WaitOutcome::Ready);
+        });
+        let events = sink.snapshot();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, AuditEvent::IrqWakeLate.id());
+        assert_eq!(events[0].level, Level::Warn);
+        assert_eq!(
+            events[0].fields[..2],
+            [
+                ("line".into(), "9".into()),
+                ("late_ms".into(), "250".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_prompt_wake_or_a_fire_before_the_wait_is_not_recorded() {
+        let (_table, _handle, waiter, sink) = recorded_waiter(firing_fallback);
+        with_log_level(Level::Trace, || {
+            assert_eq!(waiter.park_wait(u64::MAX), WaitOutcome::Ready);
+        });
+        let (table, _handle, waiter, early) = recorded_waiter(no_park);
+        table.fire(LINE, &OkController).expect("fires");
+        test_boot::advance_clock(LATE_WAKE_NS);
+        with_log_level(Level::Trace, || {
+            assert_eq!(waiter.park_wait(u64::MAX), WaitOutcome::Ready);
+        });
+        assert!(sink.snapshot().is_empty(), "a prompt wake");
+        assert!(early.snapshot().is_empty(), "a fire the wait found waiting");
+    }
+
+    #[test]
+    fn a_long_idle_wait_woken_promptly_is_not_recorded() {
+        let (_table, _handle, waiter, sink) = recorded_waiter(idle_then_firing_fallback);
+        with_log_level(Level::Trace, || {
+            assert_eq!(waiter.park_wait(u64::MAX), WaitOutcome::Ready);
+        });
+        assert!(sink.snapshot().is_empty(), "a long wait is not a late wake");
     }
 
     #[test]

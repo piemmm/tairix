@@ -269,7 +269,7 @@ impl NetworkOffer {
 ///
 /// A desktop-launched service writes `stderr` to nowhere a user will look,
 /// so the one place the reason for stopping can still be found is the log.
-pub const SESSION_REFUSED: EventId = EventId(21_000);
+pub const SESSION_REFUSED: EventId = EventId(31_000);
 
 /// The Switchboard service: the sampler, the derived tray summary's
 /// hysteresis, the publish gate, the rolling meter readings, and the

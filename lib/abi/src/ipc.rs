@@ -47,17 +47,12 @@ pub const IPC_CALL_CAPACITY_MAX: usize = 256;
 /// ([`crate::service_control::SERVICE_CONTROL_ENDPOINT`]), the RAID array
 /// composer's member rendezvous
 /// ([`crate::raid_ipc::RAID_REGISTRY_ENDPOINT`]) and its administration and
-/// status surface ([`crate::raid_admin::RAID_CONTROL_ENDPOINT`]), the per-NIC
-/// driver device channels
-/// ([`crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE`] through
-/// `+ NET_CHANNEL_ENDPOINT_COUNT`), the per-audio-device driver device
-/// channels
-/// ([`crate::driver::audio_channel::AUDIO_CHANNEL_ENDPOINT_BASE`] through
-/// `+ AUDIO_CHANNEL_ENDPOINT_COUNT`), the per-console elevation
-/// supervisors ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
+/// status surface ([`crate::raid_admin::RAID_CONTROL_ENDPOINT`]), the
+/// per-console elevation supervisors
+/// ([`crate::elevate::ELEVATE_ENDPOINT_BASE`] through
 /// `ELEVATE_ENDPOINT_BASE + CONSOLE_INDEX_MAX`), and every per-node block
-/// ([`crate::hwtree::NodeEndpointBlock::ALL`]: bus children, DMA
-/// controllers).
+/// ([`crate::hwtree::NodeEndpointBlock::ALL`]: the link suppliers' roles and
+/// the NIC and audio device channels).
 ///
 /// Binding a reserved id requires
 /// [`crate::CapabilityId::IPC_BIND_PRIVILEGED`] even when the endpoint
@@ -93,11 +88,6 @@ pub const fn is_reserved_endpoint(id: u64) -> bool {
         || id == crate::sound_cue::SOUND_CUE_ENDPOINT
         || id == crate::raid_ipc::RAID_REGISTRY_ENDPOINT
         || id == crate::raid_admin::RAID_CONTROL_ENDPOINT
-    {
-        return true;
-    }
-    if crate::driver::net_channel::is_net_channel_endpoint(id)
-        || crate::driver::audio_channel::is_audio_channel_endpoint(id)
     {
         return true;
     }

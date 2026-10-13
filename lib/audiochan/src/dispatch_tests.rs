@@ -23,8 +23,8 @@ use super::{ChannelIo, Dispatcher, MappedRegion};
 use crate::mock_audio::{MockAudio, MOCK_PERIOD, MOCK_RATE_HZ, SINK, SOURCE};
 
 const MIXER: ProcId = ProcId::from_raw([9; 16]);
-const NOTIFY_PORT: u64 = notify_endpoint_for(9, 0);
-const WATCH_PORT: u64 = notify_endpoint_for(9, 0x80);
+const NOTIFY_PORT: u64 = notify_endpoint_for(9, 0).expect("a slot");
+const WATCH_PORT: u64 = notify_endpoint_for(9, 0x80).expect("a slot");
 const RING_FRAMES: u32 = 512;
 
 fn ring_len() -> usize {

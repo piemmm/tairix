@@ -48,6 +48,12 @@ impl CollectingHwNodeSink {
     pub fn nodes_mut(&mut self) -> &mut [HwNode] {
         &mut self.nodes
     }
+
+    /// Keep only the nodes `keep` admits, in emit order, so a parent is
+    /// decided before its children.
+    pub fn retain(&mut self, keep: impl FnMut(&HwNode) -> bool) {
+        self.nodes.retain(keep);
+    }
 }
 
 impl Default for CollectingHwNodeSink {

@@ -51,6 +51,7 @@ use super::net::{
 };
 use super::net_ring::{RingGeometry, ServiceReport};
 use super::BufferClass;
+use crate::hwtree::NodeEndpointBlock;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::Errno;
 
@@ -63,28 +64,19 @@ pub const NET_CHANNEL_NOTIFY_MAGIC: u32 = u32::from_le_bytes(*b"NCHN");
 /// The `netchan-v1` protocol version.
 pub const NET_CHANNEL_VERSION_V1: u16 = 1;
 
-/// Base of the reserved device-channel call-endpoint id block (`"NCHAN\0\0\0"`
-/// little-endian). Each NIC driver process claims the first free id in
-/// `NET_CHANNEL_ENDPOINT_BASE .. NET_CHANNEL_ENDPOINT_BASE + NET_CHANNEL_ENDPOINT_COUNT`
-/// by binding it (the `drivers/bus/usb/xhci` block-claim precedent), so two NIC
-/// drivers never collide on an id without a central allocator.
+/// The device-channel call endpoints, one per NIC's hardware-tree node: a NIC
+/// driver binds the id of the node it was loaded for, which the kernel admits
+/// for that driver alone, so no two drivers ever reach for one id.
 ///
-/// The block is a reserved rendezvous
-/// ([`crate::ipc::is_reserved_endpoint`]): binding any id in it requires
-/// [`CapabilityId::IPC_BIND_PRIVILEGED`](crate::CapabilityId::IPC_BIND_PRIVILEGED),
-/// so an unprivileged squatter cannot bind one first and impersonate the
-/// driver to the stack. The driver additionally binds it **restricted
-/// sender**, requiring the caller to hold
+/// The block is reserved ([`crate::ipc::is_reserved_endpoint`]), so binding
+/// one also requires
+/// [`CapabilityId::IPC_BIND_PRIVILEGED`](crate::CapabilityId::IPC_BIND_PRIVILEGED).
+/// The driver binds it **restricted sender**, requiring the caller to hold
 /// [`CapabilityId::NET_RAW`](crate::CapabilityId::NET_RAW) (driving a NIC's
 /// raw frame rings *is* raw network access), so the kernel refuses at
 /// dispatch every caller but the network stack — the receiver never
 /// re-checks.
-pub const NET_CHANNEL_ENDPOINT_BASE: u64 = u64::from_le_bytes(*b"NCHAN\0\0\0");
-
-/// Number of concurrently-bindable device-channel endpoint ids: the most
-/// NIC driver processes the stack serves at once. A fixed validation bound
-/// on the reserved block, not an interface-count capacity.
-pub const NET_CHANNEL_ENDPOINT_COUNT: u64 = 16;
+pub const NET_CHANNEL_ENDPOINTS: NodeEndpointBlock = NodeEndpointBlock::tagged(*b"NC");
 
 /// Device-tree-style `compatible` model name of the hardware-tree node a NIC
 /// driver publishes to advertise the device-channel endpoint it claimed.
@@ -97,15 +89,14 @@ pub const NET_CHANNEL_ENDPOINT_COUNT: u64 = 16;
 /// looked for can never drift.
 pub const NETCHAN_NODE_COMPATIBLE: &[u8] = b"tairix,netchan";
 
-/// Whether `id` is one of the reserved device-channel endpoint ids.
-#[must_use]
-pub const fn is_net_channel_endpoint(id: u64) -> bool {
-    id >= NET_CHANNEL_ENDPOINT_BASE && id < NET_CHANNEL_ENDPOINT_BASE + NET_CHANNEL_ENDPOINT_COUNT
-}
-
 /// High tag of a stack-owned device-channel notify-port id (see
 /// [`notify_endpoint_for`]).
 const NET_NOTIFY_ENDPOINT_TAG: u64 = 0x4E4E_0000_0000_0000;
+
+/// The device-channel notify ports one stack process can name: the slot field
+/// of [`notify_endpoint_for`]'s id is a byte, so this is the most channels one
+/// stack serves at once.
+pub const NET_NOTIFY_SLOTS: u64 = 1 << 8;
 
 /// The notify-mailbox endpoint id the network stack binds for one managed
 /// channel-backed interface and passes to the driver in
@@ -122,13 +113,16 @@ const NET_NOTIFY_ENDPOINT_TAG: u64 = 0x4E4E_0000_0000_0000;
 /// cannot steal them; a spurious notify at worst costs one extra
 /// [`NetChannelRequest::Service`] doorbell.
 ///
-/// `index` is bounded by [`NET_CHANNEL_ENDPOINT_COUNT`] (the most channels
-/// the stack serves at once) and occupies the low byte; `pid` occupies the
-/// next 40 bits, which is the whole of [`crate::PID_MAX`], so the three
-/// fields tile the word exactly and no pid can reach the tag.
+/// `index` occupies the low byte; `pid` occupies the next 40 bits, which is
+/// the whole of [`crate::PID_MAX`], so the three fields tile the word exactly
+/// and no pid can reach the tag. [`None`] for an `index` of
+/// [`NET_NOTIFY_SLOTS`] or more, which would alias a lower slot's port.
 #[must_use]
-pub const fn notify_endpoint_for(pid: u64, index: u64) -> u64 {
-    NET_NOTIFY_ENDPOINT_TAG | ((pid & crate::PID_MAX) << 8) | (index & 0xFF)
+pub const fn notify_endpoint_for(pid: u64, index: u64) -> Option<u64> {
+    if index >= NET_NOTIFY_SLOTS {
+        return None;
+    }
+    Some(NET_NOTIFY_ENDPOINT_TAG | ((pid & crate::PID_MAX) << 8) | index)
 }
 
 /// Operation discriminants (the request's fifth byte).
@@ -1095,8 +1089,8 @@ mod tests {
     #[test]
     fn a_notify_endpoint_packs_pid_and_slot_without_reaching_the_tag() {
         for pid in [0u64, 1, 4096, crate::PID_MAX] {
-            for index in [0u64, 1, NET_CHANNEL_ENDPOINT_COUNT - 1] {
-                let endpoint = notify_endpoint_for(pid, index);
+            for index in [0u64, 1, NET_NOTIFY_SLOTS - 1] {
+                let endpoint = notify_endpoint_for(pid, index).expect("a slot");
                 assert_eq!(endpoint & 0xFF, index);
                 assert_eq!((endpoint >> 8) & crate::PID_MAX, pid);
                 assert_eq!(endpoint >> 48, NET_NOTIFY_ENDPOINT_TAG >> 48);
@@ -1107,6 +1101,7 @@ mod tests {
             notify_endpoint_for(crate::PID_MAX, 0),
             notify_endpoint_for(crate::PID_MAX - 1, 0)
         );
+        assert_eq!(notify_endpoint_for(1, NET_NOTIFY_SLOTS), None);
     }
 
     fn geometry() -> RingGeometry {
@@ -1121,7 +1116,7 @@ mod tests {
             geometry: geometry(),
             region_grant: 0xDEAD_BEEF_0BAD_F00D,
             class: BufferClass::Sensitive,
-            notify_endpoint: NET_CHANNEL_ENDPOINT_BASE,
+            notify_endpoint: NET_CHANNEL_ENDPOINTS.endpoint(3),
         })
     }
 

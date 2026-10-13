@@ -341,6 +341,23 @@ fn a_floor_leaving_brings_the_clock_down_and_the_last_returns_it_to_its_boot_rat
 }
 
 #[test]
+fn a_clock_its_last_holder_left_that_will_not_return_is_reported_running() {
+    let (mut rig, hardware) = rig();
+    rig.floor(HDMI0, link(HSM, 0), 150_000_000).expect("floors");
+    hardware.stick(true);
+    assert_eq!(rig.release(HDMI0, link(HSM, 0)), Ok(()));
+    assert_eq!(hardware.rate(2), 150_000_000, "left running as it was held");
+    assert!(rig.records().contains(&Record::Unreturned { clock: HSM }));
+    assert!(!rig.records().contains(&Record::Stuck { clock: HSM }));
+    hardware.stick(false);
+    assert_eq!(
+        rig.floor(HDMI1, link(HSM, 0), 300_000_000),
+        Ok(300_000_000),
+        "a later holder sets it afresh"
+    );
+}
+
+#[test]
 fn a_floor_raise_that_fails_leaves_every_other_holders_floor_standing() {
     let (mut rig, hardware) = rig();
     rig.floor(HDMI0, link(HSM, 0), 150_000_000).expect("floors");

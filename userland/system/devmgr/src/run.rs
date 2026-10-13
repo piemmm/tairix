@@ -51,8 +51,8 @@ mod program {
     };
     use tairix_abi::hwtree::HwDeviceClass;
     use tairix_abi::net_ipc::{
-        NetBondConfigMsg, NetInterfaceConfigMsg, NetstackRequest, NetworkSettings, IF_NAME_LEN,
-        NETSTACK_ENDPOINT,
+        decode_bind_driver_reply, NetBondConfigMsg, NetInterfaceConfigMsg, NetstackRequest,
+        NetworkSettings, BIND_DRIVER_REPLY_LEN, IF_NAME_LEN, NETSTACK_ENDPOINT,
     };
     use tairix_abi::reply::{decode_status_reply, STATUS_REPLY_LEN};
     use tairix_abi::sound_cue::SoundEvent;
@@ -362,17 +362,17 @@ mod program {
             endpoint_id: u64,
             iface: &[u8; IF_NAME_LEN],
             node_location: u64,
-        ) -> Result<(), Errno> {
+        ) -> Result<[u8; 6], Errno> {
             let request = NetstackRequest::BindDriver {
                 endpoint_id,
                 iface: *iface,
                 node_location,
             }
             .to_le_bytes();
-            let mut reply = [0u8; STATUS_REPLY_LEN];
+            let mut reply = [0u8; BIND_DRIVER_REPLY_LEN];
             let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, &request, &mut reply)
                 .map_err(Errno::from_syscall)?;
-            decode_status_reply(&reply[..len])
+            decode_bind_driver_reply(&reply[..len])
         }
 
         fn apply_settings(&mut self, settings: NetworkSettings) -> Result<(), Errno> {

@@ -2676,7 +2676,7 @@ mod tests {
             crate::driver::dmaengine::DMA_CONTROLLER_ENDPOINTS.endpoint(0)
         ));
         assert!(!is_kernel_block_device(
-            crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE
+            crate::driver::net_channel::NET_CHANNEL_ENDPOINTS.endpoint(0)
         ));
     }
 

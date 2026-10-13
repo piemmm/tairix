@@ -35,12 +35,12 @@
 //! kernel heap. This is what lets the kernel heap grow by drawing frames
 //! from here without re-entering itself (a heap that fed itself through
 //! a page allocator whose free lists allocated *from that heap* would
-//! deadlock under its own lock). The only heap use is the one-time
-//! `links`/`tags`/`bitmap` construction, before the heap is under
-//! load. Each free block occupies at most one node (its start frame),
-//! so the per-frame overhead is a fixed `2 * usize + 1` byte — far
-//! leaner than a per-frame descriptor, and proportional to the RAM the
-//! machine actually has.
+//! deadlock under its own lock). Each free block occupies at most one node
+//! (its start frame), so the per-frame overhead is a fixed `2 * usize + 1`
+//! bytes, proportional to the RAM the machine actually has. In the kernel
+//! the arrays are frames carved from that RAM
+//! ([`FrameAllocator::with_dma_reaches_carved`]), so they scale with the
+//! machine rather than with the boot heap.
 //!
 //! # Concurrency
 //!
@@ -54,9 +54,10 @@
 //! `alloc` / `alloc_order` return [`AllocError::OutOfMemory`]; the
 //! allocator never panics on resource exhaustion.
 
-use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use core::mem::ManuallyDrop;
+use core::ptr::NonNull;
 
 use tairix_collections::SmallVec;
 use tairix_inline::intrusive::{IntrusiveList, Link};
@@ -65,6 +66,7 @@ use tairix_sync::SpinLock;
 
 use crate::bootinfo::{BootMemoryMap, RegionKind};
 use crate::error::AllocError;
+use crate::phys::PhysMap;
 
 /// The one physical-RAM class vocabulary, shared with the reporting ABI so a
 /// charged class and a reported class can never be spelled differently.
@@ -382,15 +384,176 @@ impl SlotRun {
     }
 }
 
+/// One per-frame metadata array of a [`FrameAllocator`]: a heap vector, or
+/// frames carved from the RAM the allocator manages ([`carve_metadata`]).
+///
+/// Held as the bare slice either way, so indexing it costs what indexing a
+/// vector does.
+struct Meta<T> {
+    slice: NonNull<[T]>,
+    /// The capacity of the vector `slice` came from; carved frames are never
+    /// freed.
+    heap_capacity: Option<usize>,
+}
+
+impl<T: Copy> Meta<T> {
+    /// `len` copies of `value` on the heap, refused rather than aborting when
+    /// the heap cannot hold them.
+    fn owned(len: usize, value: T) -> Result<Self, AllocError> {
+        let mut vec = Vec::new();
+        vec.try_reserve_exact(len)
+            .map_err(|_| AllocError::MetadataAllocFailed)?;
+        vec.resize(len, value);
+        // `as_mut_ptr` keeps the whole allocation's provenance, which `drop`
+        // frees it through.
+        let first = NonNull::new(vec.as_mut_ptr()).ok_or(AllocError::MetadataAllocFailed)?;
+        let vec = ManuallyDrop::new(vec);
+        Ok(Self {
+            slice: NonNull::slice_from_raw_parts(first, len),
+            heap_capacity: Some(vec.capacity()),
+        })
+    }
+}
+
+impl<T> Drop for Meta<T> {
+    fn drop(&mut self) {
+        if let Some(capacity) = self.heap_capacity {
+            // SAFETY: `owned` took these parts from a vector it never dropped.
+            drop(unsafe {
+                Vec::from_raw_parts(self.slice.cast::<T>().as_ptr(), self.slice.len(), capacity)
+            });
+        }
+    }
+}
+
+impl<T> core::ops::Deref for Meta<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        // SAFETY: every element is initialised, in memory this value alone
+        // reaches for its life: its own vector, or frames no run hands out
+        // behind a `'static` direct map.
+        unsafe { self.slice.as_ref() }
+    }
+}
+
+impl<T> core::ops::DerefMut for Meta<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        // SAFETY: as `deref`, and `&mut self` makes this the one reference.
+        unsafe { self.slice.as_mut() }
+    }
+}
+
+// SAFETY: a `Meta` owns its elements exactly as a vector does, and the state
+// it belongs to moves between CPUs only behind the allocator's lock.
+unsafe impl<T: Send> Send for Meta<T> {}
+
+/// A [`FrameAllocator`]'s per-frame metadata, every frame reading used and
+/// untracked until its run is freed into the pool.
+struct FrameMeta {
+    bitmap: Meta<u64>,
+    links: Meta<Link>,
+    tags: Meta<FrameTag>,
+}
+
+impl FrameMeta {
+    /// A `span`-frame allocator's metadata, its bitmap `words` long, on the
+    /// heap.
+    fn owned(words: usize, span: usize) -> Result<Self, AllocError> {
+        Ok(Self {
+            bitmap: Meta::owned(words, ALL_USED)?,
+            links: Meta::owned(span, Link::UNLINKED)?,
+            tags: Meta::owned(span, FrameTag::UNTRACKED)?,
+        })
+    }
+}
+
+/// Lay a `span`-frame allocator's bitmap (`words` long), links and tags in
+/// frames taken off the top of the highest run in `runs` that holds them and
+/// `phys` reaches.
+///
+/// The top, so the low memory a device that reaches less needs stays with
+/// the runs; and out of `runs`, so no frame of it is ever handed out.
+fn carve_metadata(
+    runs: &mut Vec<(usize, usize)>,
+    words: usize,
+    span: usize,
+    phys: &'static (dyn PhysMap + Sync),
+) -> Result<FrameMeta, AllocError> {
+    let refused = AllocError::MetadataAllocFailed;
+    let links_at = words
+        .checked_mul(size_of::<u64>())
+        .ok_or(refused)?
+        .next_multiple_of(align_of::<Link>());
+    let tags_at = span
+        .checked_mul(size_of::<Link>())
+        .and_then(|bytes| bytes.checked_add(links_at))
+        .ok_or(refused)?;
+    let bytes = span
+        .checked_mul(size_of::<FrameTag>())
+        .and_then(|bytes| bytes.checked_add(tags_at))
+        .ok_or(refused)?;
+    let frames = bytes.div_ceil(PAGE_SIZE);
+    let len = frames.checked_mul(PAGE_SIZE).ok_or(refused)?;
+    let aligned = |base: &NonNull<u8>| {
+        base.as_ptr()
+            .align_offset(align_of::<Link>().max(align_of::<u64>()))
+            == 0
+    };
+    let (at, first, base) = runs
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|&(_, &(first, end))| end - first >= frames)
+        .find_map(|(at, &(_, end))| {
+            let first = end - frames;
+            let base = phys.translate(Frame(first).start(), len).filter(aligned)?;
+            Some((at, first, base))
+        })
+        .ok_or(refused)?;
+    runs[at].1 = first;
+    if runs[at].0 == first {
+        runs.remove(at);
+    }
+    // SAFETY: `phys` maps the whole carve for the life of the kernel, the
+    // carve has just left every run, and each array starts aligned for its
+    // type and ends inside the carve.
+    unsafe {
+        Ok(FrameMeta {
+            bitmap: carved(base, 0, words, ALL_USED),
+            links: carved(base, links_at, span, Link::UNLINKED),
+            tags: carved(base, tags_at, span, FrameTag::UNTRACKED),
+        })
+    }
+}
+
+/// `len` copies of `value` written at byte `at` of `base`, as a carved array.
+///
+/// # Safety
+///
+/// `[base + at, base + at + len * size_of::<T>())` is writable memory owned by
+/// the caller for the life of the result, aligned for `T`.
+unsafe fn carved<T: Copy>(base: NonNull<u8>, at: usize, len: usize, value: T) -> Meta<T> {
+    // SAFETY: the caller's contract covers the whole array.
+    let first = unsafe { base.byte_add(at) }.cast::<T>();
+    for slot in 0..len {
+        // SAFETY: `slot < len`, inside the caller's range.
+        unsafe { first.add(slot).write(value) };
+    }
+    Meta {
+        slice: NonNull::slice_from_raw_parts(first, len),
+        heap_capacity: None,
+    }
+}
+
 /// Internal, lock-free state of the frame allocator.
 ///
 /// `FrameAllocatorState` is what the [`SpinLock`] in [`FrameAllocator`]
 /// guards. Splitting it out makes the locking discipline explicit and
 /// lets the unit tests exercise the algorithm without spinlock noise.
 ///
-/// The per-order free lists are intrusive (see the module docs): a heap
-/// allocation never occurs on the allocate/free paths, only on the
-/// one-time construction of `bitmap`/`links`/`tags`.
+/// The per-order free lists are intrusive (see the module docs): the
+/// allocate/free paths never allocate.
 struct FrameAllocatorState {
     /// Address-space extent, in frames: the frame count from physical zero
     /// to the highest mapped address. Reported by [`FrameAllocator::total_frames`]
@@ -413,16 +576,16 @@ struct FrameAllocatorState {
     span: usize,
     /// Bit set = "frame is allocated, reserved, or non-existent", one bit
     /// per frame of the usable span (indexed by `frame - base_frame`).
-    bitmap: Vec<u64>,
+    bitmap: Meta<u64>,
     /// Intrusive free-list links, one per frame of the usable span (indexed
     /// by `frame - base_frame`). Only a free block's start frame holds live
     /// links; every other frame's link reads back unlinked.
-    links: Vec<Link>,
+    links: Meta<Link>,
     /// Per-frame bookkeeping byte, indexed by `frame - base_frame`: which
     /// free list a registered head is on (so an arbitrary buddy is found and
     /// unlinked in O(1) without scanning), or which [`MemoryClass`] an
     /// allocated block's head is charged to.
-    tags: Vec<FrameTag>,
+    tags: Meta<FrameTag>,
     /// The address zones, ascending and covering the usable span, each with
     /// its own free blocks of each order keyed by slot (`frame - base_frame`).
     zones: Vec<Zone>,
@@ -1011,11 +1174,41 @@ impl FrameAllocator {
     /// # Errors
     ///
     /// Returns [`AllocError::InvariantViolation`] if the map is
-    /// malformed (overflow or overlap) and
-    /// [`AllocError::OutOfMemory`] if the map contains no usable frame.
+    /// malformed (overflow or overlap),
+    /// [`AllocError::OutOfMemory`] if the map contains no usable frame, and
+    /// [`AllocError::MetadataAllocFailed`] if the heap cannot hold the
+    /// per-frame metadata.
     pub fn with_dma_reaches(
         map: &BootMemoryMap,
         reaches: &[core::ops::Range<u64>],
+    ) -> Result<Self, AllocError> {
+        Self::build(map, reaches, None)
+    }
+
+    /// [`Self::with_dma_reaches`], with the per-frame metadata laid in frames
+    /// carved from the top of the highest usable run that holds it and
+    /// reached through the direct map `phys`, rather than in the kernel heap.
+    ///
+    /// The metadata is about 17 bytes a frame, so it scales with the RAM
+    /// discovered — more than a heap that cannot yet grow could hold on a
+    /// large machine. The carved frames are never handed out.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::with_dma_reaches`]; [`AllocError::MetadataAllocFailed`]
+    /// when no usable run holds the metadata or `phys` cannot reach it.
+    pub fn with_dma_reaches_carved(
+        map: &BootMemoryMap,
+        reaches: &[core::ops::Range<u64>],
+        phys: &'static (dyn PhysMap + Sync),
+    ) -> Result<Self, AllocError> {
+        Self::build(map, reaches, Some(phys))
+    }
+
+    fn build(
+        map: &BootMemoryMap,
+        reaches: &[core::ops::Range<u64>],
+        phys: Option<&'static (dyn PhysMap + Sync)>,
     ) -> Result<Self, AllocError> {
         // 1. Determine total frame count.
         let hi = map
@@ -1095,29 +1288,29 @@ impl FrameAllocator {
         }
         let base_frame = lo;
         let span = hi - lo;
+
+        // 4. The per-frame metadata, sized to the *usable* span and indexed
+        //    from `base_frame`, so a usable window at a high physical address
+        //    costs metadata for the RAM it covers rather than for the address
+        //    range it sits in. Every frame reads used until its run is freed
+        //    below, so one outside every run stays reserved.
+        let words = span.div_ceil(64);
+        let FrameMeta {
+            bitmap,
+            links,
+            tags,
+        } = match phys {
+            Some(phys) => carve_metadata(&mut runs, words, span, phys)?,
+            None => FrameMeta::owned(words, span)?,
+        };
+        if runs.is_empty() {
+            return Err(AllocError::OutOfMemory);
+        }
         let boundaries = zone_boundaries(&runs, reaches);
         let zones: Vec<Zone> = core::iter::once(lo)
             .chain(boundaries)
             .map(Zone::new)
             .collect();
-
-        // 4. Allocate the per-frame metadata, all sized to the *usable*
-        //    span and indexed from `base_frame`: the bitmap (all "1" — any
-        //    frame not subsequently marked usable stays reserved), the
-        //    intrusive free-list link array, and the per-block order tag.
-        //    Sizing every one to the usable span rather than the
-        //    address-space extent keeps the bookkeeping proportional to the
-        //    RAM the machine actually has, so a usable window at a very high
-        //    physical address (or a huge sparse map) costs metadata for the
-        //    RAM it covers, not for the address range it sits in. These are
-        //    the allocator's *only* heap use, taken once here at
-        //    construction; the allocate/free paths touch no allocator but
-        //    this one (see the module docs), so the kernel heap can later
-        //    grow by drawing frames from here without re-entering itself.
-        let words = span.div_ceil(64);
-        let bitmap = vec![u64::MAX; words];
-        let links = vec![Link::UNLINKED; span];
-        let tags = vec![FrameTag::UNTRACKED; span];
         let mut state = FrameAllocatorState {
             total_frames,
             base_frame,
@@ -1659,6 +1852,8 @@ unsafe impl Sync for FrameAllocator {}
 mod tests {
     use super::*;
     use crate::bootinfo::MemoryRegion;
+    use crate::phys::SimPhysMap;
+    use tairix_sync::Once;
 
     extern crate std;
     use std::format;
@@ -1874,6 +2069,126 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Simulated RAM over frames `[0, frames)` for the metadata to land in.
+    fn sim_ram(cell: &'static Once<SimPhysMap>, frames: usize) -> &'static SimPhysMap {
+        cell.call_once_infallible(|| SimPhysMap::new(PhysAddr::new(0), frames * PAGE_SIZE))
+            .expect("a fresh cell")
+    }
+
+    #[test]
+    fn carved_metadata_lives_in_frames_the_allocator_never_hands_out() {
+        static RAM: Once<SimPhysMap> = Once::new();
+        let ram = sim_ram(&RAM, 528);
+        let a = FrameAllocator::with_dma_reaches_carved(&small_map(512), &[], ram).unwrap();
+        // 8 bitmap words, then 512 links of 16 bytes and 512 tags: 8768 bytes.
+        let top = 528 - 3;
+        assert_eq!(a.usable_frames(), 509);
+        assert_eq!(free_runs(&a), [(16, 509)]);
+
+        let mut held = Vec::new();
+        while let Ok(frame) = a.alloc(MemoryClass::Kernel) {
+            held.push(frame);
+        }
+        assert_eq!(held.len(), 509);
+        assert!(
+            held.iter().all(|frame| frame.0 < top),
+            "a carved frame was handed out"
+        );
+        for frame in held {
+            a.free(frame).unwrap();
+        }
+        assert_eq!(
+            a.free(Frame(top)),
+            Err(AllocError::InvariantViolation),
+            "a stray free cannot hand the pool its own metadata"
+        );
+
+        // The bitmap opens the carve: every slot free but the carve's own.
+        let bitmap = ram
+            .translate(Frame(top).start(), size_of::<[u64; 8]>())
+            .unwrap()
+            .cast::<u64>();
+        // SAFETY: the sim backs the carve, and no allocator call is live.
+        let words: Vec<u64> = (0..8)
+            .map(|word| unsafe { bitmap.add(word).read() })
+            .collect();
+        assert_eq!(words, [0, 0, 0, 0, 0, 0, 0, u64::MAX << 61]);
+    }
+
+    #[test]
+    fn the_metadata_comes_off_the_top_of_the_highest_run_that_holds_it() {
+        static RAM: Once<SimPhysMap> = Once::new();
+        let ram = sim_ram(&RAM, 2050);
+        let below_the_first_run = 0..2 * MIB;
+        let a = FrameAllocator::with_dma_reaches_carved(
+            &map_of_runs(&[(16, 256), (1024, 256), (2048, 2)]),
+            &[below_the_first_run],
+            ram,
+        )
+        .unwrap();
+        // A 2034-frame span: 256 bitmap bytes, 32544 of links, 2034 of tags.
+        assert_eq!(
+            free_runs(&a),
+            [(16, 256), (1024, 256 - 9), (2048, 2)],
+            "the low memory a device that reaches less needs stays free"
+        );
+    }
+
+    #[test]
+    fn the_metadata_skips_a_run_the_direct_map_cannot_reach() {
+        static RAM: Once<SimPhysMap> = Once::new();
+        let ram = sim_ram(&RAM, 512);
+        let a = FrameAllocator::with_dma_reaches_carved(
+            &map_of_runs(&[(16, 256), (1024, 256)]),
+            &[],
+            ram,
+        )
+        .unwrap();
+        // A 1264-frame span: 160 bitmap bytes, 20224 of links, 1264 of tags.
+        assert_eq!(free_runs(&a), [(16, 256 - 6), (1024, 256)]);
+    }
+
+    #[test]
+    fn metadata_that_fills_a_whole_run_removes_it() {
+        static RAM: Once<SimPhysMap> = Once::new();
+        static LONE: Once<SimPhysMap> = Once::new();
+        let ram = sim_ram(&RAM, 1029);
+        // A 1013-frame span: 128 bitmap bytes, 16208 of links, 1013 of tags.
+        let a = FrameAllocator::with_dma_reaches_carved(
+            &map_of_runs(&[(16, 256), (1024, 5)]),
+            &[],
+            ram,
+        )
+        .unwrap();
+        assert_eq!(free_runs(&a), [(16, 256)]);
+        assert_eq!(a.usable_frames(), 256);
+
+        let lone = sim_ram(&LONE, 17);
+        assert_eq!(
+            FrameAllocator::with_dma_reaches_carved(&small_map(1), &[], lone).err(),
+            Some(AllocError::OutOfMemory),
+            "RAM that only holds its own metadata has no frame to hand out"
+        );
+    }
+
+    #[test]
+    fn metadata_no_reachable_run_holds_is_refused() {
+        static WIDE: Once<SimPhysMap> = Once::new();
+        static NARROW: Once<SimPhysMap> = Once::new();
+        let wide = sim_ram(&WIDE, 1001);
+        // A 985-frame span needs 5 frames of metadata; neither run has them.
+        assert_eq!(
+            FrameAllocator::with_dma_reaches_carved(&map_of_runs(&[(16, 1), (1000, 1)]), &[], wide)
+                .err(),
+            Some(AllocError::MetadataAllocFailed)
+        );
+        let narrow = sim_ram(&NARROW, 64);
+        assert_eq!(
+            FrameAllocator::with_dma_reaches_carved(&small_map(512), &[], narrow).err(),
+            Some(AllocError::MetadataAllocFailed)
+        );
     }
 
     #[test]

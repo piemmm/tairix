@@ -19,7 +19,7 @@
 //! inside one syscall. The kernel must notice at that syscall's *exit* and
 //! emit exactly the record [`assess`] accepts:
 //!
-//! - it is a `TaskLatencyOverrun` (`4150`),
+//! - it is a `TaskLatencyOverrun`,
 //! - `blocked_in` names the syscall that spent the budget rather than
 //!   leaving it to be guessed,
 //! - `blocked_in_ms` is at least the budget, so the report is about the
@@ -85,8 +85,8 @@
 #![cfg_attr(itest_aarch64, no_main)]
 
 /// The audit event id the kernel emits for an interactive-surface frame-budget
-/// overrun. Pinned by the audit-id tests in `kernel/core/src/audit.rs`.
-pub const LATENCY_OVERRUN_EVENT_ID: u32 = 4150;
+/// overrun.
+pub const LATENCY_OVERRUN_EVENT_ID: u32 = tairix_kernel_core::AuditEvent::TaskLatencyOverrun.id().0;
 
 /// Why a `TaskLatencyOverrun` record was refused, or that it was accepted.
 ///

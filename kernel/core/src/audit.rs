@@ -22,6 +22,8 @@
 //! | 4002 | Info  | `KERNEL_PHASE_READY`          | log    | An init phase completed successfully. |
 //! | 4003 | Error | `KERNEL_PHASE_FAILED`         | audit  | An init phase failed; the kernel will halt. |
 //! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
+//! | 4005 | Info/Warn | `KERNEL_RAM_SELF_TEST`    | log    | The early-boot RAM self-test finished; `verified` short of `usable` emits at `Warn`. |
+//! | 4006 | Info/Warn | `KERNEL_HEAP_GROWTH`      | log    | Whether the heap grows past its bootstrap arena (`growth`), with the arena's `bootstrap_bytes` and boot's `peak_bytes` of it; `failed` emits at `Warn`. |
 //! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
 //! | 4011 | Error | `KERNEL_FAULT`                | audit  | A fatal CPU exception was taken in kernel mode. The `syndrome`, `fault_addr`, `fault_pc`, and `fault_sp` fields name the port's exception syndrome, the faulting address, the faulting instruction, and the kernel stack it ran on, each `null` where the CPU gave none; the register and `frame_N` blocks are the panic dump's. |
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
@@ -41,26 +43,27 @@
 //! | 4050 | Info | `INPUT_DELIVERED` | audit | An input driver delivered the **first** record of its kind to the input-focus arbiter — `kind=key` for the first `key_inject` edge, `kind=pointer` for the first `pointer_inject` record, `kind=touch` for the first `touch_inject` frame. Emitted at most once per input kind over the kernel's lifetime, carries no event content or timing — it witnesses that an autoloaded driver of that class is live, never a per-event record. |
 //! | 4051 | Info | `SEAT_SWITCHED` | audit | A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground text console. The `seat` and `console` fields name the seat and the new foreground. |
 //! | 4052 | Warn | `SEAT_LEASE_REVOKED` | audit | A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease holder. The `seat` and `evicted` fields name the seat and the evicted owner's task id. |
-//! | 4100 | Info | `FS_NODE_MUTATED` | audit | A capability- and permission-checked filesystem mutation succeeded (`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_set_mode`/`fs_set_owner`). The `op`, `uid`, and `path` fields name the operation, the caller's kernel-attested uid, and the target; `to` carries a rename's destination, `mode` a chmod's new mode (octal), and `owner`/`group` a chown's new ids. Paths are bounded to the log field limit. |
+//! | 4260 | Info | `FS_NODE_MUTATED` | audit | A capability- and permission-checked filesystem mutation succeeded (`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_set_mode`/`fs_set_owner`). The `op`, `uid`, and `path` fields name the operation, the caller's kernel-attested uid, and the target; `to` carries a rename's destination, `mode` a chmod's new mode (octal), and `owner`/`group` a chown's new ids. Paths are bounded to the log field limit. |
 //! | 4087 | Warn | `DMA_TRANSLATION_BYPASS` | audit | Discovery left a function behind a translation unit unpublished because it would not use the unit: a virtio function offering no `VIRTIO_F_ACCESS_PLATFORM`. The `address` field names the function's requester id and `unit` the unit's node. |
 //! | 4088 | Warn | `DMA_TRANSLATION_FAULT` | audit | A translation unit refused a device's access. `unit`, `stream`, `iova`, `access` and `reason` name it; `node` is the device's node where a domain owner holds the stream, and absent for a stream no owner holds; `suppressed` counts the faults the unit's budget left unrecorded since its last record. |
 //! | 4089 | Error | `DMA_TRANSLATION_STORM` | audit | A stream raised faults past its budget's storm threshold in one window: it was silenced and its `node`, where one holds it, marked `Offline`. Carries the fault's fields and `outcome`: `silenced`, or why the unit could not. |
 //! | 4091 | Warn | `DMA_QUARANTINED` | audit | A driver ended holding DMA memory its device may still master; it passed to its node's quarantine, not the allocator. The `node`, `generation` and `bytes` fields name the node, the dead driver's admission generation, and what it held. |
-//! | 4092 | Info | `DMA_QUARANTINE_RELEASED` | audit | Quarantined DMA memory returned to the allocator, scrubbed. `cause` is `reset` (a later driver for the `node` declared its device reset; recorded even when nothing was freed) or `removed` (a surprise removal retired the node; recorded only when something was freed); `bytes` is what was freed. |
+//! | 4092 | Info | `DMA_QUARANTINE_RELEASED` | audit | Quarantined DMA memory returned to the allocator, scrubbed. `cause` is `reset` (a later driver for the `node` declared its device reset) or `removed` (a surprise removal retired the node); `bytes` is what was freed, and a release that freed nothing is not recorded. |
 //! | 4093 | Info | `HW_NODE_GRANTS_REVOKED` | audit | A removed hardware-tree `node`'s authority was revoked from every task holding it: `grants` revoked across `holders` tasks, whose bindings of its interrupt lines, windows onto its registers and mappings of its shared regions were torn down. `killed` counts holders whose access could not be torn down and which were killed instead; the record is Warn when it is non-zero. |
 //! | 4094 | Info/Warn/Error | `DMA_TRANSLATION_UNIT` | audit | A translation unit discovery reported was brought up, or translates nothing and strands its devices, which master no DMA. `node` is the unit's node and `outcome` is `translating` or the refusal (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`), either with `stopped` and `refused`: the functions behind it found mastering DMA that were stopped and that would not stop (at take-over those with no firmware window; stranded, all). `faults_unrouted` carries a `reason` when its fault interrupt could not be served. |
 //! | 4095 | Error | `DMA_TRANSLATION_UNCONFIRMED` | audit | A unit could not confirm that a translation ended — a driver's domain, a removed node's, or one carve's — so what it reached is kept for good. Carries `node` and `generation`. |
 //! | 4147 | Info/Warn | `DMA_BUS_MASTER` | audit | The kernel turned a function's bus mastering on as its DMA owner began or off as it ended: `node`, `generation`, `master` (`on`/`off`), and `outcome` (`applied`, or `refused` where a function still reports otherwise). |
 //! | 4148 | Warn | `DMA_GROUP_REFUSED` | audit | A driver's first carve was refused: another node's live owner holds the isolation group its device shares. `node`, `generation`, `group`, and the `holder` node. |
 //! | 4158 | Warn | `PORT_IO_REFUSED` | audit | A driver's port access reached ports the kernel keeps for itself (PCI configuration mechanism #1) and was refused whatever its grant. `port`, `width`, `task`. |
-//! | 4101 | Warn | `FS_MUTATION_DENIED` | audit | A filesystem mutation was refused by the secured VFS; nothing changed (fail closed). Carries the same `op`/`uid`/`path`(/`to`/`mode`/`owner`/`group`) fields as `FS_NODE_MUTATED` plus the refusal's `errno`. |
+//! | 4261 | Warn | `FS_MUTATION_DENIED` | audit | A filesystem mutation was refused by the secured VFS; nothing changed (fail closed). Carries the same `op`/`uid`/`path`(/`to`/`mode`/`owner`/`group`) fields as `FS_NODE_MUTATED` plus the refusal's `errno`. |
 //! | 4130 | Warn | `VOLUME_DEGRADED`   | audit | A served volume's backing block device reported itself unhealthy while still serving I/O. Emitted once on the edge into `Degraded`; the `dev` field names the block-service endpoint. |
 //! | 4131 | Warn | `VOLUME_RECOVERING` | audit | A served volume's backing block device stalled/reset and entered its bounded recovery grace window. Emitted once on the edge into `Recovering`; `dev` names the block-service endpoint. |
 //! | 4132 | Info | `VOLUME_RECOVERED`  | audit | A degraded/recovering volume returned to healthy service (the disk came back). Emitted once on the edge back to `Available`; `dev` names the block-service endpoint. |
-//! | 4133 | Info | `SYSTEM_POWER`      | audit | A `system_power` transition was admitted: every mounted volume flushed and the platform is about to be asked to stop. The `caller` and `action` fields name the kernel-attested requester and the requested transition (`power-off`/`restart`). |
-//! | 4140 | Info | `HW_NODE_REMOVED`   | audit | An owned hardware-tree node was retired by `hw_remove_node`. The `node` field names the removed node and `mode` the removal posture (`surprise` for a vanished device, `orderly` for an idle stop-if-idle retirement). |
-//! | 4141 | Warn | `HW_NODE_REMOVE_REFUSED` | audit | An orderly `hw_remove_node` was refused because a volume is still attached on a block-service endpoint the node declares; nothing was removed (fail closed, `Errno::Busy`). The `node` field names the node left in place. |
-//! | 4150 | Warn | `TASK_LATENCY_OVERRUN` | log | An interactive surface overran the frame budget it declared with `latency_watch`. The `budget_ms`/`elapsed_ms`/`blocked_ms`/`calls` fields say where the budget went, `blocked_in` names the syscall that carried the span over, `top_calls` names the syscalls the span made most (which is what a stall spent in thousands of short calls has instead of one culprit), and `pc`/`bt` carry the stalling code as offsets into the program's own load base. Debug images only. |
+//! | 4262 | Info | `SYSTEM_POWER`      | audit | A `system_power` transition was admitted: every mounted volume flushed and the platform is about to be asked to stop. The `caller` and `action` fields name the kernel-attested requester and the requested transition (`power-off`/`restart`). |
+//! | 4263 | Error | `VOLUME_WRITEBACK_FAILED` | audit | The write-back flusher could not publish a volume whose batched transaction had aged out; the volume serves no further writes. `volume` names the mount handle and `error` the driver's refusal. |
+//! | 4264 | Info | `HW_NODE_REMOVED`   | audit | An owned hardware-tree node was retired by `hw_remove_node`. The `node` field names the removed node and `mode` the removal posture (`surprise` for a vanished device, `orderly` for an idle stop-if-idle retirement). |
+//! | 4265 | Warn | `HW_NODE_REMOVE_REFUSED` | audit | An orderly `hw_remove_node` was refused because a volume is still attached on a block-service endpoint the node declares; nothing was removed (fail closed, `Errno::Busy`). The `node` field names the node left in place. |
+//! | 4266 | Warn | `TASK_LATENCY_OVERRUN` | log | An interactive surface overran the frame budget it declared with `latency_watch`. The `budget_ms`/`elapsed_ms`/`blocked_ms`/`calls` fields say where the budget went, `blocked_in` names the syscall that carried the span over, `top_calls` names the syscalls the span made most (which is what a stall spent in thousands of short calls has instead of one culprit), and `pc`/`bt` carry the stalling code as offsets into the program's own load base. Debug images only. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -102,6 +105,12 @@ pub enum AuditEvent {
     /// that silently understates what was proven, and it emits at `Warn`.
     /// The fields are byte totals; neither is a secret.
     RamSelfTest,
+    /// The boot path decided whether the kernel heap grows past its bootstrap
+    /// arena: `growth` is `installed`, `none` (the port has no direct physical
+    /// map, by design) or `failed` (it has one, and emits at `Warn`), beside
+    /// the arena's `bootstrap_bytes` and the most of it boot used,
+    /// `peak_bytes`.
+    KernelHeapGrowth,
     /// The kernel panicked; the handler logged context and is halting.
     Panic,
     /// A fatal CPU exception was taken in kernel mode — a same-privilege
@@ -500,6 +509,14 @@ pub enum AuditEvent {
     /// image compiles the whole facility out; the id is reserved so the
     /// catalogue stays stable (`plans/WATCHDOG.md`).
     CpuWatchdogSelfSample,
+    /// A device interrupt reached the task waiting on it late: its `line`
+    /// fired during the wait, yet the waiter resumed `late_ms` later.
+    /// `drained_ms` is how long after the fire the interrupt's deferred wake
+    /// was performed, absent when none was since; it tells a wake left
+    /// pending apart from a woken task left unrun.
+    ///
+    /// Emitted by the in-kernel device wait, in task context.
+    IrqWakeLate,
     /// A bound IRQ line fired past its rate budget and was **quarantined**
     /// by the runaway-interrupt safety net (`kernel/irq`): the kernel kept
     /// it masked and stopped delivering it, so a never-quiesced or hostile
@@ -772,6 +789,7 @@ impl AuditEvent {
             Self::PhaseFailed => 4003,
             Self::BootCompleted => 4004,
             Self::RamSelfTest => 4005,
+            Self::KernelHeapGrowth => 4006,
             Self::Panic => fatal::KERNEL_PANIC.id.0,
             Self::KernelFault => fatal::KERNEL_FAULT.id.0,
             Self::SyscallFeatureUnavailable => 4020,
@@ -808,6 +826,7 @@ impl AuditEvent {
             Self::SecondaryCpuStarted => 4070,
             Self::SecondaryCpuStartFailed => 4071,
             Self::SecondaryCpuOnline => 4072,
+            Self::IrqWakeLate => 4073,
             Self::CpuStallDetected => 4080,
             Self::CpuStallCleared => 4081,
             Self::CpuHardLockupDetected => 4082,
@@ -830,8 +849,8 @@ impl AuditEvent {
             Self::DmaUnitsMalformed => 4104,
             Self::PortIoRefused => 4158,
             Self::InterruptRemapping => 4159,
-            Self::FsNodeMutated => 4100,
-            Self::FsMutationDenied => 4101,
+            Self::FsNodeMutated => 4260,
+            Self::FsMutationDenied => 4261,
             Self::SystemConfigApplied => 4110,
             Self::SystemConfigRejected => 4111,
             Self::CpuOpsRoutineSelected => 4120,
@@ -839,11 +858,11 @@ impl AuditEvent {
             Self::VolumeDegraded => 4130,
             Self::VolumeRecovering => 4131,
             Self::VolumeRecovered => 4132,
-            Self::SystemPower => 4133,
-            Self::HwNodeRemoved => 4140,
-            Self::HwNodeRemoveRefused => 4141,
-            Self::VolumeWritebackFailed => 4134,
-            Self::TaskLatencyOverrun => 4150,
+            Self::SystemPower => 4262,
+            Self::HwNodeRemoved => 4264,
+            Self::HwNodeRemoveRefused => 4265,
+            Self::VolumeWritebackFailed => 4263,
+            Self::TaskLatencyOverrun => 4266,
         })
     }
 
@@ -859,6 +878,7 @@ impl AuditEvent {
             Self::PhaseFailed => "kernel init phase failed",
             Self::BootCompleted => "kernel boot completed",
             Self::RamSelfTest => "ram self-test completed",
+            Self::KernelHeapGrowth => "kernel heap growth decided",
             Self::Panic => fatal::KERNEL_PANIC.message,
             Self::KernelFault => fatal::KERNEL_FAULT.message,
             Self::SyscallFeatureUnavailable => "syscall feature unavailable",
@@ -895,6 +915,7 @@ impl AuditEvent {
             Self::SecondaryCpuStarted => "secondary cpu start requested",
             Self::SecondaryCpuStartFailed => "secondary cpu start failed",
             Self::SecondaryCpuOnline => "secondary cpu online",
+            Self::IrqWakeLate => "device interrupt reached its waiter late",
             Self::CpuStallDetected => "cpu stall detected",
             Self::CpuStallCleared => "cpu stall cleared",
             Self::CpuHardLockupDetected => "cpu hard lockup detected",
@@ -966,6 +987,7 @@ mod tests {
         AuditEvent::PhaseFailed,
         AuditEvent::BootCompleted,
         AuditEvent::RamSelfTest,
+        AuditEvent::KernelHeapGrowth,
         AuditEvent::Panic,
         AuditEvent::KernelFault,
         AuditEvent::SyscallFeatureUnavailable,
@@ -1002,6 +1024,7 @@ mod tests {
         AuditEvent::SecondaryCpuStarted,
         AuditEvent::SecondaryCpuStartFailed,
         AuditEvent::SecondaryCpuOnline,
+        AuditEvent::IrqWakeLate,
         AuditEvent::CpuStallDetected,
         AuditEvent::CpuStallCleared,
         AuditEvent::CpuHardLockupDetected,
@@ -1045,7 +1068,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 78, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 80, "a new event belongs in `ALL`");
     }
 
     #[test]

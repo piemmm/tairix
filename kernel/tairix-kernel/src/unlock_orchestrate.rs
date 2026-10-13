@@ -29,12 +29,14 @@ use core::convert::Infallible;
 
 use tairix_abi::blkio::kernel_block_device;
 use tairix_abi::driver::block::Block;
+use tairix_abi::{HwDeviceClass, HwNode};
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_drv_storage_virtio_blk::VirtioBlk;
+use tairix_kernel_core::waitq::deadline_for;
 use tairix_kernel_core::{
-    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, SecretFeedback, SleepLock,
-    YieldHandle,
+    park_on_until, wait_now_ns, ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx,
+    NotParkable, SecretFeedback, SleepLock, YieldHandle, HW_TREE_WAITQ,
 };
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
@@ -50,8 +52,9 @@ use crate::driver_catalog::{KERNEL_DRIVER_SIGNER_PUBKEY, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::driver_spawn_loader::InitCtxDriverProcessSpawn;
 use crate::root_mount::{
-    unlock_root_disk_interactively, with_system_volume, AdminInstall, UnlockInstall, UnlockOutcome,
-    WritableRootSink, LATE_GROUPS_DB, LATE_IDENTITY, LATE_USERS_ADMIN, LATE_USERS_DB,
+    unlock_root_disk_interactively, with_system_volume, AdminInstall, KeyArrival, SupervisorWindow,
+    UnlockInstall, UnlockOutcome, WritableRootSink, KEY_SOURCE_WAIT_NS, LATE_GROUPS_DB,
+    LATE_IDENTITY, LATE_USERS_ADMIN, LATE_USERS_DB,
 };
 use crate::shared_block::{DriverStoreService, SharedBlock};
 use crate::system_mount::{
@@ -62,6 +65,25 @@ use crate::unlock_service::{
     autoload_caps, loader_caps, note, store_endpoint_binder_caps, KthreadConsoleRead, UNLOCK_TASK,
     USERS_DB_INSTALLED_MESSAGE,
 };
+
+/// The primary console a port lends the unlock.
+pub struct Console0 {
+    /// Where the prompt and the window are drawn.
+    pub write: &'static dyn ConsoleWrite,
+    /// The raw, interrupt-fed read half the prompt reads.
+    pub read: &'static (dyn ConsoleRead + Sync + 'static),
+    /// Where its keys come from.
+    pub keys: KeySource,
+}
+
+/// Where console 0's keys come from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KeySource {
+    /// A line live from boot, such as a UART: a key can arrive now.
+    Live,
+    /// An input device's driver, so no key arrives before one binds.
+    InputDevice,
+}
 
 /// The architecture console-0 seam the root-unlock orchestration reaches the
 /// hardware console through.
@@ -75,19 +97,13 @@ use crate::unlock_service::{
 /// `Sync` so a `'static` seam reference can be captured by the `Send` unlock
 /// kthread body (a spawned, admit-then-load service).
 pub trait UnlockConsole: Sync {
-    /// Acquire the primary-console (index 0) write half and raw read half for
-    /// the passphrase prompt, arming any interrupt-driven receive the port
-    /// needs so a keystroke wakes the parked reader rather than being missed.
+    /// Acquire the primary console (index 0) for the passphrase prompt,
+    /// arming any interrupt-driven receive the port needs so a keystroke
+    /// wakes the parked reader rather than being missed.
     ///
-    /// Both returned halves are `'static` (the console devices are boot
-    /// statics), so the unlock kthread body can hold them for the life of the
-    /// prompt.
-    fn acquire_console0(
-        &self,
-    ) -> (
-        &'static dyn ConsoleWrite,
-        &'static (dyn ConsoleRead + Sync + 'static),
-    );
+    /// Its halves are `'static` (the console devices are boot statics), so
+    /// the unlock kthread body can hold them for the life of the prompt.
+    fn acquire_console0(&self) -> Console0;
 
     /// Release console 0 to `login` the instant the unlock resolves — open
     /// the console-0 ownership gate, arm the receive interrupt for a `login`
@@ -246,6 +262,58 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
     }
 }
 
+/// Console 0's key source as the Supervisor window waits for it: a live line
+/// at once, an input device once a driver in the live hardware tree serves
+/// one.
+struct HwTreeKeyArrival {
+    source: KeySource,
+    audit: &'static (dyn Sink + Sync),
+}
+
+impl KeyArrival for HwTreeKeyArrival {
+    fn key_source_ready(&self) -> bool {
+        self.source == KeySource::Live || input_device_bound()
+    }
+
+    fn await_key_source(&self) -> bool {
+        if self.key_source_ready() {
+            return true;
+        }
+        note(
+            self.audit,
+            Level::Info,
+            "root-unlock: waiting for an input device before the supervisor window",
+        );
+        let bound = wait_now_ns().is_some_and(|now| {
+            park_on_until(
+                &HW_TREE_WAITQ,
+                deadline_for(now, KEY_SOURCE_WAIT_NS),
+                input_device_bound,
+            )
+            .unwrap_or_else(|NotParkable| input_device_bound())
+        });
+        if !bound {
+            note(
+                self.audit,
+                Level::Warn,
+                "root-unlock: no input device bound in time; no supervisor window",
+            );
+        }
+        bound
+    }
+}
+
+/// Whether a driver serves an input device in the live hardware tree.
+fn input_device_bound() -> bool {
+    let mut bound = false;
+    crate::hwtree_store::HW_TREE.for_each_node(&mut |node| bound |= serves_input(node));
+    bound
+}
+
+fn serves_input(node: &HwNode) -> bool {
+    node.class() == Some(HwDeviceClass::Input) && node.is_driven()
+}
+
 /// Admit the floor virtio-blk driver at the signed load gate, open the whole
 /// disk over `transport` and `host`, and run [`finish_unlock`] over it: the
 /// tail every port's virtio bring-up ends in.
@@ -366,7 +434,8 @@ pub fn finish_unlock<B: Block + 'static>(
         // (nothing cooperative). The read half is the raw device behind the
         // console-0 gate `login` reads through (the gate stays closed until
         // this unlock resolves), so the two never contend.
-        let (console_write, raw_read) = console.acquire_console0();
+        let console0 = console.acquire_console0();
+        let console_write = console0.write;
         // The passphrase prompt's secret-entry feedback: the same
         // `[input active...]` marker a user-space password read shows, drawn
         // to this console's own output. It is armed only for the span of an
@@ -379,7 +448,7 @@ pub fn finish_unlock<B: Block + 'static>(
         // reader registers on `CONSOLE_WAITQ` and the RX interrupt unparks it
         // by id.
         let reader = KthreadConsoleRead::new(
-            raw_read,
+            console0.read,
             &coop,
             crate::unlock_service::unlock_console_task(),
             Some(&secret),
@@ -440,6 +509,10 @@ pub fn finish_unlock<B: Block + 'static>(
         // the passphrase prompt's window.
         let mut supervisor =
             crate::supervisor_host::KernelSupervisorHost::new(store, &install, audit, &retry_delay);
+        let keys = HwTreeKeyArrival {
+            source: console0.keys,
+            audit,
+        };
         match unlock_root_disk_interactively(
             store.window(),
             console_write,
@@ -448,7 +521,10 @@ pub fn finish_unlock<B: Block + 'static>(
             audit,
             &retry_delay,
             &release,
-            Some(&mut supervisor),
+            Some(SupervisorWindow {
+                host: &mut supervisor,
+                keys: &keys,
+            }),
         ) {
             UnlockOutcome::Installed => note(audit, Level::Info, USERS_DB_INSTALLED_MESSAGE),
             UnlockOutcome::GaveUp => note(
@@ -460,6 +536,7 @@ pub fn finish_unlock<B: Block + 'static>(
         // The unlock task then ends (the disk stays alive — it is
         // `'static`-leaked — and this task's window borrow ends with it).
     };
+    spawn_root_prefetch(ctx, store, audit);
     if let Some(unlock_task) = ctx.spawn_kernel_service(alloc::boxed::Box::new(unlock_body)) {
         // Publish the interactive unlock kthread's scheduler id so its
         // passphrase reader can register on `CONSOLE_WAITQ` and the console RX
@@ -495,6 +572,27 @@ pub fn finish_unlock<B: Block + 'static>(
     // over the always-readable `/System` volume, independent of the user-data
     // passphrase (`plans/PI.md` design B). Never returns on success.
     serve_driver_store(store, coop, env)
+}
+
+/// Take the root mount's reads off `store`'s disk while the Supervisor window
+/// waits: it can outlast its 2 s by however long console 0's input device
+/// takes to bind.
+fn spawn_root_prefetch<B: Block + 'static>(
+    ctx: &'static (dyn InitSpawnCtx + Sync),
+    store: &'static DriverStoreService<B>,
+    audit: &'static (dyn Sink + Sync),
+) {
+    let prefetch = move |_: &mut dyn YieldHandle| crate::root_mount::prefetch_root(store.window());
+    if ctx
+        .spawn_kernel_service(alloc::boxed::Box::new(prefetch))
+        .is_none()
+    {
+        note(
+            audit,
+            Level::Warn,
+            "root-unlock: root prefetch not admitted; the mount reads the disk cold",
+        );
+    }
 }
 
 /// Become the persistent capability-gated driver-store serve loop the
@@ -607,5 +705,22 @@ fn serve_driver_store<B: Block + 'static>(
             );
             store.hold(coop)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_driven_input_device_is_a_key_source() {
+        let mut keyboard = HwNode::new(7, 1, HwDeviceClass::Input);
+        assert!(!serves_input(&keyboard), "found, but no driver yet");
+        keyboard.set_driven(true);
+        assert!(serves_input(&keyboard));
+
+        let mut disk = HwNode::new(8, 1, HwDeviceClass::Storage);
+        disk.set_driven(true);
+        assert!(!serves_input(&disk));
     }
 }

@@ -2081,7 +2081,8 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::MEM_DMA`] and that `buf` is a non-null `UserPtr`. The
     /// implementation answers only the driver of a node discovery marked
-    /// [`tairix_abi::HwProperty::BootConsole`], resolved from its task id.
+    /// [`tairix_abi::HwProperty::BootConsole`], resolved from its task id, and
+    /// parks it until the boot has handed the console on.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in

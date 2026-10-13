@@ -26,7 +26,7 @@
 
 use tairix_abi::{
     decode_bind_keys, CapabilityId, DriverBindKey, DriverError, DriverManifest, Errno,
-    DRIVER_SIGNATURE_LEN,
+    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_SIGNATURE_LEN,
 };
 
 use crate::HostError;
@@ -61,6 +61,13 @@ impl<'a> ParsedImage<'a> {
     /// to [`DriverManifest::WIRE_LEN`]; re-exposed at this scope so
     /// callers do not have to import the constant separately.
     pub const HEADER_LEN: usize = DriverManifest::WIRE_LEN;
+
+    /// The most a valid image's header, capability body and bind table
+    /// occupy together, so a prefix this long holds everything but the
+    /// payload of any image the manifest decode admits.
+    pub const PREFIX_MAX: usize = Self::HEADER_LEN
+        + DRIVER_MANIFEST_MAX_CAPABILITIES as usize * 2
+        + DRIVER_MANIFEST_MAX_BIND_KEYS as usize * DriverBindKey::WIRE_LEN;
 
     /// Decode `bytes` into header + capability body + bind table +
     /// payload.

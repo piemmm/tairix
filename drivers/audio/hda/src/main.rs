@@ -10,9 +10,9 @@
 mod program {
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::{DriverError, Errno, MmioMapper};
-    use tairix_audiochan::{exit, fail};
     use tairix_drv_audio_hda::engine::Hda;
     use tairix_drv_audio_hda::{Wait, REQUIRED_CAPABILITIES};
+    use tairix_drvrt::exit::{end, error, step, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_rt::ClockDelay;
 
@@ -37,44 +37,51 @@ mod program {
         let host = match RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) {
             Ok(host) => host,
             Err(err) => {
-                return fail(
-                    exit::NO_HOST,
-                    "hda: the driver host could not be built from the delivered grants",
-                    Some(err),
+                return end(
+                    DriverExit::NoHost,
+                    &[
+                        step("hda: the driver host could not be built from the delivered grants"),
+                        error(err),
+                    ],
                 )
             }
         };
         let (base, len) = match sole_register_window(host.resources()) {
             Ok(window) => window,
             Err(err) => {
-                return fail(
-                    exit::NO_RESOURCES,
-                    "hda: the matched node granted no single register window",
-                    Some(err),
+                return end(
+                    DriverExit::NoResources,
+                    &[
+                        step("hda: the matched node granted no single register window"),
+                        error(err),
+                    ],
                 )
             }
         };
         if let Err(err) = host.bind_irq() {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "hda: the granted interrupt line could not be bound",
-                Some(err),
+            return end(
+                DriverExit::BringupFailed,
+                &[
+                    step("hda: the granted interrupt line could not be bound"),
+                    error(err),
+                ],
             );
         }
         let Some(handle) = host.irq_handle() else {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "hda: the interrupt line bound but minted no handle",
-                None,
+            return end(
+                DriverExit::BringupFailed,
+                &[step("hda: the interrupt line bound but minted no handle")],
             );
         };
         let window = match host.map_window(base, len) {
             Ok(window) => window,
             Err(err) => {
-                return fail(
-                    exit::BRINGUP_FAILED,
-                    "hda: the granted register window could not be mapped",
-                    Some(err.as_driver_error()),
+                return end(
+                    DriverExit::BringupFailed,
+                    &[
+                        step("hda: the granted register window could not be mapped"),
+                        error(err.as_driver_error()),
+                    ],
                 )
             }
         };
@@ -82,10 +89,12 @@ mod program {
         let audio = match Hda::open(window, IrqWait { handle }, ClockDelay::new(), &host, &clock) {
             Ok(audio) => audio,
             Err(err) => {
-                return fail(
-                    exit::BRINGUP_FAILED,
-                    "hda: the controller or its codecs refused their bring-up",
-                    Some(err),
+                return end(
+                    DriverExit::BringupFailed,
+                    &[
+                        step("hda: the controller or its codecs refused their bring-up"),
+                        error(err),
+                    ],
                 )
             }
         };

@@ -12,6 +12,7 @@ use tairix_abi::touch::TouchFrame;
 use tairix_abi::{DriverError, Errno, HwProperty, LOG_FIELD_VALUE_MAX};
 use tairix_drv_input_usb_hid::bringup::{bring_up, Bound, BringupError, HidLink};
 use tairix_drv_input_usb_hid::REQUIRED_CAPABILITIES;
+use tairix_drvrt::exit::{end, step, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_hid::{pump_error_limit_reached, transport_error, Decoded, SeatSink};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
@@ -20,25 +21,14 @@ use tairix_usb::device::INT_TRANSFER_MAX;
 use tairix_usb::transport::{UrbCall, UrbClient, UrbLink};
 use tairix_util::fmt::{format_hex_bytes, format_hex_u64};
 
-/// The driver host could not be built from the kernel-delivered grants.
-const EXIT_NO_HOST: i32 = 80;
-/// The node carried no URB endpoint, shared buffer or interface number.
-const EXIT_NO_TRANSPORT: i32 = 81;
-/// The interface could not be brought up.
-const EXIT_BRINGUP_FAILED: i32 = 82;
-/// The interface kept faulting and was given up.
-const EXIT_DEVICE_FAULT: i32 = 83;
-
 /// The interface is up and its reports are being served.
-const HID_READY: EventId = EventId(4244);
+const HID_READY: EventId = EventId(27_244);
 /// One slice of the interface's report descriptor, in hex.
-const HID_DESCRIPTOR: EventId = EventId(4245);
-/// The interface could not be brought up.
-const HID_REFUSED: EventId = EventId(4246);
+const HID_DESCRIPTOR: EventId = EventId(27_245);
 /// A report read faulted.
-const HID_FAULT: EventId = EventId(4247);
+const HID_FAULT: EventId = EventId(27_247);
 /// The interface went; everything it held was released.
-const HID_DETACHED: EventId = EventId(4248);
+const HID_DETACHED: EventId = EventId(27_248);
 
 /// Consecutive report faults ridden out before the device is given up.
 const MAX_CONSECUTIVE_FAULTS: u8 = 4;
@@ -126,7 +116,7 @@ fn log_hex(id: EventId, level: Level, message: &'static str, key: &'static str, 
 fn map_transport() -> Result<(Link, u8), i32> {
     let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
     let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-        return Err(EXIT_NO_HOST);
+        return Err(end(DriverExit::NoHost, &[]));
     };
     let (Some(endpoint), Some(interface), Ok(shm)) = (
         host.endpoint_grant(),
@@ -134,10 +124,31 @@ fn map_transport() -> Result<(Link, u8), i32> {
             .and_then(|number| u8::try_from(number).ok()),
         host.shared_buffer(INT_TRANSFER_MAX),
     ) else {
-        return Err(EXIT_NO_TRANSPORT);
+        return Err(end(
+            DriverExit::NoResources,
+            &[step(
+                "usb-hid: the node carries no URB endpoint, shared buffer or interface number",
+            )],
+        ));
     };
     let client = UrbClient::new(IpcUrbCall { endpoint });
     Ok((Link(UrbLink::new(client, shm)), interface))
+}
+
+/// End the driver for a bring-up that did not complete, its detail recorded.
+fn ended(error: BringupError) -> i32 {
+    let (message, detail) = refusal(error);
+    let mut hex = [0u8; 16];
+    end(
+        error.exit(),
+        &[
+            step(message),
+            Field {
+                key: "detail_hex",
+                value: FieldValue::Str(format_hex_u64(detail, &mut hex)),
+            },
+        ],
+    )
 }
 
 /// Why bring-up failed, for the log.
@@ -259,7 +270,7 @@ fn serve(link: &mut Link, bound: &mut Bound) -> i32 {
                 );
                 if pump_error_limit_reached(&mut faults, MAX_CONSECUTIVE_FAULTS) {
                     let _ = bound.device.release(&mut Seat);
-                    return EXIT_DEVICE_FAULT;
+                    return end(DriverExit::DeviceFault, &[]);
                 }
             }
         }
@@ -273,15 +284,7 @@ fn main() -> i32 {
     };
     let mut bound = match bring_up(&mut link, interface) {
         Ok(bound) => bound,
-        Err(error) => {
-            let (message, detail) = refusal(error);
-            log_hex(HID_REFUSED, Level::Error, message, "detail_hex", detail);
-            return if error == BringupError::Gone {
-                0
-            } else {
-                EXIT_BRINGUP_FAILED
-            };
-        }
+        Err(error) => return ended(error),
     };
     log_descriptor(&bound.descriptor);
     log_ready(&bound);

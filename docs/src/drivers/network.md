@@ -307,8 +307,8 @@ region itself; that remains the stack's responsibility.
 | GENET v5                  | `tairix-drv-network-genet`       | platform MMIO (aarch64) | ring transport + facts; MDIO/PHY autonegotiation at 10/100/1000; unicast + broadcast + 15-slot group receive filter; completion-interrupt masking; receive-checksum offload (`RBUF_RXCHK_EN` → `RX_CSUM_VALIDATED`); transmit-checksum offload (`TBUF_64B_EN` status block → `TX_CSUM_TCP`+`TX_CSUM_UDP`); driver-side TCP segmentation (`TX_SEGMENT_TCP`, no hardware engine — see below) |
 
 Both driver *processes* share one control plane: `lib/netchan` carries the
-`netchan-v1` server (`NetChannelServer`) and the process loop that claims a
-reserved device-channel endpoint, emits the `netchan` hardware-tree node the
+`netchan-v1` server (`NetChannelServer`) and the process loop that binds its
+node's reserved device-channel endpoint, emits the `netchan` hardware-tree node the
 device manager binds to the stack, and parks on `{call endpoint, device IRQ}`.
 The device manager autobinds a discovered `netchan` node to `netstack`
 (`plans/NETWORK.md` N4d). Each driver is therefore device bring-up plus one

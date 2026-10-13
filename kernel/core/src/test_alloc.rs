@@ -78,27 +78,33 @@ std::thread_local! {
 }
 
 std::thread_local! {
-    /// The current thread's allocations are refused, as a full heap refuses
-    /// them.
-    static REFUSING: Cell<bool> = const { Cell::new(false) };
+    /// The smallest allocation the current thread is refused, as a full heap
+    /// refuses it; `usize::MAX` refuses none.
+    static REFUSED_FROM: Cell<usize> = const { Cell::new(usize::MAX) };
 }
 
 /// Refuse every allocation the current thread makes from now on, or stop:
 /// how a test reaches a path only an exhausted heap takes. A panic ends the
 /// refusal.
 pub fn refuse_allocations_on_current_thread(refuse: bool) {
-    REFUSING.with(|slot| slot.set(refuse));
+    refuse_allocations_from_on_current_thread(if refuse { 0 } else { usize::MAX });
 }
 
-fn refusing() -> bool {
+/// Refuse the current thread's allocations of `bytes` or more, so a path's
+/// one large buffer fails while the small allocations before it succeed.
+pub fn refuse_allocations_from_on_current_thread(bytes: usize) {
+    REFUSED_FROM.with(|slot| slot.set(bytes));
+}
+
+fn refusing(size: usize) -> bool {
     // A refused panic payload would abort the whole binary and lose the
     // message, so a panicking thread is never refused again.
-    REFUSING
+    REFUSED_FROM
         .try_with(|slot| {
             if std::thread::panicking() {
-                slot.set(false);
+                slot.set(usize::MAX);
             }
-            slot.get()
+            size >= slot.get()
         })
         .unwrap_or(false)
 }
@@ -156,7 +162,7 @@ struct CountingAlloc;
 // re-enters the allocator (the TLS slots are `const`-initialised).
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if refusing() {
+        if refusing(layout.size()) {
             return core::ptr::null_mut();
         }
         // SAFETY: forwarded verbatim; the caller upholds the layout contract.
@@ -169,7 +175,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if refusing() {
+        if refusing(layout.size()) {
             return core::ptr::null_mut();
         }
         // SAFETY: forwarded verbatim; the caller upholds the layout contract.
@@ -188,7 +194,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if refusing() {
+        if refusing(new_size) {
             return core::ptr::null_mut();
         }
         // SAFETY: forwarded verbatim; the caller upholds the layout contract.

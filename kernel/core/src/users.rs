@@ -39,10 +39,16 @@ use tairix_users::{LocatedError, UsersDb, MAX_DB_LEN};
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
+use crate::fs::{read_bootstrap_file, BootstrapFile, BootstrapReadError, VfsError};
 
 /// Absolute path of the user database on the root volume.
 pub const USERS_DB_PATH: &str = "/System/Security/Users";
+
+/// The user database as the boot reads it.
+pub const USERS_DB: BootstrapFile = BootstrapFile {
+    path: USERS_DB_PATH,
+    max_len: MAX_DB_LEN,
+};
 
 /// The kernel-held user database the `users_db_read` syscall serves
 /// (`plans/PI.md` P11).
@@ -464,6 +470,8 @@ pub enum UsersLoadError {
     /// The driver returned fewer bytes than the file's reported size; a
     /// truncated database is never parsed.
     ShortRead,
+    /// The kernel heap could not hold the file.
+    OutOfMemory,
     /// The file is not valid UTF-8.
     NotUtf8,
     /// The text failed the `users-v1` validation, at the line that raised it.
@@ -481,6 +489,7 @@ impl UsersLoadError {
             Self::NotAFile => "not_a_file",
             Self::TooLarge => "too_large",
             Self::ShortRead => "short_read",
+            Self::OutOfMemory => "out_of_memory",
             Self::NotUtf8 => "not_utf8",
             Self::Parse(_) => "parse_rejected",
         }
@@ -500,6 +509,7 @@ impl From<BootstrapReadError> for UsersLoadError {
             BootstrapReadError::NotAFile => Self::NotAFile,
             BootstrapReadError::TooLarge => Self::TooLarge,
             BootstrapReadError::ShortRead => Self::ShortRead,
+            BootstrapReadError::OutOfMemory => Self::OutOfMemory,
         }
     }
 }
@@ -644,7 +654,7 @@ where
 {
     // The bounded, fail-closed `uid 0` read shared with the group registry
     // reader; the database is bounded by the `users-v1` format maximum.
-    Ok(read_bootstrap_file(fs, USERS_DB_PATH, MAX_DB_LEN)?)
+    Ok(read_bootstrap_file(fs, USERS_DB)?)
 }
 
 /// Validate `buf` as UTF-8 and parse it with the fail-closed `users-v1`

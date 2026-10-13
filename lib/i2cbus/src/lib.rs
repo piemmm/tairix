@@ -26,4 +26,4 @@ pub use controller::{BufferHost, Controller, I2cBus, Record};
 #[cfg(target_os = "none")]
 mod serve;
 #[cfg(target_os = "none")]
-pub use serve::{bringup_failed, declared_speed, open, serve};
+pub use serve::{declared_speed, open, serve};

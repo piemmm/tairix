@@ -44,9 +44,8 @@
 
 use tairix_abi::driver::net::Net;
 use tairix_abi::driver::net_channel::{
-    is_net_channel_endpoint, AttachParams, NetChannelNotify, NetChannelRequest,
-    NETCHAN_NODE_COMPATIBLE, NET_CHANNEL_ENDPOINT_BASE, NET_CHANNEL_MAX_REPLY,
-    NET_CHANNEL_MAX_REQUEST,
+    AttachParams, NetChannelNotify, NetChannelRequest, NETCHAN_NODE_COMPATIBLE,
+    NET_CHANNEL_ENDPOINTS, NET_CHANNEL_MAX_REPLY, NET_CHANNEL_MAX_REQUEST,
 };
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
@@ -56,13 +55,13 @@ use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Level};
 use tairix_rt::{LogSink, ServedCall};
 
-use crate::exit;
 use crate::{Drain, DrainAction, Drained, NetChannelServer};
+use tairix_drvrt::exit::{end, step, DriverExit};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
 /// beacon a NIC driver emits once its device is live and its endpoint is
 /// bound.
-const NETCHAN_READY: EventId = EventId(4180);
+const NETCHAN_READY: EventId = EventId(29_180);
 
 /// Wait-set token for a device-channel call doorbell on the claimed
 /// endpoint.
@@ -105,20 +104,33 @@ struct Region {
 ///
 /// `irq_handle` is the bound device interrupt (from `irq_bind` on the line
 /// the driver's matched node granted) the loop parks on alongside the call
-/// endpoint. Never returns on the success path; every set-up refusal returns
-/// a reserved [`exit`](crate::exit) code so the driver ends fail-closed with
-/// a diagnosable reason rather than degrading into a busy re-poll.
+/// endpoint. Never returns on the success path; every set-up refusal ends
+/// the driver fail-closed with its reason recorded rather than degrading
+/// into a busy re-poll.
 pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
-    let Some(endpoint) = claim_channel_endpoint() else {
-        return exit::NO_SERVICE;
+    let Some(endpoint) = bind_channel_endpoint() else {
+        return end(
+            DriverExit::NoService,
+            &[step(
+                "netchan: the node's device-channel endpoint could not be bound",
+            )],
+        );
     };
     if emit_netchan_node(endpoint).is_none() {
-        return exit::NO_SERVICE;
+        return end(
+            DriverExit::NoService,
+            &[step(
+                "netchan: the device-channel node could not be published",
+            )],
+        );
     }
 
     let set = tairix_rt::waitset_create();
     if set < 0 {
-        return exit::NO_SERVICE;
+        return end(
+            DriverExit::NoService,
+            &[step("netchan: the serve wait set could not be created")],
+        );
     }
     #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
     let set = set as u64;
@@ -137,7 +149,12 @@ pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
             IRQ_TOKEN,
         ) != 0
     {
-        return exit::NO_SERVICE;
+        return end(
+            DriverExit::NoService,
+            &[step(
+                "netchan: the call endpoint and the interrupt could not join the wait set",
+            )],
+        );
     }
     // The channel is the one child this driver publishes. A refused settle
     // only leaves the device manager to wait out its bound for the node.
@@ -162,34 +179,23 @@ pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
     serve_loop(server, set, endpoint)
 }
 
-/// Claim the first free id in the reserved device-channel endpoint block
-/// and bind it **restricted-sender requiring `CAP_NET_RAW`**: the kernel
-/// admits a caller only if it holds that capability, so only the network
-/// stack can post to this driver (defence in depth atop the
-/// `CAP_IPC_BIND_PRIVILEGED` gate the reserved-id bind already demands).
-/// `recv_caps` is empty — endpoint ownership already restricts receive to
-/// this task. Returns the claimed id, or [`None`] if the whole block was
-/// already taken (every id squatted on — fail closed).
-fn claim_channel_endpoint() -> Option<u64> {
+/// Bind the device-channel endpoint of the node this driver was loaded for,
+/// **restricted-sender requiring `CAP_NET_RAW`**, so only the network stack
+/// can post to it. `recv_caps` is empty — endpoint ownership already
+/// restricts receive to this task. [`None`] on any refusal (fail closed).
+fn bind_channel_endpoint() -> Option<u64> {
+    let id = NET_CHANNEL_ENDPOINTS.endpoint(tairix_rt::hw_self_node().ok()?.node());
     let mut send_caps = CapabilitySet::empty();
     send_caps.insert(CapabilityId::NET_RAW);
-    let recv_caps = CapabilitySet::empty();
-    let mut id = NET_CHANNEL_ENDPOINT_BASE;
-    while is_net_channel_endpoint(id) {
-        let bound = tairix_rt::call_create(
-            id,
-            &send_caps,
-            &recv_caps,
-            NET_CHANNEL_MAX_REQUEST,
-            NET_CHANNEL_MAX_REPLY,
-            ENDPOINT_CAPACITY,
-        );
-        if bound == 0 {
-            return Some(id);
-        }
-        id += 1;
-    }
-    None
+    let bound = tairix_rt::call_create(
+        id,
+        &send_caps,
+        &CapabilitySet::empty(),
+        NET_CHANNEL_MAX_REQUEST,
+        NET_CHANNEL_MAX_REPLY,
+        ENDPOINT_CAPACITY,
+    );
+    (bound == 0).then_some(id)
 }
 
 /// Publish the `netchan` hardware-tree node carrying the claimed
@@ -225,7 +231,10 @@ fn serve_loop<N: Net>(mut server: NetChannelServer<N>, set: u64, endpoint: u64) 
         let mut token = 0u64;
         let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
         if woke < 0 {
-            return exit::NO_SERVICE;
+            return end(
+                DriverExit::ServeFailed,
+                &[step("netchan: the serve wait set faulted")],
+            );
         }
         if woke != 0 {
             // A spurious/lapsed wake with no ready source; re-park.

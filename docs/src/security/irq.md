@@ -350,9 +350,11 @@ Three implementations exist:
   device-IRQ dispatch path's `irq_wake` (after `IrqTable::fire`) and the
   architecture one-shot's `timed_wake_sweep` are **lock-free**: they only
   flag a pending wake on `IRQ_WAITQ`, and the actual `unpark` runs at the
-  next dispatcher-context `waitq::drain_pending_wakes` (the fully preemptive
-  kernel runs in-kernel code with device IRQs enabled, so an ISR must never
-  take the scheduler lock — `AGENTS.md` §17.1). The waiter re-checks its own
+  next `waitq::drain_pending_wakes` — the dispatch loop's, or the interrupted
+  task's own return to user mode or in-kernel preemption boundary, where it
+  holds no lock (the fully preemptive kernel runs in-kernel code with device
+  IRQs enabled, so an ISR must never take the scheduler lock — `AGENTS.md`
+  §17.1). The waiter re-checks its own
   bound line after every wake and deregisters when the wait ends. The
   register-before-poll order plus the scheduler wake-pending token
   closes the park/unpark race, exactly as `hw_tree_wait` does
@@ -413,17 +415,25 @@ Three implementations exist:
   woken by the line, which is what made the wait unbounded in fact
   while it looked bounded in the caller.
 
+  A wait whose line fired during it, yet that resumed 250 ms or more
+  after the fire, is recorded (`4073` `IRQ_WAKE_LATE`, Warn): a wake is
+  delivered in microseconds, so the record means the deferred wake
+  waited for a dispatch loop or the woken task waited for a CPU.
+  `drained_ms` tells which — how long after the fire the deferred wake
+  was performed, absent when it had not been. The fire's instant is the
+  table's own (`IrqTable::last_fire_ns`), on the clock the waiter reads.
+  Covered by `a_fire_whose_wake_reaches_the_waiter_late_is_recorded`.
+
 This design composes existing scheduler primitives only; no new
 scheduler interface is introduced (`AGENTS.md` §2.4 — no interface
 creep). The `irq_wait` syscall path now **parks** off the run queue
 rather than busy-yielding: the device-IRQ dispatch path's `irq_wake`
 (after `IrqTable::fire`) unparks a waiter on a fire, and `IRQ_WAITQ`
 is swept by `timed_wake_sweep` for finite timeouts, so a blocked
-user-space driver consumes no scheduler quanta. The in-kernel kthread
-path still suspends through its own race-free wait (a cooperative
-yield under the QEMU verticals, a `wfi` park on metal); migrating it
-to the same scheduler park is the device two-task split, queued for a
-future landing alongside the per-arch trap glue.
+user-space driver consumes no scheduler quanta. An in-kernel device
+wait parks the same way (`IrqParkWaiter`, `kernel/core` `blockwait`);
+its `wfi` park is only the fallback for the boot flow before the
+dispatch loop runs a task.
 
 ### Architecture-port glue
 

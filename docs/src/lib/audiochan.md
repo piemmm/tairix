@@ -33,8 +33,8 @@ path's refills and notifications — is host-tested against a mock device and a
 mock channel.
 
 `serve` is the freestanding shell, compiled only for the bare-metal targets a
-driver binary is built for. It claims a reserved device-channel endpoint bound
-**restricted-sender on `CAP_AUDIO_DEVICE`**, publishes the `tairix,audiochan`
+driver binary is built for. It binds its node's reserved device-channel
+endpoint **restricted-sender on `CAP_AUDIO_DEVICE`**, publishes the `tairix,audiochan`
 hardware-tree node the device manager hands to the mixer, and parks on a wait
 set over `{call endpoint, device interrupt}`, handing each wake to the
 dispatcher.

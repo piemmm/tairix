@@ -105,6 +105,32 @@ fn free_reclaims_so_the_same_byte_is_reused() {
 }
 
 #[test]
+fn the_peak_is_the_most_ever_handed_out_at_once() {
+    let alloc = fixture(1 << 16);
+    let layout = Layout::from_size_align(BYTE_TIER, 8).unwrap();
+    assert_eq!(alloc.peak_used(), 0);
+    // SAFETY: non-zero layout.
+    let (a, b) = unsafe { (alloc.alloc(layout), alloc.alloc(layout)) };
+    assert!(!a.is_null() && !b.is_null());
+    let both = alloc.used();
+    assert_eq!(alloc.peak_used(), both);
+    // SAFETY: `a` and `b` came from this allocator with `layout`.
+    unsafe { alloc.dealloc(a, layout) };
+    let one = alloc.used();
+    assert!(one < both);
+    // SAFETY: non-zero layout.
+    let c = unsafe { alloc.alloc(layout) };
+    assert_eq!(alloc.used(), both);
+    // SAFETY: as above.
+    unsafe {
+        alloc.dealloc(b, layout);
+        alloc.dealloc(c, layout);
+    }
+    assert_eq!(alloc.used(), 0);
+    assert_eq!(alloc.peak_used(), both, "freeing never lowers the peak");
+}
+
+#[test]
 fn adjacent_frees_coalesce_into_one_large_hole() {
     // A heap that fits exactly three `block`-sized allocations; after
     // freeing all three (in an order that exercises forward and backward

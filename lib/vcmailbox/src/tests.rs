@@ -1305,22 +1305,16 @@ fn display_done_lays_out_a_tag_with_no_values() {
 }
 
 #[test]
-fn display_done_confirms_only_a_processed_tag_and_reports_any_other_answer() {
+fn display_done_is_accepted_by_an_ok_message_and_refused_otherwise() {
     let mut firmware = MockFirmware::healthy();
     let reply = exchanged(&mut firmware, encode_display_done());
     assert_eq!(decode_display_done_response(&reply), Ok(()));
     assert!(firmware.display_done);
 
-    let mut unanswered = encode_display_done();
-    unanswered[1] = CODE_RESPONSE_OK;
-    assert_eq!(
-        decode_display_done_response(&unanswered),
-        Err(Unconfirmed {
-            header: CODE_RESPONSE_OK,
-            tag: Some(CODE_REQUEST),
-        }),
-        "a tag left a request's was not processed"
-    );
+    // The Pi 4's own answer: an OK message, the tag's code word untouched.
+    let mut untouched = encode_display_done();
+    untouched[1] = CODE_RESPONSE_OK;
+    assert_eq!(decode_display_done_response(&untouched), Ok(()));
     let mut refused = reply;
     refused[1] = CODE_RESPONSE_ERROR;
     assert_eq!(

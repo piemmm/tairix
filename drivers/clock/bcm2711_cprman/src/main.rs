@@ -11,10 +11,11 @@
 
 #[cfg(freestanding)]
 mod program {
-    use tairix_clock::{bringup_failed, fixed_rate, serve};
+    use tairix_clock::{fixed_rate, serve};
     use tairix_drv_clock_bcm2711_cprman::clocks::Clocks;
     use tairix_drv_clock_bcm2711_cprman::cprman::Cprman;
     use tairix_drv_clock_bcm2711_cprman::REQUIRED_CAPABILITIES;
+    use tairix_drvrt::exit::{end, step, DriverExit};
 
     /// The binding's position of the oscillator among the node's `clocks`.
     const OSCILLATOR_ENTRY: u8 = 0;
@@ -23,8 +24,12 @@ mod program {
         let node = tairix_clock::open(REQUIRED_CAPABILITIES.iter().copied().collect())?;
         let oscillator = fixed_rate(&node, OSCILLATOR_ENTRY)?;
         let regs = node.map()?;
-        let cprman = Cprman::new(&regs, oscillator)
-            .map_err(|_| bringup_failed("clock: the register window does not reach the PLLs"))?;
+        let cprman = Cprman::new(&regs, oscillator).map_err(|_| {
+            end(
+                DriverExit::BringupFailed,
+                &[step("clock: the register window does not reach the PLLs")],
+            )
+        })?;
         Ok(serve(&node, Clocks(cprman)))
     }
 

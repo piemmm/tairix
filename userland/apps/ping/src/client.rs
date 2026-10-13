@@ -183,15 +183,15 @@ impl Run<'_> {
             }
             if event.outcome != EchoOutcome::Reply {
                 self.summary.errors += 1;
-                let line = self.error_line(&event);
-                return self.print_unless_quiet(&line);
+                return self.print_unless_quiet(|run| run.error_line(&event));
             }
             if reply_matches(&self.target, payload, &event) {
                 let rtt_ns = self.io.now().saturating_sub(sent_at);
                 self.rtt.record(rtt_ns);
                 self.summary.received += 1;
-                let line = reply_line(&event, rtt_ns, self.target.name.as_deref());
-                return self.print_unless_quiet(&line);
+                return self.print_unless_quiet(|run| {
+                    reply_line(&event, rtt_ns, run.target.name.as_deref())
+                });
             }
         }
         Ok(())
@@ -208,7 +208,7 @@ impl Run<'_> {
     /// and output is not numeric, else the bare address.
     fn reporter(&mut self, family: NetAddrFamily, addr: [u8; 16]) -> String {
         let shown = render_addr(family, &addr);
-        if self.config.numeric {
+        if !self.config.names_peers() {
             return shown;
         }
         let name = if addr == self.target.addr {
@@ -234,12 +234,17 @@ impl Run<'_> {
             .map_err(PingError::Output)
     }
 
-    fn print_unless_quiet(&self, text: &str) -> Result<(), PingError> {
+    /// Print the per-packet line `render` builds, unless `-q` suppresses it:
+    /// then it is never built, so naming its peer costs no lookup.
+    fn print_unless_quiet(
+        &mut self,
+        render: impl FnOnce(&mut Self) -> String,
+    ) -> Result<(), PingError> {
         if self.config.quiet {
-            Ok(())
-        } else {
-            self.print(text)
+            return Ok(());
         }
+        let line = render(self);
+        self.print(&line)
     }
 }
 
@@ -252,12 +257,10 @@ fn resolve(config: &Config, io: &mut dyn PingIo) -> Result<Target, PingError> {
                 host: host.to_string(),
                 reason,
             })?;
-    // A reverse lookup only when the peer will actually be named: `-n`
-    // means numeric output *and* no query.
-    let name = if config.numeric {
-        None
-    } else {
+    let name = if config.names_peers() {
         io.reverse(family, addr)
+    } else {
+        None
     };
     Ok(Target {
         display: host.to_string(),
@@ -706,6 +709,25 @@ mod tests {
         assert_eq!(summary.errors, 1);
         assert!(!text.contains("From"));
         assert!(text.contains("+1 errors"));
+    }
+
+    #[test]
+    fn a_quiet_run_puts_no_ptr_query_on_the_wire() {
+        let mut io = FakeIo::v4();
+        io.reverse = Some("edge.example".to_string());
+        io.errors
+            .insert(1, (EchoOutcome::HopLimitExceeded, v4_addr([10, 0, 2, 1])));
+        let quiet = Config {
+            quiet: true,
+            ..resolving_config(Some(2))
+        };
+        let (summary, text, _) = ping_with(&quiet, &mut io);
+        assert_eq!((summary.received, summary.errors), (1, 1));
+        assert!(!text.contains("edge.example"), "{text}");
+        assert!(
+            io.reversed.is_empty(),
+            "-q names no peer, so neither the target nor a reporting router is looked up"
+        );
     }
 
     #[test]

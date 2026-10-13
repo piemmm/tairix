@@ -253,12 +253,17 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
         nodes.push(*node);
     })?;
     tree.on_header(&header);
+    state.generation = header.generation();
+    let now_ns = tree.now_ns();
+    state.now_ns = now_ns;
     let present = node_ids(&nodes)?;
-    // A node id is never reissued and only a node's fault-domain health
-    // changes after it is published, so a snapshot with the same ids and
-    // nothing left over from the last pass gives the tree passes nothing to do.
+    // A node id is never reissued, so a snapshot with the same ids, no driver
+    // ended, no restart due and nothing left over from the last pass gives the
+    // tree passes nothing to do.
     let restructured = catalogue_arrived
         || present != state.observed
+        || state.any_ended(&nodes)
+        || state.restart_due()
         || netbind.has_deferred_work()
         || audiobind.has_deferred_work();
     if restructured {
@@ -295,13 +300,10 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
         bind_new_channels(&nodes, netbind, netstack, sink);
         audiobind::bind_new_channels(&nodes, audiobind, audiod, sink);
     }
-    // Deliver each managed interface's `network.conf` configuration to the
-    // network stack. Runs *after* the channel hand-off so an interface that
-    // just bound this cycle can be matched (by MAC) and configured in the
-    // same reaction; an interface not yet bound is retried at the next reaction.
-    deliver_interface_configs(netifcfg, netifconfig, netstack, sink);
+    // After the hand-off, so an interface that bound this cycle is configured
+    // in the same reaction.
+    deliver_interface_configs(netifcfg, netifconfig, netbind, netstack, sink);
     let channels_owed = netbind.has_deferred_work() || audiobind.has_deferred_work();
-    let now_ns = tree.now_ns();
     if settle.observe(
         now_ns,
         catalogue.is_some(),
@@ -321,8 +323,8 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
 }
 
 /// What the boot's settling still waits on in `nodes`: each node a driver was
-/// loaded for that has not settled, each node held for its supplier, and the
-/// channel hand-offs a service was not yet up to take.
+/// loaded for that has not settled, each node held for its supplier or owed a
+/// restart, and the channel hand-offs a service was not yet up to take.
 fn pending<'a>(
     nodes: &'a [HwNode],
     state: &'a AutoloadState,
@@ -333,7 +335,10 @@ fn pending<'a>(
         .filter(|node| {
             let id = node.id();
             (state.bindings.contains_key(&id) && !node.is_settled())
-                || matches!(state.reported.get(&id), Some(NodeReport::Held(_)))
+                || matches!(
+                    state.reported.get(&id),
+                    Some(NodeReport::Held(_) | NodeReport::Restarting)
+                )
         })
         .map(|node| Pending::Node(node.id()))
         .chain(channels_owed.then_some(Pending::Channels))
@@ -462,18 +467,22 @@ pub fn run<T: HwTreeService + Presence, C: DriverStoreCall>(
         let outstanding = catalogue.is_none()
             || netbind.has_deferred_work()
             || audiobind_state.has_deferred_work()
-            || netconfig.has_deferred_work()
-            || netifconfig.has_deferred_work();
+            || netconfig.has_deferred_work();
         let deferred_ns = if outstanding {
             DEFERRED_RETRY_NS
         } else {
             u64::MAX
         };
-        // A settle wait lapsing changes no generation either.
+        // Neither a settle wait lapsing nor a restart falling due changes a
+        // generation.
+        let now_ns = tree.now_ns();
         let settling_ns = settle
             .deadline()
-            .map_or(u64::MAX, |at| at.saturating_sub(tree.now_ns()));
-        let timeout_ns = deferred_ns.min(settling_ns);
+            .map_or(u64::MAX, |at| at.saturating_sub(now_ns));
+        let restart_ns = state
+            .next_restart_ns()
+            .map_or(u64::MAX, |at| at.saturating_sub(now_ns));
+        let timeout_ns = deferred_ns.min(settling_ns).min(restart_ns);
         match tree.wait_for_change(timeout_ns) {
             // Changed, or the deadline elapsed with work still outstanding:
             // either way re-react so the deferred milestone is retried.
@@ -717,8 +726,8 @@ mod tests {
             _endpoint_id: u64,
             _iface: &[u8; tairix_abi::net_ipc::IF_NAME_LEN],
             _node_location: u64,
-        ) -> Result<(), Errno> {
-            Ok(())
+        ) -> Result<[u8; 6], Errno> {
+            Ok([2, 0, 0, 0, 0, 1])
         }
 
         fn apply_settings(
@@ -918,6 +927,78 @@ mod tests {
         assert_eq!(tree.waited_under, [crate::SETTLE_BUDGET_NS]);
         assert_eq!(tree.settled, 1);
         assert!(sink.ids().contains(&events::SETTLE_LAPSED.0));
+    }
+
+    /// A failed driver is reloaded when its restart falls due, though nothing
+    /// in the tree changes to wake the loop.
+    #[test]
+    fn a_failed_driver_is_reloaded_when_due_with_no_tree_change() {
+        let kbd = HwMatchKey::virtio(0x1234);
+        let root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root);
+        let fresh = input_node(2, kbd);
+        let mut failed = fresh;
+        failed.set_driver_ending(tairix_abi::driver::DriverEnding::Failed);
+        let ended = encode(2, &[root, failed]);
+        let mut tree = ScriptedTree::new(vec![encode(1, &[root, fresh]), ended.clone(), ended]);
+        tree.tick = crate::autoload::RESTART_DELAY_NS;
+        let mut store = ScriptedStore::new(vec![(7, vec![bind(5, kbd)])]);
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &mut NoAudiod,
+            &mut NoAudioBaseline,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(2),
+        )
+        .expect("every cycle runs");
+
+        assert_eq!(store.loads(), [(7, 2), (7, 2)]);
+        assert_eq!(
+            tree.waited_under.get(1),
+            Some(&crate::autoload::RESTART_DELAY_NS),
+            "the wait ends when the restart is due"
+        );
+    }
+
+    /// A driver that ends before it settles, as one declining its node does,
+    /// holds readiness back no longer than the reaction that sees it end.
+    #[test]
+    fn a_driver_that_ends_unsettled_holds_readiness_back_no_longer() {
+        let kbd = HwMatchKey::virtio(0x1234);
+        let nodes = [
+            HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root),
+            input_node(2, kbd),
+        ];
+        let mut tree = ScriptedTree::new(vec![encode(1, &nodes), encode(2, &nodes)]);
+        let mut store = ScriptedStore::new(vec![(7, vec![bind(5, kbd)])]);
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &mut NoAudiod,
+            &mut NoAudioBaseline,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(1),
+        )
+        .expect("both cycles run");
+
+        assert_eq!(store.loads(), [(7, 2)]);
+        assert_eq!(tree.settled, 1);
+        assert!(sink.ids().contains(&events::NODE_DRIVER_ENDED.0));
+        assert!(!sink.ids().contains(&events::SETTLE_LAPSED.0));
     }
 
     #[test]
@@ -1793,12 +1874,12 @@ mod tests {
             _endpoint_id: u64,
             _iface: &[u8; tairix_abi::net_ipc::IF_NAME_LEN],
             _node_location: u64,
-        ) -> Result<(), Errno> {
+        ) -> Result<[u8; 6], Errno> {
             if self.refusals > 0 {
                 self.refusals -= 1;
                 return Err(Errno::NotFound);
             }
-            Ok(())
+            Ok([2, 0, 0, 0, 0, 1])
         }
 
         fn apply_settings(

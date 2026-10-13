@@ -1010,7 +1010,8 @@ impl DriverNode<'static> {
             }
         }
         impl crate::hwtree::HwDriverTree for EveryNodeLive {
-            fn driver_admitted(&self, _: u32, _: bool) {}
+            fn driver_admitted(&self, _: u32, _: u64, _: bool) {}
+            fn driver_released(&self, _: u32, _: u64, _: tairix_abi::driver::DriverEnding) {}
         }
         Self {
             id,

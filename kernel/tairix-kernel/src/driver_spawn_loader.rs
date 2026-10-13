@@ -361,7 +361,14 @@ mod tests {
     }
 
     impl tairix_kernel_core::hwtree::HwDriverTree for OnlyNode {
-        fn driver_admitted(&self, _node_id: u32, _publishes: bool) {}
+        fn driver_admitted(&self, _node_id: u32, _generation: u64, _publishes: bool) {}
+        fn driver_released(
+            &self,
+            _node_id: u32,
+            _generation: u64,
+            _ending: tairix_abi::driver::DriverEnding,
+        ) {
+        }
     }
 
     use core::cell::RefCell;

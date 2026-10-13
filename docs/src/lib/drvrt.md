@@ -95,6 +95,35 @@ so a driver refuses rather than guessing.
   never carry more authority than its emitter (§4); a refusal surfaces as
   `DriverError::PermissionDenied`.
 
+## How a driver ends
+
+Every driver ends through `exit`, one vocabulary whatever device it drives, so
+a supervisor reading an exit status reads one table and no driver ends in
+silence. `exit::end(kind, detail)` records the ending once, as the kind's own
+stated reason with its name (`exit=`), the node the driver was loaded for
+(`node=`) and up to four detail fields — `exit::step` names the step that
+failed and `exit::error` the typed refusal — and answers the status to exit
+with:
+
+| Kind | Status | Record |
+|---|---|---|
+| `Declined` — the node offers nothing the driver serves; it is left unbound | 0 | 24001, Info |
+| `Removed` — the device left while it was served | 0 | 24002, Info |
+| `NoHost` — the node's grants could not be read | 80 | 24000, Error |
+| `NoResources` — the node lacks a resource, duty or link the driver needs | 81 | 24000, Error |
+| `BringupFailed` — the device would not come up | 82 | 24000, Error |
+| `NoService` — the driver's service could not be stood up | 83 | 24000, Error |
+| `ServeFailed` — the loop serving the device failed | 84 | 24000, Error |
+| `DeviceFault` — the device failed while it was served | 85 | 24000, Error |
+
+A driver declares no exit code of its own; `cargo xtask driver-exits` in `ci`
+refuses one in any crate built on this runtime. A driver needs
+`CAP_LOG_EMIT` for the record to reach the log. However a driver ends, the
+kernel clears its node's driven mark with the process, so the device manager
+records the node as ended without being told, and reloads one whose ending a
+fresh instance may cure — `NoService`, `ServeFailed`, `DeviceFault`, or a crash
+— within a restart budget (`docs/src/drivers/hardware-detection.md`).
+
 ## Link suppliers
 
 A driver other nodes link to — a clock, DMA, codec, interrupt or I²C
@@ -114,8 +143,7 @@ every supplier needs is defined here once:
 - **`serve::DutyNode`** is a supplier driver's bring-up: the node's grants
   read and its duty of the role the driver serves found
   (`DutyNode::open`), its one register window mapped, and every failure
-  recorded under the supplier's own event id and ended with one of the exit
-  codes every supplier shares (`serve::exit`).
+  ending the driver through `exit::end`.
 - **`refusal`** is the errno a protocol reply carries for a refusal from the
   hardware a supplier drives: what the hardware cannot do is `NotSupported`,
   what another holder has `Busy`, anything else its own `Errno`.

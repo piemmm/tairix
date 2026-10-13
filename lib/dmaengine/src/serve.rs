@@ -18,17 +18,14 @@ use tairix_abi::{
     DriverError, Errno, ProcId, RegisterWindow, HW_NODE_MAX_RESOURCES, PROC_ID_HEX_LEN,
 };
 use tairix_caps::CapabilitySet;
-use tairix_drvrt::serve::{exit, fail, instance_field, log_event, DutyNode, Endpoint, Service};
+use tairix_drvrt::exit::{end, step, DriverExit};
+use tairix_drvrt::serve::{instance_field, log_event, DutyNode, Endpoint, Service};
 use tairix_drvrt::{RtSupplier, Supplier};
 use tairix_log::{EventId, Field, FieldValue, Level};
 
 use crate::{split_windows, Buffer, Controller, ControllerHost, Record};
 
-/// No channel is both left to this system and interruptible.
-const EXIT_NO_CHANNELS: i32 = 93;
-
 const EVENT_READY: EventId = EventId(24_200);
-const EVENT_FAILED: EventId = EventId(24_201);
 const EVENT_CLAIMED: EventId = EventId(24_202);
 const EVENT_RECLAIMED: EventId = EventId(24_203);
 const EVENT_REFUSED: EventId = EventId(24_204);
@@ -44,13 +41,6 @@ const EVENT_UNRESET: EventId = EventId(24_210);
 struct Line {
     handle: u64,
     channels: u64,
-}
-
-/// Record that bring-up failed for `reason`, and answer the code the driver
-/// ends with: what a driver's own step, building its engine, reports.
-#[must_use]
-pub fn bringup_failed(reason: &'static str) -> i32 {
-    fail(EVENT_FAILED, exit::BRINGUP_FAILED, reason)
 }
 
 /// A controller node as its driver received it: the grants and duty, the
@@ -73,12 +63,15 @@ impl Node {
     /// read, or a node naming no single register window, no duty, no channel
     /// mask, or no memory window.
     pub fn open(caps: CapabilitySet) -> Result<Self, i32> {
-        let mut node = DutyNode::open(caps, LinkRole::Dma, EVENT_FAILED)?;
+        let mut node = DutyNode::open(caps, LinkRole::Dma)?;
         let (base, len) = node.window()?;
         // The binding makes the mask mandatory; the firmware owns what it
         // leaves out.
         let Some(mask) = node.duty().channels() else {
-            return Err(node.fail(exit::NO_RESOURCES, "dma: the tree states no channel mask"));
+            return Err(end(
+                DriverExit::NoResources,
+                &[step("dma: the tree states no channel mask")],
+            ));
         };
         let (peripheral, memory) = split_windows(
             || node.resources().filter(|r| r.is_translated_dma_window()),
@@ -86,13 +79,19 @@ impl Node {
             len as u64,
         );
         let Some(memory) = memory else {
-            return Err(node.fail(exit::NO_RESOURCES, "dma: the node reaches no memory"));
+            return Err(end(
+                DriverExit::NoResources,
+                &[step("dma: the node reaches no memory")],
+            ));
         };
         let memory_grant = node.host().grant_handle(&memory);
         let (Some(memory_grant), Ok(())) =
             (memory_grant, node.host_mut().select_dma_window(&memory))
         else {
-            return Err(node.fail(exit::NO_RESOURCES, "dma: the memory window was not granted"));
+            return Err(end(
+                DriverExit::NoResources,
+                &[step("dma: the memory window was not granted")],
+            ));
         };
         Ok(Self {
             granted: node,
@@ -119,9 +118,9 @@ impl Node {
     /// The exit code to end with when the carves cannot be held there.
     pub fn narrow(&self, reach: DmaReach) -> Result<(), i32> {
         self.granted.host().narrow_dma_reach(reach).map_err(|_| {
-            self.granted.fail(
-                exit::BRINGUP_FAILED,
-                "dma: chains cannot be held within the engines' reach",
+            end(
+                DriverExit::BringupFailed,
+                &[step("dma: chains cannot be held within the engines' reach")],
             )
         })
     }
@@ -142,17 +141,17 @@ impl Node {
 /// refusal ends the driver with its reason logged.
 pub fn serve<E: DmaEngine>(node: &Node, engine: E, reach: DmaReach) -> i32 {
     let Ok(instance) = tairix_rt::self_origin().map(|origin| origin.proc_id()) else {
-        return node.granted.fail(
-            exit::BRINGUP_FAILED,
-            "dma: this process's instance is unknown",
+        return end(
+            DriverExit::BringupFailed,
+            &[step("dma: this process's instance is unknown")],
         );
     };
     let (lines, line_count, usable) =
         bind_lines(node.granted.resources(), node.mask, engine.channel_count());
     if usable == 0 {
-        return node.granted.fail(
-            EXIT_NO_CHANNELS,
-            "dma: no channel is both unmasked and interruptible",
+        return end(
+            DriverExit::NoResources,
+            &[step("dma: no channel is both unmasked and interruptible")],
         );
     }
     let endpoint = node.granted.duty().endpoint();
@@ -170,9 +169,11 @@ pub fn serve<E: DmaEngine>(node: &Node, engine: E, reach: DmaReach) -> i32 {
         (node.mask, usable),
         node.peripheral,
     ) else {
-        return node.granted.fail(
-            exit::BRINGUP_FAILED,
-            "dma: a channel would not take its reset; its memory stays quarantined",
+        return end(
+            DriverExit::BringupFailed,
+            &[step(
+                "dma: a channel would not take its reset; its memory stays quarantined",
+            )],
         );
     };
     node.granted.host().device_quiesced();
@@ -204,7 +205,7 @@ pub fn serve<E: DmaEngine>(node: &Node, engine: E, reach: DmaReach) -> i32 {
         }
         Err(ended) => ended,
     };
-    node.granted.fail(exit::SERVE_FAILED, ended.reason())
+    ended.end()
 }
 
 /// The controller as the shared loop drives it: each bound line serves the
@@ -436,15 +437,13 @@ fn channel_field(channel: u8) -> Field<'static> {
     }
 }
 
-fn log_ready(channels: u64) {
+fn log_ready(usable: u64) {
+    let mut hex = [0u8; 16];
     log_event(
         Level::Info,
         EVENT_READY,
         "dma: controller serving",
-        &[Field {
-            key: "channels",
-            value: FieldValue::UnsignedInt(channels),
-        }],
+        &crate::ready_fields(usable, &mut hex),
     );
 }
 

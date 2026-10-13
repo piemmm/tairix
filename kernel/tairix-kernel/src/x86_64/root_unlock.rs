@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 
 use tairix_abi::HwNode;
 use tairix_caps::CapabilitySet;
-use tairix_kernel_core::{ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, YieldHandle};
+use tairix_kernel_core::{CooperativeYield, InitSpawnCtx, YieldHandle};
 use tairix_kernel_mem::FrameAllocator;
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
@@ -24,7 +24,9 @@ use tairix_reclaim::MemoryPressure;
 
 use crate::driver_catalog::VIRTIO_BLK_PATH;
 use crate::root_storage::RootBlockBinding;
-use crate::unlock_orchestrate::{finish_virtio_unlock, UnlockConsole, UnlockEnv};
+use crate::unlock_orchestrate::{
+    finish_virtio_unlock, Console0, KeySource, UnlockConsole, UnlockEnv,
+};
 use crate::unlock_service::{note, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_TASK};
 use tairix_arch_x86_64::serial::SERIAL_SINK;
 
@@ -71,25 +73,21 @@ struct X86UnlockConsole;
 static X86_UNLOCK_CONSOLE: X86UnlockConsole = X86UnlockConsole;
 
 impl UnlockConsole for X86UnlockConsole {
-    fn acquire_console0(
-        &self,
-    ) -> (
-        &'static dyn ConsoleWrite,
-        &'static (dyn ConsoleRead + Sync + 'static),
-    ) {
+    fn acquire_console0(&self) -> Console0 {
         // Arm COM1's interrupt-driven receive for the unlock window so a
         // keystroke wakes the parked passphrase reader (`console_wake`) —
         // the receive ISR drains the FIFO into `COM1_INPUT`, which
         // `COM1_CONSOLE_READ` reads. Idempotent with the
         // `release_console0_to_login` handoff arm.
         crate::x86_64::com1_rx::enable_uart_console_irq();
-        let write: &'static dyn ConsoleWrite = &COM1_CONSOLE;
         // The unlock kthread reads the *ungated* interrupt-fed read half
         // directly; the console list installs the gate-wrapped sibling for
         // `login`.
-        let read: &'static (dyn ConsoleRead + Sync + 'static) =
-            &crate::x86_64::com1_rx::COM1_CONSOLE_READ;
-        (write, read)
+        Console0 {
+            write: &COM1_CONSOLE,
+            read: &crate::x86_64::com1_rx::COM1_CONSOLE_READ,
+            keys: KeySource::Live,
+        }
     }
 
     fn release_console0_to_login(&self) {

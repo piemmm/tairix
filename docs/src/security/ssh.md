@@ -27,5 +27,6 @@ is fixed; nothing the peer sent is reflected in it.
 
 ## Audit events
 
-`lib/ssh::events` holds the `24_000..25_000` range and lands with `sshd`
+`lib/ssh::events` takes the `32_000..33_000` range in `tairix_log::registry`
+and lands with `sshd`
 (`plans/SSH.md` S5), the first component that emits them.

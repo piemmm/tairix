@@ -11,9 +11,9 @@ use tairix_log::EventId;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const FONTD_RANGE_START: u32 = 17_000;
+pub const FONTD_RANGE_START: u32 = tairix_log::registry::FONTD.start();
 /// Range end (exclusive) reserved for `fontd` event identifiers.
-pub const FONTD_RANGE_END: u32 = 18_000;
+pub const FONTD_RANGE_END: u32 = tairix_log::registry::FONTD.end();
 
 /// The service loaded its faces and bound `FONT_ENDPOINT` successfully — it is
 /// serving glyph coverage. Recorded once at startup so an operator can see the

@@ -49,6 +49,11 @@ Hybrid **buddy + bitmap**:
   region. The links are the allocator's own array, so the allocate and
   free paths reach no other allocator and the kernel heap can grow by
   drawing frames from here without re-entering itself.
+- The bitmap, links and tags cost about 17 bytes a frame, so they scale with
+  RAM. On a port with a direct physical map they are carved from the top of
+  the highest usable run the map reaches, frames the allocator never hands
+  out (`FrameAllocator::with_dma_reaches_carved`), rather than drawn from a
+  bootstrap heap sized before any RAM was discovered.
 
 The allocator never panics on OOM: `alloc` / `alloc_order` return
 `AllocError::OutOfMemory`. The constructor refuses overlapping or
@@ -2669,6 +2674,13 @@ into one run of a kernel **remap window**.
   from the physical frame allocator. Record storage is bounded by the number
   of live plus freed runs, never by the window's page count (§24.1), and a
   heap that grows and fully drains leaves the window pristine.
+- **The bootstrap arena holds only what boot allocates before growth.** A
+  kernel that installs the source reserves `tairix_kalloc::BOOT_HEAP_BYTES`
+  (16 MiB); a test kernel that never grows lives on `HEAP_BYTES` (64 MiB).
+  Phase `Mem` records the decision and the arena's peak use before it
+  (`4006` `KERNEL_HEAP_GROWTH`): under 1 MiB on every port, plus the aarch64
+  boot console's text grids and that port's 64 KiB secondary-CPU stacks,
+  which must lie in the kernel image (`plans/OPEN-DEFECTS.md` D974).
 - **Fail closed, leak nothing.** A refused reservation, a refused leaf, or
   genuine frame exhaustion returns every chunk already drawn and releases the
   address space; `shrink` accepts only an exact live run, so a mismatched
@@ -2700,8 +2712,9 @@ into one run of a kernel **remap window**.
   page** of the assembled run, frees it so the drained region drives
   `shrink`, and repeats — a teardown that stranded window address space or
   left a stale leaf cannot serve the same request twice. Measured: each port
-  grows a ~63 MiB region out of a fragmented pool, dereferences all of it,
-  and settles back at exactly the bootstrap capacity.
+  grows a region the size of the bootstrap arena's free remainder out of a
+  fragmented pool, dereferences all of it, and settles back at exactly the
+  bootstrap capacity.
 
 ## 7v. The kernel heap's two tiers (`lib/kalloc`, `framepages`)
 

@@ -19,12 +19,12 @@ use alloc::vec::Vec;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{DriverHandle, Errno, HwNode};
 use tairix_caps::CapabilitySet;
-use tairix_log::{log as log_event, Event, EventId, Field, Level, Sink};
+use tairix_log::{Field, Level, Sink};
 use tairix_util::fmt::{format_hex_u64, format_i32};
 
 use tairix_devmatch::{resolve, DriverCandidate, MatchResolution};
 
-use crate::events;
+use crate::events::{audit_node, NodeEvent};
 
 /// Load mechanism behind the device manager.
 ///
@@ -130,14 +130,15 @@ impl<'m> DeviceManager<'m> {
                     // line per unbound node would drown the slow diagnostic
                     // UART. Kept identical to the user-space sibling
                     // (`crate::autoload::match_and_load`).
-                    self.audit_node(events::NODE_UNBOUND, Level::Debug, node.id(), &[]);
+                    audit_node(self.sink, NodeEvent::Unbound, Level::Debug, node.id(), &[]);
                     report.unbound += 1;
                 }
                 MatchResolution::Tie { priority } => {
                     let mut pbuf = [0u8; 12];
                     let priority_str = format_i32(i32::from(priority), &mut pbuf);
-                    self.audit_node(
-                        events::NODE_TIE_REJECTED,
+                    audit_node(
+                        self.sink,
+                        NodeEvent::TieRejected,
                         Level::Warn,
                         node.id(),
                         &[Field {
@@ -157,8 +158,9 @@ impl<'m> DeviceManager<'m> {
                         Err(errno) => {
                             let mut ebuf = [0u8; 12];
                             let errno_str = format_i32(errno.as_i32(), &mut ebuf);
-                            self.audit_node(
-                                events::NODE_LOAD_FAILED,
+                            audit_node(
+                                self.sink,
+                                NodeEvent::LoadFailed,
                                 Level::Warn,
                                 node.id(),
                                 &[
@@ -178,8 +180,9 @@ impl<'m> DeviceManager<'m> {
                     };
                     let mut hbuf = [0u8; 16];
                     let handle_str = format_hex_u64(handle.as_u64(), &mut hbuf);
-                    self.audit_node(
-                        events::NODE_BOUND,
+                    audit_node(
+                        self.sink,
+                        NodeEvent::Bound,
                         Level::Info,
                         node.id(),
                         &[
@@ -202,46 +205,12 @@ impl<'m> DeviceManager<'m> {
         }
         report
     }
-
-    fn audit_node(&self, id: EventId, level: Level, node: u32, extra: &[Field<'_>]) {
-        let mut nbuf = [0u8; 16];
-        let node_str = format_hex_u64(u64::from(node), &mut nbuf);
-        // Stack-assemble the field slice: the node id first, then up to
-        // two event-specific fields. Sized for the largest emitter.
-        let mut fields = [Field {
-            key: "node",
-            value: tairix_log::FieldValue::Str(node_str),
-        }; 3];
-        let mut len = 1;
-        for field in extra {
-            fields[len] = *field;
-            len += 1;
-        }
-        log_event(
-            self.sink,
-            &Event {
-                level,
-                id,
-                message: event_message(id),
-                fields: &fields[..len],
-            },
-        );
-    }
-}
-
-fn event_message(id: EventId) -> &'static str {
-    match id {
-        x if x == events::NODE_BOUND => "node bound to driver",
-        x if x == events::NODE_UNBOUND => "node left unbound: no matching driver",
-        x if x == events::NODE_TIE_REJECTED => "node refused: unbroken bind-priority tie",
-        x if x == events::NODE_LOAD_FAILED => "node load failed: driver-host gate refused",
-        _ => "devmgr event",
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events;
     use crate::testsink::RecordingSink;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;

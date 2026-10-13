@@ -22,7 +22,7 @@ fn attach_params() -> AttachParams {
         endpoint: 1,
         ring_frames: 2_048,
         region_grant: 0x1234_5678_9ABC_DEF0,
-        notify_endpoint: notify_endpoint_for(4_096, 3),
+        notify_endpoint: notify_endpoint_for(4_096, 3).expect("a slot"),
     }
 }
 
@@ -59,7 +59,7 @@ fn every_request() -> [AudioChannelRequest; 11] {
         },
         AudioChannelRequest::Detach { endpoint: 1 },
         AudioChannelRequest::Watch {
-            notify_endpoint: notify_endpoint_for(4_096, 0),
+            notify_endpoint: notify_endpoint_for(4_096, 0).expect("a slot"),
         },
     ]
 }
@@ -71,22 +71,20 @@ fn encoded(request: AudioChannelRequest) -> ([u8; AUDIO_CHANNEL_MAX_REQUEST], us
 }
 
 #[test]
-fn the_reserved_endpoint_block_is_the_spelled_name_and_bounded() {
-    assert!(is_audio_channel_endpoint(AUDIO_CHANNEL_ENDPOINT_BASE));
-    assert!(is_audio_channel_endpoint(
-        AUDIO_CHANNEL_ENDPOINT_BASE + AUDIO_CHANNEL_ENDPOINT_COUNT - 1
-    ));
-    assert!(!is_audio_channel_endpoint(AUDIO_CHANNEL_ENDPOINT_BASE - 1));
-    assert!(!is_audio_channel_endpoint(
-        AUDIO_CHANNEL_ENDPOINT_BASE + AUDIO_CHANNEL_ENDPOINT_COUNT
-    ));
-    // The block is a rendezvous only a privileged binder may claim.
-    assert!(crate::ipc::is_reserved_endpoint(
-        AUDIO_CHANNEL_ENDPOINT_BASE
-    ));
-    assert!(crate::ipc::is_reserved_endpoint(
-        AUDIO_CHANNEL_ENDPOINT_BASE + AUDIO_CHANNEL_ENDPOINT_COUNT - 1
-    ));
+fn each_node_has_its_own_reserved_device_channel() {
+    for node in [0u32, 0x17, u32::MAX] {
+        let endpoint = AUDIO_CHANNEL_ENDPOINTS.endpoint(node);
+        assert_eq!(
+            crate::hwtree::NodeEndpointBlock::device_channel_node(endpoint),
+            Some(node)
+        );
+        // Only a privileged binder may claim one.
+        assert!(crate::ipc::is_reserved_endpoint(endpoint));
+    }
+    assert_ne!(
+        AUDIO_CHANNEL_ENDPOINTS.endpoint(0x17),
+        AUDIO_CHANNEL_ENDPOINTS.endpoint(0x19)
+    );
 }
 
 /// The three fields tile the word exactly, so no pid or slot can reach
@@ -95,8 +93,8 @@ fn the_reserved_endpoint_block_is_the_spelled_name_and_bounded() {
 #[test]
 fn a_notify_endpoint_packs_pid_and_slot_without_reaching_the_tag() {
     for pid in [0u64, 1, 4_096, crate::PID_MAX] {
-        for index in [0u64, 1, AUDIO_CHANNEL_ENDPOINT_COUNT - 1] {
-            let endpoint = notify_endpoint_for(pid, index);
+        for index in [0u64, 1, AUDIO_NOTIFY_SLOTS - 1] {
+            let endpoint = notify_endpoint_for(pid, index).expect("a slot");
             assert_eq!(endpoint & 0xFF, index);
             assert_eq!((endpoint >> 8) & crate::PID_MAX, pid);
             assert_eq!(endpoint >> 48, AUDIO_NOTIFY_ENDPOINT_TAG >> 48);
@@ -104,8 +102,8 @@ fn a_notify_endpoint_packs_pid_and_slot_without_reaching_the_tag() {
         }
     }
     assert_ne!(
-        notify_endpoint_for(crate::PID_MAX, 0),
-        notify_endpoint_for(crate::PID_MAX - 1, 0)
+        notify_endpoint_for(crate::PID_MAX, 0).expect("a slot"),
+        notify_endpoint_for(crate::PID_MAX - 1, 0).expect("a slot")
     );
 }
 
@@ -312,7 +310,7 @@ fn attach_refuses_a_notify_port_that_names_a_system_rendezvous() {
     for hijacked in [
         crate::sysinfo::SYSINFO_ENDPOINT,
         crate::audio::AUDIO_ENDPOINT,
-        AUDIO_CHANNEL_ENDPOINT_BASE,
+        AUDIO_CHANNEL_ENDPOINTS.endpoint(0x17),
     ] {
         let mut corrupt = frame;
         put_u64(&mut corrupt, HEADER_LEN + attach::NOTIFY, hijacked);
@@ -322,10 +320,14 @@ fn attach_refuses_a_notify_port_that_names_a_system_rendezvous() {
         );
     }
     // The mixer's own derivation never produces one.
-    assert!(!crate::ipc::is_reserved_endpoint(notify_endpoint_for(
-        crate::PID_MAX,
-        AUDIO_CHANNEL_ENDPOINT_COUNT - 1
-    )));
+    assert!(!crate::ipc::is_reserved_endpoint(
+        notify_endpoint_for(crate::PID_MAX, AUDIO_NOTIFY_SLOTS - 1).expect("a slot")
+    ));
+    assert_eq!(
+        notify_endpoint_for(crate::PID_MAX, AUDIO_NOTIFY_SLOTS),
+        None,
+        "a slot past the byte would alias the first"
+    );
 }
 
 /// A driver is told to send only to a mixer's device-channel notify port: a
@@ -335,12 +337,12 @@ fn attach_refuses_a_notify_port_that_names_a_system_rendezvous() {
 fn attach_and_watch_refuse_a_port_outside_the_device_notify_space() {
     let (attach, attach_len) = encoded(AudioChannelRequest::Attach(attach_params()));
     let (watch, watch_len) = encoded(AudioChannelRequest::Watch {
-        notify_endpoint: notify_endpoint_for(4_096, 0),
+        notify_endpoint: notify_endpoint_for(4_096, 0).expect("a slot"),
     });
     for stray in [
         crate::audio::notify_endpoint_for(4_096, 3),
         0x0A55_0001,
-        notify_endpoint_for(4_096, 3) ^ (1 << 63),
+        notify_endpoint_for(4_096, 3).expect("a slot") ^ (1 << 63),
     ] {
         assert!(!is_audio_notify_endpoint(stray));
         let mut corrupt = attach;
@@ -356,10 +358,9 @@ fn attach_and_watch_refuse_a_port_outside_the_device_notify_space() {
             Err(Errno::OutOfRange)
         );
     }
-    assert!(is_audio_notify_endpoint(notify_endpoint_for(
-        crate::PID_MAX,
-        0xFF
-    )));
+    assert!(is_audio_notify_endpoint(
+        notify_endpoint_for(crate::PID_MAX, 0xFF).expect("a slot")
+    ));
 }
 
 #[test]

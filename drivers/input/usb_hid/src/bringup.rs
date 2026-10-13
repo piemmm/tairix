@@ -11,6 +11,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::{DriverError, Errno};
+use tairix_drvrt::exit::DriverExit;
 use tairix_hid::{
     boot, DescriptorError, HidDevice, HidTransport, ReportDescriptor, ReportId, MAX_DESCRIPTOR,
 };
@@ -76,6 +77,20 @@ pub enum BringupError {
     NothingServed,
     /// Memory for its descriptors or model ran out.
     OutOfMemory,
+}
+
+impl BringupError {
+    /// How the driver ends for this failure: an interface that went is
+    /// removed, one carrying nothing the seat serves is declined, and any
+    /// other is a bring-up failure.
+    #[must_use]
+    pub const fn exit(self) -> DriverExit {
+        match self {
+            Self::Gone => DriverExit::Removed,
+            Self::NothingServed => DriverExit::Declined,
+            _ => DriverExit::BringupFailed,
+        }
+    }
 }
 
 /// A transfer's failure: the interface gone, or a fault.

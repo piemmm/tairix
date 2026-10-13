@@ -64,31 +64,9 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_drv_bus_pcie_brcm::wiring::{emit_vl805_node, pcie_bringup_from_resources};
+    use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_rt::ClockDelay;
-
-    /// Exit code when the rt-backed driver host could not be built from the
-    /// kernel-delivered grants (the `resource_grants` query was refused or the
-    /// delivery did not fit). A reserved, fail-closed value.
-    const EXIT_NO_HOST: i32 = 80;
-
-    /// Exit code when the delivered grants do not name the controller window,
-    /// inbound aperture, and outbound window this bus driver needs — an
-    /// unbound or mis-provisioned node. A reserved,
-    /// fail-closed value.
-    const EXIT_NO_RESOURCES: i32 = 81;
-
-    /// Exit code when the PCIe bring-up / VL805 publish failed (the link never
-    /// trained, no USB function was found, the BAR could not be assigned or
-    /// mapped, or the node emission was refused). A reserved, fail-closed
-    /// value; the bus is left unbrought-up, never wedged.
-    const EXIT_BRINGUP_FAILED: i32 = 82;
-
-    /// Exit code when the resident park failed — the kernel refused the
-    /// wait-set the lifetime park runs on. Exiting fail-loud beats the
-    /// yield-forever spin a parkless residency would degrade into; the
-    /// spawning supervisor decides whether to relaunch. A reserved value.
-    const EXIT_PARK_FAILED: i32 = 83;
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
@@ -104,19 +82,19 @@ mod program {
             .copied()
             .collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return EXIT_NO_HOST;
+            return end(DriverExit::NoHost, &[]);
         };
         // Parse the discovered controller/inbound/outbound windows from the
         // same delivered grants the host maps over — no build-time board
         // constant, no second `resource_grants` syscall.
         let Ok(bringup) = pcie_bringup_from_resources(host.resources()) else {
-            return EXIT_NO_RESOURCES;
+            return end(DriverExit::NoResources, &[]);
         };
         // The one userland clock-backed `Delay` for the link bring-up's
         // hardware-dictated microsecond waits.
         let delay = ClockDelay::new();
         if emit_vl805_node(&host, &bringup, &delay).is_err() {
-            return EXIT_BRINGUP_FAILED;
+            return end(DriverExit::BringupFailed, &[]);
         }
         // The bus holds the one function it enumerated; a refused settle only
         // leaves the device manager to wait out its bound for this node.
@@ -125,7 +103,7 @@ mod program {
         // the life of the system: park off the run queue for good. A failed
         // park exits fail-loud rather than degrading into a yield spin.
         let _ = tairix_rt::park_forever();
-        EXIT_PARK_FAILED
+        end(DriverExit::ServeFailed, &[])
     }
 
     tairix_rt::entry!(main);

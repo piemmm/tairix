@@ -137,7 +137,7 @@ Decision order, first match wins:
 
 | Condition | Action |
 |---|---|
-| Clock `Unset` | Sync as soon as `NetworkUp` is satisfied |
+| Clock `Unset` | Sync immediately |
 | Reading implausible (pre-`RELEASE_EPOCH`, or ≥ 100 years hence) | Sync immediately |
 | Reading minus the persisted last-seen instant exceeds `STALE_BOOT_GAP` (5 days) | Sync immediately |
 | Otherwise (clock set and plausible) | **No boot sync.** Refresh once `REFRESH_UPTIME` of uptime has elapsed, then on that cadence |
@@ -934,8 +934,7 @@ a stock installation keeps time with no configuration.
 
 ## 8. Cross-references
 
-- `plans/NETWORK.md` — the socket ABI and the `NetworkUp` readiness condition
-  `timed` requires.
+- `plans/NETWORK.md` — the socket ABI.
 - `plans/DNS.md` — the stub resolver that turns configured server names into
   addresses, and the engine-shape precedent this plan follows.
 - `plans/NEW-SERVICEMANAGER.md` — enrolment, SUM1 unit metadata, the control

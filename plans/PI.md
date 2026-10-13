@@ -1923,8 +1923,7 @@ firmware-revision probe, which rests on the VideoCore answering property
 requests in posting order, the VL805's `HCRST` before `UsbDevice::start`,
 and GENET's `DMA_DISABLED` wait — each observed, after killing the driver
 mid-traffic, as the successor's `DMA_QUARANTINE_RELEASED` record carrying
-non-zero `bytes` (every bring-up records one, so the record alone proves
-nothing).
+non-zero `bytes` (a bring-up that frees nothing records none).
 
 **Remaining for P10 (GUI):** run `userland/gui/{wm,taskbar,session}` on
 the HVS path so `userland/session/login` offers the launchable graphical session
@@ -2878,8 +2877,8 @@ rest is metal.
 
 **Metal checklist**, run with SND8's first consumer:
 
-1. The driver comes up serving channels `0x7f5` and declares the node
-   quiesced; the firmware's channels 1 and 3 are never touched, and the
+1. The driver comes up serving channel mask `0x7f5` (`channels=9`) and
+   declares the node quiesced; the firmware's channels 1 and 3 are never touched, and the
    firmware's own display and audio keep working.
 2. A cyclic transfer to a peripheral FIFO raises one interrupt per period on
    its channel's line, including channels 7–10 on their shared lines.

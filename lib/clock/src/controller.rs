@@ -148,6 +148,12 @@ pub enum Record {
         /// The clock's binding id.
         clock: u32,
     },
+    /// A clock its last holder left could not be returned unheld; it runs on
+    /// at the rate it was held at.
+    Unreturned {
+        /// The clock's binding id.
+        clock: u32,
+    },
     /// A request was refused.
     Refused {
         /// The operation, when the frame named one.
@@ -409,7 +415,7 @@ impl<H: ClockHardware, S: SupplierHost, L: Recorder<Record>> Controller<H, S, L>
                     self.note_halt(id, halt);
                     self.log.record(Record::Stopped { clock: id });
                 }
-                Err(_) => self.log.record(Record::Stuck { clock: id }),
+                Err(_) => self.log.record(Record::Unreturned { clock: id }),
             }
             return;
         }

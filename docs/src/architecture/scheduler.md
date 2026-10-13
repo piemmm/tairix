@@ -822,13 +822,14 @@ enabled) remains the only writer of run-queue state. An interrupt handler
 needs to wake a waiter, only sets an atomic flag
 (`WaitQueue::request_wake` / the `timed_wake_sweep` pending bit), mirroring
 `tairix_kernel_irq::IrqTable::fire`. The real `unpark` — which reads the
-registry `RwLock` and the run-queue lock — runs at the next
-dispatcher-context safe point (`waitq::drain_pending_wakes`, between steps
-and before idle), so the scheduler's locks are never acquired with
-interrupts disabled and an ISR can never deadlock against an in-progress
-`spawn` / `dispatch` on the interrupted task. A woken task cannot run until
-the current in-kernel task yields anyway (the kernel is non-preemptible),
-so deferring the unpark to that point costs no responsiveness. Involuntary
+registry `RwLock` and the run-queue lock — runs at the next safe point
+(`waitq::drain_pending_wakes`): between dispatcher steps and before idle,
+and at both preemption boundaries, the return to user mode and the
+in-kernel `yield_if_owed`, where the interrupted task holds no spin lock.
+An ISR therefore never takes a scheduler lock and can never deadlock
+against an in-progress `spawn` / `dispatch` on the interrupted task, and a
+completion that lands while a user task runs wakes its waiter on that
+interrupt's own return, not on the task's next syscall or tick. Involuntary
 preemption of a *user* task is the separate privilege-gated path: a timer
 tick taken from EL0/U-mode/ring 3 suspends the running user task back to the
 scheduler via the port's preempt callback. The integration test's per-CPU

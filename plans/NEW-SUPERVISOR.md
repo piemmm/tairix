@@ -38,7 +38,12 @@ exception.
 - **The boot-screen wording is frozen exactly as specced.** The three
   on-screen strings below are byte-exact and are asserted by the QEMU
   vertical (§7). They are the contract; do not "improve" the wording.
-  1. `[Press ESC for supervisor]` — shown for 2 seconds.
+  1. `[Press ESC for supervisor]` — shown for 2 seconds, once console 0
+     can deliver a key: at once on a line live from boot, such as a UART;
+     on a console fed by an input device (the Pi's framebuffer console and
+     its USB keyboard), when a driver binds one. Until then the line reads
+     `[Waiting for a keyboard]` and (1) is drawn over it; if none binds
+     within 30 seconds the line is cleared.
   2. `ARXFS passphrase: ` — replaces (1) in place after the window, for an
      encrypted root; a plaintext root's line collapses to `ARXFS` instead
      and mounts with no prompt.
@@ -72,7 +77,19 @@ exception.
 - **No busy-waiting (§2.23).** The 2-second window and every REPL read are
   genuine timed/interrupt-driven parks on `CONSOLE_WAITQ` (reuse
   `unlock_service::park_for_ns` and the `KthreadConsoleRead` reader), never
-  a spin or a `yield_now` loop.
+  a spin or a `yield_now` loop. The wait for an input device parks on the
+  hardware tree's wait queue (`park_on_until` over `HW_TREE_WAITQ`).
+- **The window is on a screen that stays lit.** A display engine taking
+  console 0's screen over from the firmware waits until the boot hands the
+  console to `login` (`console_relocate` parks), so the takeover's mode set,
+  which blanks a sink while it re-locks, never lands under the window or the
+  passphrase prompt.
+- **The wait is not wasted.** While the window waits, a separate kernel task
+  reads what the root mount will read (`root_mount::prefetch_root`: a
+  plaintext root through a read-only open and the bootstrap files the unlock
+  loads, an encrypted root as far as its lock), writing nothing, so the mount
+  after the window finds it cached and a slow disk still cannot hold the
+  window off.
 - **Complete, not minimal (§27).** The command dispatcher is a full table
   of `&'static` entries (name, summary, per-command help, handler) with
   prefix-free exact matching, argument tokenisation, and unknown-command
@@ -116,6 +133,14 @@ diagnose.
 
 State machine (all timed reads are parks, never spins):
 
+0. **Wait for a key source.** The port says whether console 0's keys come
+   from a live line or an input device (`KeySource`). An input-device console
+   parks until the live hardware tree holds an `Input` node a driver serves,
+   for at most 30 s, its line reading `\r\n[Waiting for a keyboard]`. Once a
+   key can arrive the announcement is drawn over it,
+   `\r[Press ESC for supervisor]\x1b[K`; with none the waiting text is erased
+   (`\r\x1b[K`), leaving the fresh line open, so the unlock draws over the
+   same line either way.
 1. **Announce.** `write_all(console, b"\r\n[Press ESC for supervisor]")`. The
    leading `\r\n` opens a fresh line, so one blank line separates the boot
    banner (userland `init`'s machine-summary line beneath the
@@ -863,7 +888,8 @@ zero total and a narrow geometry never panic.
   not persistently) — it never fabricates one.
 - The ESC boot-screen window at the top of
   `root_mount.rs :: unlock_root_disk_interactively_impl`, byte-exact:
-  `[Press ESC for supervisor]` → 2 s timed park (`ConsoleRead::read_timeout`,
+  the key-source wait (`KeyArrival`, `[Waiting for a keyboard]` on screen
+  while it lasts) → `[Press ESC for supervisor]` → 2 s timed park (`ConsoleRead::read_timeout`,
   a genuine bounded park) → in-place redraw `\rARXFS passphrase: \x1b[K`; a
   lone `ESC` → `\rARXFS\x1b[K\r\n\r\nSupervisor\r\n` then `run_supervisor`.
   ESC-vs-CSI disambiguation is a bounded re-poll (`esc_is_lone_escape` /
@@ -871,7 +897,7 @@ zero total and a narrow geometry never panic.
   (`read_passphrase_line` returns `PassphraseReadError::Escape` on a
   first-byte lone `ESC`); both entry points share one `enter_supervisor`
   banner+REPL definition. The host is built in `unlock_orchestrate.rs`'s
-  unlock body and threaded as `Option<&mut dyn SupervisorHost>`
+  unlock body and threaded with its key source as `Option<SupervisorWindow>`
   (`None` in host tests, so their behaviour is unchanged); on
   `SupervisorExit::Mounted` the unlock returns `Installed` with no further
   prompt. `install_boot_log_tail(&BOOT_AUDIT_RING)` is published on each

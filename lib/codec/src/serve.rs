@@ -3,7 +3,6 @@
 use tairix_abi::driver::codec::{Codec, CODEC_MAX_REPLY, CODEC_MAX_REQUEST};
 use tairix_abi::hwlink::LinkDuty;
 use tairix_abi::PROC_ID_HEX_LEN;
-use tairix_audiochan::{exit, fail};
 use tairix_drvrt::serve::{instance_field, log_event, Endpoint, Service};
 use tairix_drvrt::{Recorder, RtSupplier};
 use tairix_log::{EventId, Field, FieldValue, Level};
@@ -22,7 +21,7 @@ const ENDPOINT_CAPACITY: usize = 4;
 /// for the life of the driver process.
 ///
 /// Never returns on the success path; a set-up refusal or a lost endpoint
-/// ends the driver with [`exit::NO_SERVICE`] and its reason logged.
+/// ends the driver, its reason recorded.
 pub fn serve<C: Codec>(codec: C, duty: &LinkDuty) -> i32 {
     let endpoint = duty.endpoint();
     let mut server = CodecServer::new(codec, RtSupplier::new(endpoint), Log, endpoint);
@@ -40,7 +39,7 @@ pub fn serve<C: Codec>(codec: C, duty: &LinkDuty) -> i32 {
         Ok(service) => service.run(&mut server),
         Err(ended) => ended,
     };
-    fail(exit::NO_SERVICE, ended.reason(), None)
+    ended.end()
 }
 
 /// The system log, as the server records to it.

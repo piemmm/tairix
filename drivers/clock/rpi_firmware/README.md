@@ -59,7 +59,8 @@ and no interrupt line.
   role and the endpoint with the process, so a replacement can take both.
 - **A linked clock cannot be stopped.** The property interface has no off; a
   clock the firmware had not started rests at the least it accepts once its
-  last holder leaves.
+  last holder leaves (120 MHz for the state-machine clock), or where it runs
+  when that least is zero.
 - **Not exercisable under QEMU.** QEMU models no `VideoCore`, so the exchanges
   are proven against the mock firmware and the live channel is the on-metal
   acceptance item (`plans/PI.md`).
@@ -70,7 +71,8 @@ and no interrupt line.
 | Id | Level | Decision |
 |---|---|---|
 | 24700 | Info | the mechanism applying targets |
-| 24701 | Error | the mechanism ending, with the reason |
+
+A driver's ending is the driver runtime's record (`tairix_drvrt::exit`).
 
 The `clock-v1` endpoint's own are `lib/clock`'s (`docs/src/lib/clock.md`).
 

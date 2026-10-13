@@ -159,8 +159,10 @@ A level is programmed into the device's control where it has one and the
 mixer applies the remainder; a control the driver refuses as unsupported
 falls back to the mixer, and any other refusal loses the device. A direction's
 default is the live endpoint the tenant prefers, else the one the machine's
-baseline prefers, else the first bound, chosen again whenever a device is
-bound, lost or reaped, the room moves, or a preference changes. The baseline —
+baseline prefers, else the first bound of those likeliest to reach a listener
+(a connector with something plugged in, then one that cannot tell, then one
+known empty), chosen again whenever a device is bound, lost or reaped, a
+connector changes, the room moves, or a preference changes. The baseline —
 the preferred sink and source and the level every endpoint starts at — is
 delivered by the device manager from `system.conf`.
 

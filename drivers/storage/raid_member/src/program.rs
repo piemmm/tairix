@@ -23,42 +23,31 @@ use tairix_abi::reply::STATUS_REPLY_LEN;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::Errno;
 use tairix_drv_storage_raid_member::{AgentStep, MemberAgent, Transport};
+use tairix_drvrt::exit::{end, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
 use tairix_util::fmt::format_hex_u64;
 
-/// Exit code when the rt-backed driver host could not be built from the
-/// kernel-delivered grants. A reserved, fail-closed value.
-const EXIT_NO_HOST: i32 = 90;
-
-/// Exit code when the matched member node did not carry the block endpoint
-/// and shared-window grants this agent must delegate.
-const EXIT_NO_TRANSPORT: i32 = 91;
-
-/// Exit code when the agent could not mint the wait-set it parks its
-/// membership on — without it every wait would have to become a poll.
-const EXIT_NO_WAITSET: i32 = 92;
-
 /// Diagnostic event id: the device was offered to the composer and the
 /// membership is being held open.
-const RAID_MEMBER_OFFERED: EventId = EventId(4186);
+const RAID_MEMBER_OFFERED: EventId = EventId(28_186);
 
 /// Diagnostic event id: no composer is listening on the rendezvous yet, so
 /// the offer is paced and made again.
-const RAID_NO_COMPOSER: EventId = EventId(4187);
+const RAID_NO_COMPOSER: EventId = EventId(28_187);
 
 /// Diagnostic event id: the composer released this member — the array was
 /// torn down, or the device was removed from it.
-const RAID_MEMBER_RELEASED: EventId = EventId(4188);
+const RAID_MEMBER_RELEASED: EventId = EventId(28_188);
 
 /// Diagnostic event id: the composer refused this device; the agent stops.
-const RAID_MEMBER_REFUSED: EventId = EventId(4189);
+const RAID_MEMBER_REFUSED: EventId = EventId(28_189);
 
 /// Diagnostic event id: the composer could not take this device on yet (a
 /// previous membership for it has still to end, or it had no room); the agent
 /// offers again on its paced cadence.
-const RAID_MEMBER_DEFERRED: EventId = EventId(4214);
+const RAID_MEMBER_DEFERRED: EventId = EventId(28_114);
 
 /// Emit one diagnostic record carrying a single hex-rendered field.
 fn log_hex_event(id: EventId, level: Level, message: &'static str, key: &'static str, value: u64) {
@@ -181,13 +170,13 @@ fn main() -> i32 {
         .copied()
         .collect();
     let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-        return EXIT_NO_HOST;
+        return end(DriverExit::NoHost, &[]);
     };
     let Some(transport) = resolve_transport(&host) else {
-        return EXIT_NO_TRANSPORT;
+        return end(DriverExit::NoResources, &[]);
     };
     let Ok(mut waits) = Waits::create() else {
-        return EXIT_NO_WAITSET;
+        return end(DriverExit::NoService, &[]);
     };
     // The agent's own node, so the composer can name this member in its audit
     // trail. Kernel-resolved from the calling task, never claimed; a node the

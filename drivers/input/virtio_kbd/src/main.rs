@@ -94,34 +94,10 @@ mod program {
     use tairix_abi::driver::virtio_pci::virtio_pci_windows;
     use tairix_abi::input::PointerInput;
     use tairix_abi::{DriverError, MmioMapper};
+    use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_virtio::{MmioTransport, PciTransport, Transport};
     use tairix_virtio_input::{Report, VirtioInput, VirtioKeyboardConsole};
-
-    /// Exit code when the rt-backed driver host could not be built from the
-    /// kernel-delivered grants (the `resource_grants` query was refused or the
-    /// delivery did not fit). A reserved, fail-closed value.
-    const EXIT_NO_HOST: i32 = 80;
-
-    /// Exit code when the delivered grants do not name a usable register
-    /// window (a single MMIO aperture or the full set of four role-tagged
-    /// virtio-PCI config windows) this driver needs — an unbound,
-    /// mis-provisioned, or malformed node. A reserved, fail-closed value.
-    const EXIT_NO_RESOURCES: i32 = 81;
-
-    /// Exit code when the device bring-up failed (the register window could
-    /// not be mapped, the window is not a virtio-MMIO device, the device
-    /// rejected the virtio init sequence, or the granted interrupt line
-    /// could not be bound after the device came up — the event pump parks
-    /// on it, so a driver that cannot bind it would degrade into the busy
-    /// re-poll the charter forbids). A reserved, fail-closed value; the
-    /// console is left without a keyboard, never wedged.
-    const EXIT_BRINGUP_FAILED: i32 = 82;
-
-    /// Exit code when the running device faulted (a corrupted completion or
-    /// descriptor). Structural, never transient: the driver exits fail-loud
-    /// rather than spin retrying a broken device. A reserved value.
-    const EXIT_DEVICE_FAULT: i32 = 83;
 
     /// Reports drained from the device per poll. A batch size, not a
     /// capacity: what is not drained stays queued and is read next time.
@@ -150,7 +126,7 @@ mod program {
             .copied()
             .collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return EXIT_NO_HOST;
+            return end(DriverExit::NoHost, &[]);
         };
 
         // Shape-key the transport by the grant set the kernel minted, so one
@@ -163,26 +139,26 @@ mod program {
         match virtio_pci_windows(host.resources()) {
             Ok(windows) => {
                 let Ok(transport) = PciTransport::map(&windows, &host) else {
-                    return EXIT_BRINGUP_FAILED;
+                    return end(DriverExit::BringupFailed, &[]);
                 };
                 run(&host, transport)
             }
             // No role-tagged window at all: a single-aperture MMIO delivery.
             Err(DriverError::NotFound) => {
                 let Ok((base, len)) = sole_register_window(host.resources()) else {
-                    return EXIT_NO_RESOURCES;
+                    return end(DriverExit::NoResources, &[]);
                 };
                 let Ok(window) = host.map_window(base, len) else {
-                    return EXIT_BRINGUP_FAILED;
+                    return end(DriverExit::BringupFailed, &[]);
                 };
                 let Ok(transport) = MmioTransport::new(window) else {
-                    return EXIT_BRINGUP_FAILED;
+                    return end(DriverExit::BringupFailed, &[]);
                 };
                 run(&host, transport)
             }
             // Some virtio-PCI windows but not the full four — a malformed,
             // mis-provisioned node. Fail closed rather than half-bind.
-            Err(_) => EXIT_NO_RESOURCES,
+            Err(_) => end(DriverExit::NoResources, &[]),
         }
     }
 
@@ -205,7 +181,7 @@ mod program {
         // `open_armed` has already reset the device.
         let vhost: &dyn VirtioHost = host;
         let Ok(mut input) = VirtioInput::open_armed(transport, vhost, |_| host.bind_irq()) else {
-            return EXIT_BRINGUP_FAILED;
+            return end(DriverExit::BringupFailed, &[]);
         };
 
         // Pump the device forever, injecting each decoded report for the
@@ -225,7 +201,7 @@ mod program {
                 if let Some(lifted) = input.touch_lifted() {
                     let _ = tairix_rt::touch_inject(seat, &lifted);
                 }
-                return EXIT_DEVICE_FAULT;
+                return end(DriverExit::DeviceFault, &[]);
             };
             for report in &reports[..drained] {
                 match report {

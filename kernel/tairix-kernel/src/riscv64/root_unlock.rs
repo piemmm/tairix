@@ -24,7 +24,7 @@ use tairix_arch_riscv64::platform::Riscv64Fdt;
 use tairix_arch_riscv64::{trap, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
 use tairix_fdt::{Fdt, Node};
-use tairix_kernel_core::{ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, YieldHandle};
+use tairix_kernel_core::{CooperativeYield, InitSpawnCtx, YieldHandle};
 use tairix_kernel_irq::IrqTable;
 use tairix_kernel_mem::{FrameAllocator, PhysMap};
 use tairix_kernel_sec::captable::TaskCapabilities;
@@ -39,7 +39,9 @@ use crate::floor_mmio::{bring_up_virtio_mmio, MmioFloorPort};
 use crate::riscv64::irq::{controller as irq_controller, published_irq_table};
 use crate::riscv64::spawn_producer::SPAWN_TABLE_PHYSMAP;
 use crate::root_storage::RootBlockBinding;
-use crate::unlock_orchestrate::{finish_virtio_unlock, UnlockConsole, UnlockEnv};
+use crate::unlock_orchestrate::{
+    finish_virtio_unlock, Console0, KeySource, UnlockConsole, UnlockEnv,
+};
 use crate::unlock_service::{note, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_TASK};
 
 /// Identity extent, in GiB, a bookkeeping space maps: enough for the kernel
@@ -145,16 +147,12 @@ struct RiscvUnlockConsole;
 static RISCV_UNLOCK_CONSOLE: RiscvUnlockConsole = RiscvUnlockConsole;
 
 impl UnlockConsole for RiscvUnlockConsole {
-    fn acquire_console0(
-        &self,
-    ) -> (
-        &'static dyn ConsoleWrite,
-        &'static (dyn ConsoleRead + Sync + 'static),
-    ) {
-        let write: &'static dyn ConsoleWrite = &crate::riscv64::boot::RISCV_UART_CONSOLE;
-        let read: &'static (dyn ConsoleRead + Sync + 'static) =
-            &crate::riscv64::boot::RISCV_UART_CONSOLE_READ;
-        (write, read)
+    fn acquire_console0(&self) -> Console0 {
+        Console0 {
+            write: &crate::riscv64::boot::RISCV_UART_CONSOLE,
+            read: &crate::riscv64::boot::RISCV_UART_CONSOLE_READ,
+            keys: KeySource::Live,
+        }
     }
 
     fn release_console0_to_login(&self) {

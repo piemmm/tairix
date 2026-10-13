@@ -33,5 +33,7 @@ tairix-clock = { path = "../../../lib/clock", version = "=0.0.0", features = ["t
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 [target.'cfg(target_os = "none")'.dependencies]
+# The one vocabulary the driver ends with.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # `_start`.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }

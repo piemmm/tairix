@@ -28,4 +28,4 @@ pub use controller::{Applied, ClockHardware, Controller, Halt, Policy, Record};
 #[cfg(target_os = "none")]
 mod serve;
 #[cfg(target_os = "none")]
-pub use serve::{bringup_failed, fixed_rate, open, serve};
+pub use serve::{fixed_rate, open, serve};

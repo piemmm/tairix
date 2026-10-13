@@ -137,7 +137,7 @@ pub(crate) fn root_backed_vfs() -> Result<Vfs, VfsError> {
 /// The structural refusals every boot-time reader of a `/System/Security`
 /// database shares; each reader maps these onto its own load-error type.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum BootstrapReadError {
+pub enum BootstrapReadError {
     /// Resolving, stat-ing, or reading the path failed (missing file,
     /// permission refusal, driver fault, …).
     Vfs(VfsError),
@@ -149,6 +149,18 @@ pub(crate) enum BootstrapReadError {
     /// The driver returned fewer bytes than the file's reported size; a
     /// truncated database is never parsed.
     ShortRead,
+    /// The kernel heap could not hold the file.
+    OutOfMemory,
+}
+
+/// A root-volume file the boot reads through [`read_bootstrap_file`]: where
+/// it lives and the most its format may hold.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BootstrapFile {
+    /// The absolute path on the root volume.
+    pub path: &'static str,
+    /// The format's own size bound, checked before a byte is read.
+    pub max_len: usize,
 }
 
 impl From<VfsError> for BootstrapReadError {
@@ -173,10 +185,9 @@ impl From<VfsError> for BootstrapReadError {
 /// # Errors
 ///
 /// The [`BootstrapReadError`] naming the first check that refused.
-pub(crate) fn read_bootstrap_file<F>(
+pub fn read_bootstrap_file<F>(
     fs: &mut F,
-    path: &str,
-    max_len: usize,
+    file: BootstrapFile,
 ) -> Result<alloc::vec::Vec<u8>, BootstrapReadError>
 where
     F: tairix_abi::driver::filesystem::FilesystemRead
@@ -193,7 +204,7 @@ where
         supplementary_gids: &[],
         caps: &caps,
     };
-    let path = Path::parse(path)?;
+    let path = Path::parse(file.path)?;
 
     // Bound the file against the format's own maximum before reading a
     // single byte.
@@ -201,12 +212,15 @@ where
     if info.kind != NodeKind::RegularFile {
         return Err(BootstrapReadError::NotAFile);
     }
-    if info.size > max_len as u64 {
+    if info.size > file.max_len as u64 {
         return Err(BootstrapReadError::TooLarge);
     }
     let size = usize::try_from(info.size).map_err(|_| BootstrapReadError::TooLarge)?;
 
-    let mut buf = alloc::vec![0u8; size];
+    let mut buf = alloc::vec::Vec::new();
+    buf.try_reserve_exact(size)
+        .map_err(|_| BootstrapReadError::OutOfMemory)?;
+    buf.resize(size, 0);
     let read = vfs.read_via_secured(&cred, &path, fs, 0, &mut buf)?;
     if read != size {
         // A truncated file is never parsed; zero the partial read before

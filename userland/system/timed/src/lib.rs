@@ -114,7 +114,8 @@ pub trait RtcSource {
     /// # Errors
     ///
     /// The typed refusal. A failure costs the next boot its head start and
-    /// nothing else, so a caller reports it and carries on.
+    /// nothing else, so a caller reports it and carries on. `NotFound` is a
+    /// board with no clock chip, as for [`Self::read`].
     fn set(&mut self, time: Time64) -> Result<(), Errno>;
 }
 
@@ -467,8 +468,11 @@ impl<C: Clock, R: RecordStore, T: Transport, L: Launcher, S: Sink + Clone, K: Rt
         // Write the validated instant back to the board's clock chip, so a
         // machine that syncs once then boots offline still starts from a good
         // time. A refusal costs the next boot its head start and nothing
-        // else, so it is reported and the sync stands.
+        // else, so it is reported and the sync stands. A board with no chip
+        // answers `NotFound`, its ordinary state rather than a refusal; it is
+        // asked again at each sample, since a chip may bind later.
         match self.rtc.set(update.wall) {
+            Err(Errno::NotFound) => {}
             Ok(()) => self.record_event(
                 events::RTC_WRITEBACK,
                 Level::Info,

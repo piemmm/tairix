@@ -11,8 +11,9 @@
 
 #[cfg(freestanding)]
 mod program {
-    use tairix_clock::{bringup_failed, fixed_rate, serve};
+    use tairix_clock::{fixed_rate, serve};
     use tairix_drv_clock_bcm2711_dvp::{Gates, REQUIRED_CAPABILITIES};
+    use tairix_drvrt::exit::{end, step, DriverExit};
 
     /// The binding's position of the gated clock among the node's `clocks`.
     const PARENT_ENTRY: u8 = 0;
@@ -21,8 +22,12 @@ mod program {
         let node = tairix_clock::open(REQUIRED_CAPABILITIES.iter().copied().collect())?;
         let parent = fixed_rate(&node, PARENT_ENTRY)?;
         let regs = node.map()?;
-        let gates = Gates::new(&regs, parent)
-            .map_err(|_| bringup_failed("clock: the register window does not reach the gates"))?;
+        let gates = Gates::new(&regs, parent).map_err(|_| {
+            end(
+                DriverExit::BringupFailed,
+                &[step("clock: the register window does not reach the gates")],
+            )
+        })?;
         Ok(serve(&node, gates))
     }
 

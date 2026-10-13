@@ -29,7 +29,8 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_display::service::{open_surface, serve, EXIT_NO_HOST};
+    use tairix_display::service::{open_surface, serve};
+    use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 
     /// Program entry point; on success it never returns.
@@ -39,7 +40,7 @@ mod program {
             .copied()
             .collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return EXIT_NO_HOST;
+            return end(DriverExit::NoHost, &[]);
         };
         match open_surface(&host) {
             Ok(mut surface) => serve(&mut surface, &[]),

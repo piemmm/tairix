@@ -420,6 +420,75 @@ fn read_image_returns_a_bundle_byte_for_byte() {
 }
 
 #[test]
+fn a_prefix_read_reads_the_head_of_a_bundle_and_no_more() {
+    let mut fs = MockStore::new();
+    fs.add_file_with("/System/Drivers/genet", b"MANIFEST|program bytes");
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = alloc::vec![0xAAu8];
+    reader
+        .read_image_prefix(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/genet",
+            8,
+            &mut buf,
+        )
+        .expect("a readable in-store file");
+    assert_eq!(buf, b"\xAAMANIFEST");
+
+    buf.clear();
+    reader
+        .read_image_prefix(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/genet",
+            4096,
+            &mut buf,
+        )
+        .expect("a bundle shorter than the prefix");
+    assert_eq!(buf.as_slice(), b"MANIFEST|program bytes");
+}
+
+#[test]
+fn a_prefix_read_still_refuses_a_bundle_too_large_to_load() {
+    let mut fs = MockStore::new();
+    let id = fs.add_file_with("/System/Drivers/huge", b"small actual body");
+    fs.set_reported_size(id, MAX_DRIVER_IMAGE_LEN as u64 + 1);
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    assert_eq!(
+        reader.read_image_prefix(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/huge",
+            16,
+            &mut buf
+        ),
+        Err(DriverImageError::TooLarge)
+    );
+    assert!(buf.is_empty());
+}
+
+#[test]
+fn a_bundle_the_heap_cannot_hold_fails_closed() {
+    const SIZE: usize = 1 << 20;
+    let mut fs = MockStore::new();
+    let id = fs.add_file_with("/System/Drivers/big", b"body");
+    fs.set_reported_size(id, SIZE as u64);
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = alloc::vec![0x11u8];
+
+    crate::test_alloc::refuse_allocations_from_on_current_thread(SIZE);
+    let read = reader.read_image(&mut fs, DRIVER_STORE_PATH, "/System/Drivers/big", &mut buf);
+    crate::test_alloc::refuse_allocations_on_current_thread(false);
+
+    assert_eq!(read, Err(DriverImageError::OutOfMemory));
+    assert_eq!(buf, alloc::vec![0x11u8]);
+}
+
+#[test]
 fn read_image_appends_rather_than_overwrites() {
     // The `ImageSource` contract appends to a (pre-cleared, pre-sized)
     // buffer; prove a non-empty prefix is preserved.
@@ -614,6 +683,7 @@ fn driver_image_error_errno_mapping_is_stable() {
         DriverImageError::ShortRead.to_errno(),
         Errno::NotImplemented
     );
+    assert_eq!(DriverImageError::OutOfMemory.to_errno(), Errno::OutOfMemory);
     assert_eq!(
         DriverImageError::Vfs(VfsError::NotFound).to_errno(),
         Errno::NotFound

@@ -34,7 +34,7 @@
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::ops::Bound;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{CpuId, TaskId};
@@ -294,12 +294,14 @@ pub struct WaitQueue {
     /// like `tairix_kernel_irq::IrqTable::fire`); the real
     /// [`Self::wake_all`] — which collects waiter ids under the lock and
     /// then calls the scheduler's `unpark` — runs later at a safe
-    /// dispatcher-context point via [`drain_pending_wakes`]. A woken
-    /// task cannot run until the current in-kernel task yields anyway
-    /// (the kernel is non-preemptible), so deferring the *unpark* to
-    /// that yield point costs no responsiveness while keeping every ISR
-    /// lock-free.
+    /// dispatcher-context point via [`drain_pending_wakes`]. The cost is
+    /// latency: the wake waits for some CPU's dispatch loop, and a waiter
+    /// another CPU could run at once waits on the interrupted CPU's
+    /// in-kernel task to suspend.
     wake_pending: AtomicBool,
+    /// When [`drain_pending_wakes`] last performed a flagged wake, on the
+    /// wait clock; zero before the first.
+    drained_at_ns: AtomicU64,
 }
 
 impl WaitQueue {
@@ -310,7 +312,16 @@ impl WaitQueue {
         Self {
             waiters: SpinLock::new(WaitSet::new()),
             wake_pending: AtomicBool::new(false),
+            drained_at_ns: AtomicU64::new(0),
         }
+    }
+
+    /// When a flagged wake of this queue was last performed, on the wait
+    /// clock, or [`None`] before the first.
+    #[must_use]
+    pub fn drained_at_ns(&self) -> Option<u64> {
+        let at = self.drained_at_ns.load(Ordering::Acquire);
+        (at != 0).then_some(at)
     }
 
     /// Request an explicit wake of every waiter **from any context,
@@ -330,8 +341,11 @@ impl WaitQueue {
 
     /// Consume a pending wake request, returning whether one was set.
     /// `AcqRel` pairs with [`Self::request_wake`]'s `Release`.
+    ///
+    /// Every CPU's drain reads this flag at every boundary, so the clear case
+    /// is a load: a swap would take the line exclusive on each of them.
     fn take_wake_pending(&self) -> bool {
-        self.wake_pending.swap(false, Ordering::AcqRel)
+        self.wake_pending.load(Ordering::Relaxed) && self.wake_pending.swap(false, Ordering::AcqRel)
     }
 
     /// Non-consuming peek: whether a wake request is currently pending
@@ -1576,12 +1590,15 @@ pub fn drain_pending_wakes() -> bool {
     let mut woke = false;
     for queue in deferred_queues() {
         if queue.take_wake_pending() {
+            queue.drained_at_ns.store(arch.now_ns(), Ordering::Release);
             queue.wake_all(arch);
             woke = true;
         }
     }
     // Deadline sweep flagged by the timer one-shot.
-    if TIMED_SWEEP_PENDING.swap(false, Ordering::AcqRel) {
+    if TIMED_SWEEP_PENDING.load(Ordering::Relaxed)
+        && TIMED_SWEEP_PENDING.swap(false, Ordering::AcqRel)
+    {
         run_timed_sweep(arch);
         woke = true;
     }

@@ -76,6 +76,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::IPC_ENDPOINT,
     CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::SHM,
+    CapabilityId::LOG_EMIT,
 ];
 
 /// The driver's canonical bind table — the single source both the installed

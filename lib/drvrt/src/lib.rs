@@ -51,6 +51,7 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod exit;
 mod host;
 mod supplier;
 mod syscalls;

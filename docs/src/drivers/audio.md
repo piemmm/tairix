@@ -123,12 +123,12 @@ so a second meaning cannot be smuggled into the fixed frame.
 
 ### Discovery and the endpoint block
 
-A driver claims the first free id in the reserved
-`AUDIO_CHANNEL_ENDPOINT_BASE` block (spelled `"ACHAN"`), so two audio drivers
-never collide without a central allocator. Binding a reserved id requires
-`CAP_IPC_BIND_PRIVILEGED`, so an unprivileged squatter cannot impersonate a
-driver; the driver additionally binds it restricted-sender on the audio-device
-capability, so only the mixer can reach it.
+A driver binds the id `AUDIO_CHANNEL_ENDPOINTS` reserves for the node it was
+loaded for, which the kernel's `call_create` admits for that node's driver
+alone, so no two drivers reach for one id and no number of devices is capped.
+Binding a reserved id also requires `CAP_IPC_BIND_PRIVILEGED`, and the driver
+binds it restricted-sender on the audio-device capability, so only the mixer
+can reach it.
 
 The driver then publishes a hardware-tree node carrying
 `AUDIOCHAN_NODE_COMPATIBLE` (`tairix,audiochan`), which the device manager

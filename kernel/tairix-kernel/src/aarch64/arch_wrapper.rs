@@ -794,6 +794,12 @@ impl ConsoleWrite for VideoConsole {
         }
     }
 
+    fn boot_holds_screen(&self) -> bool {
+        // The video console is console 0, which the boot hands to `login` by
+        // opening this gate, and the opener wakes the console wait-queue.
+        !crate::unlock_service::CONSOLE0_GATE.is_open()
+    }
+
     fn purge(&self) {
         // A retained console owns its screen, so the discard is real: both
         // cell grids and every pixel, not the escape sequence the trait

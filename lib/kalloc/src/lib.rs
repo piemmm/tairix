@@ -122,42 +122,47 @@ use tairix_sync::irq::{InterruptControl, IrqState};
 use tairix_sync::FnCell;
 use tairix_sync::IrqSafeSpinLock;
 
-/// Bytes of the bootstrap heap arena a freestanding bin reserves in `.bss`.
-///
-/// This is the *bootstrap* region only — the heap grows past it from the
-/// installed [`HeapSource`], so it is a boot floor and never a ceiling.
-/// It must cover every allocation made before the boot path can install
-/// that source.
+/// Bytes of the arena a kernel that installs no [`HeapSource`] lives on: a
+/// test kernel whose heap never grows.
 pub const HEAP_BYTES: usize = 64 * 1024 * 1024;
 
-/// 4 KiB-aligned heap storage handed out by [`FreeListAllocator`].
+/// Bytes of the bootstrap arena a kernel that installs a [`HeapSource`]
+/// reserves: what boot allocates before the frame allocator exists.
+///
+/// Boot itself peaks under 1 MiB. The aarch64 boot console's text grids
+/// (about 2.5 MiB at 4K) and that port's 64 KiB secondary-CPU stacks, which
+/// its MMU-off secondary entry needs inside the kernel image, take the rest,
+/// so this caps that port at about 200 cores (`plans/OPEN-DEFECTS.md` D974).
+pub const BOOT_HEAP_BYTES: usize = 16 * 1024 * 1024;
+
+/// `N` bytes of 4 KiB-aligned heap storage handed out by [`FreeListAllocator`].
 ///
 /// Aligned to a page so a page-aligned request is never wasted satisfying
 /// it out of a half-aligned tail. A binary declares it as a plain `static`:
 /// its bytes are reached only through [`as_mut_ptr`](Self::as_mut_ptr), so
 /// nothing needs a `static mut` to write them.
 #[repr(C, align(4096))]
-pub struct Heap(UnsafeCell<[u8; HEAP_BYTES]>);
+pub struct Heap<const N: usize = HEAP_BYTES>(UnsafeCell<[u8; N]>);
 
 // SAFETY: no safe method reads or writes the bytes. The only access is the
 // raw pointer `as_mut_ptr` returns, and dereferencing it is the caller's own
 // `unsafe` obligation — for `FreeListAllocator`, exclusive ownership of the
 // region under its lock — so sharing a `Heap` shares nothing a reference
 // could alias.
-unsafe impl Sync for Heap {}
+unsafe impl<const N: usize> Sync for Heap<N> {}
 
 // The alignment attribute needs a literal, so this pins it to the granule
 // `FreeListAllocator::new` requires its arena to carry.
 const _: () = assert!(align_of::<Heap>() == PAGE_SIZE);
 
-impl Heap {
+impl<const N: usize> Heap<N> {
     /// Zero-initialised heap. `const` so the binary's arena is constructed
     /// in `.bss`, never on the stack (clippy's `large_stack_arrays` and
     /// `declare_interior_mutable_const` are false positives: no `Heap` value
     /// ever materialises as a local, and every consumer assigns `Heap::ZERO`
     /// directly to a `static`, whose one copy is the arena it wants).
     #[allow(clippy::large_stack_arrays, clippy::declare_interior_mutable_const)]
-    pub const ZERO: Self = Self(UnsafeCell::new([0; HEAP_BYTES]));
+    pub const ZERO: Self = Self(UnsafeCell::new([0; N]));
 
     /// The arena's first byte, which [`FreeListAllocator::new`] takes.
     #[must_use]
@@ -606,6 +611,8 @@ struct Inner {
     initialised: bool,
     /// Bytes currently handed out (diagnostic).
     used: usize,
+    /// The most `used` has ever been (diagnostic).
+    peak: usize,
     /// Total usable bytes across the bootstrap region and every currently
     /// mapped grown region — the denominator `remaining` reports against.
     /// Grows and shrinks with the grown regions, never a fixed ceiling.
@@ -636,6 +643,7 @@ impl Inner {
         Self {
             initialised: false,
             used: 0,
+            peak: 0,
             capacity: 0,
             regions: None,
             source: None,
@@ -646,6 +654,12 @@ impl Inner {
             #[cfg(test)]
             steps: 0,
         }
+    }
+
+    /// Count `bytes` as handed out.
+    fn charge(&mut self, bytes: usize) {
+        self.used = self.used.saturating_add(bytes);
+        self.peak = self.peak.max(self.used);
     }
 
     /// Thread `block` onto the segregated list for its size.
@@ -960,6 +974,14 @@ impl FreeListAllocator {
         self.with_inner(|inner| inner.used)
     }
 
+    /// The most bytes ever handed out at once (diagnostic). Read before a
+    /// [`HeapSource`] is installed, it is what the bootstrap region had to
+    /// hold.
+    #[must_use]
+    pub fn peak_used(&self) -> usize {
+        self.with_inner(|inner| inner.peak)
+    }
+
     /// Bytes not currently handed out (diagnostic; includes free-list
     /// fragmentation, so a single allocation of this size may still fail).
     ///
@@ -1038,9 +1060,9 @@ impl FreeListAllocator {
             }
             // SAFETY: `rest` is off every list and marked free.
             unsafe { inner.push_free(rest) };
-            inner.used += size;
+            inner.charge(size);
         } else {
-            inner.used += total;
+            inner.charge(total);
         }
         // SAFETY: `block` is live and now sized to what it keeps.
         unsafe { (*block.as_ptr()).set(FLAG_FREE, false) };
@@ -1645,7 +1667,7 @@ impl FreeListAllocator {
                 // A frame was never part of the byte tier's space, so it joins
                 // both sides of the ledger and leaves `remaining` unmoved.
                 inner.capacity = inner.capacity.saturating_add(PAGE_SIZE);
-                inner.used = inner.used.saturating_add(PAGE_SIZE);
+                inner.charge(PAGE_SIZE);
                 return Some(page);
             }
             // No frame left; the bootstrap region may still hold a page.

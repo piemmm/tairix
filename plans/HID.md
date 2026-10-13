@@ -121,7 +121,7 @@ driver ending — has every key, button and contact it held released first.
   reports exceed its packet size is part of the live acceptance
   (`plans/USB.md` UM).
   A device that goes, or faults four reads running, is released and its driver
-  exits; a refused bring-up logs its reason (events 4244–4248).
+  exits; a refused bring-up logs its reason (events 27244–27248).
 - **I2C (H6).** `i2c_hid` reads the HID descriptor at the register the platform
   names (`hid-descr-addr`, or ACPI `_DSM`), resets the device, reads the report
   descriptor, and reads the input register while its interrupt line is asserted

@@ -34,6 +34,7 @@ pub mod ingress;
 pub mod journal;
 pub mod ratelimit;
 pub mod record;
+pub mod registry;
 pub mod render;
 pub mod report;
 pub mod segment;
@@ -133,10 +134,9 @@ impl Level {
 /// Stable numeric identifier for a logged event.
 ///
 /// The identifier is part of the contract with external log consumers:
-/// once published, it must never change meaning or be re-used. New events
-/// take the next free identifier in their owning subsystem's reserved
-/// range (subsystems pick ranges of `1_000`, e.g. `1_000..2_000` for
-/// `kernel/sec`, `2_000..3_000` for `kernel/mem`, …).
+/// once published, it must never change meaning or be re-used. A new event
+/// takes the next free identifier in its component's range in the
+/// [`registry`].
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct EventId(pub u32);

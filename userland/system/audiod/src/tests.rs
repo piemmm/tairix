@@ -43,7 +43,8 @@ use crate::{AudioChannelTransport, AudioService, Notifier, RegionHost, RegionId}
 const DEVICE_HZ: u32 = 48_000;
 
 /// The port the fixture's device channel is bound to tell.
-const FIXTURE_NOTIFY: u64 = tairix_abi::driver::audio_channel::notify_endpoint_for(1, 1);
+const FIXTURE_NOTIFY: u64 =
+    tairix_abi::driver::audio_channel::notify_endpoint_for(1, 1).expect("a slot");
 /// Frames the fixture device interrupts on.
 const PERIOD: u32 = 256;
 /// Frames the fixture device will hold in flight.
@@ -569,15 +570,20 @@ impl Fixture {
 
     /// Bind a second device, on channel `endpoint` at `location`.
     fn bind_another(&mut self, endpoint: u64, location: u64) {
+        self.bind_another_device(endpoint, location, FixtureDevice::new());
+    }
+
+    /// Bind `device` as another channel.
+    fn bind_another_device(&mut self, endpoint: u64, location: u64, device: FixtureDevice) {
         let transport = LoopbackChannel {
-            server: Rc::new(RefCell::new(AudioChannelServer::new(FixtureDevice::new()))),
+            server: Rc::new(RefCell::new(AudioChannelServer::new(device))),
             regions: Rc::clone(&self.regions),
         };
         self.service
             .bind_device(
                 endpoint,
                 location,
-                tairix_abi::driver::audio_channel::notify_endpoint_for(1, 2),
+                tairix_abi::driver::audio_channel::notify_endpoint_for(1, 2).expect("a slot"),
                 Box::new(transport),
                 &DiscardSink,
             )
@@ -2501,6 +2507,36 @@ fn a_default_follows_its_tenants_preference_through_a_device_going() {
         .find(|sink| sink.location == AudioLocation::new(0x51e7, 0).expect("a place"))
         .expect("the replugged sink");
     assert!(back.default.is_default());
+}
+
+/// With no preference, the default is the first bound of the endpoints
+/// likeliest to reach a listener: a port with a monitor on it before a jack
+/// that cannot tell, and either before a port with nothing on it.
+#[test]
+fn a_default_with_no_preference_goes_where_something_is_plugged_in() {
+    let mut fixture = Fixture::new();
+    fixture.device.borrow_mut().audio_mut().jack = JackState::Absent;
+    fixture.bind();
+    let anyone = caller(9, &[]);
+    let mut monitor = FixtureDevice::new();
+    monitor.jack = JackState::Present;
+    fixture.bind_another_device(0x4143_4841_4E00_0002, 0x51e7, monitor);
+    fixture.bind_another_device(0x4143_4841_4E00_0003, 0x51e8, FixtureDevice::new());
+    let sinks = fixture.devices(&anyone, StreamDirection::Playback);
+    assert_eq!(sinks.len(), 3);
+    let defaults: Vec<u32> = sinks
+        .iter()
+        .filter(|sink| sink.default.is_default())
+        .map(|sink| sink.device_id)
+        .collect();
+    assert_eq!(defaults, [sinks[1].device_id], "the port with a monitor");
+
+    // A monitor reaching the first port makes it the first bound of its rank.
+    fixture.device.borrow_mut().audio_mut().jack = JackState::Present;
+    jack_changed(&mut fixture, 0);
+    let sinks = fixture.devices(&anyone, StreamDirection::Playback);
+    assert!(sinks[0].default.is_default());
+    assert!(!sinks[1].default.is_default());
 }
 
 /// A device whose driver faulted is lost; the same channel bound again is a

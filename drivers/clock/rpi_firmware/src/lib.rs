@@ -208,7 +208,7 @@ impl<'c, C: MailboxChannel + ?Sized> LinkedClocks<'c, C> {
         }; LINKED_CLOCKS.len()];
         for (linked, clock) in clocks.iter_mut().zip(LINKED_CLOCKS) {
             let max_hz = rate_of(channel, clock, ClockRateQuery::Max)?;
-            let min_hz = rate_of(channel, clock, ClockRateQuery::Min)?;
+            let min_hz = rate_of(channel, clock, ClockRateQuery::Min)?.max(clock.least_hz());
             if max_hz != 0 && min_hz <= max_hz {
                 linked.range = Some((min_hz, max_hz));
             }
@@ -279,9 +279,13 @@ impl<C: MailboxChannel + ?Sized> ClockHardware for LinkedClocks<'_, C> {
             return Ok(Halt::Clean);
         };
         let (min_hz, _) = self.range(at)?;
-        // A clock the firmware had not started is left at the least it
-        // accepts: the property interface cannot stop one.
-        set_rate(self.channel, LINKED_CLOCKS[at], before.max(min_hz))?;
+        // The property interface cannot stop a clock, and a zero rate is how
+        // it answers "no such clock": one the firmware had not started is left
+        // at the least it accepts, or where it runs when that least is zero.
+        let rest_hz = before.max(min_hz);
+        if rest_hz != 0 {
+            set_rate(self.channel, LINKED_CLOCKS[at], rest_hz)?;
+        }
         self.clocks[at].before = None;
         Ok(Halt::Clean)
     }

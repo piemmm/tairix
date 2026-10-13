@@ -41,9 +41,10 @@ use tairix_drv_fs_arxfs::{
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::boot_session::{LateBootSession, LATE_BOOT_SESSION};
 use tairix_kernel_core::{
-    build_identity_table, load_groups_db, load_users_db_source, ConsoleRead, ConsoleWrite,
-    GroupsLoadError, HeldUsersDbSource, LateGroupsDb, LateIdentity, LateUsersAdmin, LateUsersDb,
-    SleepLock, UserAdminEngine, UsersDbSource, UsersLoadError,
+    build_identity_table, load_groups_db, load_users_db_source, read_bootstrap_file, ConsoleRead,
+    ConsoleWrite, GroupsLoadError, HeldUsersDbSource, LateGroupsDb, LateIdentity, LateUsersAdmin,
+    LateUsersDb, SleepLock, UserAdminEngine, UsersDbSource, UsersLoadError, GROUPS_DB,
+    SYSTEM_CONFIG, USERS_DB,
 };
 use tairix_kernel_sec::{GroupId, IdentityTable};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -57,7 +58,7 @@ use tairix_users::{GroupsDb, UsersDb};
 use crate::kernel_fs::KernelFs;
 use crate::user_admin_backing::RootAdminBacking;
 use crate::volume_policy::LateStorageGid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// A mounted root volume, viewed as the read + security surface the
 /// driver-store file service needs.
@@ -612,6 +613,37 @@ pub fn mount_root_disk_and_load_users<Disk: Block>(
     load_root(root, keying, audit)
 }
 
+/// Read what mounting `disk`'s root will read, so the mount after the
+/// Supervisor window finds it cached: a plaintext root through a read-only
+/// open and the bootstrap files the unlock loads, an encrypted root — which
+/// nothing can read without its key — as far as its lock.
+///
+/// Writes nothing and records nothing; whatever it cannot read, the mount
+/// reads and reports.
+pub fn prefetch_root<Disk: Block>(mut disk: Disk) {
+    let Ok(RootLock::Plaintext) = probe_root_lock(&mut disk) else {
+        return;
+    };
+    let Ok(table) = parse_partition_table(&mut disk) else {
+        return;
+    };
+    let Some(extent) = table.first_of_type(PartitionType::ARXFSRoot) else {
+        return;
+    };
+    let Ok(root) = PartitionBlock::from_partition(&mut disk, &extent) else {
+        return;
+    };
+    let Ok(mut fs) = ARXFS::open_read_only(root, Keying::Plaintext) else {
+        return;
+    };
+    for file in [USERS_DB, GROUPS_DB, SYSTEM_CONFIG] {
+        if let Ok(mut bytes) = read_bootstrap_file(&mut fs, file) {
+            // The users database holds password hashes.
+            bytes.zeroize();
+        }
+    }
+}
+
 /// Discover and mount the read-only signed-bundle `/System` volume on
 /// `disk` and run the continuation `f` against the **still-open** volume,
 /// returning whatever `f` returns wrapped in [`Some`].
@@ -734,6 +766,20 @@ macro_rules! fs_label {
     };
 }
 
+/// The fresh line the Supervisor's announcement opens.
+macro_rules! window_line {
+    () => {
+        "\r\n"
+    };
+}
+
+/// The Supervisor's announcement, wherever on its line it is drawn.
+macro_rules! announcement {
+    () => {
+        "[Press ESC for supervisor]"
+    };
+}
+
 /// The interactive unlock prompt drawn on its own fresh line. `\r\n` opens
 /// the line; the trailing space separates the label from the typed secret.
 const FS_UNLOCK_PROMPT: &[u8] = concat!("\r\n", fs_label!(), " passphrase: ").as_bytes();
@@ -771,7 +817,42 @@ const FS_UNLOCK_PROMPT_INPLACE: &[u8] =
 /// or times out. The in-place prompt and the enter-banner below return to
 /// column 0 of *this* announcement line and overwrite its text. Frozen
 /// wording — asserted by the QEMU vertical; do not "improve" it.
-const SUPERVISOR_ANNOUNCE: &[u8] = b"\r\n[Press ESC for supervisor]";
+const SUPERVISOR_ANNOUNCE: &[u8] = concat!(window_line!(), announcement!()).as_bytes();
+
+/// The window's line while console 0 cannot yet deliver a key, so the wait
+/// shows rather than looking like a boot that skipped the window.
+const KEY_SOURCE_AWAITED: &[u8] = concat!(window_line!(), "[Waiting for a keyboard]").as_bytes();
+
+/// The announcement drawn over [`KEY_SOURCE_AWAITED`] once a key can arrive,
+/// with whatever of the waiting text it does not cover erased.
+const ANNOUNCE_OVER_WAIT: &[u8] = concat!("\r", announcement!(), "\x1b[K").as_bytes();
+
+/// [`KEY_SOURCE_AWAITED`] erased when no key can arrive, leaving its line open
+/// for the unlock as an elapsed window leaves it.
+const KEY_SOURCE_ABANDONED: &[u8] = b"\r\x1b[K";
+
+/// How long the window waits for console 0 to gain a key source before the
+/// boot goes on without it.
+pub const KEY_SOURCE_WAIT_NS: u64 = 30_000_000_000;
+
+/// Whether console 0 can deliver a key, as the Supervisor window asks it.
+pub trait KeyArrival {
+    /// Whether a key can arrive now.
+    fn key_source_ready(&self) -> bool;
+
+    /// Return once a key can arrive, or [`KEY_SOURCE_WAIT_NS`] after the call
+    /// with none: whether one can.
+    fn await_key_source(&self) -> bool;
+}
+
+/// The pre-boot Supervisor a boot can drop into, and the key source its
+/// window waits for.
+pub struct SupervisorWindow<'a> {
+    /// The REPL's host.
+    pub host: &'a mut dyn SupervisorHost,
+    /// When console 0 can deliver the key that opens it.
+    pub keys: &'a dyn KeyArrival,
+}
 
 /// The byte-exact line collapse + banner drawn when the operator drops into
 /// the Supervisor (`plans/NEW-SUPERVISOR.md` §2 step 5): the prompt/announce
@@ -1089,13 +1170,27 @@ fn drain_csi_sequence(input: &dyn ConsoleRead) {
 /// [`EscWindow::Elapsed::initial`] and fed to the passphrase read as the
 /// line's first character — never discarded, which would silently corrupt a
 /// quickly-typed secret. A root that takes no passphrase sends it nowhere.
+///
+/// The countdown starts only once console 0 can deliver a key; until then the
+/// line says the window waits for one. When none can arrive in
+/// [`KeyArrival::await_key_source`]'s bound the waiting text is erased and its
+/// line left for the unlock as an elapsed window leaves it.
 fn esc_boot_window(
     console: &dyn ConsoleWrite,
     input: &dyn ConsoleRead,
-    supervisor: &mut dyn SupervisorHost,
+    supervisor: &mut SupervisorWindow<'_>,
     boot_session: &LateBootSession,
 ) -> EscWindow {
-    write_all(console, SUPERVISOR_ANNOUNCE);
+    if supervisor.keys.key_source_ready() {
+        write_all(console, SUPERVISOR_ANNOUNCE);
+    } else {
+        write_all(console, KEY_SOURCE_AWAITED);
+        if !supervisor.keys.await_key_source() {
+            write_all(console, KEY_SOURCE_ABANDONED);
+            return EscWindow::Elapsed { initial: None };
+        }
+        write_all(console, ANNOUNCE_OVER_WAIT);
+    }
     let mut byte = [0u8; 1];
     let got = input
         .read_timeout(&mut byte, SUPERVISOR_WINDOW_NS)
@@ -1103,7 +1198,7 @@ fn esc_boot_window(
     if got == 1 && byte[0] == 0x1b {
         if esc_is_lone_escape(input) {
             // Lone ESC: enter the REPL.
-            return match enter_supervisor(console, input, supervisor, boot_session) {
+            return match enter_supervisor(console, input, supervisor.host, boot_session) {
                 // The operator unlocked and mounted the root from the REPL.
                 SupervisorExit::Mounted => EscWindow::Mounted,
                 // The operator asked to resume boot. Any session choice the
@@ -1207,12 +1302,13 @@ fn enter_supervisor(
 ///   in-kernel kthread passes the console-0 hand-off (open the gate, arm
 ///   the UART receive interrupt, resolve the `LateUsersDb` pending wait);
 ///   coupling it here makes forgetting it impossible.
-/// * `supervisor` — the optional pre-boot Supervisor host. When present, a
-///   bounded ESC boot-screen window is drawn before anything mounts — even on
-///   a disk that cannot be read, so the Supervisor can diagnose it; a lone
-///   `ESC` drops into the Supervisor REPL, and if the operator mounts the root
-///   from there the unlock returns [`UnlockOutcome::Installed`] with no
-///   further prompt. [`None`] (host tests) skips the window entirely.
+/// * `supervisor` — the optional pre-boot Supervisor. When present, a bounded
+///   ESC boot-screen window is drawn before anything mounts — even on a disk
+///   that cannot be read, so the Supervisor can diagnose it — once console 0
+///   can deliver a key ([`KeyArrival`]); a lone `ESC` drops into the
+///   Supervisor REPL, and if the operator mounts the root from there the
+///   unlock returns [`UnlockOutcome::Installed`] with no further prompt.
+///   [`None`] (host tests) skips the window entirely.
 ///
 /// Driver loading is **not** part of this policy: under design B the
 /// user-space `devmgr` loads drivers over the driver-store endpoint served
@@ -1222,7 +1318,7 @@ fn enter_supervisor(
 // Each parameter is a distinct, irreducible boot seam the unlock threads
 // through — the disk, the console write/read halves, the install cells, the
 // audit sink, the anti-brute-force delay, the console-release callback, and
-// the optional pre-boot Supervisor host. Bundling them into a struct would
+// the optional pre-boot Supervisor. Bundling them into a struct would
 // only rename the same fields without removing any, so the argument list is
 // the honest shape of the seam.
 #[allow(clippy::too_many_arguments)]
@@ -1234,7 +1330,7 @@ pub fn unlock_root_disk_interactively<Disk: Block>(
     audit: &dyn Sink,
     delay: &dyn Fn(),
     on_resolved: &dyn Fn(),
-    supervisor: Option<&mut dyn SupervisorHost>,
+    supervisor: Option<SupervisorWindow<'_>>,
 ) -> UnlockOutcome {
     // Run the interactive unlock to a terminal outcome, then hand the
     // console back to `login` — *exactly once, on every outcome and every
@@ -1267,23 +1363,22 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
     install: &UnlockInstall<'_>,
     audit: &dyn Sink,
     delay: &dyn Fn(),
-    supervisor: Option<&mut dyn SupervisorHost>,
+    supervisor: Option<SupervisorWindow<'_>>,
 ) -> UnlockOutcome {
     // The disk is borrowed mutably for each attempt through the
     // `impl Block for &mut B` forwarding, so one device is reused across
     // retries without re-acquiring it.
     let mut disk = disk;
-    // Kept reusable (reborrowed via `as_deref_mut`) so the *same* host serves
-    // both entry points: the boot-screen window here and a lone `ESC` at the
-    // live passphrase prompt in the loop below.
+    // One host serves both entry points: the boot-screen window here and a
+    // lone `ESC` at the live passphrase prompt below.
     let mut supervisor = supervisor;
     // The production cell the operator's one-boot login choice is recorded in;
     // `enter_supervisor` installs into it from either entry point.
     let boot_session = &LATE_BOOT_SESSION;
     // The window opens before the disk is read, so a disk slow to answer
     // cannot hold off the Supervisor that would diagnose it.
-    let window = match supervisor.as_deref_mut() {
-        Some(host) => match esc_boot_window(console, input, host, boot_session) {
+    let window = match supervisor.as_mut() {
+        Some(supervisor) => match esc_boot_window(console, input, supervisor, boot_session) {
             EscWindow::Mounted => return UnlockOutcome::Installed,
             window => Some(window),
         },
@@ -1359,8 +1454,8 @@ fn unlock_root_disk_interactively_impl<Disk: Block>(
                 // redrew the screen, so re-prompt on a fresh line. With no
                 // host (host tests) an `ESC` is a no-op that simply
                 // re-prompts.
-                if let Some(host) = supervisor.as_deref_mut() {
-                    match enter_supervisor(console, input, host, boot_session) {
+                if let Some(supervisor) = supervisor.as_mut() {
+                    match enter_supervisor(console, input, supervisor.host, boot_session) {
                         SupervisorExit::Mounted => return UnlockOutcome::Installed,
                         // Any session choice was recorded by
                         // `enter_supervisor`; re-prompt for the passphrase.
@@ -2692,7 +2787,10 @@ mod tests {
             &RecordingSink::new(),
             &|| {},
             &|| {},
-            Some(&mut SilentSupervisor),
+            Some(SupervisorWindow {
+                host: &mut SilentSupervisor,
+                keys: &KeysNow,
+            }),
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -2701,6 +2799,209 @@ mod tests {
         assert_eq!(count_occurrences(&out, SUPERVISOR_ANNOUNCE), 1);
         assert_eq!(count_occurrences(&out, FS_UNLOCKED_LINE), 1);
         assert_eq!(count_occurrences(&out, b"passphrase"), 0);
+    }
+
+    #[test]
+    fn with_no_key_source_the_wait_is_erased_and_the_root_mounts_on_its_line() {
+        let (late, identity, groups, gid) = (
+            LateUsersDb::new(),
+            boot_identity(),
+            LateGroupsDb::new(),
+            LateStorageGid::new(),
+        );
+        let console = RecordingConsole::new();
+
+        let outcome = unlock_root_disk_interactively(
+            plaintext_disk(),
+            &console,
+            &ScriptInput::new(Vec::new()),
+            &plaintext_install(&late, &identity, &groups, &gid),
+            &RecordingSink::new(),
+            &|| {},
+            &|| {},
+            Some(SupervisorWindow {
+                host: &mut SilentSupervisor,
+                keys: &NoKeys,
+            }),
+        );
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert!(late.is_installed());
+        let drawn = [KEY_SOURCE_AWAITED, KEY_SOURCE_ABANDONED, FS_UNLOCKED_LINE].concat();
+        assert_eq!(
+            console.bytes(),
+            drawn,
+            "the label takes the line the wait was shown on"
+        );
+    }
+
+    /// A key source that records how much of the boot screen was drawn when
+    /// the window asked for it.
+    struct DrawnWhenAsked<'a> {
+        console: &'a RecordingConsole,
+        drawn: core::cell::Cell<Option<usize>>,
+    }
+
+    impl KeyArrival for DrawnWhenAsked<'_> {
+        fn key_source_ready(&self) -> bool {
+            false
+        }
+
+        fn await_key_source(&self) -> bool {
+            self.drawn.set(Some(self.console.bytes().len()));
+            true
+        }
+    }
+
+    #[test]
+    fn the_window_shows_its_wait_and_announces_over_it_once_a_key_can_arrive() {
+        let (late, identity, groups, gid) = (
+            LateUsersDb::new(),
+            boot_identity(),
+            LateGroupsDb::new(),
+            LateStorageGid::new(),
+        );
+        let console = RecordingConsole::new();
+        let keys = DrawnWhenAsked {
+            console: &console,
+            drawn: core::cell::Cell::new(None),
+        };
+
+        let outcome = unlock_root_disk_interactively(
+            plaintext_disk(),
+            &console,
+            &ScriptInput::new(Vec::new()),
+            &plaintext_install(&late, &identity, &groups, &gid),
+            &RecordingSink::new(),
+            &|| {},
+            &|| {},
+            Some(SupervisorWindow {
+                host: &mut SilentSupervisor,
+                keys: &keys,
+            }),
+        );
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        assert_eq!(
+            keys.drawn.get(),
+            Some(KEY_SOURCE_AWAITED.len()),
+            "the wait is on screen while it lasts"
+        );
+        let out = console.bytes();
+        assert!(out.starts_with(&[KEY_SOURCE_AWAITED, ANNOUNCE_OVER_WAIT].concat()));
+        assert_eq!(count_occurrences(&out, SUPERVISOR_ANNOUNCE), 0);
+    }
+
+    #[test]
+    fn a_key_source_ready_at_once_shows_no_wait() {
+        let (late, identity, groups, gid) = (
+            LateUsersDb::new(),
+            boot_identity(),
+            LateGroupsDb::new(),
+            LateStorageGid::new(),
+        );
+        let console = RecordingConsole::new();
+
+        let outcome = unlock_root_disk_interactively(
+            plaintext_disk(),
+            &console,
+            &ScriptInput::new(Vec::new()),
+            &plaintext_install(&late, &identity, &groups, &gid),
+            &RecordingSink::new(),
+            &|| {},
+            &|| {},
+            Some(SupervisorWindow {
+                host: &mut SilentSupervisor,
+                keys: &KeysNow,
+            }),
+        );
+
+        assert_eq!(outcome, UnlockOutcome::Installed);
+        let out = console.bytes();
+        assert!(out.starts_with(SUPERVISOR_ANNOUNCE));
+        assert_eq!(count_occurrences(&out, KEY_SOURCE_AWAITED), 0);
+    }
+
+    /// A disk that counts the reads and writes it serves.
+    struct CountingBlock {
+        inner: FatVecBlock,
+        reads: usize,
+        writes: usize,
+    }
+
+    impl CountingBlock {
+        fn new(inner: FatVecBlock) -> Self {
+            Self {
+                inner,
+                reads: 0,
+                writes: 0,
+            }
+        }
+    }
+
+    impl Block for CountingBlock {
+        fn geometry(&self) -> Result<BlockGeometry, DriverError> {
+            self.inner.geometry()
+        }
+
+        fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
+            self.reads += 1;
+            self.inner.read_blocks(lba, buf)
+        }
+
+        fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+            self.writes += 1;
+            self.inner.write_blocks(lba, buf)
+        }
+
+        fn flush(&mut self) -> Result<(), DriverError> {
+            self.inner.flush()
+        }
+    }
+
+    #[test]
+    fn the_prefetch_reads_into_a_plaintext_root_and_writes_nothing() {
+        let mut probed = CountingBlock::new(plaintext_disk());
+        assert_eq!(probe_root_lock(&mut probed), Ok(RootLock::Plaintext));
+        let mut warmed = CountingBlock::new(plaintext_disk());
+        prefetch_root(&mut warmed);
+
+        assert!(
+            warmed.reads > probed.reads,
+            "it reads past the lock into the volume"
+        );
+        assert_eq!(warmed.writes, 0, "nothing written before the window closes");
+        let (late, identity, groups, gid) = (
+            LateUsersDb::new(),
+            boot_identity(),
+            LateGroupsDb::new(),
+            LateStorageGid::new(),
+        );
+        let outcome = unlock_root_disk_interactively(
+            warmed.inner,
+            &RecordingConsole::new(),
+            &ScriptInput::new(Vec::new()),
+            &plaintext_install(&late, &identity, &groups, &gid),
+            &RecordingSink::new(),
+            &|| {},
+            &|| {},
+            None,
+        );
+        assert_eq!(outcome, UnlockOutcome::Installed);
+    }
+
+    #[test]
+    fn the_prefetch_reads_an_encrypted_root_only_as_far_as_its_lock() {
+        let mut probed = CountingBlock::new(success_disk());
+        assert!(matches!(
+            probe_root_lock(&mut probed),
+            Ok(RootLock::Passphrase(_))
+        ));
+        let mut warmed = CountingBlock::new(success_disk());
+        prefetch_root(&mut warmed);
+
+        assert_eq!(warmed.reads, probed.reads);
+        assert_eq!(warmed.writes, 0);
     }
 
     /// A disk that records whether it was read before the boot screen's
@@ -2774,7 +3075,10 @@ mod tests {
             &RecordingSink::new(),
             &|| {},
             &|| {},
-            Some(&mut SilentSupervisor),
+            Some(SupervisorWindow {
+                host: &mut SilentSupervisor,
+                keys: &KeysNow,
+            }),
         );
 
         assert_eq!(outcome, UnlockOutcome::Installed);
@@ -2800,7 +3104,10 @@ mod tests {
             &sink,
             &|| {},
             &|| {},
-            Some(&mut SilentSupervisor),
+            Some(SupervisorWindow {
+                host: &mut SilentSupervisor,
+                keys: &KeysNow,
+            }),
         );
 
         assert_eq!(outcome, UnlockOutcome::GaveUp);
@@ -3318,6 +3625,32 @@ mod tests {
         fn audit(&mut self, _event: SupervisorEvent) {}
     }
 
+    /// Console 0 that can deliver a key at once, as a UART can.
+    struct KeysNow;
+
+    impl KeyArrival for KeysNow {
+        fn key_source_ready(&self) -> bool {
+            true
+        }
+
+        fn await_key_source(&self) -> bool {
+            true
+        }
+    }
+
+    /// Console 0 whose input device never binds.
+    struct NoKeys;
+
+    impl KeyArrival for NoKeys {
+        fn key_source_ready(&self) -> bool {
+            false
+        }
+
+        fn await_key_source(&self) -> bool {
+            false
+        }
+    }
+
     /// One REPL command line, terminated as the console would deliver it.
     fn repl_script(line: &[u8]) -> Vec<u8> {
         let mut bytes = line.to_vec();
@@ -3345,7 +3678,15 @@ mod tests {
         let cell = LateBootSession::new();
         let input = ScriptInput::new(boot_screen_script(b"continue gui"));
 
-        let window = esc_boot_window(&AcceptConsole, &input, &mut SilentSupervisor, &cell);
+        let window = esc_boot_window(
+            &AcceptConsole,
+            &input,
+            &mut SupervisorWindow {
+                host: &mut SilentSupervisor,
+                keys: &KeysNow,
+            },
+            &cell,
+        );
 
         assert!(matches!(window, EscWindow::Resumed));
         assert_eq!(cell.get(), BootSession::Graphical);
@@ -3359,7 +3700,15 @@ mod tests {
         let cell = LateBootSession::new();
         let input = ScriptInput::new(boot_screen_script(b"continue"));
 
-        esc_boot_window(&AcceptConsole, &input, &mut SilentSupervisor, &cell);
+        esc_boot_window(
+            &AcceptConsole,
+            &input,
+            &mut SupervisorWindow {
+                host: &mut SilentSupervisor,
+                keys: &KeysNow,
+            },
+            &cell,
+        );
 
         assert_eq!(cell.get(), BootSession::Unset);
     }

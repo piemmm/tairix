@@ -522,14 +522,19 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   (`platform::display_engine`), no boot display node is published: the HVS
   node states the discovery-only `BootConsole` fact, and its driver has the
   kernel move the console onto a block the kernel owns below the HVS's DMA
-  reach (`console_relocate`) before it tells the firmware the display is the
-  ARM's. The console then renders through the direct map, cleaning each band
+  reach (`console_relocate`), once the boot has handed the console to
+  `login`, before it tells the firmware the display is the ARM's. The console
+  then renders through the direct map, cleaning each band
   it paints to the point of coherency as it does on the firmware's surface,
   and repaints from its retained screen in the disposition it held; the
   firmware's surface is never touched again ([Display
   drivers](../drivers/display.md)). Otherwise the surface is published as the
   boot display node, keyed `simple-framebuffer`, that the generic display
-  service binds — a `ramfb` surface, or a board without the engine.
+  service binds — a `ramfb` surface, or a board without the engine. Either
+  way the firmware's own `simple-framebuffer` nodes are withheld — every one
+  where the engine takes the screen over, else the one describing the
+  console's surface — since the walk publishes them with only their register
+  window, and a display service bound to one could serve nothing.
 - **Cell-grid attach (post-MMU, by design).** The pre-MMU phase only
   *records* the discovered surface and clears it to a clean background;
   it does **not** build the renderer, because `tairix_fbcon` keeps a
@@ -1625,12 +1630,11 @@ item (§0.9).
 
 > **Note (`plans/PI.md` P10 D5d):** but for `4100`, the numbered events the
 > chronicle below cites (`4101`–`4131`) were emitted by the in-kernel keyboard
-> scaffold that P10 D5d deleted, and the kernel's audit catalogue has since
-> reissued several of those ids to unrelated events (`4101` is
-> `FsMutationDenied`, `4120` `CpuOpsRoutineSelected`), so a live record
-> carrying one is not a USB diagnostic. `4100` is still the boot path's PCIe
-> discovery record (beacon `4a/6`), an id the catalogue's `FsNodeMutated` also
-> claims (`plans/OPEN-DEFECTS.md` D169). The chronicle is retained only for the
+> scaffold that P10 D5d deleted, and the kernel has since reissued several of
+> those ids to unrelated events (`4101` is the boot path's CPU-clock record,
+> `4120` `CpuOpsRoutineSelected`), so a live record carrying one is not a USB
+> diagnostic. `4100` is still the boot path's PCIe discovery record (beacon
+> `4a/6`). The chronicle is retained only for the
 > **PCIe root-cause findings** that still apply to `drivers/bus/pcie_brcm` and
 > the user-space bring-up.
 
@@ -2391,7 +2395,7 @@ dropped two things the metal-debugged scaffold relied on:
    `ControllerBringupError` (the failing `BringupPhase` plus the `Xhci::open`
    reset sub-stage + `USBCMD`/`USBSTS`, or the enumeration
    `stage`/`completion`/`reject`/`evtype` breadcrumbs + root-port `PORTSC`),
-   which the host-controller driver emits as event `4126` (and a `4101`
+   which the host-controller driver emits as event `27026` (and a `27001`
    "controller up" beacon) through `tairix_rt::LogSink`, gated on `CAP_LOG_EMIT`
    (`AGENTS.md` §15.7 / §19.4). A non-I/O-coherent stall now reads
    `phase=enumerate stage_hex=2 completion_hex=0` — the historical

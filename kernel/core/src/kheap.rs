@@ -176,17 +176,20 @@ impl HeapSource for FrameHeapSource {
 /// assembled. `window_pages` is the heap's share of the window — its low
 /// pages, the kthread stack tier holding the rest
 /// (`crate::kstack::install_kernel_stacks`) — so the two can never hand out
-/// the same address. A window whose bookkeeping cannot be sized leaves the
-/// heap on its bootstrap region, fail closed.
+/// the same address.
+///
+/// Returns whether the source was installed: a window whose bookkeeping
+/// cannot be sized leaves the heap on its bootstrap region, fail closed.
+#[must_use]
 pub fn install_frame_heap_source(
     heap: &'static FreeListAllocator,
     frames: &'static FrameAllocator,
     physmap: &'static (dyn PhysMap + Sync),
     kvmap: &'static dyn KernelVirtMap,
     window_pages: usize,
-) {
+) -> bool {
     let Ok(slots) = SlotWindow::new(window_pages, frames, physmap) else {
-        return;
+        return false;
     };
     let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
         frames,
@@ -195,6 +198,7 @@ pub fn install_frame_heap_source(
         slots: SpinLock::new(slots),
     }));
     heap.install_source(source);
+    true
 }
 
 #[cfg(test)]

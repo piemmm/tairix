@@ -76,11 +76,11 @@ device-bring-up verticals carve — keeps its address under translation.
 RAM above that half is reached through the direct physical map instead,
 which lives in the upper half and is what every kernel path that touches
 a *frame* resolves through. The boot heap is
-a 64 MiB `.heap` (NOLOAD) section the linker places *after*
-`__kernel_end`, so the trampoline does not zero it and the usable
-physical-memory map excludes it.
+a `.heap` (NOLOAD) section the linker places after `__bss_end` and
+before `__kernel_end`, so the trampoline does not zero it and the usable
+physical-memory map, which starts at `__kernel_end`, excludes it.
 
-> The 64 MiB kernel heap allocator itself lives in the shared
+> The kernel heap allocator itself lives in the shared
 > `lib/kalloc` crate (`tairix-kalloc`), registered as the test
 > binary's `#[global_allocator]` — the same allocator the x86_64 boot
 > bins use, defined once (`AGENTS.md` §2.2, §6).

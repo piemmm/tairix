@@ -8,9 +8,9 @@
 use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for console-output event identifiers.
-pub const CONSOLE_OUT_RANGE_START: u32 = 18_000;
+pub const CONSOLE_OUT_RANGE_START: u32 = tairix_log::registry::CONSOLE_OUT.start();
 /// Range end (exclusive) reserved for console-output event identifiers.
-pub const CONSOLE_OUT_RANGE_END: u32 = 19_000;
+pub const CONSOLE_OUT_RANGE_END: u32 = tairix_log::registry::CONSOLE_OUT.end();
 
 /// Console output the queue could not accept was dropped.
 ///

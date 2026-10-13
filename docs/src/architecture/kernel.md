@@ -215,6 +215,7 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4003 | Error | `KERNEL_PHASE_FAILED`   | audit  |
 | 4004 | Info  | `KERNEL_BOOT_COMPLETED` | audit  |
 | 4005 | Info/Warn | `KERNEL_RAM_SELF_TEST`  | log    |
+| 4006 | Info/Warn | `KERNEL_HEAP_GROWTH`    | log    |
 | 4010 | Error | `KERNEL_PANIC`          | audit  |
 | 4011 | Error | `KERNEL_FAULT`          | audit  |
 | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  |
@@ -250,6 +251,7 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4070 | Info  | `SECONDARY_CPU_STARTED`     | audit  |
 | 4071 | Error | `SECONDARY_CPU_START_FAILED`| audit  |
 | 4072 | Info  | `SECONDARY_CPU_ONLINE`      | audit  |
+| 4073 | Warn  | `IRQ_WAKE_LATE`             | diag   |
 | 4080 | Error | `CPU_STALL_DETECTED`        | audit  |
 | 4081 | Warn  | `CPU_STALL_CLEARED`         | audit  |
 | 4082 | Error | `CPU_HARD_LOCKUP_DETECTED`  | audit  |
@@ -260,8 +262,6 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4090 | Warn  | `IRQ_LINE_QUARANTINED`      | audit  |
 | 4091 | Warn  | `DMA_QUARANTINED`           | audit  |
 | 4092 | Info  | `DMA_QUARANTINE_RELEASED`   | audit  |
-| 4100 | Info  | `FS_NODE_MUTATED`           | audit  |
-| 4101 | Warn  | `FS_MUTATION_DENIED`        | audit  |
 | 4110 | Info  | `SYSTEM_CONFIG_APPLIED`     | audit  |
 | 4111 | Warn  | `SYSTEM_CONFIG_REJECTED`    | audit  |
 | 4120 | Info  | `CPU_OPS_ROUTINE_SELECTED`  | audit  |
@@ -269,10 +269,12 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4130 | Warn  | `VOLUME_DEGRADED`           | audit  |
 | 4131 | Warn  | `VOLUME_RECOVERING`         | audit  |
 | 4132 | Info  | `VOLUME_RECOVERED`          | audit  |
-| 4133 | Info  | `SYSTEM_POWER`              | audit  |
-| 4134 | Error | `VOLUME_WRITEBACK_FAILED`   | audit  |
-| 4140 | Info  | `HW_NODE_REMOVED`           | audit  |
-| 4141 | Warn  | `HW_NODE_REMOVE_REFUSED`    | audit  |
+| 4260 | Info  | `FS_NODE_MUTATED`           | audit  |
+| 4261 | Warn  | `FS_MUTATION_DENIED`        | audit  |
+| 4262 | Info  | `SYSTEM_POWER`              | audit  |
+| 4263 | Error | `VOLUME_WRITEBACK_FAILED`   | audit  |
+| 4264 | Info  | `HW_NODE_REMOVED`           | audit  |
+| 4265 | Warn  | `HW_NODE_REMOVE_REFUSED`    | audit  |
 
 `PROCESS_SIGNAL_CROSS_PRINCIPAL` is the `signal` syscall's cross-principal
 authority decision (`plans/NEW-TASKBAR.md` T11). `signal` first tries the
@@ -373,9 +375,9 @@ memory entering and leaving the quarantine (`kernel/core::dmaquarantine`). The
 first is recorded when a driver ends still holding DMA memory its device may
 be mastering, naming the `node`, the driver's admission `generation`, and the
 `bytes` it leaves — its own carves still live, plus the DMA shared regions it
-carved and still maps. The second is recorded with `cause=reset` at every
-`dma_quiesced` a later driver of the node makes, even one that freed nothing,
-and with `cause=removed` for each surprise-removed node that freed something;
+carved and still maps. The second is recorded with `cause=reset` at each
+`dma_quiesced` a later driver of the node makes that freed something, and
+with `cause=removed` for each surprise-removed node that freed something;
 its `bytes` are those returned to the allocator, never a block that stayed
 allocated. The two do not pair one for one: memory surrendered after its node
 was already released or retired is freed on arrival with no record of its

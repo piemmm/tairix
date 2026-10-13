@@ -43,6 +43,16 @@
 /* Packed little-endian wire size of a driver register reply, in bytes. */
 #define TAIRIX_DRIVER_REGISTER_REPLY_WIRE_LEN 24u
 
+/* Driver exit statuses (int32_t): one vocabulary for every driver. */
+#define TAIRIX_DRIVER_EXIT_DECLINED ((int32_t)0)
+#define TAIRIX_DRIVER_EXIT_REMOVED ((int32_t)0)
+#define TAIRIX_DRIVER_EXIT_NO_HOST ((int32_t)80)
+#define TAIRIX_DRIVER_EXIT_NO_RESOURCES ((int32_t)81)
+#define TAIRIX_DRIVER_EXIT_BRINGUP_FAILED ((int32_t)82)
+#define TAIRIX_DRIVER_EXIT_NO_SERVICE ((int32_t)83)
+#define TAIRIX_DRIVER_EXIT_SERVE_FAILED ((int32_t)84)
+#define TAIRIX_DRIVER_EXIT_DEVICE_FAULT ((int32_t)85)
+
 /* Driver execution domain (uint8_t); IN_KERNEL additionally needs CAP_DRV_KERNEL. */
 #define TAIRIX_DRIVER_KIND_USER_SPACE ((uint8_t)0u)
 #define TAIRIX_DRIVER_KIND_IN_KERNEL ((uint8_t)1u)

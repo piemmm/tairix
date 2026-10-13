@@ -9,7 +9,7 @@
 
 use crate::dispatch_slot::RescheduleAction;
 use crate::kthread::reschedule_current;
-use crate::waitq::{nearest_timed_deadline, wait_arch, SLEEP_WAITQ};
+use crate::waitq::{nearest_timed_deadline, wait_arch, WaitQueue, SLEEP_WAITQ};
 
 /// The caller cannot be parked — the boot flow before the dispatch loop runs,
 /// or a context with no wait hook — so only it knows what to do instead.
@@ -25,17 +25,43 @@ pub struct NotParkable;
 /// [`NotParkable`] when the caller is not a task the scheduler can park; it
 /// leaves no registration behind and has not slept to the deadline.
 pub fn park_until(deadline_ns: u64) -> Result<(), NotParkable> {
+    park_on_until(&SLEEP_WAITQ, deadline_ns, || false).map(|_| ())
+}
+
+/// Park the calling task on `queue` until `ready` holds or the monotonic
+/// clock reaches `deadline_ns`, re-checking `ready` on every wake: whether it
+/// holds.
+///
+/// `ready` is read again once the task is registered, so a change that wakes
+/// `queue` between the first check and the park is not lost.
+///
+/// # Errors
+///
+/// As [`park_until`].
+pub fn park_on_until(
+    queue: &WaitQueue,
+    deadline_ns: u64,
+    ready: impl Fn() -> bool,
+) -> Result<bool, NotParkable> {
     let hook = wait_arch().ok_or(NotParkable)?;
     loop {
+        if ready() {
+            return Ok(true);
+        }
         if hook.now_ns() >= deadline_ns {
-            return Ok(());
+            return Ok(false);
         }
         let cpu = hook.current_cpu().ok_or(NotParkable)?;
         let task = hook.current_task(cpu).ok_or(NotParkable)?;
-        SLEEP_WAITQ.register(task, deadline_ns);
+        queue.register(task, deadline_ns);
+        if ready() {
+            queue.deregister(task);
+            hook.set_wakeup(nearest_timed_deadline());
+            return Ok(true);
+        }
         hook.set_wakeup(nearest_timed_deadline());
         let parked = reschedule_current(cpu, RescheduleAction::Park);
-        SLEEP_WAITQ.deregister(task);
+        queue.deregister(task);
         hook.set_wakeup(nearest_timed_deadline());
         if !parked {
             return Err(NotParkable);
@@ -68,5 +94,29 @@ mod tests {
             "the failed park deregistered itself"
         );
         assert!(test_boot::take_unparked().is_empty());
+    }
+
+    #[test]
+    fn a_condition_already_met_or_a_deadline_already_reached_needs_no_park() {
+        let _ = test_boot::claim_scheduler();
+        test_boot::advance_clock(5_000);
+        let queue = WaitQueue::new();
+        assert_eq!(park_on_until(&queue, u64::MAX - 1, || true), Ok(true));
+        assert_eq!(park_on_until(&queue, 5_000, || false), Ok(false));
+    }
+
+    #[test]
+    fn a_condition_wait_that_cannot_park_is_told_so_and_leaves_no_registration() {
+        let (_, task) = test_boot::claim_scheduler();
+        let queue = WaitQueue::new();
+        assert_eq!(
+            park_on_until(&queue, u64::MAX - 1, || false),
+            Err(NotParkable)
+        );
+        let arch = test_boot::claimed_wait_arch().expect("claimed hook");
+        assert!(
+            !queue.wake_task(arch, task),
+            "the failed park deregistered itself"
+        );
     }
 }

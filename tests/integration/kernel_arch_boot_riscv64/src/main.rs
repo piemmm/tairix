@@ -35,21 +35,15 @@ mod kernel {
 
     use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
     use tairix_itest_finisher::fail_point;
-    use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+    use tairix_kalloc::{FreeListAllocator, Heap, BOOT_HEAP_BYTES};
     use tairix_log::{Event, EventId, Sink};
     use tairix_test_kheap_growth as kheap_growth;
     use tairix_test_riscv64_boot::boot;
 
-    /// Static boot heap.
-    ///
-    /// Placed in the linker's dedicated `.heap` (NOLOAD) section so the
-    /// boot trampoline does not zero its 64 MiB (the bump allocator
-    /// does not require zeroed backing) and the boot pipeline excludes
-    /// it from the usable physical-memory map. `static mut` because the
-    /// bump allocator hands out disjoint slices via an atomic cursor;
-    /// the storage is otherwise never aliased.
+    /// The production bin's bootstrap arena, in its NOLOAD `.heap` section,
+    /// so this boot proves the pipeline fits it before the heap can grow.
     #[link_section = ".heap"]
-    static mut HEAP: Heap = Heap::ZERO;
+    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -57,7 +51,7 @@ mod kernel {
     /// the allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), BOOT_HEAP_BYTES) };
 
     /// `EventId` emitted by `kernel_core::kernel_main` once every init
     /// phase completed. Pinned by the `event_ids_are_unique` test in

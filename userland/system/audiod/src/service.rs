@@ -42,7 +42,9 @@ use tairix_abi::audio::{
     StreamGrant, StreamReport, StreamRole, StreamState, Tenancy, AUDIO_MAX_REPLY,
     MAX_CLIENT_STREAM_SLOTS,
 };
-use tairix_abi::driver::audio::{ring_bounds, Frames, StreamDirection, MAX_DEVICE_ENDPOINTS};
+use tairix_abi::driver::audio::{
+    ring_bounds, Frames, JackState, StreamDirection, MAX_DEVICE_ENDPOINTS,
+};
 use tairix_abi::driver::audio_channel::AudioChannelNotify;
 use tairix_abi::driver::audio_ring::PcmGeometry;
 use tairix_abi::origin::Origin;
@@ -439,8 +441,8 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     }
 
     /// Choose each direction's default again: the live endpoint the room's
-    /// tenant prefers, else the one the machine prefers, else the first bound.
-    /// Recorded when it moves, because "which device does audio come out of"
+    /// tenant prefers, else the one the machine prefers, else the first bound
+    /// of those likeliest to reach a listener. Recorded when it moves, because "which device does audio come out of"
     /// is a decision a user is entitled to see.
     fn refresh_defaults(&mut self, sink: &dyn Sink) {
         for direction in [StreamDirection::Playback, StreamDirection::Capture] {
@@ -487,8 +489,11 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 return Some(found.device_id);
             }
         }
-        // Device ids rise with each bind, so the least is the first bound.
-        candidates().map(|endpoint| endpoint.device_id).min()
+        // Device ids rise with each bind, so the least of a rank is the first
+        // bound.
+        candidates()
+            .min_by_key(|endpoint| (reach_rank(endpoint.facts.jack), endpoint.device_id))
+            .map(|endpoint| endpoint.device_id)
     }
 
     /// Serve one `audio-v1` request from `caller`, writing the reply into
@@ -2108,6 +2113,17 @@ fn put(reply: &mut [u8; AUDIO_MAX_REPLY], body: &[u8]) -> usize {
 }
 
 /// The direction's name for an audit field.
+/// How likely an endpoint's connector is to reach a listener, likeliest
+/// first: something plugged in, then a connector that cannot tell, then one
+/// known empty.
+const fn reach_rank(jack: JackState) -> u8 {
+    match jack {
+        JackState::Present => 0,
+        JackState::Unknown => 1,
+        JackState::Absent => 2,
+    }
+}
+
 const fn direction_name(direction: StreamDirection) -> &'static str {
     match direction {
         StreamDirection::Playback => "sink",

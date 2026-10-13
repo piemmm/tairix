@@ -7,10 +7,10 @@
 use tairix_log::EventId;
 
 /// Range start (inclusive) reserved for `discoveryd` event identifiers.
-pub const DISCOVERYD_RANGE_START: u32 = 25_000;
+pub const DISCOVERYD_RANGE_START: u32 = tairix_log::registry::DISCOVERYD.start();
 
 /// Range end (exclusive) reserved for `discoveryd` event identifiers.
-pub const DISCOVERYD_RANGE_END: u32 = 26_000;
+pub const DISCOVERYD_RANGE_END: u32 = tairix_log::registry::DISCOVERYD.end();
 
 /// The front holds its multicast DNS sockets; carries each address family's
 /// outcome — joined, or the step the stack refused and why.

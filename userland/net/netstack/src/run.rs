@@ -50,16 +50,16 @@ mod program {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
 
-    use tairix_abi::driver::net::LinkState;
+    use tairix_abi::driver::net::{LinkState, MAC_ADDRESS_LEN};
     use tairix_abi::driver::net_channel::{
-        notify_endpoint_for, NetChannelNotify, NET_CHANNEL_ENDPOINT_COUNT, NET_CHANNEL_NOTIFY_LEN,
+        notify_endpoint_for, NetChannelNotify, NET_CHANNEL_NOTIFY_LEN,
     };
     use tairix_abi::driver::net_ring::RingGeometry;
     use tairix_abi::driver::BufferClass;
     use tairix_abi::net::{SocketRequest, NETSTACK_SOCKET_ENDPOINT, SOCKET_MAX_REPLY};
     use tairix_abi::net_ipc::{
-        NetBondConfigMsg, NetIfKind, NetInterfaceConfigMsg, NetstackRequest, IF_NAME_LEN,
-        NETSTACK_ENDPOINT, NETSTACK_MAX_REPLY, NETSTACK_MAX_REQUEST,
+        encode_bind_driver_reply, NetBondConfigMsg, NetIfKind, NetInterfaceConfigMsg,
+        NetstackRequest, IF_NAME_LEN, NETSTACK_ENDPOINT, NETSTACK_MAX_REPLY, NETSTACK_MAX_REQUEST,
     };
     use tairix_abi::notice::NoticeTopic;
     use tairix_abi::reply::encode_status_reply;
@@ -99,20 +99,9 @@ mod program {
     const PORT_ROOM_TOKEN: u64 = 4;
 
     /// First wait-set token of a bound NIC channel's notify port. Channel
-    /// slot `i` (`0..MAX_CHANNELS`) owns `CHANNEL_TOKEN_BASE + i`, so a
-    /// wake's token names its slot directly.
+    /// slot `i` owns `CHANNEL_TOKEN_BASE + i`, so a wake's token names its
+    /// slot directly.
     const CHANNEL_TOKEN_BASE: u64 = 5;
-
-    /// Most NIC device channels the stack serves at once — the reserved
-    /// device-channel endpoint block's width (a fixed shared-resource bound,
-    /// not a scaling capacity: it sizes the notify-port id space and the
-    /// slot table, both bounded by the endpoint block itself).
-    // The ABI states the block width as a `u64` id count and an array length
-    // must be `usize`; `TryFrom` is not usable in constant position, so the
-    // conversion cannot be spelled checked here. The block is 16 ids wide, so
-    // it fits every supported pointer width.
-    #[allow(clippy::cast_possible_truncation)]
-    const MAX_CHANNELS: usize = NET_CHANNEL_ENDPOINT_COUNT as usize;
 
     /// Slots the notify port queues: the driver rings a single coalescing
     /// doorbell, so a tiny queue absorbs one racing the previous drain — a
@@ -326,10 +315,9 @@ mod program {
         // The socket table's demux indices hash under the same process key
         // as the bond's flow hash: a peer chooses half of a connection key.
         let mut sockets = SocketService::new(hash_key);
-        // The bound NIC channels, one per slot in the reserved endpoint
-        // block. A fixed table (not a growable capacity): the channel count
-        // is bounded by the endpoint block itself.
-        let mut channels: [Option<Channel>; MAX_CHANNELS] = core::array::from_fn(|_| None);
+        // The bound NIC channels by slot, grown as NICs bind; a slot whose
+        // channel ended is the next bind's.
+        let mut channels: Vec<Option<Channel>> = Vec::new();
         let mut request = [0u8; NETSTACK_MAX_REQUEST];
         let mut socket_request = [0u8; SocketRequest::MAX_WIRE_LEN];
         let mut reply = [0u8; NETSTACK_MAX_REPLY];
@@ -518,7 +506,7 @@ mod program {
     fn serve_admin(
         stack: &mut Netstack,
         sockets: &SocketService,
-        channels: &mut [Option<Channel>],
+        channels: &mut Vec<Option<Channel>>,
         rng: &mut FastRng,
         pid: u64,
         set: u64,
@@ -554,7 +542,8 @@ mod program {
                 iface,
                 node_location,
             );
-            let _ = tairix_rt::call_reply(NETSTACK_ENDPOINT, ticket, &encode_status_reply(result));
+            let _ =
+                tairix_rt::call_reply(NETSTACK_ENDPOINT, ticket, &encode_bind_driver_reply(result));
             return;
         }
         // The per-interface configuration is a *separate* framed message (its
@@ -601,7 +590,7 @@ mod program {
     #[allow(clippy::too_many_arguments)]
     fn serve_bind_driver(
         stack: &mut Netstack,
-        channels: &mut [Option<Channel>],
+        channels: &mut Vec<Option<Channel>>,
         rng: &mut FastRng,
         caller: &Caller,
         pid: u64,
@@ -609,7 +598,7 @@ mod program {
         endpoint_id: u64,
         iface: [u8; IF_NAME_LEN],
         node_location: u64,
-    ) -> Result<(), Errno> {
+    ) -> Result<[u8; MAC_ADDRESS_LEN], Errno> {
         if !caller.capabilities().holds(CapabilityId::NET_ADMIN) {
             audit(
                 events::DRIVER_BIND_DENIED,
@@ -629,13 +618,13 @@ mod program {
             node_location,
             now(),
         ) {
-            Ok(()) => {
+            Ok(mac) => {
                 audit(
                     events::DRIVER_BOUND,
                     Level::Info,
                     "netstack: NIC driver device channel bound to interface",
                 );
-                Ok(())
+                Ok(mac)
             }
             Err(err) => {
                 // Report the exact provisioning step's errno so a failed
@@ -975,7 +964,7 @@ mod program {
     #[allow(clippy::too_many_arguments)]
     fn bind_driver(
         stack: &mut Netstack,
-        channels: &mut [Option<Channel>],
+        channels: &mut Vec<Option<Channel>>,
         rng: &mut FastRng,
         pid: u64,
         set: u64,
@@ -983,14 +972,16 @@ mod program {
         iface: [u8; IF_NAME_LEN],
         node_location: u64,
         now: Duration64,
-    ) -> Result<(), Errno> {
-        // A free slot in the bounded channel table (its width is the
-        // reserved endpoint block, so a full table means every channel is
-        // in use — fail closed).
-        let index = channels
-            .iter()
-            .position(Option::is_none)
-            .ok_or(Errno::LimitExceeded)?;
+    ) -> Result<[u8; MAC_ADDRESS_LEN], Errno> {
+        let index = if let Some(index) = channels.iter().position(Option::is_none) {
+            index
+        } else {
+            channels.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+            channels.push(None);
+            channels.len() - 1
+        };
+        // Every slot past the notify id's own field is refused, never aliased.
+        let notify = notify_endpoint_for(pid, index as u64).ok_or(Errno::LimitExceeded)?;
 
         // Learn the device before sizing anything: the facts fix the ring
         // geometry both sides bind over.
@@ -999,6 +990,7 @@ mod program {
         };
         let facts = NetChannelClient::query_facts(&mut transport)?;
         facts.validate()?;
+        let mac = *facts.mac.as_octets();
         let machine = tairix_rt::boot_facts().ok();
         let machine = machine.as_ref();
         // Ring depths, receive-queue breadth, and the segmentation slot
@@ -1047,7 +1039,6 @@ mod program {
         // Bind the notify mailbox the driver rings on receive. Its id is
         // the non-reserved, per-(pid, slot) `notify_endpoint_for` name, so
         // the bind needs no privilege and cannot collide.
-        let notify = notify_endpoint_for(pid, index as u64);
         if tairix_rt::port_bind(notify, NET_CHANNEL_NOTIFY_LEN, NOTIFY_CAPACITY) != 0 {
             let _ = tairix_rt::shm_unmap(base, region_len);
             return Err(Errno::AlreadyExists);
@@ -1110,7 +1101,7 @@ mod program {
             notify,
             client,
         });
-        Ok(())
+        Ok(mac)
     }
 
     /// A DHCPv4 client randomness factory: each configured DHCP interface

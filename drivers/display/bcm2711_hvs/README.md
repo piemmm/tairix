@@ -84,6 +84,7 @@ It runs in user space and never requests `CAP_DRV_KERNEL`.
 | An encoder's driver ended | 24904 |
 | A valve outran its budget stopping | 24905 |
 | The core clock refused a floor | 24906 |
-| Bring-up failed | 24907 |
-| The firmware gave the display up | 24908 |
-| The firmware did not confirm giving the display up | 24909 |
+| The firmware accepted the hand-over | 24908 |
+| The firmware refused the hand-over | 24909 |
+
+A driver's ending is the driver runtime's record (`tairix_drvrt::exit`).

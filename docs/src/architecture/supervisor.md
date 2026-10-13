@@ -17,7 +17,15 @@ The on-screen wording is fixed and byte-exact:
 1. `[Press ESC for supervisor]` is shown for two seconds on its own line, one
    blank line below the boot banner — the same one-blank-line spacing the
    `ARXFS passphrase: ` prompt uses, so the screen is laid out identically
-   whether or not the operator enters the console.
+   whether or not the operator enters the console. It appears once a key can
+   reach the console: at once over a serial line, and on a framebuffer console
+   once the driver of an input device has loaded. Until then the line reads
+   `[Waiting for a keyboard]`; if none has loaded within 30 seconds the line
+   is cleared and boot goes on. While it waits, the files the root mount
+   reads are read ahead, without writing anything. A display engine taking
+   the screen over from the firmware waits until boot has handed the console
+   to login, so its mode set never blanks the screen under this line or the
+   passphrase prompt.
 2. If no key is pressed, the announcement is replaced **in place** — by the
    `ARXFS passphrase: ` prompt for an encrypted root (the blank line above it
    is preserved), by the bare `ARXFS` label for a plaintext one, which mounts

@@ -33,6 +33,7 @@
 
 use crate::blkio::{BlkStatus, FaultDomainState};
 use crate::driver::display::{DisplayFormat, DisplayMode};
+use crate::driver::exit::DriverEnding;
 use crate::driver::net::MAC_ADDRESS_LEN;
 use crate::hwlink::{LinkDuty, LinkRequest, LinkRole, LINK_SELECTOR_MAX_CELLS};
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
@@ -107,9 +108,9 @@ pub const HW_NODE_MAX_RESOURCES: usize = 32;
 
 /// Bytes the fixed [`HwNode`] header occupies on the wire, before the
 /// match-key and resource arrays: `id`, `parent`, `address`, `class`, the two
-/// array counts, the fault-domain health byte, the served link roles, and the
-/// presence flags.
-pub const HW_NODE_HEADER_LEN: usize = 4 + 4 + 4 + 2 + 1 + 1 + 1 + 1 + 1;
+/// array counts, the fault-domain health byte, the served link roles, the
+/// presence flags, and how the node's last driver ended.
+pub const HW_NODE_HEADER_LEN: usize = 4 + 4 + 4 + 2 + 1 + 1 + 1 + 1 + 1 + 1;
 
 /// Device class of a hardware-tree node.
 ///
@@ -751,7 +752,27 @@ impl NodeEndpointBlock {
         crate::driver::codec::CODEC_ENDPOINTS,
         crate::driver::irqline::INTERRUPT_LINE_ENDPOINTS,
         crate::driver::i2c::I2C_CONTROLLER_ENDPOINTS,
+        crate::driver::encoder::ENCODER_ENDPOINTS,
+        crate::driver::audio_channel::AUDIO_CHANNEL_ENDPOINTS,
+        crate::driver::net_channel::NET_CHANNEL_ENDPOINTS,
     ];
+
+    /// The blocks of device channels: each id is served by the driver loaded
+    /// for the node it names, to the service that uses the device.
+    pub const DEVICE_CHANNELS: &'static [Self] = &[
+        crate::driver::audio_channel::AUDIO_CHANNEL_ENDPOINTS,
+        crate::driver::net_channel::NET_CHANNEL_ENDPOINTS,
+    ];
+
+    /// The node whose device channel `id` is, or [`None`] for an id in no
+    /// device-channel block.
+    #[must_use]
+    pub fn device_channel_node(id: u64) -> Option<u32> {
+        Self::DEVICE_CHANNELS
+            .iter()
+            .find(|block| block.contains(id))
+            .and_then(|block| block.node_of(id))
+    }
 
     /// The block whose ids' two high bytes spell `tag`.
     pub(crate) const fn tagged(tag: [u8; 2]) -> Self {
@@ -2616,6 +2637,9 @@ pub struct HwNode {
     /// [`is_settled`](Self::is_settled) and
     /// [`is_hot_arrival`](Self::is_hot_arrival), which only the kernel sets.
     presence: u8,
+    /// How the driver that last held the node ended
+    /// ([`driver_ending`](Self::driver_ending)), which only the kernel sets.
+    ending: u8,
     match_keys: [HwMatchKey; HW_NODE_MAX_MATCH_KEYS],
     resources: [HwResource; HW_NODE_MAX_RESOURCES],
 }
@@ -2634,8 +2658,11 @@ const PRESENCE_SETTLED: u8 = 1 << 1;
 /// The node was published after its emitter had settled: the device arrived
 /// on a running machine rather than being found as it came up.
 const PRESENCE_HOT_ARRIVAL: u8 = 1 << 2;
+/// A live driver holds the node.
+const PRESENCE_DRIVEN: u8 = 1 << 3;
 /// Every defined presence bit.
-const PRESENCE_DEFINED: u8 = PRESENCE_REMOVABLE | PRESENCE_SETTLED | PRESENCE_HOT_ARRIVAL;
+const PRESENCE_DEFINED: u8 =
+    PRESENCE_REMOVABLE | PRESENCE_SETTLED | PRESENCE_HOT_ARRIVAL | PRESENCE_DRIVEN;
 
 /// Every bit of [`HwNode`]'s served set that names a role.
 const SERVED_DEFINED: u8 = {
@@ -2668,6 +2695,7 @@ impl HwNode {
             fault_health: FaultDomainState::Healthy.as_u8(),
             served: 0,
             presence: 0,
+            ending: DriverEnding::None.as_u8(),
             match_keys: [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS],
             resources: [HwResource::EMPTY; HW_NODE_MAX_RESOURCES],
         }
@@ -2870,6 +2898,19 @@ impl HwNode {
         self.set_presence(PRESENCE_SETTLED, settled);
     }
 
+    /// Whether a live driver holds this node: the kernel marks it as it admits
+    /// one and clears it as the driver ends, so a driver that ended is seen
+    /// as ended rather than as still serving.
+    #[must_use]
+    pub const fn is_driven(&self) -> bool {
+        self.presence & PRESENCE_DRIVEN != 0
+    }
+
+    /// Record whether a live driver holds this node.
+    pub fn set_driven(&mut self, driven: bool) {
+        self.set_presence(PRESENCE_DRIVEN, driven);
+    }
+
     /// Whether this node was published after its emitter had settled: its
     /// device arrived on a running machine rather than being found as the
     /// emitter came up.
@@ -2879,16 +2920,32 @@ impl HwNode {
     }
 
     /// Discard every reading the kernel keeps for a node it is publishing —
-    /// the served roles, the domain's health and whether a driver has
-    /// settled it — none of which an emitter may claim, and record whether
-    /// it arrives on a running machine.
+    /// the served roles, the domain's health, whether a driver holds or has
+    /// settled it, and how one ended — none of which an emitter may claim,
+    /// and record whether it arrives on a running machine.
     ///
     /// What the emitter describes, its removability among it, is kept.
     pub fn admit_published(&mut self, hot_arrival: bool) {
         self.served = 0;
         self.fault_health = FaultDomainState::Healthy.as_u8();
         self.presence &= PRESENCE_REMOVABLE;
+        self.ending = DriverEnding::None.as_u8();
         self.set_presence(PRESENCE_HOT_ARRIVAL, hot_arrival);
+    }
+
+    /// How the driver that last held this node ended; [`DriverEnding::None`]
+    /// while one holds it or none has.
+    #[must_use]
+    pub const fn driver_ending(&self) -> DriverEnding {
+        match DriverEnding::from_u8(self.ending) {
+            Some(ending) => ending,
+            None => DriverEnding::None,
+        }
+    }
+
+    /// Record how the driver that last held this node ended.
+    pub fn set_driver_ending(&mut self, ending: DriverEnding) {
+        self.ending = ending.as_u8();
     }
 
     fn set_presence(&mut self, bit: u8, set: bool) {
@@ -2912,6 +2969,7 @@ impl HwNode {
         out[16] = self.fault_health;
         out[17] = self.served;
         out[18] = self.presence;
+        out[19] = self.ending;
         let mut off = HW_NODE_HEADER_LEN;
         for key in &self.match_keys {
             out[off..off + HwMatchKey::WIRE_LEN].copy_from_slice(&key.to_le_bytes());
@@ -2955,6 +3013,9 @@ impl HwNode {
         // serving", the side that holds a consumer back.
         let served = bytes[17] & SERVED_DEFINED;
         let presence = bytes[18] & PRESENCE_DEFINED;
+        let ending = DriverEnding::from_u8(bytes[19])
+            .ok_or(Errno::OutOfRange)?
+            .as_u8();
         let mut match_keys = [HwMatchKey::EMPTY; HW_NODE_MAX_MATCH_KEYS];
         let mut off = HW_NODE_HEADER_LEN;
         for slot in &mut match_keys {
@@ -2976,6 +3037,7 @@ impl HwNode {
             fault_health,
             served,
             presence,
+            ending,
             match_keys,
             resources,
         })
@@ -4222,8 +4284,33 @@ mod tests {
             // No block swallows another service's rendezvous.
             assert!(!block.contains(crate::rtc_ipc::RTC_ENDPOINT));
             assert!(!block.contains(crate::mailbox_ipc::MAILBOX_ENDPOINT));
-            assert!(!block.contains(crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE));
+            assert!(!block
+                .contains(crate::driver::net_channel::notify_endpoint_for(1, 0).expect("a slot")));
+            assert!(!block.contains(
+                crate::driver::audio_channel::notify_endpoint_for(1, 0).expect("a slot")
+            ));
         }
+        for role in crate::hwlink::LinkRole::ALL {
+            assert!(
+                NodeEndpointBlock::ALL.contains(&role.endpoints()),
+                "{role:?}'s block is reserved"
+            );
+        }
+        for &block in NodeEndpointBlock::DEVICE_CHANNELS {
+            assert!(NodeEndpointBlock::ALL.contains(&block));
+            assert!(crate::hwlink::LinkRole::of_endpoint(block.endpoint(7)).is_none());
+            assert_eq!(
+                NodeEndpointBlock::device_channel_node(block.endpoint(7)),
+                Some(7)
+            );
+        }
+        assert_eq!(
+            NodeEndpointBlock::device_channel_node(
+                crate::driver::encoder::ENCODER_ENDPOINTS.endpoint(7)
+            ),
+            None,
+            "a link role's endpoint is served under its duty, not its node"
+        );
         for (at, &one) in NodeEndpointBlock::ALL.iter().enumerate() {
             for &other in &NodeEndpointBlock::ALL[at + 1..] {
                 for id in [0u32, u32::MAX] {
@@ -4898,8 +4985,8 @@ mod tests {
         assert_eq!(GrantedResource::WIRE_LEN, 40);
         // The fixed node header followed by the fixed match-key and resource
         // arrays.
-        assert_eq!(HW_NODE_HEADER_LEN, 19);
-        assert_eq!(HwNode::WIRE_LEN, 1347);
+        assert_eq!(HW_NODE_HEADER_LEN, 20);
+        assert_eq!(HwNode::WIRE_LEN, 1348);
         assert_eq!(HwTreeHeader::WIRE_LEN, 16);
     }
 
@@ -5029,6 +5116,7 @@ mod tests {
         claimed.set_serves(LinkRole::ALL[0], true);
         claimed.set_fault_health(FaultDomainState::Offline);
         claimed.set_settled(true);
+        claimed.set_driver_ending(DriverEnding::Crashed);
         for hot in [false, true] {
             let mut node = claimed;
             node.admit_published(hot);
@@ -5036,10 +5124,24 @@ mod tests {
             assert!(LinkRole::ALL.iter().all(|&role| !node.serves(role)));
             assert_eq!(node.fault_health(), FaultDomainState::Healthy);
             assert!(!node.is_settled());
+            assert_eq!(node.driver_ending(), DriverEnding::None);
             assert_eq!(node.is_hot_arrival(), hot);
             assert_eq!(node.match_keys(), claimed.match_keys());
             assert_eq!(node.resources(), claimed.resources());
         }
+    }
+
+    #[test]
+    fn a_driver_ending_round_trips_and_a_byte_naming_none_is_refused() {
+        for ending in DriverEnding::ALL {
+            let mut node = sample_node();
+            node.set_driver_ending(ending);
+            let decoded = HwNode::from_bytes(&node.to_le_bytes()).expect("decodes");
+            assert_eq!(decoded.driver_ending(), ending);
+        }
+        let mut bytes = sample_node().to_le_bytes();
+        bytes[19] = 0xFF;
+        assert_eq!(HwNode::from_bytes(&bytes), Err(Errno::OutOfRange));
     }
 
     #[test]

@@ -1327,34 +1327,45 @@ fn audit_root_storage_binding(
         );
     }
 
-    // Publish the framebuffer boot console (`plans/DISPLAY.md` D7d) into the
-    // same buffered tree the block and input probes feed: where the tree
-    // enables a display engine, that engine takes the screen over and its node
-    // is told the console is its to move; else the surface is the boot display
-    // node the generic display service binds. A degenerate mode publishes
-    // nothing, and the collecting sink never fills, so the emit cannot fail —
-    // the discard mirrors the observers above.
-    if let Some(video) = video {
-        // SAFETY: as the probes' closures above — `dtb` bounds the firmware
-        // blob validated at boot, identity-mapped and immutable for the
-        // kernel's life, MMU on.
-        let engine = unsafe { Fdt::from_ptr(dtb as *const u8) }
-            .ok()
-            .and_then(|fdt| platform::display_engine(&fdt))
-            .and_then(|id| sink.nodes_mut().iter_mut().find(|node| node.id() == id));
-        if let Some(engine) = engine {
-            crate::boot_display::mark_boot_console(engine);
-        } else {
-            let scanout = crate::boot_display::BootScanout {
-                base: video.fb_base,
-                width_px: video.width_px,
-                height_px: video.height_px,
-                stride_bytes: video.stride_bytes,
-                format: video.format,
-                memory: video.memory,
-            };
-            let _ = crate::boot_display::observe_boot_display(&scanout, &mut sink);
+    // Publish the framebuffer boot console (`plans/DISPLAY.md` D7d): where the
+    // tree enables a display engine, the engine takes the screen over, its
+    // node told the console is its to move, and every firmware surface goes
+    // with it; else the boot display node stands in for the firmware's own.
+    // The collecting sink never fills, so the emit cannot fail.
+    // SAFETY: as the probes' closures above — `dtb` bounds the firmware blob
+    // validated at boot, identity-mapped and immutable for the kernel's life,
+    // MMU on.
+    let engine = unsafe { Fdt::from_ptr(dtb as *const u8) }
+        .ok()
+        .and_then(|fdt| platform::display_engine(&fdt))
+        .filter(|&id| sink.nodes().iter().any(|node| node.id() == id));
+    if let Some(engine) = engine {
+        if video.is_some() {
+            if let Some(node) = sink.nodes_mut().iter_mut().find(|node| node.id() == engine) {
+                crate::boot_display::mark_boot_console(node);
+            }
         }
+        crate::boot_display::withhold_firmware_surfaces(
+            &mut sink,
+            crate::boot_display::FirmwareSurfaces::TakenOver,
+        );
+    } else if let Some(video) = video {
+        crate::boot_display::withhold_firmware_surfaces(
+            &mut sink,
+            crate::boot_display::FirmwareSurfaces::Published {
+                base: video.fb_base,
+                len: video.fb_len_bytes,
+            },
+        );
+        let scanout = crate::boot_display::BootScanout {
+            base: video.fb_base,
+            width_px: video.width_px,
+            height_px: video.height_px,
+            stride_bytes: video.stride_bytes,
+            format: video.format,
+            memory: video.memory,
+        };
+        let _ = crate::boot_display::observe_boot_display(&scanout, &mut sink);
     }
 
     // Every generic ECAM host the tree describes becomes the kernel's own,

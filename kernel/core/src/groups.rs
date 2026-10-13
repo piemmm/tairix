@@ -57,10 +57,16 @@ use tairix_users::{
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{read_bootstrap_file, BootstrapReadError, VfsError};
+use crate::fs::{read_bootstrap_file, BootstrapFile, BootstrapReadError, VfsError};
 
 /// Absolute path of the group registry on the root volume.
 pub const GROUPS_DB_PATH: &str = "/System/Security/Groups";
+
+/// The group registry as the boot reads it.
+pub const GROUPS_DB: BootstrapFile = BootstrapFile {
+    path: GROUPS_DB_PATH,
+    max_len: MAX_GROUPS_DB_LEN,
+};
 
 /// The live group registry the ungated group-directory introspection
 /// serves.
@@ -162,6 +168,8 @@ pub enum GroupsLoadError {
     /// The driver returned fewer bytes than the file's reported size; a
     /// truncated registry is never parsed.
     ShortRead,
+    /// The kernel heap could not hold the file.
+    OutOfMemory,
     /// The file is not valid UTF-8.
     NotUtf8,
     /// The text failed the `groups-v1` validation, at the line that raised it.
@@ -179,6 +187,7 @@ impl GroupsLoadError {
             Self::NotAFile => "not_a_file",
             Self::TooLarge => "too_large",
             Self::ShortRead => "short_read",
+            Self::OutOfMemory => "out_of_memory",
             Self::NotUtf8 => "not_utf8",
             Self::Parse(_) => "parse_rejected",
         }
@@ -192,6 +201,7 @@ impl From<BootstrapReadError> for GroupsLoadError {
             BootstrapReadError::NotAFile => Self::NotAFile,
             BootstrapReadError::TooLarge => Self::TooLarge,
             BootstrapReadError::ShortRead => Self::ShortRead,
+            BootstrapReadError::OutOfMemory => Self::OutOfMemory,
         }
     }
 }
@@ -212,7 +222,7 @@ pub fn load_groups_db<F>(fs: &mut F, audit: &dyn Sink) -> Result<GroupsDb, Group
 where
     F: FilesystemRead + FilesystemSecurity + ?Sized,
 {
-    let parsed = match read_bootstrap_file(fs, GROUPS_DB_PATH, MAX_GROUPS_DB_LEN) {
+    let parsed = match read_bootstrap_file(fs, GROUPS_DB) {
         Ok(buf) => parse_groups_text(&buf),
         Err(err) => Err(GroupsLoadError::from(err)),
     };

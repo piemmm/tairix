@@ -12,9 +12,9 @@ use tairix_log::EventId;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const SYSINFOD_RANGE_START: u32 = 8_000;
+pub const SYSINFOD_RANGE_START: u32 = tairix_log::registry::SYSINFOD.start();
 /// Range end (exclusive) reserved for `sysinfod` event identifiers.
-pub const SYSINFOD_RANGE_END: u32 = 9_000;
+pub const SYSINFOD_RANGE_END: u32 = tairix_log::registry::SYSINFOD.end();
 
 /// An audited query was invoked under a granted capability set.
 ///

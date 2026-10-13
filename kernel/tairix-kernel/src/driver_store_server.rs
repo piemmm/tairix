@@ -779,7 +779,14 @@ mod tests {
         }
     }
     impl HwDriverTree for SliceNodes<'_> {
-        fn driver_admitted(&self, _node_id: u32, _publishes: bool) {}
+        fn driver_admitted(&self, _node_id: u32, _generation: u64, _publishes: bool) {}
+        fn driver_released(
+            &self,
+            _node_id: u32,
+            _generation: u64,
+            _ending: tairix_abi::driver::DriverEnding,
+        ) {
+        }
     }
     impl HwNodeResolver for SliceNodes<'_> {
         fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>> {

@@ -36,7 +36,7 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_x86_64::qemu_exit;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
@@ -51,12 +51,9 @@ mod kernel {
     // per-binary attribute — see `kernel/tairix-kernel/Cargo.toml`'s
     // top-level rationale comment.
 
-    /// Static heap for the bump allocator.
-    ///
-    /// `static mut` because the bump allocator hands out disjoint
-    /// slices via an `AtomicUsize` cursor; the storage itself is
-    /// otherwise immutable from any other call site.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The production bin's bootstrap arena, so this boot proves the
+    /// pipeline fits it before the heap can grow.
+    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -65,7 +62,7 @@ mod kernel {
     /// is the only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), BOOT_HEAP_BYTES) };
 
     // --- Audit observer Sink --------------------------------------
 

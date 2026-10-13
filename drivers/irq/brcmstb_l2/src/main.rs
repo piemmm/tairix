@@ -19,12 +19,12 @@ mod program {
     use tairix_abi::PROC_ID_HEX_LEN;
     use tairix_drv_irq_brcmstb_l2::controller::{Controller, Record, LINES};
     use tairix_drv_irq_brcmstb_l2::{BIND_KEYS, LAYOUTS, REQUIRED_CAPABILITIES};
-    use tairix_drvrt::serve::{exit, fail, instance_field, log_event, DutyNode, Endpoint, Service};
+    use tairix_drvrt::exit::{end, step, DriverExit};
+    use tairix_drvrt::serve::{instance_field, log_event, DutyNode, Endpoint, Service};
     use tairix_drvrt::{Recorder, RtSupplier};
     use tairix_log::{EventId, Field, FieldValue, Level};
 
     const EVENT_READY: EventId = EventId(24_600);
-    const EVENT_FAILED: EventId = EventId(24_601);
     const EVENT_CLAIMED: EventId = EventId(24_602);
     const EVENT_RECLAIMED: EventId = EventId(24_603);
     const EVENT_REFUSED: EventId = EventId(24_604);
@@ -37,14 +37,13 @@ mod program {
                 .and_then(|matched| LAYOUTS.get(matched).copied())
         });
         let Some(layout) = layout else {
-            return fail(
-                EVENT_FAILED,
-                exit::NO_RESOURCES,
-                "l2-intc: the node matches no layout",
+            return end(
+                DriverExit::NoResources,
+                &[step("l2-intc: the node matches no layout")],
             );
         };
         let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
-        let node = match DutyNode::open(caps, LinkRole::InterruptLine, EVENT_FAILED) {
+        let node = match DutyNode::open(caps, LinkRole::InterruptLine) {
             Ok(node) => node,
             Err(code) => return code,
         };
@@ -53,9 +52,9 @@ mod program {
             Err(code) => return code,
         };
         if len < layout.window_len() {
-            return node.fail(
-                exit::NO_RESOURCES,
-                "l2-intc: the window is shorter than the registers",
+            return end(
+                DriverExit::NoResources,
+                &[step("l2-intc: the window is shorter than the registers")],
             );
         }
         let Some(line) = node
@@ -63,9 +62,9 @@ mod program {
             .find(|r| r.kind() == Some(HwResourceKind::Irq))
             .and_then(|r| u32::try_from(r.base()).ok())
         else {
-            return node.fail(
-                exit::NO_RESOURCES,
-                "l2-intc: the node names no line of its own",
+            return end(
+                DriverExit::NoResources,
+                &[step("l2-intc: the node names no line of its own")],
             );
         };
         let regs = match node.map() {
@@ -76,15 +75,15 @@ mod program {
         let Ok(mut controller) =
             Controller::new(&regs, layout, RtSupplier::new(endpoint), Log, endpoint)
         else {
-            return node.fail(
-                exit::BRINGUP_FAILED,
-                "l2-intc: the lines could not be masked",
+            return end(
+                DriverExit::BringupFailed,
+                &[step("l2-intc: the lines could not be masked")],
             );
         };
         let Ok(own_line) = u64::try_from(tairix_rt::irq_bind(line)) else {
-            return node.fail(
-                exit::BRINGUP_FAILED,
-                "l2-intc: its own line could not be bound",
+            return end(
+                DriverExit::BringupFailed,
+                &[step("l2-intc: its own line could not be bound")],
             );
         };
         let mut request = [0u8; IRQLINE_MAX_REQUEST];
@@ -106,7 +105,7 @@ mod program {
             }
             Err(ended) => ended,
         };
-        node.fail(exit::SERVE_FAILED, ended.reason())
+        ended.end()
     }
 
     /// The system log, as the controller records to it.

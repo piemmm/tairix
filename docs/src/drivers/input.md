@@ -237,8 +237,9 @@ and a periodic re-poll would only burn power. It is the opposite case to a
 per-request deadline, because there the request's own completion is the only
 other event that could end the wait. Every
 capability and bound is re-checked kernel-side (`AGENTS.md` §5.4); a bring-up
-failure exits with a reserved fail-closed code (`80`/`81`/`82`) and a hard
-device fault exits `83` rather than spinning on a broken device. It is a
+failure ends the driver through the driver runtime's exit vocabulary
+(`no_host`/`no_resources`/`bringup_failed`) and a hard device fault ends it
+as `device_fault` (85) rather than spinning on a broken device. It is a
 separate crate from the §8
 `tairix-drv-input-virtio-input` identity so it can link `tairix-rt` without
 pulling it into the kernel-linked driver shell (`AGENTS.md` §2.2).
@@ -261,7 +262,10 @@ report on change, and configures the device's features: a digitizer's input
 mode and switches, a touch pad's contact limit and pad type, a wheel's
 resolution multiplier. A descriptor that does not parse falls back to the boot
 layout on a boot keyboard or boot mouse, and refuses any other interface with
-its reason logged; the descriptor is logged in hex at bind. Every keyboard,
+its reason logged; the descriptor is logged in hex at bind. An interface
+carrying nothing the seat serves — a receiver's vendor-defined interface — is
+declined rather than failed: the driver ends cleanly, recorded at info, and the
+device manager leaves the node unbound. Every keyboard,
 mouse, touch pad and touch screen application on the interface is then served:
 each report is a blocking interrupt-IN URB the host controller answers when
 the device reports, so the driver parks between reports, and each record goes

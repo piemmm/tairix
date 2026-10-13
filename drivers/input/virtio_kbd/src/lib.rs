@@ -15,4 +15,5 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::MEM_DMA,
     CapabilityId::IRQ_BIND,
     CapabilityId::INPUT_INJECT,
+    CapabilityId::LOG_EMIT,
 ];

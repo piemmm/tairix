@@ -43,8 +43,8 @@
 //! [`Errno`](tairix_abi::Errno) — a service call before attach, a region too
 //! small for the agreed geometry, an endpoint index the device does not
 //! present, or a device fault is never a panic and never a partially-applied
-//! action. Every set-up refusal in `serve` exits with a reserved code from
-//! [`exit`] rather than degrading.
+//! action. Every set-up refusal in `serve` ends the driver through
+//! `tairix_drvrt::exit` rather than degrading.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -62,34 +62,4 @@ mod mock_audio;
 #[cfg(target_os = "none")]
 mod serve;
 #[cfg(target_os = "none")]
-pub use serve::{fail, serve, Channel};
-
-/// The reserved, fail-closed process exit codes an audio driver binary ends
-/// with when it cannot serve its device.
-///
-/// One definition for every audio driver process: the codes are the diagnosis
-/// a supervisor reads off a driver that gave up, so two drivers reporting the
-/// same failure must report the same number. `serve` returns
-/// [`NO_SERVICE`](exit::NO_SERVICE) itself; the others are returned by the
-/// binary's own bring-up, before it hands the device over. The numbers match
-/// `lib/netchan`'s, so one supervisor table reads both classes.
-pub mod exit {
-    /// The rt-backed driver host could not be built from the
-    /// kernel-delivered grants (the `resource_grants` query was refused, or
-    /// the delivery did not fit).
-    pub const NO_HOST: i32 = 80;
-    /// The delivered grants do not name the resources this driver needs — an
-    /// unbound, mis-provisioned, or malformed node.
-    pub const NO_RESOURCES: i32 = 81;
-    /// Device bring-up failed: a window could not be mapped, the device is
-    /// not the one the node claimed, it rejected its init sequence, or an
-    /// event source — the granted interrupt line, or a port its bus reports
-    /// progress on — could not be bound (the serve loop parks on them, so a
-    /// driver without one would degrade into the busy re-poll the charter
-    /// forbids).
-    pub const BRINGUP_FAILED: i32 = 82;
-    /// The device channel could not be stood up: no free reserved endpoint
-    /// id, the bind was refused, the `audiochan` node could not be published,
-    /// or the wait set could not be built.
-    pub const NO_SERVICE: i32 = 83;
-}
+pub use serve::{serve, Channel};

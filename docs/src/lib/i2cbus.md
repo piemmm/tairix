@@ -42,12 +42,13 @@ failure ends the driver with a stable exit code and its reason logged.
 | Id | Level | Decision |
 |---|---|---|
 | 24100 | Info | serving |
-| 24101 | Error | ending, with the reason |
 | 24102 | Info | a channel opened, and what its link reaches |
 | 24103 | Info | a channel closed |
 | 24104 | Info | channels dropped with their ended holder |
 | 24105 | Info / Warn | a transaction that faulted: a target not answering, or a fault of the bus |
 | 24106 | Warn | a request refused |
+
+A driver's ending is the driver runtime's record (`tairix_drvrt::exit`).
 
 ## Stability
 

@@ -20,9 +20,8 @@ use crate::phy::{self, LaneMap};
 use crate::regs::{core, csc, dvp, field, hd, packet};
 use crate::sink::{self, Ddc};
 
-/// The state machine clock runs at least this fast while the block is used:
-/// below it, and at zero most of all, the block's registers stall the bus.
-pub(crate) const HSM_MIN_HZ: u64 = 120_000_000;
+/// The state machine clock runs at least this fast while the block is used.
+pub(crate) const HSM_MIN_HZ: u64 = tairix_vcmailbox::FirmwareClock::M2mc.least_hz();
 
 /// How long the scheduler takes to change mode, in microseconds.
 const SCHEDULER_BUDGET_US: u64 = 1_000_000;

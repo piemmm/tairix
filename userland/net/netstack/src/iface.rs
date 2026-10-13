@@ -647,25 +647,20 @@ impl Netstack {
         // limit the fresh config never reaches, so a partial apply is not
         // possible (fail closed, leave the interface untouched).
         msg.validate()?;
-        // Locate the interface by its stable hardware identity, in
-        // precedence order: an explicit MAC selector, else an explicit
-        // hardware-node location (the register-window base the driver bind
-        // recorded), else the alias itself. A node selector never matches
-        // an interface with no resolved location (a `0` `node_location`),
-        // and `msg.match_node` is always non-zero (the config rejects `0`).
-        let index = if let Some(mac) = msg.match_mac {
-            self.interfaces
-                .iter()
-                .position(|i| i.facts.mac.as_octets() == &mac)
-                .ok_or(Errno::NotFound)?
-        } else if let Some(node) = msg.match_node {
-            self.interfaces
-                .iter()
-                .position(|i| i.node_location != 0 && i.node_location == node)
-                .ok_or(Errno::NotFound)?
-        } else {
-            self.find(msg.alias).ok_or(Errno::NotFound)?
-        };
+        // Locate the interface by its stable hardware identity — the one
+        // selector rule the device manager offers configurations by — else
+        // by the alias itself.
+        let index = self
+            .interfaces
+            .iter()
+            .position(|i| {
+                if msg.names_by_alias() {
+                    i.name == msg.alias
+                } else {
+                    msg.selects(i.facts.mac.as_octets(), i.node_location)
+                }
+            })
+            .ok_or(Errno::NotFound)?;
         // A bond member owns no addresses: the bond does. Refuse a direct
         // address assignment (static v4/v6, DHCPv4, or SLAAC) to an
         // enrolled member (fail closed) — the member is a pure frame

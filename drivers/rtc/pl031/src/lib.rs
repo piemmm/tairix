@@ -57,8 +57,11 @@ const BIND_PRIORITY: u16 = 10;
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the counter window and the restricted-sender RTC endpoint. No clock
 /// authority: the reading is served to the one holder of `CAP_TIME_SET`.
-pub const REQUIRED_CAPABILITIES: &[CapabilityId] =
-    &[CapabilityId::MMIO_MAP, CapabilityId::IPC_BIND_PRIVILEGED];
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::MMIO_MAP,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
 
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from, so the

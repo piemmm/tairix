@@ -199,15 +199,16 @@ logged as `4209` `BOOT_TREE_REFUSED` carrying the `errno`.
 
 ### Presence: removable, settled, hot
 
-Each node carries three presence bits, and only one is the emitter's to state:
+Each node carries four presence bits, and only one is the emitter's to state:
 
 | Bit | Set by | Meaning |
 |---|---|---|
 | removable | the emitter (`HwNode::set_removable`) | the device can leave a running machine: a USB device on a port its hub does not mark fixed (`PORTSC.DR` at a root port, the hub descriptor's `DeviceRemovable` map below one) |
 | settled | the kernel | the node's driver has brought up what was present when it started |
 | hot arrival | the kernel | the node was published under a parent that had already settled |
+| driven | the kernel | a live driver holds the node: set as the kernel admits the driver, cleared with settled as its process ends |
 
-The kernel takes both of its bits back from whatever a publish carried
+The kernel takes its three bits back from whatever a publish carried
 (`HwNode::admit_published`), so an emitter can neither forge a hot arrival nor
 claim its own children settled. A node whose driver may publish (`CAP_HW_EMIT`,
 or any bundle driver) is unsettled from admission; one whose driver cannot is
@@ -217,6 +218,28 @@ and bumps the generation on the edge only. A bus driver calls it after its
 initial walk — xHCI once no skipped-port retry is armed — a channel driver once
 its channel node is published, and a driver with nothing to enumerate as it
 starts.
+
+The driven bit is how the device manager learns a driver ended, and the
+node's ending (`HwNode::driver_ending`) how: the kernel reads the driver's exit
+status as it releases the node — `clean` (it declined the node, or its device
+went), `refused` (a failure a fresh instance meets again: no grants, a missing
+resource, a device that would not come up, an image that would not load),
+`failed` (one it may not: a service it could not stand up, a serve loop or a
+device that failed while served), `crashed` (killed, or a status outside the
+driver exit vocabulary) or `unloaded` — and clears it as the next driver is
+admitted, with the fault-domain health the last one reported. Each mark is
+keyed by the admission it was made for, so the late release of a driver that
+ended frees no successor admitted since.
+
+A node whose driver ended `failed` or `crashed` is reloaded once its restart
+falls due (`13030` `NODE_DRIVER_RESTARTING`): 500 ms after the ending,
+doubling per attempt, at most three times; a driver that served a minute
+since its load has its restarts forgiven, so a fault once in a long while is
+recovered from every time. Meanwhile the node holds its consumers and the
+boot's settling, and the device manager's wait ends when the restart is due.
+Any other ending, or a spent budget, leaves the node unbound (`13029`
+`NODE_DRIVER_ENDED`, carrying the `ending` and any `restarts` spent): it is
+not loaded again, holds no consumer and is not waited on.
 
 ### Readiness and device sounds
 
@@ -252,6 +275,8 @@ range (`tairix_devmgr::events`):
 | `13020` `NODE_LOAD_RACED_REMOVAL` | the node left the tree before its driver was admitted (`errno` `DeviceOffline`); `Info` |
 | `13021` `NODE_ALREADY_DRIVEN` | another live driver already holds the node (`errno` `Busy`); `Info` |
 | `13022` `NODE_HELD` | the node waits for the `supplier` its links name: in the tree and matched but not yet bound, or not in the tree; `Debug` |
+| `13029` `NODE_DRIVER_ENDED` | the driver bound to the node ended and is not reloaded; fields `ending`, `restarts`; `Info` |
+| `13030` `NODE_DRIVER_RESTARTING` | the driver ended `failed` or `crashed` and is reloaded after `delay_ms`, restart `attempt`; `Warn` |
 | `13026` `DEVICES_SETTLED` | the hardware present at boot has settled; the manager announces its readiness |
 | `13027` `SETTLE_LAPSED` | a `node`, or the `channels` hand-offs, did not settle within the budget; the boot settles without it; `Warn` |
 | `13028` `READINESS_REFUSED` | the service manager did not record the announcement |
@@ -384,8 +409,9 @@ registry each time the endpoint is bound or unbound, and bumps the tree's
 generation so `devmgr` reacts.
 
 `devmgr` holds a node whose links name a supplier not yet serving: one in the
-tree that a driver matches, that does not serve the link's role and whose
-load was not refused, or one not in the tree at all. A supplier counts once
+tree that a driver matches, that does not serve the link's role, whose load
+was not refused and whose driver has not ended, or one not in the tree at
+all. A supplier counts once
 it serves rather than once its driver is loaded, so a consumer never calls an
 endpoint its supplier has yet to bind. A supplier no installed driver serves
 — a clock the firmware owns — holds nothing, or its consumers would wait
@@ -394,7 +420,8 @@ by a PHY whose own clocks it makes would otherwise wait on the PHY while the
 PHY waits on it. As with Linux's device links, the links within a cycle
 order nothing and its members load together; a link leaving the cycle still
 holds. A supplier may sit later in the tree than its consumer, so a pass that
-bound or refused something is followed by another, and a supplier that
+decided something — bound a node, or found its load refused or its driver
+ended — is followed by another, and a supplier that
 vanishes takes its bound consumers down before itself (`NODE_HELD`,
 `13022`).
 

@@ -27,6 +27,7 @@ use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_caps::CapabilitySet;
+use tairix_drvrt::exit::{end, error, step, DriverExit};
 use tairix_drvrt::{GrantSyscalls, RtDriverHost};
 use tairix_log::{EventId, Field, FieldValue, Level};
 use tairix_rt::changenotice::ChangeNotice;
@@ -36,36 +37,13 @@ use crate::rt::RtShmMapper;
 use crate::server::{DisplayServer, PeerFacts, DISPLAY_REPLY_MAX};
 use crate::{Framebuffer, FramebufferConfig};
 
-/// Exit code when the driver host could not be built from the
-/// kernel-delivered grants. A reserved, fail-closed value.
-pub const EXIT_NO_HOST: i32 = 80;
-
-/// Exit code when the delivered grants do not name exactly one valid
-/// scan-out surface — an unbound or mis-provisioned node. The service never
-/// scans out a guessed geometry.
-pub const EXIT_NO_RESOURCES: i32 = 81;
-
-/// Exit code when the surface could not be brought up (the scan-out window
-/// could not be mapped).
-pub const EXIT_BRINGUP_FAILED: i32 = 82;
-
-/// Exit code when the reserved [`DISPLAY_ENDPOINT`] could not be bound
-/// (already bound, or the manifest lacks the privileged bind right): exiting
-/// leaves the seat without a display service, never a squattable one.
-pub const EXIT_NO_ENDPOINT: i32 = 83;
-
-/// Exit code when the wait-set the loop parks on could not be created,
-/// populated, or waited on: the service exits rather than degrade into a busy
-/// re-poll.
-pub const EXIT_WAIT_FAILED: i32 = 84;
-
 /// Range start (inclusive) reserved for the display service's event
 /// identifiers, per the `lib/log` convention of one 1 000-wide range per
 /// subsystem. Once shipped the values are never re-used or re-numbered.
-pub const DISPLAY_SERVICE_RANGE_START: u32 = 15_000;
+pub const DISPLAY_SERVICE_RANGE_START: u32 = tairix_log::registry::DISPLAY_SERVICE.start();
 
 /// Range end (exclusive) reserved for display-service event identifiers.
-pub const DISPLAY_SERVICE_RANGE_END: u32 = 16_000;
+pub const DISPLAY_SERVICE_RANGE_END: u32 = tairix_log::registry::DISPLAY_SERVICE.end();
 
 /// One-shot: the first client frame reached the scan-out surface since this
 /// service started — the witness that the session → service → surface path
@@ -124,10 +102,18 @@ const EVENT_TOKEN: u64 = 3;
 ///
 /// # Errors
 ///
-/// [`EXIT_NO_RESOURCES`] when the grants name no single valid surface, and
-/// [`EXIT_BRINGUP_FAILED`] when its window cannot be mapped.
+/// The exit status to end with, its reason recorded: grants naming no single
+/// valid surface, or a window that will not map.
 pub fn open_surface<S: GrantSyscalls>(host: &RtDriverHost<S>) -> Result<Framebuffer<'_>, i32> {
-    let (phys_base, mode) = sole_framebuffer(host.resources()).map_err(|_| EXIT_NO_RESOURCES)?;
+    let (phys_base, mode) = sole_framebuffer(host.resources()).map_err(|err| {
+        end(
+            DriverExit::NoResources,
+            &[
+                step("display: the node grants no single valid scan-out surface"),
+                error(err),
+            ],
+        )
+    })?;
     let config = FramebufferConfig {
         phys_base,
         width_px: mode.width_px,
@@ -137,12 +123,20 @@ pub fn open_surface<S: GrantSyscalls>(host: &RtDriverHost<S>) -> Result<Framebuf
     };
     // The host wires no seat gate: the per-request lease check is the
     // engine's kernel-attested `call_peer_seat`.
-    Framebuffer::open(host, config).map_err(|_| EXIT_BRINGUP_FAILED)
+    Framebuffer::open(host, config).map_err(|err| {
+        end(
+            DriverExit::BringupFailed,
+            &[
+                step("display: the scan-out surface would not map"),
+                error(err),
+            ],
+        )
+    })
 }
 
 /// Serve the display endpoint over `display`, whose output moves on `wakes`,
-/// for the life of the service, answering the reserved exit code the moment
-/// it cannot go on.
+/// for the life of the service, ending it with its reason recorded the
+/// moment it cannot go on.
 ///
 /// A display whose output never moves names no wake.
 pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
@@ -159,10 +153,16 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
         CAPACITY,
     ) != 0
     {
-        return EXIT_NO_ENDPOINT;
+        return end(
+            DriverExit::NoService,
+            &[step("display: the display endpoint could not be bound")],
+        );
     }
     let Ok(wait_set) = u64::try_from(tairix_rt::waitset_create()) else {
-        return EXIT_WAIT_FAILED;
+        return end(
+            DriverExit::NoService,
+            &[step("display: the serve wait set could not be created")],
+        );
     };
     let members = [
         (WaitSourceKind::Endpoint, DISPLAY_ENDPOINT, ENDPOINT_TOKEN),
@@ -178,7 +178,12 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
     });
     for (kind, id, token) in members.into_iter().chain(events) {
         if tairix_rt::waitset_ctl(wait_set, WaitSetOp::Add, kind, id, token) != 0 {
-            return EXIT_WAIT_FAILED;
+            return end(
+                DriverExit::NoService,
+                &[step(
+                    "display: an event source could not join the serve wait set",
+                )],
+            );
         }
     }
     // Announced once the rendezvous is bound, which is the authority, and
@@ -194,7 +199,10 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
     let mut first_present_logged = false;
     loop {
         if tairix_rt::waitset_wait(wait_set, u64::MAX, &mut token) != 0 {
-            return EXIT_WAIT_FAILED;
+            return end(
+                DriverExit::ServeFailed,
+                &[step("display: the serve wait set faulted")],
+            );
         }
         if token == LEASE_TOKEN {
             if let Some(lease) = read_lease() {

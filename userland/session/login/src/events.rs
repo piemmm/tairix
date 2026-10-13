@@ -11,9 +11,9 @@ use tairix_log::EventId;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const LOGIN_RANGE_START: u32 = 10_000;
+pub const LOGIN_RANGE_START: u32 = tairix_log::registry::LOGIN.start();
 /// Range end (exclusive) reserved for `login` event identifiers.
-pub const LOGIN_RANGE_END: u32 = 11_000;
+pub const LOGIN_RANGE_END: u32 = tairix_log::registry::LOGIN.end();
 
 /// A user authenticated and a session was launched on their behalf. The
 /// session inherits the user's capability ceiling.

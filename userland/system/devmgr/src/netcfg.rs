@@ -19,15 +19,13 @@
 //! safe defaults (both families enabled, SYN cookies `auto`) hold.
 
 use alloc::collections::BTreeSet;
-use alloc::vec::Vec;
 
 use tairix_abi::net_ipc::{NetBondConfigMsg, NetInterfaceConfigMsg, NetworkSettings, IF_NAME_LEN};
-use tairix_abi::Errno;
 use tairix_log::{log as log_event, Event, Field, FieldValue, Level, Sink};
 use tairix_netconfig::InterfaceConfigPlan;
 
 use crate::events;
-use crate::netbind::NetstackBind;
+use crate::netbind::{NetBindState, NetstackBind};
 
 /// The device manager's read of the stack-wide `net.*` policy from the
 /// system-configuration store.
@@ -161,21 +159,24 @@ pub trait NetworkInterfaceConfigSource {
     fn load(&mut self) -> Option<InterfaceConfigPlan>;
 }
 
-/// The device manager's memory of the per-interface plan it last read and
-/// which of it the network stack has accepted.
+/// The device manager's memory of the per-interface plan it last read, which
+/// of it the network stack has accepted, and which it refused.
 ///
 /// Unlike the stack-wide settings (one message for the whole policy), each
 /// interface's configuration is delivered when *its* interface binds —
-/// asynchronously, as the driver comes up — so the plan is retried on every
-/// generation bump until each interface has accepted it, and a delivered
-/// interface is skipped thereafter (idempotent).
+/// asynchronously, as the driver comes up — and a delivered interface is
+/// skipped thereafter (idempotent). A refusal is the stack's answer, not a
+/// failure to reach it: the configuration is offered again only once its
+/// document entry changes or another NIC binds.
 #[derive(Default)]
 pub struct NetIfConfigState {
     plan: Option<InterfaceConfigPlan>,
     delivered: BTreeSet<[u8; IF_NAME_LEN]>,
     delivered_bonds: BTreeSet<[u8; IF_NAME_LEN]>,
+    refused: BTreeSet<[u8; IF_NAME_LEN]>,
+    refused_bonds: BTreeSet<[u8; IF_NAME_LEN]>,
+    nics_seen: usize,
     rejected_logged: bool,
-    deferred: bool,
 }
 
 impl NetIfConfigState {
@@ -183,15 +184,6 @@ impl NetIfConfigState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Whether the last pass left a planned interface unconfigured.
-    ///
-    /// The stack accepting an interface it previously refused bumps no
-    /// generation, so a caller that parks for one would never retry.
-    #[must_use]
-    pub fn has_deferred_work(&self) -> bool {
-        self.deferred
     }
 
     /// Adopt what the source answered with this bump.
@@ -212,10 +204,14 @@ impl NetIfConfigState {
             if *held == plan {
                 return;
             }
-            self.delivered
-                .retain(|alias| held.message_for(alias) == plan.message_for(alias));
-            self.delivered_bonds
-                .retain(|alias| held.bond_for(alias) == plan.bond_for(alias));
+            let message_kept =
+                |alias: &[u8; IF_NAME_LEN]| held.message_for(alias) == plan.message_for(alias);
+            let bond_kept =
+                |alias: &[u8; IF_NAME_LEN]| held.bond_for(alias) == plan.bond_for(alias);
+            self.delivered.retain(message_kept);
+            self.refused.retain(message_kept);
+            self.delivered_bonds.retain(bond_kept);
+            self.refused_bonds.retain(bond_kept);
             if held.rejected != plan.rejected {
                 self.rejected_logged = false;
             }
@@ -225,156 +221,133 @@ impl NetIfConfigState {
 }
 
 /// Deliver each managed interface's `network.conf` configuration to the
-/// network stack, retrying until each interface has accepted it.
+/// network stack once the stack has what it names.
 ///
 /// The plan is re-read through `source` at every reaction, exactly as the
 /// stack-wide policy is: the document on the writable root only becomes
-/// readable at the root mount, and an administrator may edit it
-/// at any time afterwards, so a plan read once and cached would leave the
-/// running stack on whichever configuration happened to be visible first.
-/// Until the store is readable this is a no-op that retries on the next
-/// bump. Any config-error rejects (a managed non-bond interface with no
-/// `match.mac`) are surfaced loud, once per distinct rejected set. Each
-/// not-yet-delivered interface's configuration is then pushed: an
-/// [`Errno::NotFound`] means the interface has not bound yet — the expected
-/// early state, retried silently — a success records the interface as
-/// delivered, and any other refusal is logged fail-soft and retried on the
-/// next reaction.
+/// readable at the root mount, and an administrator may edit it at any time
+/// afterwards. Until the store is readable this does nothing. Any config-error
+/// rejects (a managed non-bond interface with no `match.mac`/`match.node`) are
+/// surfaced loud, once per distinct rejected set.
+///
+/// A configuration is offered only once the stack holds what it names: an
+/// interface's once a NIC in `bound` is the one its selector names, a bond's
+/// once every member's configuration has landed, and a bond's own addressing
+/// once the bond is composed. So no interface the stack lacks is ever offered,
+/// and every refusal recorded is a real one.
 pub fn deliver_interface_configs(
     source: &mut dyn NetworkInterfaceConfigSource,
     state: &mut NetIfConfigState,
+    bound: &NetBindState,
     netstack: &mut dyn NetstackBind,
     sink: &dyn Sink,
 ) {
     // An unreadable store early in boot is the expected state, not an
     // anomaly, so it is not logged.
-    state.deferred = false;
     state.adopt(source.load());
-    if state.plan.is_none() {
+    let Some(plan) = state.plan.take() else {
         return;
-    }
-
-    // Surface any config-error rejects loud, once per distinct set.
+    };
     if !state.rejected_logged {
-        if let Some(plan) = &state.plan {
-            for name in &plan.rejected {
-                audit_iface(
-                    sink,
-                    events::NETWORK_IFCONFIG_REJECTED,
-                    Level::Warn,
-                    "network.conf interface has no match.mac/match.node identity; skipped",
-                    name,
-                );
-            }
+        for name in &plan.rejected {
+            audit_iface(
+                sink,
+                events::NETWORK_IFCONFIG_REJECTED,
+                Level::Warn,
+                "network.conf interface has no match.mac/match.node identity; skipped",
+                name,
+            );
         }
         state.rejected_logged = true;
     }
+    let nics = bound.nics().count();
+    if nics != state.nics_seen {
+        state.nics_seen = nics;
+        state.refused.clear();
+        state.refused_bonds.clear();
+    }
 
-    // Deliver the per-interface configs and the bond compositions, repeating
-    // while a pass records a new delivery. One pass is not enough because the
-    // three kinds form a dependency chain that resolves in order:
-    //   1. a member/plain interface's config binds once its driver is up;
-    //   2. a bond composes once its member aliases exist (step 1);
-    //   3. a **bond** interface's own addressing (a per-interface config
-    //      whose alias is the bond) applies only once the bond exists (step
-    //      2) — an earlier attempt returns `NotFound` and is not recorded.
-    // Re-running the per-interface pass after composing the bonds is what
-    // lets the bond's address land in the same bump the bond was composed,
-    // rather than waiting for an unrelated later bump that may never come.
-    // Bounded to one pass per pending item (progress each round guarantees
-    // termination well inside it): a hostile or misconfigured store can never
-    // spin this. Items still `NotFound` after the loop (an unbound driver)
-    // are left for the next reaction.
-    let max_passes = match &state.plan {
-        Some(plan) => plan.messages.len() + plan.bonds.len() + 1,
-        None => 0,
-    };
-    for _ in 0..max_passes {
-        let before = state.delivered.len() + state.delivered_bonds.len();
+    for msg in plan.messages.iter().filter(|msg| !msg.names_by_alias()) {
+        if state.offerable(msg)
+            && bound
+                .nics()
+                .any(|nic| msg.selects(&nic.mac, nic.node_location))
+        {
+            state.offer_interface(msg, netstack, sink);
+        }
+    }
+    for bond in &plan.bonds {
+        let members_landed = bond
+            .members()
+            .iter()
+            .all(|member| state.delivered.contains(member));
+        if members_landed
+            && !state.delivered_bonds.contains(&bond.alias)
+            && !state.refused_bonds.contains(&bond.alias)
+        {
+            state.offer_bond(bond, netstack, sink);
+        }
+    }
+    for msg in plan.messages.iter().filter(|msg| msg.names_by_alias()) {
+        if state.offerable(msg) && state.delivered_bonds.contains(&msg.alias) {
+            state.offer_interface(msg, netstack, sink);
+        }
+    }
+    state.plan = Some(plan);
+}
 
-        // `NetInterfaceConfigMsg` is `Copy`, so collect the pending set to end
-        // the immutable borrow of `state.plan` before recording deliveries.
-        let pending: Vec<NetInterfaceConfigMsg> = match &state.plan {
-            Some(plan) => plan
-                .messages
-                .iter()
-                .filter(|msg| !state.delivered.contains(&msg.alias))
-                .copied()
-                .collect(),
-            None => Vec::new(),
+impl NetIfConfigState {
+    /// Whether `msg` is neither delivered nor refused as it stands.
+    fn offerable(&self, msg: &NetInterfaceConfigMsg) -> bool {
+        !self.delivered.contains(&msg.alias) && !self.refused.contains(&msg.alias)
+    }
+
+    fn offer_interface(
+        &mut self,
+        msg: &NetInterfaceConfigMsg,
+        netstack: &mut dyn NetstackBind,
+        sink: &dyn Sink,
+    ) {
+        let (id, level, message) = if netstack.apply_interface_config(msg).is_ok() {
+            self.delivered.insert(msg.alias);
+            (
+                events::NETWORK_IFCONFIG_DELIVERED,
+                Level::Info,
+                "per-interface network configuration delivered",
+            )
+        } else {
+            self.refused.insert(msg.alias);
+            (
+                events::NETWORK_IFCONFIG_DELIVERY_FAILED,
+                Level::Warn,
+                "per-interface network configuration refused",
+            )
         };
-        for msg in &pending {
-            match netstack.apply_interface_config(msg) {
-                Ok(()) => {
-                    state.delivered.insert(msg.alias);
-                    audit_iface(
-                        sink,
-                        events::NETWORK_IFCONFIG_DELIVERED,
-                        Level::Info,
-                        "per-interface network configuration delivered",
-                        &msg.alias,
-                    );
-                }
-                // The interface has not bound yet (or its bond is not composed
-                // yet): the expected state, retried on a later pass or bump.
-                Err(Errno::NotFound) => {}
-                Err(_) => {
-                    state.deferred = true;
-                    audit_iface(
-                        sink,
-                        events::NETWORK_IFCONFIG_DELIVERY_FAILED,
-                        Level::Warn,
-                        "per-interface network configuration refused; will retry",
-                        &msg.alias,
-                    );
-                }
-            }
-        }
+        audit_iface(sink, id, level, message, &msg.alias);
+    }
 
-        // Deliver every not-yet-composed bond. A bond needs its members
-        // renamed first, so an early attempt returns `NotFound` — retried on
-        // a later pass or bump, exactly like an unbound interface.
-        let pending_bonds: Vec<NetBondConfigMsg> = match &state.plan {
-            Some(plan) => plan
-                .bonds
-                .iter()
-                .filter(|msg| !state.delivered_bonds.contains(&msg.alias))
-                .copied()
-                .collect(),
-            None => Vec::new(),
+    fn offer_bond(
+        &mut self,
+        bond: &NetBondConfigMsg,
+        netstack: &mut dyn NetstackBind,
+        sink: &dyn Sink,
+    ) {
+        let (id, level, message) = if netstack.apply_bond_config(bond).is_ok() {
+            self.delivered_bonds.insert(bond.alias);
+            (
+                events::NETWORK_IFCONFIG_DELIVERED,
+                Level::Info,
+                "bond interface composed",
+            )
+        } else {
+            self.refused_bonds.insert(bond.alias);
+            (
+                events::NETWORK_IFCONFIG_DELIVERY_FAILED,
+                Level::Warn,
+                "bond interface composition refused",
+            )
         };
-        for msg in &pending_bonds {
-            match netstack.apply_bond_config(msg) {
-                Ok(()) => {
-                    state.delivered_bonds.insert(msg.alias);
-                    audit_iface(
-                        sink,
-                        events::NETWORK_IFCONFIG_DELIVERED,
-                        Level::Info,
-                        "bond interface composed",
-                        &msg.alias,
-                    );
-                }
-                Err(Errno::NotFound) => {}
-                Err(_) => {
-                    state.deferred = true;
-                    audit_iface(
-                        sink,
-                        events::NETWORK_IFCONFIG_DELIVERY_FAILED,
-                        Level::Warn,
-                        "bond interface composition refused; will retry",
-                        &msg.alias,
-                    );
-                }
-            }
-        }
-
-        // A pass that recorded no new delivery has reached a fixed point:
-        // every remaining item is waiting on something outside this bump (an
-        // unbound driver), so stop rather than spin.
-        if state.delivered.len() + state.delivered_bonds.len() == before {
-            break;
-        }
+        audit_iface(sink, id, level, message, &bond.alias);
     }
 }
 
@@ -440,6 +413,7 @@ mod tests {
         ifconfigs: RefCell<Vec<NetInterfaceConfigMsg>>,
         ifconfig_results: RefCell<Vec<Result<(), Errno>>>,
         bonds: RefCell<Vec<NetBondConfigMsg>>,
+        macs: RefCell<Vec<[u8; 6]>>,
     }
 
     impl RecordingNetstack {
@@ -450,6 +424,7 @@ mod tests {
                 ifconfigs: RefCell::new(Vec::new()),
                 ifconfig_results: RefCell::new(Vec::new()),
                 bonds: RefCell::new(Vec::new()),
+                macs: RefCell::new(Vec::new()),
             }
         }
 
@@ -471,8 +446,8 @@ mod tests {
             _e: u64,
             _i: &[u8; IF_NAME_LEN],
             _node_location: u64,
-        ) -> Result<(), Errno> {
-            Ok(())
+        ) -> Result<[u8; 6], Errno> {
+            self.macs.borrow_mut().pop().ok_or(Errno::NotFound)
         }
 
         fn apply_settings(&mut self, settings: NetworkSettings) -> Result<(), Errno> {
@@ -651,6 +626,42 @@ mod tests {
         out
     }
 
+    /// NICs with these MACs and hardware locations, each bound as the
+    /// device manager binds a channel its driver publishes beneath its node.
+    fn bound(nics: &[([u8; 6], u64)]) -> NetBindState {
+        use tairix_abi::hwtree::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT};
+        let mut nodes = Vec::new();
+        for (at, &(_, location)) in (0u32..).zip(nics) {
+            let mut device = HwNode::new(2 * at + 1, HW_NODE_ROOT, HwDeviceClass::Network);
+            device
+                .push_resource(HwResource::mmio(location, 0x1000))
+                .expect("room");
+            let mut channel = HwNode::new(2 * at + 2, device.id(), HwDeviceClass::Network);
+            channel
+                .push_match_key(
+                    HwMatchKey::compatible(
+                        tairix_abi::driver::net_channel::NETCHAN_NODE_COMPATIBLE,
+                    )
+                    .expect("key"),
+                )
+                .expect("room");
+            channel
+                .push_resource(HwResource::endpoint(0x100 + u64::from(at)))
+                .expect("room");
+            nodes.push(device);
+            nodes.push(channel);
+        }
+        let mut stack = RecordingNetstack::new(Vec::new());
+        *stack.macs.borrow_mut() = nics.iter().rev().map(|&(mac, _)| mac).collect();
+        let mut state = NetBindState::new();
+        crate::netbind::bind_new_channels(&nodes, &mut state, &mut stack, &RecordingSink::new());
+        assert_eq!(state.nics().count(), nics.len(), "every NIC binds");
+        state
+    }
+
+    const WAN_MAC: [u8; 6] = [1, 2, 3, 4, 5, 6];
+    const LAN_MAC: [u8; 6] = [1, 2, 3, 4, 5, 7];
+
     fn a_config(alias: &str, mac: [u8; 6]) -> NetInterfaceConfigMsg {
         NetInterfaceConfigMsg {
             alias: iface_name(alias),
@@ -669,46 +680,112 @@ mod tests {
         let mut state = NetIfConfigState::new();
         let mut netstack = RecordingNetstack::new(Vec::new());
         let sink = RecordingSink::new();
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+        let nics = bound(&[(WAN_MAC, 0)]);
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
         assert!(netstack.ifconfigs.borrow().is_empty(), "nothing pushed");
         assert!(sink.ids().is_empty(), "the early state is quiet");
     }
 
+    /// A configuration is offered once its NIC binds, however many tree
+    /// changes come first, and is accepted at once.
     #[test]
-    fn an_interface_config_is_delivered_when_the_interface_binds() {
+    fn a_configuration_whose_nic_binds_late_is_offered_once_and_accepted() {
         let plan = InterfaceConfigPlan {
-            messages: alloc::vec![a_config("wan", [1, 2, 3, 4, 5, 6])],
+            messages: alloc::vec![a_config("wan", WAN_MAC)],
             bonds: Vec::new(),
             rejected: Vec::new(),
         };
-        // The source answers once and then reports the store unreadable, so
-        // the plan already held stands; the stack answers NotFound (not
-        // bound yet) then Ok (bound).
         let mut source = ScriptedIfSource::new(alloc::vec![Some(plan)]);
         let mut state = NetIfConfigState::new();
-        let mut netstack =
-            RecordingNetstack::with_ifconfig_results(alloc::vec![Err(Errno::NotFound), Ok(())]);
+        let mut netstack = RecordingNetstack::new(Vec::new());
         let sink = RecordingSink::new();
+        let unbound = NetBindState::new();
+        for _ in 0..3 {
+            deliver_interface_configs(&mut source, &mut state, &unbound, &mut netstack, &sink);
+        }
+        assert!(
+            netstack.ifconfigs.borrow().is_empty(),
+            "nothing to offer to"
+        );
+        assert!(sink.ids().is_empty());
 
-        // First bump: interface not bound yet — retried silently.
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
-        assert_eq!(netstack.ifconfigs.borrow().len(), 1);
-        assert!(sink.ids().is_empty(), "a not-yet-bound iface is quiet");
-
-        // Second bump: the interface bound; the config is delivered.
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
-        assert_eq!(netstack.ifconfigs.borrow().len(), 2);
+        let nics = bound(&[(WAN_MAC, 0)]);
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
+        assert_eq!(netstack.ifconfigs.borrow().len(), 1, "offered once");
         assert_eq!(
             sink.ids().as_slice(),
             &[events::NETWORK_IFCONFIG_DELIVERED.0]
         );
+    }
 
-        // Third bump: already delivered — nothing pushed.
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+    /// The Pi 4 image configures a QEMU NIC by MAC beside the Pi's own by
+    /// node: the one never present is never offered, so nothing is refused.
+    #[test]
+    fn a_configuration_whose_nic_never_binds_is_never_offered() {
+        let mut wan = a_config("wan", WAN_MAC);
+        wan.match_mac = None;
+        wan.match_node = Some(0xfd58_0000);
+        let plan = InterfaceConfigPlan {
+            messages: alloc::vec![wan, a_config("vwan", LAN_MAC)],
+            bonds: Vec::new(),
+            rejected: Vec::new(),
+        };
+        let mut source = ScriptedIfSource::new(alloc::vec![Some(plan)]);
+        let mut state = NetIfConfigState::new();
+        let mut netstack = RecordingNetstack::new(Vec::new());
+        let sink = RecordingSink::new();
+        let nics = bound(&[(WAN_MAC, 0xfd58_0000)]);
+        for _ in 0..4 {
+            deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
+        }
+        assert_eq!(
+            *netstack.ifconfigs.borrow(),
+            alloc::vec![wan],
+            "by its node"
+        );
+        assert_eq!(
+            sink.ids().as_slice(),
+            &[events::NETWORK_IFCONFIG_DELIVERED.0]
+        );
+    }
+
+    /// A refusal is the stack's answer: it is recorded once and offered again
+    /// only when something changes, never on a timer.
+    #[test]
+    fn a_refused_configuration_waits_for_its_entry_or_another_nic() {
+        let plan = InterfaceConfigPlan {
+            messages: alloc::vec![a_config("wan", WAN_MAC)],
+            bonds: Vec::new(),
+            rejected: Vec::new(),
+        };
+        let mut source = ScriptedIfSource::new(alloc::vec![Some(plan)]);
+        let mut state = NetIfConfigState::new();
+        let mut netstack = RecordingNetstack::with_ifconfig_results(alloc::vec![
+            Err(Errno::AlreadyExists),
+            Ok(())
+        ]);
+        let sink = RecordingSink::new();
+        let one = bound(&[(WAN_MAC, 0)]);
+        for _ in 0..3 {
+            deliver_interface_configs(&mut source, &mut state, &one, &mut netstack, &sink);
+        }
         assert_eq!(
             netstack.ifconfigs.borrow().len(),
-            2,
-            "a delivered interface is not re-pushed"
+            1,
+            "refused once, not retried"
+        );
+        assert_eq!(
+            sink.ids().as_slice(),
+            &[events::NETWORK_IFCONFIG_DELIVERY_FAILED.0]
+        );
+
+        let two = bound(&[(WAN_MAC, 0), (LAN_MAC, 0)]);
+        deliver_interface_configs(&mut source, &mut state, &two, &mut netstack, &sink);
+        assert_eq!(netstack.ifconfigs.borrow().len(), 2, "another NIC bound");
+        assert_eq!(
+            sink.ids().last(),
+            Some(&events::NETWORK_IFCONFIG_DELIVERED.0)
         );
     }
 
@@ -723,8 +800,9 @@ mod tests {
         let mut state = NetIfConfigState::new();
         let mut netstack = RecordingNetstack::new(Vec::new());
         let sink = RecordingSink::new();
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+        let nics = NetBindState::new();
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
         assert_eq!(
             sink.ids().as_slice(),
             &[events::NETWORK_IFCONFIG_REJECTED.0],
@@ -735,8 +813,8 @@ mod tests {
 
     #[test]
     fn an_edited_document_is_re_delivered_and_an_untouched_interface_is_not() {
-        let wan = a_config("wan", [1, 2, 3, 4, 5, 6]);
-        let lan = a_config("lan", [1, 2, 3, 4, 5, 7]);
+        let wan = a_config("wan", WAN_MAC);
+        let lan = a_config("lan", LAN_MAC);
         let mut edited = wan;
         edited.mtu = 9000;
         // Read in reverse: the source pops from the back.
@@ -755,14 +833,15 @@ mod tests {
         let mut state = NetIfConfigState::new();
         let mut netstack = RecordingNetstack::new(Vec::new());
         let sink = RecordingSink::new();
+        let nics = bound(&[(WAN_MAC, 0), (LAN_MAC, 0)]);
 
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
         assert_eq!(netstack.ifconfigs.borrow().len(), 2, "both delivered");
 
         // The administrator edits `wan`'s MTU while the machine runs. The
         // plan is re-read, so the change reaches the stack — and `lan`, which
         // the edit did not touch, is not pushed a second time.
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
         let pushed = netstack.ifconfigs.borrow().clone();
         assert_eq!(pushed.len(), 3, "only the edited interface is re-pushed");
         assert_eq!(pushed[2], edited);
@@ -780,11 +859,12 @@ mod tests {
         let mut state = NetIfConfigState::new();
         let mut netstack = RecordingNetstack::new(Vec::new());
         let sink = RecordingSink::new();
+        let nics = NetBindState::new();
 
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
         assert!(sink.ids().is_empty(), "nothing to reject yet");
 
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+        deliver_interface_configs(&mut source, &mut state, &nics, &mut netstack, &sink);
         assert_eq!(
             sink.ids().as_slice(),
             &[events::NETWORK_IFCONFIG_REJECTED.0],
@@ -804,10 +884,10 @@ eth1.match.mac 02:00:00:00:00:03
         let plan = InterfaceConfigPlan::of(&config);
         let mut source = ScriptedIfSource::new(alloc::vec![Some(plan)]);
         let mut state = NetIfConfigState::new();
-        // Members bind (Ok), then the bond composes (Ok).
         let mut netstack = RecordingNetstack::new(Vec::new());
         let sink = RecordingSink::new();
-        deliver_interface_configs(&mut source, &mut state, &mut netstack, &sink);
+        let members = bound(&[([2, 0, 0, 0, 0, 2], 0), ([2, 0, 0, 0, 0, 3], 0)]);
+        deliver_interface_configs(&mut source, &mut state, &members, &mut netstack, &sink);
         // The bond's own addressing and both member renames were delivered.
         assert_eq!(
             netstack.ifconfigs.borrow().len(),

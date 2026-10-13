@@ -18,10 +18,11 @@ mod program {
     use tairix_abi::hwlink::{LinkRequest, LinkRole};
     use tairix_abi::{DriverError, MmioMapper, HW_NODE_MAX_RESOURCES};
     use tairix_audiochan::cyclic::LinkDma;
-    use tairix_audiochan::{exit, fail, serve};
+    use tairix_audiochan::serve;
     use tairix_drv_audio_bcm2711_i2s::interface::Interface;
     use tairix_drv_audio_bcm2711_i2s::pcm::{self, Pcm};
     use tairix_drv_audio_bcm2711_i2s::REQUIRED_CAPABILITIES;
+    use tairix_drvrt::exit::{end, error, step, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_linkclient::{ClockClient, CodecClient, DmaClient, RtLinkCall};
 
@@ -31,10 +32,9 @@ mod program {
     fn main() -> i32 {
         let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return fail(
-                exit::NO_HOST,
-                "i2s: the node's grants could not be read",
-                None,
+            return end(
+                DriverExit::NoHost,
+                &[step("i2s: the node's grants could not be read")],
             );
         };
         let mut granted = [None; HW_NODE_MAX_RESOURCES];
@@ -62,41 +62,36 @@ mod program {
             dreq,
             codec_link,
         ) else {
-            return fail(
-                exit::NO_RESOURCES,
-                "i2s: the node names no single register window, transmit request line and codec",
-                None,
-            );
+            return end(DriverExit::NoResources, &[step("i2s: the node names no single register window, transmit request line and codec")]);
         };
         let Ok(regs) = host.map_window(base, len) else {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "i2s: the register window would not map",
-                None,
+            return end(
+                DriverExit::BringupFailed,
+                &[step("i2s: the register window would not map")],
             );
         };
         let Ok(block) = Pcm::new(&regs) else {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "i2s: the register window is too short",
-                None,
+            return end(
+                DriverExit::BringupFailed,
+                &[step("i2s: the register window is too short")],
             );
         };
         let Ok(codec) = CodecClient::new(RtLinkCall::new(codec_link.endpoint()), codec_link) else {
-            return fail(
-                exit::NO_RESOURCES,
-                "i2s: the codec link states no interface link",
-                None,
+            return end(
+                DriverExit::NoResources,
+                &[step("i2s: the codec link states no interface link")],
             );
         };
         let clock = clock_link.map(|link| ClockClient::new(RtLinkCall::new(link.endpoint()), link));
         let client = match DmaClient::open(RtLinkCall::new(dreq.endpoint()), dreq) {
             Ok(client) => client,
             Err(err) => {
-                return fail(
-                    exit::BRINGUP_FAILED,
-                    "i2s: no DMA channel opened on the transmit request line",
-                    Some(DriverError::from_errno(err)),
+                return end(
+                    DriverExit::BringupFailed,
+                    &[
+                        step("i2s: no DMA channel opened on the transmit request line"),
+                        error(DriverError::from_errno(err)),
+                    ],
                 );
             }
         };
@@ -104,10 +99,12 @@ mod program {
         let interface = match Interface::new(block, channel, clock, codec) {
             Ok(interface) => interface,
             Err(err) => {
-                return fail(
-                    exit::BRINGUP_FAILED,
-                    "i2s: the codec, its link and the bit clock admit no stream",
-                    Some(err),
+                return end(
+                    DriverExit::BringupFailed,
+                    &[
+                        step("i2s: the codec, its link and the bit clock admit no stream"),
+                        error(err),
+                    ],
                 );
             }
         };

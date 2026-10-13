@@ -200,15 +200,42 @@ fn a_device_gone_mid_bring_up_is_gone_and_one_describing_no_interface_is_refused
 }
 
 #[test]
-fn an_interface_carrying_nothing_the_seat_serves_is_refused() {
+fn an_interface_carrying_nothing_the_seat_serves_is_declined_with_no_error_recorded() {
+    struct Levels(core::cell::RefCell<Vec<(tairix_log::EventId, tairix_log::Level)>>);
+    impl tairix_log::Sink for Levels {
+        fn write_event(&self, event: &tairix_log::Event<'_>) {
+            self.0.borrow_mut().push((event.id, event.level));
+        }
+    }
     let vendor = [
         0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95,
         0x08, 0x09, 0x01, 0x81, 0x02, 0xC0,
     ];
     let config = configuration(&[&interface(0, [3, 0, 0]), &hid(21), &interrupt_in(1)]);
     let mut device = Device::new(config, &vendor);
+    let error = bring_up(&mut device, 0).map(|_| ()).unwrap_err();
+    assert_eq!(error, BringupError::NothingServed);
+
+    let sink = Levels(core::cell::RefCell::new(Vec::new()));
+    let status = tairix_drvrt::exit::end_with(&sink, Some(2), error.exit(), &[]);
+    assert_eq!(status, 0);
     assert_eq!(
-        bring_up(&mut device, 0).map(|_| ()),
-        Err(BringupError::NothingServed)
+        sink.0.into_inner(),
+        [(tairix_drvrt::exit::DRIVER_DECLINED, tairix_log::Level::Info)]
     );
+}
+
+#[test]
+fn only_an_interface_that_went_or_serves_nothing_ends_without_a_failure() {
+    use tairix_drvrt::exit::DriverExit;
+    assert_eq!(BringupError::Gone.exit(), DriverExit::Removed);
+    assert_eq!(BringupError::NothingServed.exit(), DriverExit::Declined);
+    for error in [
+        BringupError::Transfer(Errno::EndpointStalled),
+        BringupError::Interface(InterfaceError::NotFound),
+        BringupError::Descriptor(DescriptorError::Truncated),
+        BringupError::OutOfMemory,
+    ] {
+        assert_eq!(error.exit(), DriverExit::BringupFailed, "{error:?}");
+    }
 }

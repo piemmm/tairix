@@ -163,7 +163,14 @@ impl Translation {
                 .map_err(|_| refuse(&held, false, "untriggerable"))?;
         }
         // A dispatched task always parks, so the waiter needs no CPU halt.
-        let waiter = IrqParkWaiter::new(env.table, bound.handle, FAULT_OWNER, env.controller, None);
+        let waiter = IrqParkWaiter::new(
+            env.table,
+            bound.handle,
+            FAULT_OWNER,
+            env.controller,
+            None,
+            env.audit,
+        );
         // A refused route may have reached the unit in part.
         unit.route_faults(route)
             .map_err(|_| refuse(&held, true, "refused"))?;

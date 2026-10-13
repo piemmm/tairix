@@ -15,7 +15,7 @@ use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, HwMatchKey, ProcId, PROC_ID_LEN,
 };
 use tairix_clock::testkit::Rig;
-use tairix_clock::{ClockHardware, Policy};
+use tairix_clock::{ClockHardware, Policy, Record};
 use tairix_vcmailbox::mock::MockFirmware;
 use tairix_vcmailbox::{FirmwareClock, MailboxTransport};
 
@@ -335,9 +335,46 @@ fn the_hdmi_state_machine_clock_runs_at_the_highest_floor_and_rests_at_its_least
     rig.end(HDMI1);
     assert_eq!(
         channel.firmware().m2mc.hz,
-        25_000_000,
-        "a clock the firmware had not started rests at the least it accepts"
+        120_000_000,
+        "a clock the firmware had not started rests at the least its blocks need"
     );
+}
+
+/// The Pi 4's firmware reports the state-machine clock unset with a least of
+/// zero: its return is never a request for zero, which the property interface
+/// answers as no such clock.
+#[test]
+fn the_state_machine_clock_never_falls_below_what_its_blocks_need() {
+    let mut firmware = MockFirmware::healthy();
+    firmware.m2mc = tairix_vcmailbox::mock::MockClock::new(0, 0, 600_000_000, 1_000_000);
+    let channel = MockChannel::new(firmware);
+    let mut rig = rig(&channel);
+    let m2mc = link(FirmwareClock::M2mc, 0);
+    assert_eq!(rig.floor(HDMI0, m2mc, 25_000_000), Ok(120_000_000));
+    assert_eq!(rig.release(HDMI0, m2mc), Ok(()));
+    assert_eq!(channel.firmware().m2mc.hz, 120_000_000);
+    assert!(rig
+        .records()
+        .iter()
+        .all(|record| !matches!(record, Record::Stuck { .. } | Record::Unreturned { .. })));
+}
+
+/// A clock whose least is zero and which the firmware had not started has no
+/// rate to return to: it is left where its last holder had it.
+#[test]
+fn a_clock_with_no_rate_to_return_to_is_left_running() {
+    let mut firmware = MockFirmware::healthy();
+    firmware.pixel_bvb = tairix_vcmailbox::mock::MockClock::new(0, 0, 300_000_000, 1_000_000);
+    let channel = MockChannel::new(firmware);
+    let mut rig = rig(&channel);
+    let bvb = link(FirmwareClock::PixelBvb, 1);
+    assert_eq!(rig.floor(HDMI0, bvb, 75_000_000), Ok(75_000_000));
+    assert_eq!(rig.release(HDMI0, bvb), Ok(()));
+    assert_eq!(channel.firmware().pixel_bvb.hz, 75_000_000);
+    assert!(rig
+        .records()
+        .iter()
+        .all(|record| !matches!(record, Record::Stuck { .. } | Record::Unreturned { .. })));
 }
 
 /// The display engine bounds the modes its pipe carries by how fast the core

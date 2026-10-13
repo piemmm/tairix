@@ -118,12 +118,12 @@ fourth detector would report one event three ways.
 
 ## What a report contains
 
-One `TaskLatencyOverrun` record (id `4150`) per span, emitted through the
+One `TaskLatencyOverrun` record (id `4266`) per span, emitted through the
 **diagnostic** sink — the log/UART stream, never the hash-chained audit
 trail, so no code address lands on the tamper-evident log:
 
 ```
-[42.117] [WARN] id=4150 interactive surface overran its frame budget task=7
+[42.117] [WARN] id=4266 interactive surface overran its frame budget task=7
   name=desktop budget_ms=250 elapsed_ms=312 blocked_ms=304 calls=41
   sampled=blocking blocked_in=ipc_call blocked_in_ms=297
   top_calls=ipc_call=22,stream_read=11

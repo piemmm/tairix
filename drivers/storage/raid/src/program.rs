@@ -67,118 +67,100 @@ use tairix_drv_storage_raid::{
     LiveArrays, MaintenanceStep, MemberDevice, MemberRegistry, MemberWindow, OfferRefusal,
     ProbedDevice, ServiceError,
 };
+use tairix_drvrt::exit::{end, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_raid::{ArraySuperblock, MaintenanceAction, SuperblockError};
 use tairix_rt::LogSink;
 use tairix_util::fmt::format_hex_u64;
 
-/// Exit code when the rt-backed driver host could not be built from the
-/// kernel-delivered grants. A reserved, fail-closed value.
-const EXIT_NO_HOST: i32 = 90;
-
-/// Exit code when the composer could not bind its reserved rendezvous — no
-/// member could ever offer, so there is nothing to do but exit for
-/// supervision.
-const EXIT_NO_REGISTRY: i32 = 91;
-
-/// Exit code when the composer could not mint the two wait-sets it parks on,
-/// or register what they watch — without them every wait would have to become
-/// a poll.
-const EXIT_NO_WAITSET: i32 = 92;
-
-/// Exit code when the composer could not bind its reserved control endpoint.
-/// An array nobody can create, grow, or stop is not the service this driver
-/// promises, so it exits for supervision rather than serving half of it.
-const EXIT_NO_CONTROL: i32 = 93;
-
 /// Diagnostic event id: the composer bound its rendezvous and is ready for
 /// offers.
-const RAID_COMPOSER_READY: EventId = EventId(4191);
+const RAID_COMPOSER_READY: EventId = EventId(28_200);
 
 /// Diagnostic event id: a member's device was read and admitted into the
 /// registry, its membership held open.
-const RAID_MEMBER_ADMITTED: EventId = EventId(4192);
+const RAID_MEMBER_ADMITTED: EventId = EventId(28_201);
 
 /// Diagnostic event id: an offered device was refused (a malformed offer, an
 /// unmappable window, an unreadable device, a duplicate, or a full registry).
-const RAID_MEMBER_REFUSED: EventId = EventId(4193);
+const RAID_MEMBER_REFUSED: EventId = EventId(28_202);
 
 /// Diagnostic event id: an array was assembled and published as a block
 /// device; `devmgr` now loads the volume manager on it.
-const RAID_ARRAY_PUBLISHED: EventId = EventId(4194);
+const RAID_ARRAY_PUBLISHED: EventId = EventId(28_203);
 
 /// Diagnostic event id: an array could not be brought online this attempt (a
 /// member unreachable, a re-stamp write refused, or its resources could not be
 /// created); the registry backs off before retrying.
-const RAID_ARRAY_FAILED: EventId = EventId(4195);
+const RAID_ARRAY_FAILED: EventId = EventId(28_204);
 
 /// Diagnostic event id: an array started short of full redundancy — a slot was
 /// absent, or held a copy its own metadata proved is behind. A slot the
 /// composer could not see is additionally fenced: the array's generation is
 /// bumped and the survivors re-stamped, so that disk rejoins as the rebuild
 /// target it is rather than as a copy trusted to be current.
-const RAID_ARRAY_DEGRADED: EventId = EventId(4196);
+const RAID_ARRAY_DEGRADED: EventId = EventId(28_205);
 
 /// Diagnostic event id: a returning or late member was placed into its live
 /// array to be rebuilt from the survivors.
-const RAID_MEMBER_JOINED: EventId = EventId(4197);
+const RAID_MEMBER_JOINED: EventId = EventId(28_206);
 
 /// Diagnostic event id: an array resumed a verification pass or a rebuild its
 /// members' records had recorded, rather than starting the pass over.
-const RAID_ARRAY_RESUMED: EventId = EventId(4198);
+const RAID_ARRAY_RESUMED: EventId = EventId(28_207);
 
 /// Diagnostic event id: a maintenance turn failed — a re-add refused, a
 /// rebuild or verification chunk that the members would not serve, or a
 /// position the members would not record. The scheduler backs off before
 /// trying again.
-const RAID_MAINTENANCE_FAILED: EventId = EventId(4199);
+const RAID_MAINTENANCE_FAILED: EventId = EventId(28_208);
 
 /// Diagnostic event id: a verification pass completed over the whole array,
 /// closing the window in which a latent media error could have sat undetected.
-const RAID_SCRUB_COMPLETED: EventId = EventId(4200);
+const RAID_SCRUB_COMPLETED: EventId = EventId(28_209);
 
 /// Diagnostic event id: an array lost redundancy but keeps serving.
-const RAID_HEALTH_DEGRADED: EventId = EventId(4201);
+const RAID_HEALTH_DEGRADED: EventId = EventId(28_210);
 
 /// Diagnostic event id: an array is rebuilding a member back into itself.
-const RAID_HEALTH_RECOVERING: EventId = EventId(4202);
+const RAID_HEALTH_RECOVERING: EventId = EventId(28_211);
 
 /// Diagnostic event id: an array is whole again — every member current.
-const RAID_HEALTH_RECOVERED: EventId = EventId(4203);
+const RAID_HEALTH_RECOVERED: EventId = EventId(28_212);
 
 /// Diagnostic event id: an array can no longer serve; too many members are
 /// gone for its level to reconstruct what they held. Its consumers now get
 /// typed fail-closed answers rather than data the array cannot vouch for.
-const RAID_ARRAY_LOST: EventId = EventId(4204);
+const RAID_ARRAY_LOST: EventId = EventId(28_213);
 
 /// Audit event id: an administrative request that changes the composition was
 /// allowed and carried out.
-const RAID_CONTROL_ALLOWED: EventId = EventId(4205);
+const RAID_CONTROL_ALLOWED: EventId = EventId(28_214);
 
 /// Audit event id: an administrative request that changes the composition was
 /// refused — the caller lacked the capability, the frame did not decode, or the
 /// operation's own preconditions were not met.
-const RAID_CONTROL_REFUSED: EventId = EventId(4206);
+const RAID_CONTROL_REFUSED: EventId = EventId(28_215);
 
 /// Audit event id: a control request could not be attributed to a caller, so it
 /// was refused unserved. The kernel attests every caller, so this is a
 /// torn-down call or a ticket already answered — never a caller's choice.
-const RAID_CONTROL_UNATTESTED: EventId = EventId(4207);
+const RAID_CONTROL_UNATTESTED: EventId = EventId(28_216);
 
 /// Diagnostic event id: an offered device carries no array metadata and is held
 /// as an unaffiliated candidate — part of no array, and available only to an
 /// explicit administrative create or add.
-const RAID_CANDIDATE_HELD: EventId = EventId(4208);
+const RAID_CANDIDATE_HELD: EventId = EventId(28_217);
 
 /// Diagnostic event id: the agent holding a membership open exited, so the
 /// membership is over and its device leaves any array it was composed into.
-const RAID_AGENT_EXITED: EventId = EventId(4215);
+const RAID_AGENT_EXITED: EventId = EventId(28_224);
 
 /// Diagnostic event id: a membership that has ended stays held because its
 /// device is still composed into an array that cannot give it up (a stripe);
 /// it is released once that array lets the device go.
-const RAID_MEMBERSHIP_STILL_COMPOSED: EventId = EventId(4216);
+const RAID_MEMBERSHIP_STILL_COMPOSED: EventId = EventId(28_225);
 
 /// Outstanding-membership capacity of the reserved rendezvous. Each admitted
 /// member holds its offer call open for the life of its membership, so this
@@ -1549,7 +1531,7 @@ fn main() -> i32 {
         .copied()
         .collect();
     let Ok(_host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-        return EXIT_NO_HOST;
+        return end(DriverExit::NoHost, &[]);
     };
     if !create_registry_endpoint() {
         log_hex_event(
@@ -1559,7 +1541,7 @@ fn main() -> i32 {
             "endpoint_hex",
             RAID_REGISTRY_ENDPOINT,
         );
-        return EXIT_NO_REGISTRY;
+        return end(DriverExit::NoService, &[]);
     }
     if !create_control_endpoint() {
         log_hex_event(
@@ -1569,16 +1551,16 @@ fn main() -> i32 {
             "endpoint_hex",
             RAID_CONTROL_ENDPOINT,
         );
-        return EXIT_NO_CONTROL;
+        return end(DriverExit::NoService, &[]);
     }
     let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
-        return EXIT_NO_WAITSET;
+        return end(DriverExit::NoService, &[]);
     };
     // A second set, for the members this process drives as a *client*. Minted
     // once here so opening a member transport — which happens on every
     // assembly attempt — never mints a kernel object of its own.
     let Ok(member_set) = u64::try_from(tairix_rt::waitset_create()) else {
-        return EXIT_NO_WAITSET;
+        return end(DriverExit::NoService, &[]);
     };
     // Both served endpoints ride the one set, so a single park covers a member
     // offering itself and an administrator driving the composition; neither
@@ -1592,13 +1574,13 @@ fn main() -> i32 {
             endpoint,
         ) < 0
         {
-            return EXIT_NO_WAITSET;
+            return end(DriverExit::NoService, &[]);
         }
     }
     // Each membership's agent is watched, and this one feed wakes the park when
     // any of them exits, so a membership never outlives its agent.
     if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::PeerExit, 0, 0) < 0 {
-        return EXIT_NO_WAITSET;
+        return end(DriverExit::NoService, &[]);
     }
     log_hex_event(
         RAID_COMPOSER_READY,

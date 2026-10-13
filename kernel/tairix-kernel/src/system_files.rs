@@ -166,6 +166,13 @@ where
             .read_image(&mut **fs, self.store_root, path, buf)
             .map_err(DriverImageError::to_errno)
     }
+
+    fn read_prefix(&self, path: &str, len: usize, buf: &mut Vec<u8>) -> Result<(), Errno> {
+        let mut fs = self.fs.borrow_mut();
+        self.reader
+            .read_image_prefix(&mut **fs, self.store_root, path, len, buf)
+            .map_err(DriverImageError::to_errno)
+    }
 }
 
 #[cfg(test)]

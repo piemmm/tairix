@@ -1,75 +1,54 @@
 //! A link supplier's bring-up from its node's grants, the loop it serves its
-//! node's endpoint from, and the log record helpers its decisions are written
-//! with.
+//! node's endpoint from, the board clock's endpoint, and the log record
+//! helpers their decisions are written with.
 
+use tairix_abi::driver::rtc::Rtc;
 use tairix_abi::driver::{named_register_window, sole_register_window, DeviceWake};
 use tairix_abi::hwlink::{LinkDuty, LinkRole};
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
+use tairix_abi::rtc_ipc::{self, RTC_ENDPOINT};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Delay, Errno, MmioMapper, ProcId, RegisterWindow, PROC_ID_HEX_LEN};
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
 
+use crate::exit::{end, step, DriverExit};
 use crate::supplier::{timer, Timer};
 use crate::{RtDriverHost, RtGrantSyscalls, Supplier};
 
-/// Exit codes a link supplier's driver ends with.
-pub mod exit {
-    /// The node's grants could not be read.
-    pub const NO_HOST: i32 = 90;
-    /// The node lacks a resource its driver needs.
-    pub const NO_RESOURCES: i32 = 91;
-    /// The driver's own bring-up failed.
-    pub const BRINGUP_FAILED: i32 = 92;
-    /// The service ended.
-    pub const SERVE_FAILED: i32 = 95;
-}
-
-/// Record under `id` why the driver is ending, and answer `code`, the code it
-/// ends with.
-#[must_use]
-pub fn fail(id: EventId, code: i32, reason: &'static str) -> i32 {
-    log_event(Level::Error, id, reason, &[]);
-    code
-}
-
-/// A link supplier's node as its driver received it: the grants, the duty it
-/// serves, and the event its driver's failures are recorded under.
+/// A link supplier's node as its driver received it: the grants and the duty
+/// it serves.
 pub struct DutyNode {
     host: RtDriverHost<RtGrantSyscalls>,
     duty: LinkDuty,
-    failed: EventId,
 }
 
 impl DutyNode {
     /// The node the driver running with `caps` was loaded for, carrying a
-    /// duty of `role`; every failure is recorded under `failed`.
+    /// duty of `role`.
     ///
     /// # Errors
     ///
-    /// The exit code to end with, its reason recorded: grants that cannot be
-    /// read, or no duty of `role`.
-    pub fn open(caps: CapabilitySet, role: LinkRole, failed: EventId) -> Result<Self, i32> {
+    /// The exit status to end with, its reason recorded: grants that cannot
+    /// be read, or no duty of `role`.
+    pub fn open(caps: CapabilitySet, role: LinkRole) -> Result<Self, i32> {
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return Err(fail(
-                failed,
-                exit::NO_HOST,
-                "the node's grants could not be read",
-            ));
+            return Err(end(DriverExit::NoHost, &[]));
         };
         let duty = host
             .resources()
             .find_map(|resource| resource.link_duty().ok().filter(|duty| duty.role() == role));
         let Some(duty) = duty else {
-            return Err(fail(
-                failed,
-                exit::NO_RESOURCES,
-                "the node carries no duty of the role its driver serves",
+            return Err(end(
+                DriverExit::NoResources,
+                &[step(
+                    "the node carries no duty of the role its driver serves",
+                )],
             ));
         };
-        Ok(Self { host, duty, failed })
+        Ok(Self { host, duty })
     }
 
     /// The host the node's grants were read into.
@@ -101,9 +80,9 @@ impl DutyNode {
     /// The exit code to end with when the node names no single window.
     pub fn window(&self) -> Result<(u64, usize), i32> {
         sole_register_window(self.resources()).map_err(|_| {
-            self.fail(
-                exit::NO_RESOURCES,
-                "the node names no single register window",
+            end(
+                DriverExit::NoResources,
+                &[step("the node names no single register window")],
             )
         })
     }
@@ -116,9 +95,12 @@ impl DutyNode {
     /// will not map.
     pub fn map(&self) -> Result<RegisterWindow, i32> {
         let (base, len) = self.window()?;
-        self.host
-            .map_window(base, len)
-            .map_err(|_| self.fail(exit::BRINGUP_FAILED, "the register window would not map"))
+        self.host.map_window(base, len).map_err(|_| {
+            end(
+                DriverExit::BringupFailed,
+                &[step("the register window would not map")],
+            )
+        })
     }
 
     /// Map the node's register window named `name` in its `reg-names`.
@@ -129,20 +111,19 @@ impl DutyNode {
     /// or it will not map.
     pub fn map_named(&self, name: &[u8]) -> Result<RegisterWindow, i32> {
         let (base, len) = named_register_window(self.resources(), name).map_err(|_| {
-            self.fail(
-                exit::NO_RESOURCES,
-                "the node names no single register window of a name its driver needs",
+            end(
+                DriverExit::NoResources,
+                &[step(
+                    "the node names no single register window of a name its driver needs",
+                )],
             )
         })?;
-        self.host
-            .map_window(base, len)
-            .map_err(|_| self.fail(exit::BRINGUP_FAILED, "a register window would not map"))
-    }
-
-    /// Record why the driver is ending, and answer `code`.
-    #[must_use]
-    pub fn fail(&self, code: i32, reason: &'static str) -> i32 {
-        fail(self.failed, code, reason)
+        self.host.map_window(base, len).map_err(|_| {
+            end(
+                DriverExit::BringupFailed,
+                &[step("a register window would not map")],
+            )
+        })
     }
 }
 
@@ -177,6 +158,21 @@ impl Ended {
             Self::EndpointLost => "the endpoint was lost",
             Self::EventFaulted => "an event source could not be serviced",
         }
+    }
+
+    /// The ending the driver exits with.
+    #[must_use]
+    pub const fn exit(self) -> DriverExit {
+        match self {
+            Self::Unbound | Self::NoWaitSet => DriverExit::NoService,
+            Self::WaitFaulted | Self::EndpointLost | Self::EventFaulted => DriverExit::ServeFailed,
+        }
+    }
+
+    /// End the driver for this, its reason recorded.
+    #[must_use]
+    pub fn end(self) -> i32 {
+        end(self.exit(), &[step(self.reason())])
     }
 }
 
@@ -290,6 +286,56 @@ impl<'b> Service<'b> {
                 }
             }
         }
+    }
+}
+
+/// Calls the board clock's endpoint queues: its one client asks a handful of
+/// times a day, each answered before the next is received.
+const RTC_ENDPOINT_CAPACITY: usize = 4;
+
+/// Serve the board's clock chip `chip` on the RTC endpoint for the life of
+/// the driver, answering the status the driver ends with.
+///
+/// Only the holder of `CAP_TIME_SET` may call: the one principal that sets the
+/// machine clock from a chip. A machine has one such endpoint, so the driver
+/// of a second chip finds it bound and declines its node.
+pub fn rtc<R: Rtc + ?Sized>(chip: &mut R) -> i32 {
+    let mut send_caps = CapabilitySet::empty();
+    send_caps.insert(CapabilityId::TIME_SET);
+    let bound = tairix_rt::call_create(
+        RTC_ENDPOINT,
+        &send_caps,
+        &CapabilitySet::empty(),
+        rtc_ipc::REQUEST_LEN,
+        rtc_ipc::REPLY_LEN,
+        RTC_ENDPOINT_CAPACITY,
+    );
+    if bound == -i64::from(Errno::AlreadyExists.as_i32()) {
+        return end(
+            DriverExit::Declined,
+            &[step("rtc: another clock chip serves the machine")],
+        );
+    }
+    if bound != 0 {
+        return end(
+            DriverExit::NoService,
+            &[step("rtc: the endpoint could not be bound")],
+        );
+    }
+    let mut request = [0u8; rtc_ipc::REQUEST_LEN];
+    let mut reply = [0u8; rtc_ipc::REPLY_LEN];
+    loop {
+        let mut ticket = 0u64;
+        let Ok(len) = tairix_rt::call_recv(RTC_ENDPOINT, &mut request, &mut ticket) else {
+            return end(
+                DriverExit::ServeFailed,
+                &[step("rtc: the endpoint was lost")],
+            );
+        };
+        // A reply that cannot be framed goes out empty, which the client
+        // decodes as a fail-closed truncation.
+        let framed = rtc_ipc::serve_request(chip, &request[..len], &mut reply).unwrap_or(0);
+        let _ = tairix_rt::call_reply(RTC_ENDPOINT, ticket, &reply[..framed]);
     }
 }
 

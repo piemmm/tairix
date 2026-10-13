@@ -23,6 +23,7 @@ use tairix_drv_storage_usb_msd::scsi::{
 };
 use tairix_drv_storage_usb_msd::serve::{blk_block_for, publish_units};
 use tairix_drv_storage_usb_msd::uas::{Uas, UasPipes};
+use tairix_drvrt::exit::{end, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
@@ -30,82 +31,66 @@ use tairix_usb::device::BULK_BUF_LEN;
 use tairix_usb::transport::{read_configuration, UrbCall, UrbClient, UrbLink};
 use tairix_util::fmt::format_hex_u64;
 
-/// Exit code when the rt-backed driver host could not be built from the
-/// kernel-delivered grants. A reserved, fail-closed value.
-const EXIT_NO_HOST: i32 = 80;
-
-/// Exit code when the matched interface node did not carry the URB
-/// transport endpoint and shared-buffer grants this driver needs.
-const EXIT_NO_TRANSPORT: i32 = 81;
-
-/// Exit code when the device's descriptors or LUN bring-up refused every
-/// unit (no disk to serve).
-const EXIT_BRINGUP_FAILED: i32 = 82;
-
-/// Exit code when a per-LUN block service (endpoint, window, node, or the
-/// wait-set) could not be stood up.
-const EXIT_NO_SERVICE: i32 = 83;
-
 /// Diagnostic event id: the one-shot "LUNs published, serving" beacon.
-const MSD_READY: EventId = EventId(4160);
+const MSD_READY: EventId = EventId(27_360);
 
 /// Diagnostic event id: a bring-up step completed.
-const MSD_SETUP: EventId = EventId(4161);
+const MSD_SETUP: EventId = EventId(27_361);
 
 /// Diagnostic event id: a bring-up or serve step failed.
-const MSD_ERROR: EventId = EventId(4162);
+const MSD_ERROR: EventId = EventId(27_362);
 
 /// Diagnostic event id: one LUN was brought up and its node published.
-const MSD_LUN_READY: EventId = EventId(4163);
+const MSD_LUN_READY: EventId = EventId(27_363);
 
 /// Diagnostic event id: one LUN was skipped (non-disk type or never
 /// became ready) — logged, never a crash.
-const MSD_LUN_SKIPPED: EventId = EventId(4164);
+const MSD_LUN_SKIPPED: EventId = EventId(27_364);
 
 /// Diagnostic event id: the interface disappeared; nodes retracted and
 /// the driver exits for a clean reload on re-plug.
-const MSD_DETACHED: EventId = EventId(4165);
+const MSD_DETACHED: EventId = EventId(27_365);
 
 /// Diagnostic event id: a LUN's recovery grace window elapsed with no
 /// request and no recovery, so it failed closed. The disk stays present
 /// and its endpoint keeps serving fail-closed answers — a later genuine
 /// return still recovers it (sticky-but-recoverable, no reboot).
-const MSD_GRACE_EXPIRED: EventId = EventId(4166);
+const MSD_GRACE_EXPIRED: EventId = EventId(27_366);
 
 /// Diagnostic event id: the recovery ladder escalated to a data-path reset
 /// for a stalling LUN — the bounded step taken to try to bring a recovering
 /// unit back before its grace window is left to fail it closed.
-const MSD_RECOVERY_RESET: EventId = EventId(4167);
+const MSD_RECOVERY_RESET: EventId = EventId(27_367);
 
 /// Diagnostic event id: a LUN reported itself unhealthy while still serving
 /// valid data (a recovered-error threshold, a pending sector reallocation) —
 /// the device-level [`BlkHealthTransition::Degraded`] edge.
-const MSD_HEALTH_DEGRADED: EventId = EventId(4168);
+const MSD_HEALTH_DEGRADED: EventId = EventId(27_368);
 
 /// Diagnostic event id: a LUN stalled or reset and entered its bounded
 /// recovery grace window — the device-level [`BlkHealthTransition::Recovering`]
 /// edge. Its I/O is ridden out reissuably while it is given a chance to return.
-const MSD_HEALTH_RECOVERING: EventId = EventId(4169);
+const MSD_HEALTH_RECOVERING: EventId = EventId(27_369);
 
 /// Diagnostic event id: a degraded, recovering, or failed-closed LUN returned
 /// to healthy service — the device-level [`BlkHealthTransition::Recovered`]
 /// edge. "The disk came back": logged as a recovery, not a fault.
-const MSD_HEALTH_RECOVERED: EventId = EventId(4170);
+const MSD_HEALTH_RECOVERED: EventId = EventId(27_370);
 
 /// Diagnostic event id: the device's shared transport reset, holding every
 /// LUN reissuable under one recovery window — the fault-domain
 /// [`BlkHealthTransition::Recovering`] edge for the shared BOT transport.
-const MSD_DOMAIN_RECOVERING: EventId = EventId(4171);
+const MSD_DOMAIN_RECOVERING: EventId = EventId(27_371);
 
 /// Diagnostic event id: the device's shared transport demonstrably returned
 /// (a unit completed a real transfer), recovering the whole device — the
 /// fault-domain [`BlkHealthTransition::Recovered`] edge.
-const MSD_DOMAIN_RECOVERED: EventId = EventId(4172);
+const MSD_DOMAIN_RECOVERED: EventId = EventId(27_372);
 
 /// Diagnostic event id: the shared-transport recovery window elapsed without a
 /// return, failing the whole device closed. It stays sticky-but-recoverable —
 /// a later genuine transfer recovers it with no reboot.
-const MSD_DOMAIN_OFFLINE: EventId = EventId(4173);
+const MSD_DOMAIN_OFFLINE: EventId = EventId(27_373);
 
 /// Outstanding-request capacity of a per-LUN endpoint. The volume layer
 /// submits one request at a time (it blocks on the reply); a small queue
@@ -523,19 +508,19 @@ fn map_urb_transport() -> Result<(u64, &'static mut [u8], u8), i32> {
         .copied()
         .collect();
     let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-        return Err(EXIT_NO_HOST);
+        return Err(end(DriverExit::NoHost, &[]));
     };
     let Some(endpoint) = host.endpoint_grant() else {
-        return Err(EXIT_NO_TRANSPORT);
+        return Err(end(DriverExit::NoResources, &[]));
     };
     let Some(interface) = host
         .property(HwProperty::UsbInterface)
         .and_then(|number| u8::try_from(number).ok())
     else {
-        return Err(EXIT_NO_TRANSPORT);
+        return Err(end(DriverExit::NoResources, &[]));
     };
     let Ok(shm) = host.shared_buffer(BULK_BUF_LEN) else {
-        return Err(EXIT_NO_TRANSPORT);
+        return Err(end(DriverExit::NoResources, &[]));
     };
     Ok((endpoint, &mut shm[..BULK_BUF_LEN], interface))
 }
@@ -559,8 +544,8 @@ fn discover_storage_interface(
         data[..delivered].copy_from_slice(landed);
         Ok(delivered)
     })
-    .map_err(|_| EXIT_BRINGUP_FAILED)?;
-    find_storage_interface(&config, interface).map_err(|_| EXIT_BRINGUP_FAILED)
+    .map_err(|_| end(DriverExit::BringupFailed, &[]))?;
+    find_storage_interface(&config, interface).map_err(|_| end(DriverExit::BringupFailed, &[]))
 }
 
 /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -671,10 +656,10 @@ fn publish_luns<T: ScsiTransport>(
     urb_endpoint: u64,
 ) -> Result<[Option<LunServe>; MAX_LUNS], i32> {
     let Ok(lun_count) = scsi.lun_count() else {
-        return Err(EXIT_BRINGUP_FAILED);
+        return Err(end(DriverExit::BringupFailed, &[]));
     };
     let Some(blk_block) = blk_block_for(urb_endpoint) else {
-        return Err(EXIT_NO_SERVICE);
+        return Err(end(DriverExit::NoService, &[]));
     };
     let mut luns: [Option<LunServe>; MAX_LUNS] = core::array::from_fn(|_| None);
     let published = publish_units(
@@ -695,9 +680,11 @@ fn publish_luns<T: ScsiTransport>(
                     return Ok(None);
                 }
             };
-            let blk_endpoint = bind_blk_endpoint(blk_block, lun).ok_or(EXIT_NO_SERVICE)?;
-            let (window, shm_id) = create_window().ok_or(EXIT_NO_SERVICE)?;
-            let node_id = emit_lun_node(blk_endpoint, shm_id).ok_or(EXIT_NO_SERVICE)?;
+            let blk_endpoint =
+                bind_blk_endpoint(blk_block, lun).ok_or(end(DriverExit::NoService, &[]))?;
+            let (window, shm_id) = create_window().ok_or(end(DriverExit::NoService, &[]))?;
+            let node_id =
+                emit_lun_node(blk_endpoint, shm_id).ok_or(end(DriverExit::NoService, &[]))?;
             log_hex_event(
                 MSD_LUN_READY,
                 Level::Info,
@@ -724,7 +711,7 @@ fn publish_luns<T: ScsiTransport>(
             "count_hex",
             u64::from(lun_count),
         );
-        return Err(EXIT_BRINGUP_FAILED);
+        return Err(end(DriverExit::BringupFailed, &[]));
     }
     Ok(luns)
 }
@@ -769,7 +756,7 @@ where
     };
     let Some(set) = join_serve_set(&luns) else {
         retract_all(&luns);
-        return EXIT_NO_SERVICE;
+        return end(DriverExit::NoService, &[]);
     };
     // Every unit is published, and a unit never appears later. A refused
     // settle only leaves the device manager to wait out its bound for the node.
@@ -844,7 +831,7 @@ where
                 continue;
             }
             retract_all(&luns);
-            return EXIT_NO_SERVICE;
+            return end(DriverExit::NoService, &[]);
         }
         // A member is ready: fold any grace window that came due while parked
         // on this wake before serving, so a sibling LUN's window is honoured

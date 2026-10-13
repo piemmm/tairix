@@ -8,11 +8,6 @@
 //! quiet (summary only), and `-n` prints numeric addresses. Short help is the
 //! reserved `-?`/`--help` pair (plans/APPS.md §4).
 //!
-//! `-n` is accepted and has no effect: it suppresses *reverse* lookup of the
-//! addresses replies come from, and this tool never performs one (the stub
-//! resolver has no `PTR` record type), so the addresses printed are already
-//! numeric.
-//!
 //! A value-taking short flag accepts its value attached (`-c5`) or as the
 //! next argument (`-c 5`); long options accept `--count 5` or `--count=5`.
 //! Exactly one target operand is required: an IPv4 or IPv6 address literal,
@@ -124,6 +119,15 @@ pub struct Config {
     pub quiet: bool,
     /// Numeric output (`-n`): no reverse lookup of the peer address.
     pub numeric: bool,
+}
+
+impl Config {
+    /// Whether any line will name a peer: `-n` prints bare addresses and `-q`
+    /// prints no per-packet line, and either way a lookup buys nothing.
+    #[must_use]
+    pub fn names_peers(&self) -> bool {
+        !self.numeric && !self.quiet
+    }
 }
 
 /// Why an argument vector was not a valid `ping` invocation.

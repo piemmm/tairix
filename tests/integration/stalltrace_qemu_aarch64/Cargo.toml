@@ -41,5 +41,9 @@ tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
 # own `Run` binary's userland runtime) must never link into this kernel bin.
 tairix-test-stalltrace = { path = "../stalltrace_program", version = "=0.0.0", default-features = false }
 
+[dependencies]
+# The kernel's audit catalogue, the one definition of the record's id.
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+
 [build-dependencies]
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

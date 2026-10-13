@@ -836,10 +836,11 @@ switches per period on the path whose whole job is not to have jitter.
 
 The surface:
 
-- A reserved endpoint block (`AUDIO_CHANNEL_ENDPOINT_BASE`, `"ACHAN\0\0\0"`),
-  claimed by first-free binding so two audio drivers never collide without a
-  central allocator. Binding requires `CAP_IPC_BIND_PRIVILEGED` so a squatter
-  cannot impersonate a driver, and the endpoint is bound **restricted-sender on
+- A reserved endpoint per audio device's node (`AUDIO_CHANNEL_ENDPOINTS`, a
+  node-indexed block): a driver binds the id of the node it was loaded for,
+  which the kernel admits for that driver alone, so no id is ever probed and
+  no number of devices is capped. Binding also requires
+  `CAP_IPC_BIND_PRIVILEGED`, and the endpoint is bound **restricted-sender on
   `CAP_AUDIO_DEVICE`**, so the kernel refuses at dispatch every caller but the
   mixer and the driver never re-checks.
 - A `tairix,audiochan` node the driver publishes, which `devmgr` recognises and
@@ -2161,8 +2162,11 @@ a replug into the same port.
 
 **A default follows a preference, not the order devices appeared in.** Each
 direction's default is the live endpoint the room's tenant prefers, else the
-one the machine prefers, else the first bound. It is chosen again whenever a
-device is bound, lost or reaped, the room moves, or a preference changes. A
+one the machine prefers, else the first bound of those likeliest to reach a
+listener: a connector with something plugged in, then one that cannot tell,
+then one known empty — so a monitor's HDMI port is chosen over an empty one.
+It is chosen again whenever a device is bound, lost or reaped, a connector
+changes, the room moves, or a preference changes. A
 lost device is never a default and is never enumerated, and it is reaped once
 no stream rides it. A replugged device that reuses its channel endpoint
 replaces the lost one.

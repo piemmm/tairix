@@ -31,6 +31,8 @@ tairix-net = { path = "../net", version = "=0.0.0" }
 # is linked only for the bare-metal targets a driver binary is built for; on
 # the host only the pure handler (and its tests) compiles.
 [target.'cfg(target_os = "none")'.dependencies]
+# The one vocabulary a driver ends with.
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0" }
 # The capability set the restricted-sender endpoint bind is scoped by
 # (`CAP_NET_RAW`) — the one capability-primitive definition.
 tairix-caps = { path = "../caps", version = "=0.0.0" }

@@ -12,10 +12,11 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::driver::dma::DmaReach;
-    use tairix_dmaengine::{bringup_failed, serve, Node};
+    use tairix_dmaengine::{serve, Node};
     use tairix_drv_dma_bcm2835::dma4::{self, Bcm2711Dma};
     use tairix_drv_dma_bcm2835::legacy::{self, Bcm2835Dma};
     use tairix_drv_dma_bcm2835::{Engine, BIND_KEYS};
+    use tairix_drvrt::exit::{end, step, DriverExit};
 
     const WINDOW_REFUSED: &str = "dma: the register window is not whole channels";
 
@@ -27,7 +28,10 @@ mod program {
 
     fn main() -> i32 {
         let Some(engine) = engine() else {
-            return bringup_failed("dma: the node matches neither engine's binding");
+            return end(
+                DriverExit::BringupFailed,
+                &[step("dma: the node matches neither engine's binding")],
+            );
         };
         let caps = tairix_drv_dma_bcm2835::REQUIRED_CAPABILITIES
             .iter()
@@ -52,11 +56,11 @@ mod program {
         match engine {
             Engine::Legacy => match Bcm2835Dma::new(&regs, &store) {
                 Ok(engine) => serve(&node, engine, reach),
-                Err(_) => bringup_failed(WINDOW_REFUSED),
+                Err(_) => end(DriverExit::BringupFailed, &[step(WINDOW_REFUSED)]),
             },
             Engine::Dma4 => match Bcm2711Dma::new(&regs, &store) {
                 Ok(engine) => serve(&node, engine, reach),
-                Err(_) => bringup_failed(WINDOW_REFUSED),
+                Err(_) => end(DriverExit::BringupFailed, &[step(WINDOW_REFUSED)]),
             },
         }
     }

@@ -70,9 +70,10 @@ emergency, so that release edge is load-bearing, not a corner case.
 `serve(net, irq_handle)` is the freestanding process loop, compiled only for
 the bare-metal targets a driver binary is built for. It:
 
-1. claims the first free id in the reserved device-channel endpoint block,
-   bound **restricted-sender requiring `CAP_NET_RAW`** — so the kernel refuses
-   every caller but the stack at dispatch, on top of the
+1. binds the device-channel endpoint `NET_CHANNEL_ENDPOINTS` reserves for the
+   node the driver was loaded for, which the kernel admits for that node's
+   driver alone, **restricted-sender requiring `CAP_NET_RAW`** — so the kernel
+   refuses every caller but the stack at dispatch, on top of the
    `CAP_IPC_BIND_PRIVILEGED` gate the reserved-id bind already demands;
 2. publishes a hardware-tree node carrying that endpoint as a grant request
    (`NETCHAN_NODE_COMPATIBLE`), which the device manager observes and hands to
@@ -98,13 +99,9 @@ the bare-metal targets a driver binary is built for. It:
 Every reply is a fully-encoded `netchan-v1` frame carrying a typed `Errno`: a
 service call before attach, a region too small for the agreed geometry, or a
 device fault is never a panic and never a partially-applied action. Every
-set-up refusal in `serve` returns a reserved code from the `exit` module
-(80–83), so a driver that cannot serve its device ends with a diagnosable
-reason rather than degrading into a busy re-poll.
-
-Those codes are the diagnosis a supervisor reads off a driver that gave up,
-so they are defined here rather than per driver: two drivers reporting the
-same failure report the same number.
+set-up refusal in `serve` ends the driver through `tairix_drvrt::exit`, its
+reason recorded with the step that failed, rather than degrading into a busy
+re-poll.
 
 ## Test surface
 

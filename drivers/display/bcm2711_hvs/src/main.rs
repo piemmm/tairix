@@ -20,12 +20,13 @@ mod program {
     use tairix_abi::hwtree::HwResource;
     use tairix_abi::MmioMapper;
     use tairix_abi::{DriverError, Errno, HwProperty, HW_NODE_MAX_RESOURCES};
-    use tairix_display::service::{serve, EXIT_BRINGUP_FAILED, EXIT_NO_HOST, EXIT_NO_RESOURCES};
+    use tairix_display::service::serve;
     use tairix_drv_display_bcm2711_hvs::{
         DmaFrames, Engine, Parts, Record, Surface, HVS_WINDOW, OUTPUTS_MAX, REQUIRED_CAPABILITIES,
         VALVES,
     };
-    use tairix_drvrt::serve::{fail, log_event};
+    use tairix_drvrt::exit::{end, step, DriverExit};
+    use tairix_drvrt::serve::log_event;
     use tairix_drvrt::{Recorder, RtDriverHost, RtGrantSyscalls};
     use tairix_inline::ArrayVec;
     use tairix_linkclient::{ClockClient, EncoderClient, RtLinkCall};
@@ -40,7 +41,6 @@ mod program {
     const ENCODER_GONE: EventId = EventId(24_904);
     const STOP_OVERRAN: EventId = EventId(24_905);
     const CLOCK_REFUSED: EventId = EventId(24_906);
-    const BRINGUP_FAILED: EventId = EventId(24_907);
     const FIRMWARE_RELEASED: EventId = EventId(24_908);
     const FIRMWARE_UNCONFIRMED: EventId = EventId(24_909);
 
@@ -153,22 +153,23 @@ mod program {
             return Ok(None);
         }
         let surface = tairix_rt::console_relocate().map_err(|errno: Errno| {
-            log_event(
-                Level::Error,
-                BRINGUP_FAILED,
-                "display: the console would not move off the firmware's memory",
-                &[Field {
-                    key: "reason",
-                    value: FieldValue::Error(errno),
-                }],
-            );
-            EXIT_BRINGUP_FAILED
+            end(
+                DriverExit::BringupFailed,
+                &[
+                    step("display: the console would not move off the firmware's memory"),
+                    Field {
+                        key: "reason",
+                        value: FieldValue::Error(errno),
+                    },
+                ],
+            )
         })?;
         console(&surface, granted).map(Some).ok_or_else(|| {
-            fail(
-                BRINGUP_FAILED,
-                EXIT_BRINGUP_FAILED,
-                "display: the console's new surface lies outside the engine's reach",
+            end(
+                DriverExit::BringupFailed,
+                &[step(
+                    "display: the console's new surface lies outside the engine's reach",
+                )],
             )
         })
     }
@@ -188,13 +189,13 @@ mod program {
             Ok(Ok(())) => log_event(
                 Level::Info,
                 FIRMWARE_RELEASED,
-                "display: the firmware gave the display up",
+                "display: the firmware accepted the hand-over",
                 &[],
             ),
             Ok(Err(Unconfirmed { header, tag })) => log_event(
                 Level::Warn,
                 FIRMWARE_UNCONFIRMED,
-                "display: the firmware did not confirm giving the display up; it is taken over",
+                "display: the firmware refused the hand-over; it is taken over",
                 &[
                     Field {
                         key: "header",
@@ -224,10 +225,11 @@ mod program {
     fn main() -> i32 {
         let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return fail(
-                BRINGUP_FAILED,
-                EXIT_NO_HOST,
-                "display: the driver host could not be built from the delivered grants",
+            return end(
+                DriverExit::NoHost,
+                &[step(
+                    "display: the driver host could not be built from the delivered grants",
+                )],
             );
         };
         let mut granted = ArrayVec::<HwResource, HW_NODE_MAX_RESOURCES>::new();
@@ -254,10 +256,9 @@ mod program {
             map(HVS_WINDOW),
             links().find(|link| link.role() == LinkRole::Clock),
         ) else {
-            return fail(
-                BRINGUP_FAILED,
-                EXIT_NO_RESOURCES,
-                "display: the node names no HVS window and core clock",
+            return end(
+                DriverExit::NoResources,
+                &[step("display: the node names no HVS window and core clock")],
             );
         };
         // Each output's encoder wakes the engine when its connector moves.
@@ -291,10 +292,9 @@ mod program {
             log: Log,
         };
         let Ok(mut engine) = Engine::open(parts) else {
-            return fail(
-                BRINGUP_FAILED,
-                EXIT_BRINGUP_FAILED,
-                "display: the HVS refused its set-up",
+            return end(
+                DriverExit::BringupFailed,
+                &[step("display: the HVS refused its set-up")],
             );
         };
         serve(&mut engine, &wakes)

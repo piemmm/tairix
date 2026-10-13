@@ -6,10 +6,10 @@
 use tairix_log::EventId;
 
 /// First id reserved for this service.
-pub const GREETER_RANGE_START: u32 = 19_000;
+pub const GREETER_RANGE_START: u32 = tairix_log::registry::GREETER.start();
 
 /// One past the last id reserved for this service.
-pub const GREETER_RANGE_END: u32 = 20_000;
+pub const GREETER_RANGE_END: u32 = tairix_log::registry::GREETER.end();
 
 /// The seat is held, the mode is known, and the first frame is on screen.
 pub const SCREEN_READY: EventId = EventId(19_001);

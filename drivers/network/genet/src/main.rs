@@ -30,7 +30,7 @@
 //!    device-channel serve loop every NIC driver process runs.
 //!
 //! A bring-up failure exits with a reserved fail-closed code
-//! (`tairix_netchan::exit`), leaving the system without this NIC rather than
+//! (`tairix_drvrt::exit`), leaving the system without this NIC rather than
 //! wedged; the spawning supervisor decides whether to relaunch. On the host
 //! it is an inert stub so `cargo build --workspace`, clippy, and fmt still
 //! cover the file.
@@ -43,8 +43,8 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_drv_network_genet::wiring::open_discovered;
+    use tairix_drvrt::exit::{end, step, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use tairix_netchan::exit;
     use tairix_rt::ClockDelay;
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -61,10 +61,13 @@ mod program {
             .copied()
             .collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return exit::NO_HOST;
+            return end(DriverExit::NoHost, &[]);
         };
         let Some(irq_line) = host.irq_line() else {
-            return exit::NO_RESOURCES;
+            return end(
+                DriverExit::NoResources,
+                &[step("genet: the node grants no interrupt line")],
+            );
         };
 
         // Bind the interrupt the serve loop parks on before the device can
@@ -72,7 +75,10 @@ mod program {
         // degrade into the busy re-poll the charter forbids.
         let irq_ret = tairix_rt::irq_bind(irq_line);
         if irq_ret <= 0 {
-            return exit::BRINGUP_FAILED;
+            return end(
+                DriverExit::BringupFailed,
+                &[step("genet: the interrupt line would not bind")],
+            );
         }
         #[allow(clippy::cast_sign_loss)] // `irq_ret > 0` is the minted IrqHandle.
         let irq_handle = irq_ret as u64;
@@ -83,7 +89,10 @@ mod program {
             host.link_address(),
             ClockDelay::new(),
         ) else {
-            return exit::BRINGUP_FAILED;
+            return end(
+                DriverExit::BringupFailed,
+                &[step("genet: the controller would not come up")],
+            );
         };
         tairix_netchan::serve(net, irq_handle)
     }

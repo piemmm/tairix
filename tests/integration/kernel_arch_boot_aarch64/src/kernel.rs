@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+use tairix_kalloc::{FreeListAllocator, Heap, BOOT_HEAP_BYTES};
 use tairix_kernel::aarch64::boot as boot_aarch64;
 use tairix_log::{Event, EventId, Sink};
 use tairix_test_kheap_growth as kheap_growth;
@@ -17,11 +17,9 @@ use tairix_test_kheap_growth as kheap_growth;
 // ELF `-kernel` entry.
 use crate::tree::DTB_BLOB;
 
-/// Static boot heap.
-///
-/// The boot heap, in `.bss`, which the layout places below `__kernel_end` so
-/// the boot memory map never hands a heap frame to the allocator.
-static HEAP: Heap = Heap::ZERO;
+/// The production bin's bootstrap arena, in `.bss` below `__kernel_end`, so
+/// this boot proves the pipeline fits it before the heap can grow.
+static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -29,7 +27,7 @@ static HEAP: Heap = Heap::ZERO;
 /// the allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), BOOT_HEAP_BYTES) };
 
 /// `EventId` emitted by `kernel_core::kernel_main` once every init
 /// phase completed. Pinned by the `event_ids_are_unique` test in

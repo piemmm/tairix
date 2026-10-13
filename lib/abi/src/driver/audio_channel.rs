@@ -53,6 +53,7 @@ use super::audio::{
     MAX_DEVICE_ENDPOINTS,
 };
 use super::audio_ring::PcmGeometry;
+use crate::hwtree::NodeEndpointBlock;
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
 use crate::time::Time64;
 use crate::Errno;
@@ -66,27 +67,18 @@ pub const AUDIO_CHANNEL_NOTIFY_MAGIC: u32 = u32::from_le_bytes(*b"ACHN");
 /// The `audiochan-v1` protocol version.
 pub const AUDIO_CHANNEL_VERSION_V1: u16 = 1;
 
-/// Base of the reserved device-channel call-endpoint id block
-/// (`"ACHAN\0\0\0"` little-endian). Each audio driver process claims the first
-/// free id in
-/// `AUDIO_CHANNEL_ENDPOINT_BASE .. AUDIO_CHANNEL_ENDPOINT_BASE + AUDIO_CHANNEL_ENDPOINT_COUNT`
-/// by binding it, so two audio drivers never collide on an id without a
-/// central allocator.
+/// The device-channel call endpoints, one per audio device's hardware-tree
+/// node: an audio driver binds the id of the node it was loaded for, which
+/// the kernel admits for that driver alone, so no two drivers ever reach for
+/// one id.
 ///
-/// The block is a reserved rendezvous
-/// ([`crate::ipc::is_reserved_endpoint`]): binding any id in it requires
-/// [`CapabilityId::IPC_BIND_PRIVILEGED`](crate::CapabilityId::IPC_BIND_PRIVILEGED),
-/// so an unprivileged squatter cannot bind one first and impersonate the
-/// driver to the mixer. The driver additionally binds it **restricted
-/// sender** on the audio-device capability the mixer alone holds
-/// (`plans/SOUND.md`), so the kernel refuses at dispatch every caller but the
-/// mixer and the driver never re-checks.
-pub const AUDIO_CHANNEL_ENDPOINT_BASE: u64 = u64::from_le_bytes(*b"ACHAN\0\0\0");
-
-/// Number of concurrently-bindable device-channel endpoint ids: the most
-/// audio driver processes the mixer serves at once. A fixed validation bound
-/// on the reserved block, not a device-count capacity.
-pub const AUDIO_CHANNEL_ENDPOINT_COUNT: u64 = 16;
+/// The block is reserved ([`crate::ipc::is_reserved_endpoint`]), so binding
+/// one also requires
+/// [`CapabilityId::IPC_BIND_PRIVILEGED`](crate::CapabilityId::IPC_BIND_PRIVILEGED).
+/// The driver binds it **restricted sender** on the audio-device capability
+/// the mixer alone holds (`plans/SOUND.md`), so the kernel refuses at dispatch
+/// every caller but the mixer and the driver never re-checks.
+pub const AUDIO_CHANNEL_ENDPOINTS: NodeEndpointBlock = NodeEndpointBlock::tagged(*b"AC");
 
 /// Device-tree-style `compatible` model name of the hardware-tree node an
 /// audio driver publishes to advertise the device-channel endpoint it claimed.
@@ -99,19 +91,16 @@ pub const AUDIO_CHANNEL_ENDPOINT_COUNT: u64 = 16;
 /// can never drift.
 pub const AUDIOCHAN_NODE_COMPATIBLE: &[u8] = b"tairix,audiochan";
 
-/// Whether `id` is one of the reserved device-channel endpoint ids.
-#[must_use]
-pub const fn is_audio_channel_endpoint(id: u64) -> bool {
-    id >= AUDIO_CHANNEL_ENDPOINT_BASE
-        && id < AUDIO_CHANNEL_ENDPOINT_BASE + AUDIO_CHANNEL_ENDPOINT_COUNT
-}
-
 /// High tag of a mixer-owned device-channel notify-port id (see
 /// [`notify_endpoint_for`]).
 const AUDIO_NOTIFY_ENDPOINT_TAG: u64 = 0x4141_0000_0000_0000;
 
 /// The bits of a notify-port id the tag occupies.
 const AUDIO_NOTIFY_TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+
+/// The device-channel notify ports one mixer process can name: the slot
+/// field of [`notify_endpoint_for`]'s id is a byte.
+pub const AUDIO_NOTIFY_SLOTS: u64 = 1 << 8;
 
 /// The notify-mailbox endpoint id the mixer binds for one attached device
 /// channel and passes to the driver in [`AttachParams::notify_endpoint`].
@@ -125,13 +114,16 @@ const AUDIO_NOTIFY_TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
 /// receive the wakes it sends, and a bystander cannot steal them; a spurious
 /// notify at worst costs one extra [`AudioChannelRequest::Service`] doorbell.
 ///
-/// `index` is bounded by [`AUDIO_CHANNEL_ENDPOINT_COUNT`] and occupies the low
-/// byte; `pid` occupies the next 40 bits, which is the whole of
-/// [`crate::PID_MAX`], so the three fields tile the word exactly and no pid
-/// can reach the tag.
+/// `index` occupies the low byte; `pid` occupies the next 40 bits, which is
+/// the whole of [`crate::PID_MAX`], so the three fields tile the word exactly
+/// and no pid can reach the tag. [`None`] for an `index` of
+/// [`AUDIO_NOTIFY_SLOTS`] or more, which would alias a lower slot's port.
 #[must_use]
-pub const fn notify_endpoint_for(pid: u64, index: u64) -> u64 {
-    AUDIO_NOTIFY_ENDPOINT_TAG | ((pid & crate::PID_MAX) << 8) | (index & 0xFF)
+pub const fn notify_endpoint_for(pid: u64, index: u64) -> Option<u64> {
+    if index >= AUDIO_NOTIFY_SLOTS {
+        return None;
+    }
+    Some(AUDIO_NOTIFY_ENDPOINT_TAG | ((pid & crate::PID_MAX) << 8) | index)
 }
 
 /// Whether `id` is a device-channel notify-port id, as [`notify_endpoint_for`]

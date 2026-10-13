@@ -12,10 +12,10 @@
  *     trampoline.
  *   - `__bss_start` / `__bss_end` bracket the zero-init region and are
  *     8-byte aligned for the doubleword-store clear loop in `boot.s`.
- *   - The 64 MiB boot heap lives in a separate `.heap` (NOLOAD)
- *     section placed *after* `__bss_end`, so the boot trampoline does
- *     not waste cycles zeroing it (the bump allocator does not need
- *     zeroed backing) and the boot pipeline can exclude it from the
+ *   - The boot heap lives in a separate `.heap` (NOLOAD) section
+ *     placed *after* `__bss_end`, so the boot trampoline does not
+ *     waste cycles zeroing it (the allocator does not need zeroed
+ *     backing) and the boot pipeline can exclude it from the
  *     usable physical-memory map by starting the usable region at
  *     `__kernel_end`.
  *   - The default `medany` code model means every reference is

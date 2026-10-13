@@ -22,6 +22,8 @@ mod charter_cite;
 mod ci_long;
 mod deps_check;
 mod devids;
+mod driver_exits;
+mod event_ids;
 mod feature_lane;
 mod font_atlas;
 mod font_store;
@@ -68,6 +70,8 @@ pub enum Command {
     Devids,
     DepsCheck,
     CfgCheck,
+    EventIds,
+    DriverExits,
     HelpLint,
     Coverage,
     Sbom,
@@ -106,6 +110,8 @@ impl Command {
         Command::Devids,
         Command::DepsCheck,
         Command::CfgCheck,
+        Command::EventIds,
+        Command::DriverExits,
         Command::HelpLint,
         Command::Coverage,
         Command::Sbom,
@@ -143,6 +149,8 @@ impl Command {
             "devids" => Command::Devids,
             "deps-check" => Command::DepsCheck,
             "cfg-check" => Command::CfgCheck,
+            "event-ids" => Command::EventIds,
+            "driver-exits" => Command::DriverExits,
             "help-lint" => Command::HelpLint,
             "coverage" => Command::Coverage,
             "sbom" => Command::Sbom,
@@ -182,6 +190,8 @@ impl Command {
             Command::Devids => "devids",
             Command::DepsCheck => "deps-check",
             Command::CfgCheck => "cfg-check",
+            Command::EventIds => "event-ids",
+            Command::DriverExits => "driver-exits",
             Command::HelpLint => "help-lint",
             Command::Coverage => "coverage",
             Command::Sbom => "sbom",
@@ -234,6 +244,8 @@ impl Command {
             }
             Command::DepsCheck => "Enforce the §17.4 modularity dependency graph.",
             Command::CfgCheck => "Reject target-conditional compilation outside the arch ports.",
+            Command::EventIds => "Check every crate's event ids against the id registry.",
+            Command::DriverExits => "Refuse a driver exit code declared outside the driver runtime.",
             Command::HelpLint => {
                 "Lint the command apps' Help/ trees: completeness, drift, content policy."
             }
@@ -296,6 +308,8 @@ impl Command {
             Command::Devids => devids::run(ctx, args),
             Command::DepsCheck => run_deps_check(ctx),
             Command::CfgCheck => run_cfg_check(ctx),
+            Command::EventIds => run_event_ids(ctx),
+            Command::DriverExits => run_driver_exits(ctx),
             Command::HelpLint => help_lint::run(ctx),
             Command::Coverage => run_coverage(ctx, args),
             Command::Sbom => run_sbom(ctx, args),
@@ -1050,6 +1064,16 @@ fn run_cfg_check(ctx: &Context) -> Result<(), String> {
     cfg_check::run(&ctx.workspace_root)
 }
 
+fn run_event_ids(ctx: &Context) -> Result<(), String> {
+    eprintln!("xtask: [event-ids] {}", ctx.workspace_root.display());
+    event_ids::run(&ctx.workspace_root)
+}
+
+fn run_driver_exits(ctx: &Context) -> Result<(), String> {
+    eprintln!("xtask: [driver-exits] {}", ctx.workspace_root.display());
+    driver_exits::run(&ctx.workspace_root)
+}
+
 fn run_coverage(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // `cargo-llvm-cov` is a cargo subcommand: its binary rejects a bare
     // `--version` and is only reachable as `cargo llvm-cov`. Probe it the
@@ -1356,6 +1380,11 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // scan, no compilation (plans/APPS.md §8.1 for help-lint).
         static_gate("deps-check", ctx, run_deps_check),
         static_gate("cfg-check", ctx, run_cfg_check),
+        // One event id, one meaning: every crate's ids from its registered
+        // range, no value defined by two crates; a source scan.
+        static_gate("event-ids", ctx, run_event_ids),
+        // Every driver ends through the one exit vocabulary; a source scan.
+        static_gate("driver-exits", ctx, run_driver_exits),
         static_gate("help-lint", ctx, help_lint::run),
         // Reject any unreviewed AI-drafted artefact marker that reached the
         // tree; a source scan, fails closed.

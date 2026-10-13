@@ -69,7 +69,7 @@ mod testsink;
 
 pub use autoload::{
     match_and_load, unload_vanished, AutoloadState, NodeBindings, NodeDriver, NodeReport,
-    ReportedNodes,
+    NodeRestart, ReportedNodes,
 };
 pub use manager::{AutoloadReport, DeviceManager, DriverLoader, NodeBinding};
 pub use netbind::{bind_new_channels, netchan_endpoint, NetBindState, NetstackBind};

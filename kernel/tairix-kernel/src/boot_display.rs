@@ -19,6 +19,11 @@
 //! it tells the firmware the display is the ARM's, so nothing scans out or
 //! writes the firmware's surface once the firmware may take it back.
 //!
+//! The firmware's own `simple-framebuffer` nodes describing that surface are
+//! withheld ([`withhold_firmware_surfaces`]): the walk publishes one with only
+//! its register window, never the geometry a grant needs, so a driver bound to
+//! it could serve nothing, and the console is already described.
+//!
 //! The node rides the same boot-discovered tree the block and input
 //! probes buffer, so the pre-unlock autoload matches it exactly like any
 //! other discovered device: the signed store scan finds the display
@@ -29,12 +34,16 @@
 //! runtime `hw_emit_node` display publication creates a further seat
 //! (`plans/DISPLAY.md` D6).
 
+use alloc::vec::Vec;
+
 use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
-use tairix_abi::hwtree::{FramebufferMemory, HwResource};
+use tairix_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
 use tairix_abi::{
     HwDeviceClass, HwMatchKey, HwNode, HwProperty, HW_NODE_ROOT_ID, SIMPLE_FRAMEBUFFER_COMPATIBLE,
 };
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
+
+use crate::boot_hwtree::CollectingHwNodeSink;
 
 /// Node id of the boot display in the discovered tree.
 ///
@@ -111,6 +120,53 @@ pub fn observe_boot_display(
         return Ok(());
     }
     sink.emit(node)
+}
+
+/// The firmware surfaces the platform's own description of the display stands
+/// in for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FirmwareSurfaces {
+    /// A display engine takes the screen over, and every firmware surface
+    /// with it, as Linux's `vc4` removes every firmware framebuffer.
+    TakenOver,
+    /// The boot display node describes the surface of `len` bytes at `base`.
+    Published {
+        /// The surface's first byte.
+        base: u64,
+        /// Its length in bytes.
+        len: u64,
+    },
+}
+
+impl FirmwareSurfaces {
+    fn stands_in_for(self, node: &HwNode) -> bool {
+        let is_surface = node
+            .match_keys()
+            .iter()
+            .any(|key| key.compatible_bytes() == SIMPLE_FRAMEBUFFER_COMPATIBLE);
+        is_surface
+            && match self {
+                Self::TakenOver => true,
+                Self::Published { base, len } => node.resources().iter().any(|window| {
+                    window.kind() == Some(HwResourceKind::Mmio)
+                        && window.base() < base.saturating_add(len)
+                        && base < window.base().saturating_add(window.length())
+                }),
+            }
+    }
+}
+
+/// Withhold from `sink` the firmware's `simple-framebuffer` nodes `surfaces`
+/// stands in for, and anything discovered beneath one.
+pub fn withhold_firmware_surfaces(sink: &mut CollectingHwNodeSink, surfaces: FirmwareSurfaces) {
+    let mut withheld: Vec<u32> = Vec::new();
+    sink.retain(|node| {
+        let excluded = withheld.contains(&node.parent()) || surfaces.stands_in_for(node);
+        if excluded && withheld.try_reserve(1).is_ok() {
+            withheld.push(node.id());
+        }
+        !excluded
+    });
 }
 
 /// State on `engine`, the node of the display engine that takes the screen
@@ -205,6 +261,67 @@ mod tests {
             engine.match_keys().is_empty(),
             "the engine keeps its own binding"
         );
+    }
+
+    /// A firmware `simple-framebuffer` node at `base`, as the walk publishes
+    /// it: its register window and nothing else.
+    fn firmware_surface(id: u32, base: u64) -> HwNode {
+        let mut node = HwNode::new(id, HW_NODE_ROOT_ID, HwDeviceClass::Display);
+        node.push_match_key(HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE).expect("key"))
+            .expect("room");
+        node.push_resource(HwResource::mmio(base, 0x7f_8000))
+            .expect("room");
+        node
+    }
+
+    fn collected(nodes: &[HwNode]) -> CollectingHwNodeSink {
+        let mut sink = CollectingHwNodeSink::new();
+        for node in nodes {
+            sink.emit(*node).expect("the heap grows");
+        }
+        sink
+    }
+
+    fn ids(sink: &CollectingHwNodeSink) -> Vec<u32> {
+        sink.nodes().iter().map(HwNode::id).collect()
+    }
+
+    #[test]
+    fn an_engine_taking_the_screen_over_leaves_no_firmware_surface_to_bind() {
+        let engine = HwNode::new(1, HW_NODE_ROOT_ID, HwDeviceClass::Other);
+        let child = HwNode::new(4, 2, HwDeviceClass::Other);
+        let mut sink = collected(&[
+            engine,
+            firmware_surface(2, 0x3e40_2000),
+            firmware_surface(3, 0x1000_0000),
+            child,
+        ]);
+        withhold_firmware_surfaces(&mut sink, FirmwareSurfaces::TakenOver);
+        assert_eq!(ids(&sink), [1], "every surface, and what hangs beneath one");
+    }
+
+    #[test]
+    fn the_boot_display_node_replaces_only_the_firmware_surface_it_describes() {
+        let mut sink = collected(&[
+            firmware_surface(2, 0x3e40_2000),
+            firmware_surface(3, 0x1000_0000),
+        ]);
+        withhold_firmware_surfaces(
+            &mut sink,
+            FirmwareSurfaces::Published {
+                base: 0x3e40_2000,
+                len: 0x7f_8000,
+            },
+        );
+        observe_boot_display(
+            &BootScanout {
+                base: 0x3e40_2000,
+                ..ramfb_scanout()
+            },
+            &mut sink,
+        )
+        .expect("the heap grows");
+        assert_eq!(ids(&sink), [3, BOOT_DISPLAY_NODE_ID]);
     }
 
     #[test]

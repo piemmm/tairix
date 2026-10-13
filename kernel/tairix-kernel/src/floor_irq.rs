@@ -6,6 +6,7 @@ use tairix_abi::IrqHandle;
 use tairix_kernel_core::{FallbackPark, IrqParkWaiter};
 use tairix_kernel_irq::{IrqController, IrqTable, Trigger};
 use tairix_kernel_sec::captable::ProcessId;
+use tairix_log::Sink;
 
 /// Where a port's floor devices take their interrupts.
 #[derive(Clone, Copy)]
@@ -73,15 +74,17 @@ impl ArmedLine {
         self.handle
     }
 
-    /// The waiter the line's owner parks on for its completions.
+    /// The waiter the line's owner parks on for its completions, recording a
+    /// late wake through `audit`.
     #[must_use]
-    pub fn waiter(&self) -> IrqParkWaiter {
+    pub fn waiter(&self, audit: &'static (dyn Sink + Sync)) -> IrqParkWaiter {
         IrqParkWaiter::new(
             self.host.table,
             self.handle,
             self.owner,
             self.host.controller,
             Some(self.host.park),
+            audit,
         )
     }
 }

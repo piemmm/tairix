@@ -130,17 +130,16 @@ const BOOT_CPUS: usize = 1;
 /// 16-byte-aligned kernel-stack slot. Matches the System V AMD64
 /// ABI's 16-byte stack-alignment requirement at function entry.
 #[repr(C, align(16))]
-struct KernelStack([u8; KERNEL_STACK_BYTES]);
+struct KernelStack(core::cell::UnsafeCell<[u8; KERNEL_STACK_BYTES]>);
 
-/// Per-CPU kernel stack pool, sized to the [`BOOT_CPUS`] this binary
-/// brings up (the BSP). A future AP-bring-up commit sizes it from the
-/// discovered CPU count rather than re-introducing a fixed ceiling.
-///
-/// This is the only `static mut` in the bin crate, justified in `README.md`
-/// as the per-CPU bootstrap-stack arena. Access is exclusively through
-/// [`kernel_stack_top`], which derives a disjoint pointer per `cpu_index`.
-static mut KERNEL_STACKS: [KernelStack; BOOT_CPUS] =
-    [const { KernelStack([0; KERNEL_STACK_BYTES]) }; BOOT_CPUS];
+// SAFETY: no Rust code reads or writes a slot: its CPU runs on it once
+// `kernel_stack_top` has named it, and each CPU is named only its own.
+unsafe impl Sync for KernelStack {}
+
+/// Per-CPU kernel stack pool, one slot per CPU this binary brings up
+/// ([`BOOT_CPUS`]).
+static KERNEL_STACKS: [KernelStack; BOOT_CPUS] =
+    [const { KernelStack(core::cell::UnsafeCell::new([0; KERNEL_STACK_BYTES])) }; BOOT_CPUS];
 
 /// Per-CPU GDT/IDT/IST arena the arch crate's [`percpu`] entry points
 /// index, sized to [`BOOT_CPUS`] and published once by [`try_boot`]
@@ -158,11 +157,7 @@ static SYSCALL_TLS_STORAGE: syscall_entry::SyscallTlsStorage<BOOT_CPUS> =
 /// satisfies that statically (it only calls with `0`).
 fn kernel_stack_top(cpu_index: usize) -> u64 {
     debug_assert!(cpu_index < BOOT_CPUS);
-    // SAFETY: `cpu_index < BOOT_CPUS` per the debug assert above
-    // (production callers in this module guarantee the bound at the
-    // call site too); `addr_of` reads the static's address without
-    // creating a Rust reference.
-    let base = unsafe { core::ptr::addr_of!(KERNEL_STACKS[cpu_index]) } as u64;
+    let base = KERNEL_STACKS[cpu_index].0.get().addr() as u64;
     base + core::mem::size_of::<KernelStack>() as u64
 }
 

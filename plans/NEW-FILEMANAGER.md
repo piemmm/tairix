@@ -1718,8 +1718,8 @@ the click-through that keys on them is written.
   kernel-attested serial witness for a New-Folder / rename / delete step to
   gate on — and, independently, mutating on-disk state is a security-relevant
   decision the charter (§5.4(4)/§19.4) requires be logged. Landed: two stable
-  events in `kernel/core` — `FsNodeMutated` (id 4100, `Info`) on a successful
-  mutation and `FsMutationDenied` (id 4101, `Warn`, carrying the refusal's
+  events in `kernel/core` — `FsNodeMutated` (id 4260, `Info`) on a successful
+  mutation and `FsMutationDenied` (id 4261, `Warn`, carrying the refusal's
   `errno`) — emitted by every write handler after the secured VFS decides,
   under the caller's kernel-attested uid, via the free `emit_fs_mutation`
   (with `audit_path_field` bounding the path on a char boundary so an

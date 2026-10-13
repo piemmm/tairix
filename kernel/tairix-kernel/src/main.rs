@@ -22,30 +22,19 @@
 mod kernel {
     use core::panic::PanicInfo;
 
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
     use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator, SERIAL_SINK};
 
-    // --- Bump-allocator-backed `#[global_allocator]` ---------------
+    /// What boot allocates before the heap can grow from the frame allocator.
+    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
 
-    /// Static heap for the bump allocator.
+    /// The global allocator, over [`HEAP`].
     ///
-    /// `static mut` because the bump allocator hands out disjoint
-    /// slices via an `AtomicUsize` cursor; the storage itself is
-    /// otherwise immutable from any other call site.
-    static mut HEAP: Heap = Heap::ZERO;
-
-    /// Global allocator backed by [`HEAP`].
-    ///
-    /// SAFETY: the allocator is constructed from `HEAP`'s base
-    /// pointer in `const` context; the pointer is page-aligned (the
-    /// `Heap` type is `#[repr(C, align(4096))]`) and the storage
-    /// lives for the lifetime of the binary because `HEAP` is a
-    /// `static`. The allocator is not exposed through any other
-    /// API, so it satisfies the `FreeListAllocator::new` uniqueness
-    /// requirement.
+    /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
+    /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), BOOT_HEAP_BYTES) };
 
     // --- Panic handler --------------------------------------------
 
@@ -103,28 +92,21 @@ mod kernel {
     use tairix_arch_aarch64::SERIAL_SINK;
     use tairix_kernel::aarch64::boot;
     use tairix_kernel::aarch64::panic_ctx::handle_panic_via_kernel_core;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
     use tairix_kernel::FreeListAllocator;
 
-    /// Static boot heap for the bump allocator.
-    ///
-    /// `static mut` because the bump allocator hands out disjoint slices
-    /// via an `AtomicUsize` cursor; the storage is otherwise never
-    /// aliased. It lives in `.bss` (zeroed by the boot trampoline). This
-    /// is the boot-heap arena — the one `static mut` the binary needs.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// What boot allocates before the heap can grow from the frame
+    /// allocator — the secondary-CPU stacks among them, which the MMU-off
+    /// secondary entry reaches at their physical address.
+    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
 
-    /// Global allocator backed by [`HEAP`].
+    /// The global allocator, over [`HEAP`].
     ///
-    /// SAFETY: the allocator is constructed from `HEAP`'s base pointer in
-    /// `const` context; the pointer is page-aligned (`Heap` is
-    /// `#[repr(C, align(4096))]`) and the storage lives for the lifetime
-    /// of the binary because `HEAP` is a `static`. The allocator is not
-    /// exposed through any other API, satisfying `FreeListAllocator::new`'s
-    /// uniqueness requirement.
+    /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
+    /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), BOOT_HEAP_BYTES) };
 
     /// Forward to the shared aarch64 panic bridge, which routes through
     /// `kernel_core::handle_panic` (registers + backtrace) once the arch
@@ -174,34 +156,24 @@ mod kernel {
     use core::panic::PanicInfo;
 
     use tairix_arch_riscv64::SERIAL_SINK;
-    use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
+    use tairix_kernel::kalloc::{Heap, BOOT_HEAP_BYTES};
     use tairix_kernel::riscv64::boot;
     use tairix_kernel::riscv64::panic_ctx::handle_panic_via_kernel_core;
     use tairix_kernel::FreeListAllocator;
 
-    /// Static boot heap for the bump allocator.
-    ///
-    /// `static mut` because the bump allocator hands out disjoint slices
-    /// via an `AtomicUsize` cursor; the storage is otherwise never
-    /// aliased. It lives in the linker's NOLOAD `.heap` section
-    /// (`riscv64-virt.ld`), placed after `__bss_end` so the boot
-    /// trampoline neither zeroes nor counts it in the usable
-    /// physical-memory map (which starts at `__kernel_end`). This is the
-    /// boot-heap arena — the one `static mut` the binary needs.
+    /// What boot allocates before the heap can grow from the frame
+    /// allocator. In the NOLOAD `.heap` section (`riscv64-virt.ld`), after
+    /// `__bss_end`, so the boot trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static mut HEAP: Heap = Heap::ZERO;
+    static HEAP: Heap<BOOT_HEAP_BYTES> = Heap::ZERO;
 
-    /// Global allocator backed by [`HEAP`].
+    /// The global allocator, over [`HEAP`].
     ///
-    /// SAFETY: the allocator is constructed from `HEAP`'s base pointer in
-    /// `const` context; the pointer is page-aligned (`Heap` is
-    /// `#[repr(C, align(4096))]`) and the storage lives for the lifetime
-    /// of the binary because `HEAP` is a `static`. The allocator is not
-    /// exposed through any other API, satisfying `FreeListAllocator::new`'s
-    /// uniqueness requirement.
+    /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
+    /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), BOOT_HEAP_BYTES) };
 
     /// Forward to the shared riscv64 panic bridge, which routes through
     /// `kernel_core::handle_panic` (registers + backtrace) once the arch

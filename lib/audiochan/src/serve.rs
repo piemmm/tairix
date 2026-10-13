@@ -38,62 +38,28 @@
 
 use tairix_abi::driver::audio::Audio;
 use tairix_abi::driver::audio_channel::{
-    is_audio_channel_endpoint, AUDIOCHAN_NODE_COMPATIBLE, AUDIO_CHANNEL_ENDPOINT_BASE,
-    AUDIO_CHANNEL_MAX_REPLY, AUDIO_CHANNEL_MAX_REQUEST,
+    AUDIOCHAN_NODE_COMPATIBLE, AUDIO_CHANNEL_ENDPOINTS, AUDIO_CHANNEL_MAX_REPLY,
+    AUDIO_CHANNEL_MAX_REQUEST,
 };
 use tairix_abi::driver::DeviceWake;
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-use tairix_abi::{
-    CapabilityId, DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId,
-};
+use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId};
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::{LogSink, ServedCall};
 
-use crate::exit;
 use crate::{ChannelIo, Dispatcher, MappedRegion};
+use tairix_drvrt::exit::{end, step, DriverExit};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
 /// beacon an audio driver emits once its device is live and its endpoint is
 /// bound.
-const AUDIOCHAN_READY: EventId = EventId(4210);
-
-/// Diagnostic event id: an audio driver process giving up, carrying the
-/// reason it could not serve its device.
-const AUDIOCHAN_FAILED: EventId = EventId(4211);
+const AUDIOCHAN_READY: EventId = EventId(29_010);
 
 /// Diagnostic event id: an attach the driver refused because the region the
 /// mixer granted is smaller than the geometry the two agreed.
-const AUDIOCHAN_SHORT_REGION: EventId = EventId(4212);
-
-/// Record why this driver process is ending abnormally, then return `code`
-/// for the runtime to exit with.
-///
-/// An autoloaded driver is detached, so nothing reads its `stderr`; without
-/// this an operator sees only the supervisor's exit code, which names the
-/// stage that gave up but never what refused it. `detail` carries the typed
-/// refusal where the failure had one.
-///
-/// One definition for every audio driver process, beside the codes it
-/// reports, so two drivers cannot describe the same failure differently.
-#[must_use]
-pub fn fail(code: i32, reason: &'static str, detail: Option<DriverError>) -> i32 {
-    let field = detail.map(|err| Field {
-        key: "error",
-        value: FieldValue::SignedInt(i64::from(err as i32)),
-    });
-    log(
-        &LogSink,
-        &Event {
-            level: Level::Error,
-            id: AUDIOCHAN_FAILED,
-            message: reason,
-            fields: field.as_slice(),
-        },
-    );
-    code
-}
+const AUDIOCHAN_SHORT_REGION: EventId = EventId(29_012);
 
 /// Wait-set token for a device-channel call doorbell on the claimed endpoint.
 const CALL_TOKEN: u64 = 1;
@@ -120,22 +86,18 @@ impl<A: Audio> Channel<A> {
     ///
     /// # Errors
     ///
-    /// The reserved [`exit`](crate::exit) code to end with, its reason
-    /// logged.
+    /// The exit status to end with, its reason recorded.
     pub fn publish(audio: A) -> Result<Self, i32> {
-        let Some(endpoint) = claim_channel_endpoint() else {
-            return Err(fail(
-                exit::NO_SERVICE,
-                "audiochan: no reserved device-channel endpoint could be claimed and bound",
-                None,
+        let Some(endpoint) = bind_channel_endpoint() else {
+            return Err(end(
+                DriverExit::NoService,
+                &[step(
+                    "audiochan: the node's device-channel endpoint could not be bound",
+                )],
             ));
         };
         if emit_audiochan_node(endpoint).is_none() {
-            return Err(fail(
-                exit::NO_SERVICE,
-                "audiochan: the device-channel node could not be published to the hardware tree",
-                None,
-            ));
+            return Err(end(DriverExit::NoService, &[step("audiochan: the device-channel node could not be published to the hardware tree")]));
         }
         // The channel is the one child this driver publishes. A refused
         // settle only leaves the device manager to wait out its bound.
@@ -179,15 +141,15 @@ impl<A: Audio> Channel<A> {
 /// `wakes` are the device's event sources the loop parks on alongside the
 /// call endpoint; it needs at least one, or nothing would ever tell it a
 /// period passed. Never returns on the success path; every set-up refusal
-/// returns a reserved [`exit`](crate::exit) code so the driver ends
-/// fail-closed with a diagnosable reason rather than degrading into a busy
-/// re-poll.
+/// ends the driver fail-closed with its reason recorded rather than degrading
+/// into a busy re-poll.
 pub fn serve<A: Audio>(audio: A, wakes: &[DeviceWake]) -> i32 {
     if wakes.is_empty() {
-        return fail(
-            exit::NO_SERVICE,
-            "audiochan: the device names no event source to wait on",
-            None,
+        return end(
+            DriverExit::NoService,
+            &[step(
+                "audiochan: the device names no event source to wait on",
+            )],
         );
     }
     let channel = match Channel::publish(audio) {
@@ -196,10 +158,9 @@ pub fn serve<A: Audio>(audio: A, wakes: &[DeviceWake]) -> i32 {
     };
     let set = tairix_rt::waitset_create();
     if set < 0 {
-        return fail(
-            exit::NO_SERVICE,
-            "audiochan: the serve wait set could not be created",
-            None,
+        return end(
+            DriverExit::NoService,
+            &[step("audiochan: the serve wait set could not be created")],
         );
     }
     #[allow(clippy::cast_sign_loss)] // `set >= 0` is the wait-set handle.
@@ -216,43 +177,28 @@ pub fn serve<A: Audio>(audio: A, wakes: &[DeviceWake]) -> i32 {
             tairix_rt::waitset_ctl(set, WaitSetOp::Add, kind, id, EVENT_TOKEN) == 0
         });
     if !joined {
-        return fail(
-            exit::NO_SERVICE,
-            "audiochan: the call endpoint and the device's event sources could not be joined into the serve wait set",
-            None,
-        );
+        return end(DriverExit::NoService, &[step("audiochan: the call endpoint and the device's event sources could not be joined into the serve wait set")]);
     }
     serve_loop(channel, set)
 }
 
-/// Claim the first free id in the reserved device-channel endpoint block and
-/// bind it **restricted-sender requiring `CAP_AUDIO_DEVICE`**: the kernel
-/// admits a caller only if it holds that capability, so only the mixer can
-/// post to this driver (defence in depth atop the `CAP_IPC_BIND_PRIVILEGED`
-/// gate the reserved-id bind already demands). `recv_caps` is empty —
-/// endpoint ownership already restricts receive to this task. Returns the
-/// claimed id, or [`None`] if the whole block was already taken (every id
-/// squatted on — fail closed).
-fn claim_channel_endpoint() -> Option<u64> {
+/// Bind the device-channel endpoint of the node this driver was loaded for,
+/// **restricted-sender requiring `CAP_AUDIO_DEVICE`**, so only the mixer can
+/// post to it. `recv_caps` is empty — endpoint ownership already restricts
+/// receive to this task. [`None`] on any refusal (fail closed).
+fn bind_channel_endpoint() -> Option<u64> {
+    let id = AUDIO_CHANNEL_ENDPOINTS.endpoint(tairix_rt::hw_self_node().ok()?.node());
     let mut send_caps = CapabilitySet::empty();
     send_caps.insert(CapabilityId::AUDIO_DEVICE);
-    let recv_caps = CapabilitySet::empty();
-    let mut id = AUDIO_CHANNEL_ENDPOINT_BASE;
-    while is_audio_channel_endpoint(id) {
-        let bound = tairix_rt::call_create(
-            id,
-            &send_caps,
-            &recv_caps,
-            AUDIO_CHANNEL_MAX_REQUEST,
-            AUDIO_CHANNEL_MAX_REPLY,
-            ENDPOINT_CAPACITY,
-        );
-        if bound == 0 {
-            return Some(id);
-        }
-        id += 1;
-    }
-    None
+    let bound = tairix_rt::call_create(
+        id,
+        &send_caps,
+        &CapabilitySet::empty(),
+        AUDIO_CHANNEL_MAX_REQUEST,
+        AUDIO_CHANNEL_MAX_REPLY,
+        ENDPOINT_CAPACITY,
+    );
+    (bound == 0).then_some(id)
 }
 
 /// Publish the `audiochan` hardware-tree node carrying the claimed
@@ -285,10 +231,11 @@ fn serve_loop<A: Audio>(mut channel: Channel<A>, set: u64) -> i32 {
         let mut token = 0u64;
         let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
         if woke < 0 {
-            return fail(
-                exit::NO_SERVICE,
-                "audiochan: the serve wait set faulted; the device is no longer being served",
-                None,
+            return end(
+                DriverExit::NoService,
+                &[step(
+                    "audiochan: the serve wait set faulted; the device is no longer being served",
+                )],
             );
         }
         if woke != 0 {

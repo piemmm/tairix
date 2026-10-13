@@ -34,7 +34,7 @@
 //!    the life of the driver (never busy-polls).
 //!
 //! A bring-up failure exits with a reserved fail-closed code
-//! (`tairix_netchan::exit`), leaving the system without this NIC rather than
+//! (`tairix_drvrt::exit`), leaving the system without this NIC rather than
 //! wedged; the spawning supervisor decides whether to relaunch. On the host it
 //! is an inert stub so `cargo build --workspace`, clippy, and fmt still cover
 //! the file.
@@ -50,8 +50,8 @@ mod program {
     use tairix_abi::driver::virtio::VirtioHost;
     use tairix_abi::driver::virtio_pci::virtio_pci_windows;
     use tairix_abi::{DriverError, MmioMapper};
+    use tairix_drvrt::exit::{end, step, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use tairix_netchan::exit;
     use tairix_virtio::{MmioTransport, PciTransport};
     use tairix_virtio_net::VirtioNet;
 
@@ -69,10 +69,13 @@ mod program {
             .copied()
             .collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return exit::NO_HOST;
+            return end(DriverExit::NoHost, &[]);
         };
         let Some(irq_line) = host.irq_line() else {
-            return exit::NO_RESOURCES;
+            return end(
+                DriverExit::NoResources,
+                &[step("virtio-net: the node grants no interrupt line")],
+            );
         };
 
         // Bind the device interrupt line the serve loop parks on. This is the
@@ -83,7 +86,10 @@ mod program {
         // bound handle).
         let irq_ret = tairix_rt::irq_bind(irq_line);
         if irq_ret <= 0 {
-            return exit::BRINGUP_FAILED;
+            return end(
+                DriverExit::BringupFailed,
+                &[step("virtio-net: the interrupt line would not bind")],
+            );
         }
         #[allow(clippy::cast_sign_loss)] // `irq_ret > 0` is the minted IrqHandle.
         let irq_handle = irq_ret as u64;
@@ -100,34 +106,57 @@ mod program {
         match virtio_pci_windows(host.resources()) {
             Ok(windows) => {
                 let Ok(transport) = PciTransport::map(&windows, &host) else {
-                    return exit::BRINGUP_FAILED;
+                    return end(
+                        DriverExit::BringupFailed,
+                        &[step("virtio-net: the PCI windows would not map")],
+                    );
                 };
                 let vhost: &dyn VirtioHost = &host;
                 let Ok(net) = VirtioNet::open(transport, vhost, machine.as_ref()) else {
-                    return exit::BRINGUP_FAILED;
+                    return end(
+                        DriverExit::BringupFailed,
+                        &[step("virtio-net: the device would not open")],
+                    );
                 };
                 tairix_netchan::serve(net, irq_handle)
             }
             // No role-tagged window at all: a single-aperture MMIO delivery.
             Err(DriverError::NotFound) => {
                 let Ok((base, len)) = sole_register_window(host.resources()) else {
-                    return exit::NO_RESOURCES;
+                    return end(
+                        DriverExit::NoResources,
+                        &[step("virtio-net: the node names no single register window")],
+                    );
                 };
                 let Ok(window) = host.map_window(base, len) else {
-                    return exit::BRINGUP_FAILED;
+                    return end(
+                        DriverExit::BringupFailed,
+                        &[step("virtio-net: the register window would not map")],
+                    );
                 };
                 let Ok(transport) = MmioTransport::new(window) else {
-                    return exit::BRINGUP_FAILED;
+                    return end(
+                        DriverExit::BringupFailed,
+                        &[step("virtio-net: the MMIO transport would not open")],
+                    );
                 };
                 let vhost: &dyn VirtioHost = &host;
                 let Ok(net) = VirtioNet::open(transport, vhost, machine.as_ref()) else {
-                    return exit::BRINGUP_FAILED;
+                    return end(
+                        DriverExit::BringupFailed,
+                        &[step("virtio-net: the device would not open")],
+                    );
                 };
                 tairix_netchan::serve(net, irq_handle)
             }
             // Some virtio-PCI windows but not the full four — a malformed,
             // mis-provisioned node. Fail closed rather than half-bind.
-            Err(_) => exit::NO_RESOURCES,
+            Err(_) => end(
+                DriverExit::NoResources,
+                &[step(
+                    "virtio-net: the node grants some of the PCI windows, not all four",
+                )],
+            ),
         }
     }
 

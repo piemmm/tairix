@@ -27,47 +27,32 @@ use tairix_abi::{Errno, HwDeviceClass, HwMatchKey, HwNode};
 use tairix_blkclient::{RemoteBlock, RtBlkCall};
 use tairix_drv_storage_volmgr::name::{candidate, CANDIDATE_ATTEMPTS};
 use tairix_drv_storage_volmgr::plan::{plan_volumes, PlanSummary, VolumePlan};
+use tairix_drvrt::exit::{end, DriverExit};
 use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
 use tairix_util::fmt::format_hex_u64;
 
-/// Exit code when the rt-backed driver host could not be built from the
-/// kernel-delivered grants. A reserved, fail-closed value.
-const EXIT_NO_HOST: i32 = 90;
-
-/// Exit code when the matched storage node did not carry the blkio
-/// endpoint and shared-window grants this driver needs.
-const EXIT_NO_TRANSPORT: i32 = 91;
-
-/// Exit code when the served device could not be probed (a transport or
-/// device fault — never merely an unrecognised layout).
-const EXIT_DEVICE_FAILED: i32 = 92;
-
-/// Exit code when the wait-set the block transport parks each reply on could
-/// not be minted — without it every wait would have to become a poll.
-const EXIT_NO_WAITSET: i32 = 93;
-
 /// Diagnostic event id: the device was probed; carries the planned and
 /// unrecognised counts.
-const VOLMGR_PROBED: EventId = EventId(4180);
+const VOLMGR_PROBED: EventId = EventId(28_080);
 
 /// Diagnostic event id: one volume attached and published.
-const VOLMGR_ATTACHED: EventId = EventId(4181);
+const VOLMGR_ATTACHED: EventId = EventId(28_081);
 
 /// Diagnostic event id: one volume's attach was refused (the kernel's
 /// audited attach events carry the cause; this records the errno seen
 /// from this side).
-const VOLMGR_ATTACH_FAILED: EventId = EventId(4182);
+const VOLMGR_ATTACH_FAILED: EventId = EventId(28_082);
 
 /// Diagnostic event id: the device carried nothing attachable (no
 /// partition table, no recognised filesystem) — a normal outcome, logged
 /// so an unformatted stick is diagnosable.
-const VOLMGR_NOTHING_ATTACHABLE: EventId = EventId(4183);
+const VOLMGR_NOTHING_ATTACHABLE: EventId = EventId(28_083);
 
 /// Diagnostic event id: the device could not be probed (transport or
 /// device fault) and this instance is exiting for supervision.
-const VOLMGR_DEVICE_FAILED: EventId = EventId(4184);
+const VOLMGR_DEVICE_FAILED: EventId = EventId(28_084);
 
 /// Diagnostic event id: an extent (the whole device, or a partition) was
 /// recognised as a RAID array member and deliberately not attached — it
@@ -75,22 +60,22 @@ const VOLMGR_DEVICE_FAILED: EventId = EventId(4184);
 /// would diverge a mirror or serve stale data (`plans/FIX-IO.md` IO6). A
 /// normal outcome, logged so a member disk is diagnosable rather than looking
 /// blank.
-const VOLMGR_RAID_MEMBER: EventId = EventId(4185);
+const VOLMGR_RAID_MEMBER: EventId = EventId(28_085);
 
 /// Diagnostic event id: the RAID member node could not be published, so no
 /// agent will offer this device to the array composer and any array it belongs
 /// to stays short a member. Not fatal to this device's other volumes.
-const VOLMGR_RAID_MEMBER_UNPUBLISHED: EventId = EventId(4190);
+const VOLMGR_RAID_MEMBER_UNPUBLISHED: EventId = EventId(28_090);
 
 /// Diagnostic event id: the whole device carries nothing at all, so it was
 /// published as a device a new RAID array could be created over. A normal
 /// outcome for a fresh disk, logged so an administrator can see why a blank
 /// disk became nameable to the array tools.
-const VOLMGR_RAID_CANDIDATE: EventId = EventId(4191);
+const VOLMGR_RAID_CANDIDATE: EventId = EventId(28_091);
 
 /// Diagnostic event id: the blank-device node could not be published, so this
 /// disk cannot be named when creating an array. Not fatal to anything else.
-const VOLMGR_RAID_CANDIDATE_UNPUBLISHED: EventId = EventId(4192);
+const VOLMGR_RAID_CANDIDATE_UNPUBLISHED: EventId = EventId(28_092);
 
 /// Publish the member node the array composer's agent binds, re-declaring
 /// this device's transport under it (`plans/FIX-IO.md` `IO6c`).
@@ -238,14 +223,14 @@ fn probe_device<S: tairix_drvrt::GrantSyscalls>(
     // A window too small for the blkio data protocol is a mis-provisioned
     // node, refused before any slice is built over it.
     let Ok(window) = host.shared_buffer(BLK_DATA_LEN) else {
-        return Err(EXIT_NO_TRANSPORT);
+        return Err(end(DriverExit::NoResources, &[]));
     };
     let window = &mut window[..BLK_DATA_LEN];
 
     // The one wait-set this program's block transport parks its replies on.
     // The kernel reclaims it when this process exits.
     let Ok(waitset) = u64::try_from(tairix_rt::waitset_create()) else {
-        return Err(EXIT_NO_WAITSET);
+        return Err(end(DriverExit::NoService, &[]));
     };
     let mut client = match RemoteBlock::connect_read_only(RtBlkCall::new(endpoint, waitset), window)
     {
@@ -258,7 +243,7 @@ fn probe_device<S: tairix_drvrt::GrantSyscalls>(
                 "errno_hex",
                 err as u64,
             );
-            return Err(EXIT_DEVICE_FAILED);
+            return Err(end(DriverExit::DeviceFault, &[]));
         }
     };
 
@@ -277,7 +262,7 @@ fn probe_device<S: tairix_drvrt::GrantSyscalls>(
                 "errno_hex",
                 err as u64,
             );
-            Err(EXIT_DEVICE_FAILED)
+            Err(end(DriverExit::DeviceFault, &[]))
         }
     }
 }
@@ -328,21 +313,21 @@ fn main() -> i32 {
         .copied()
         .collect();
     let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-        return EXIT_NO_HOST;
+        return end(DriverExit::NoHost, &[]);
     };
     // The matched storage node carried two transport grants: the blkio
     // call endpoint (its id) and the shared data window (mapped by the probe;
     // its region id rides in every attach request the kernel re-checks
     // against this task's grants).
     let Some(endpoint) = host.endpoint_grant() else {
-        return EXIT_NO_TRANSPORT;
+        return end(DriverExit::NoResources, &[]);
     };
     let Some(window_id) = host
         .resources()
         .find(|resource| resource.kind() == Some(HwResourceKind::Shared))
         .map(tairix_abi::hwtree::HwResource::base)
     else {
-        return EXIT_NO_TRANSPORT;
+        return end(DriverExit::NoResources, &[]);
     };
 
     // Phase 1 — probe, then Phase 2 — attach. The order is the module's

@@ -31,6 +31,7 @@ use crate::sched::{CpuId, SchedError, Scheduler, SchedulerArch};
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{BootFacts, DescriptorTable, Errno};
 use tairix_caps::CapabilitySet;
+use tairix_kalloc::FreeListAllocator;
 use tairix_kernel_ipc::PortRegistry;
 use tairix_kernel_irq::{IrqController, IrqTable, MonotonicClock};
 use tairix_kernel_mem::{AllocError, FrameAllocator, PhysMap, UserAddressSpace};
@@ -2082,7 +2083,9 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // Withdraw the address-space-registry entry last of the driver's
         // resources: its grants, streams, limits and matched-node record, so
         // the node takes a successor only once nothing of this one holds on.
+        let driver = self.aspaces.read().loaded_driver(sec_id);
         self.aspaces.write().withdraw(sec_id);
+        crate::hwtree::driver_released(driver, tairix_abi::driver::DriverEnding::Unloaded);
 
         // The number the admission held is never returned: this teardown
         // omits part of the process teardown (`plans/OPEN-DEFECTS.md` D271),
@@ -2211,39 +2214,19 @@ fn run_phases<A: KernelArch>(
         log_sink,
     );
     let dma_reaches = crate::hwtree::dma_reaches(hw_tree);
-    let frame_allocator: &'static FrameAllocator = Box::leak(Box::new(
-        FrameAllocator::with_dma_reaches(memory_map, &dma_reaches).map_err(InitError::Mem)?,
-    ));
-    // Activate growable kernel-heap backing at the first point every
-    // required component exists. Scheduler/runtime initialization allocates
-    // from the heap, so deferring this until after those allocations can
-    // exhaust the fixed bootstrap region on a valid discovered-sized
-    // topology.
-    //
-    // Growth assembles each region out of several physical chunks mapped
-    // into the port's kernel remap window, so it needs both the direct map
-    // (to reach a page-table frame) and that window. A port that supplies
-    // neither leaves the heap on its bootstrap region — fail closed, never a
-    // panic. The arch handle is lifted to `'static` because the window's map
-    // keeps the port's cross-CPU invalidation for the life of the image.
-    if let Some(physmap) = arch.direct_phys_map() {
-        let arch_arc: &'static Arc<A> = Box::leak(Box::new(Arc::clone(&arch)));
-        let arch_static: &'static A = arch_arc;
-        if let Some(kvmap) = A::install_kernel_remap(arch_static, frame_allocator, physmap) {
-            // The window's two consumers are split here, at the one site that
-            // installs both: the stack tier takes the top of the window and
-            // the heap keeps the rest, so neither can hand out address space
-            // the other owns.
-            let heap_pages = crate::kstack::install_kernel_stacks(frame_allocator, physmap, kvmap);
-            crate::kheap::install_frame_heap_source(
-                heap,
-                frame_allocator,
-                physmap,
-                kvmap,
-                heap_pages,
-            );
-        }
-    }
+    let physmap = arch.direct_phys_map();
+    // The metadata scales with RAM, so it is carved from RAM rather than drawn
+    // from a bootstrap arena sized before any RAM was discovered.
+    let frames = match physmap {
+        Some(physmap) => FrameAllocator::with_dma_reaches_carved(memory_map, &dma_reaches, physmap),
+        None => FrameAllocator::with_dma_reaches(memory_map, &dma_reaches),
+    };
+    let frame_allocator: &'static FrameAllocator =
+        Box::leak(Box::new(frames.map_err(InitError::Mem)?));
+    // Growth is installed at the first point every component it needs exists:
+    // everything allocated before this has to fit the bootstrap arena.
+    let growth = install_heap_growth(&arch, heap, frame_allocator, physmap);
+    record_heap_growth(log_sink, heap, growth);
     phase_ready(log_sink, Phase::Mem);
 
     // Phase 3 — Sec. Build the compiled-in system identity (the OS-owned
@@ -3358,6 +3341,77 @@ pub(crate) struct KernelState<A: KernelArch> {
     pub(crate) mastering: Option<crate::iommu::Mastering>,
 }
 
+/// Whether the kernel heap grows past its bootstrap arena.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeapGrowth {
+    Installed,
+    /// The port has no direct physical map, so nothing can back growth.
+    None,
+    /// The port has a direct map, but its remap window or the window's
+    /// bookkeeping could not be set up.
+    Failed,
+}
+
+/// Install the frame-backed growth source into `heap`.
+///
+/// Growth assembles each region out of several physical chunks mapped into
+/// the port's kernel remap window, so it needs both the direct map (to reach a
+/// page-table frame) and that window. The arch handle is lifted to `'static`
+/// because the window's map keeps the port's cross-CPU invalidation for the
+/// life of the image.
+fn install_heap_growth<A: KernelArch + 'static>(
+    arch: &Arc<A>,
+    heap: &'static FreeListAllocator,
+    frames: &'static FrameAllocator,
+    physmap: Option<&'static (dyn PhysMap + Sync)>,
+) -> HeapGrowth {
+    let Some(physmap) = physmap else {
+        return HeapGrowth::None;
+    };
+    let arch_static: &'static A = Box::leak(Box::new(Arc::clone(arch)));
+    let Some(kvmap) = A::install_kernel_remap(arch_static, frames, physmap) else {
+        return HeapGrowth::Failed;
+    };
+    // The window's two consumers are split here, at the one site that
+    // installs both: the stack tier takes the top of the window and the heap
+    // keeps the rest, so neither can hand out address space the other owns.
+    let heap_pages = crate::kstack::install_kernel_stacks(frames, physmap, kvmap);
+    if crate::kheap::install_frame_heap_source(heap, frames, physmap, kvmap, heap_pages) {
+        HeapGrowth::Installed
+    } else {
+        HeapGrowth::Failed
+    }
+}
+
+/// Record how the heap grows, with what boot needed of its bootstrap arena
+/// before it could: the evidence the arena's size rests on.
+fn record_heap_growth(sink: &(dyn Sink + Sync), heap: &FreeListAllocator, growth: HeapGrowth) {
+    let (level, label) = match growth {
+        HeapGrowth::Installed => (Level::Info, "installed"),
+        HeapGrowth::None => (Level::Info, "none"),
+        HeapGrowth::Failed => (Level::Warn, "failed"),
+    };
+    emit(
+        sink,
+        level,
+        AuditEvent::KernelHeapGrowth,
+        &[
+            Field {
+                key: "growth",
+                value: tairix_log::FieldValue::Str(label),
+            },
+            Field {
+                key: "bootstrap_bytes",
+                value: tairix_log::FieldValue::UnsignedInt(heap.capacity() as u64),
+            },
+            Field {
+                key: "peak_bytes",
+                value: tairix_log::FieldValue::UnsignedInt(heap.peak_used() as u64),
+            },
+        ],
+    );
+}
+
 fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {
     emit(
         sink,
@@ -3477,15 +3531,15 @@ mod tests {
             Err(err) => panic!("phases must succeed, got {err:?}"),
         }
 
-        // Build the expected event sequence: for each phase a
-        // `PhaseStarted` followed by a `PhaseReady`.
+        // For each phase a `PhaseStarted` followed by a `PhaseReady`, with
+        // the heap-growth decision inside `mem`.
         let expected: alloc::vec::Vec<u32> = Phase::ORDER
             .iter()
-            .flat_map(|_| {
-                [
-                    AuditEvent::PhaseStarted.id().0,
-                    AuditEvent::PhaseReady.id().0,
-                ]
+            .flat_map(|&phase| {
+                let within = (phase == Phase::Mem).then_some(AuditEvent::KernelHeapGrowth.id().0);
+                core::iter::once(AuditEvent::PhaseStarted.id().0)
+                    .chain(within)
+                    .chain(core::iter::once(AuditEvent::PhaseReady.id().0))
             })
             .collect();
         assert_eq!(log_sink.event_ids(), expected);
@@ -3587,6 +3641,72 @@ mod tests {
         assert!(audit_sink.snapshot().iter().any(|event| {
             event.id == AuditEvent::ProcessSpawnFailed.id() && event.level == Level::Error
         }));
+    }
+
+    #[test]
+    fn phase_mem_records_how_the_heap_grows_and_what_boot_needed_first() {
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let heap = boot.heap;
+        // Host kernel code allocates from the test process's own heap, so
+        // the boot heap holds only what the test puts there.
+        let layout = core::alloc::Layout::from_size_align(PAGE_SIZE, 16).unwrap();
+        // SAFETY: a non-zero layout.
+        let block = unsafe { core::alloc::GlobalAlloc::alloc(heap, layout) };
+        assert!(!block.is_null());
+        run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+
+        let events = log_sink.snapshot();
+        let at = |id: tairix_log::EventId, phase: &str| {
+            events
+                .iter()
+                .position(|e| e.id == id && e.fields[0].1 == phase)
+                .expect("phase record present")
+        };
+        let growth = AuditEvent::KernelHeapGrowth.id();
+        let records: alloc::vec::Vec<_> = events.iter().filter(|e| e.id == growth).collect();
+        assert_eq!(records.len(), 1);
+        let record = records[0];
+        // The host arch has no direct physical map, so nothing backs growth.
+        assert_eq!(record.level, Level::Info);
+        let field = |key: &str| {
+            record
+                .fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+                .expect("field present")
+        };
+        assert_eq!(field("growth"), "none");
+        assert_eq!(
+            field("bootstrap_bytes"),
+            alloc::format!("{}", heap.capacity())
+        );
+        assert_eq!(field("peak_bytes"), alloc::format!("{}", heap.peak_used()));
+        assert!(heap.peak_used() >= PAGE_SIZE);
+        let position = events.iter().position(|e| e.id == growth).unwrap();
+        assert!(at(AuditEvent::PhaseStarted.id(), "mem") < position);
+        assert!(position < at(AuditEvent::PhaseReady.id(), "mem"));
+        // SAFETY: `block` came from `heap` with `layout`.
+        unsafe { core::alloc::GlobalAlloc::dealloc(heap, block, layout) };
+    }
+
+    #[test]
+    fn only_a_growth_source_that_failed_to_install_is_a_warning() {
+        let heap = crate::test_heap::leak_heap().expect("host test heap");
+        for (growth, level, label) in [
+            (HeapGrowth::Installed, Level::Info, "installed"),
+            (HeapGrowth::None, Level::Info, "none"),
+            (HeapGrowth::Failed, Level::Warn, "failed"),
+        ] {
+            let sink = TestSink::new();
+            record_heap_growth(&sink, heap, growth);
+            let events = sink.snapshot();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].level, level);
+            assert_eq!(events[0].fields[0], ("growth".into(), label.into()));
+        }
     }
 
     #[test]

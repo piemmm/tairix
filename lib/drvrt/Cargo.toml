@@ -21,9 +21,7 @@ tairix-caps = { path = "../caps", version = "=0.0.0" }
 # the production `GrantSyscalls` impl forwards to (one syscall trap). The
 # crate is generic over the seam so its logic is host-tested without a kernel.
 tairix-rt = { path = "../rt", version = "=0.0.0" }
-
-[target.'cfg(target_os = "none")'.dependencies]
-# The records a supplier's serve loop writes its decisions as.
+# The records a driver's ending and a supplier's serve loop are written as.
 tairix-log = { path = "../log", version = "=0.0.0" }
 
 [features]

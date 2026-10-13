@@ -60,6 +60,7 @@ pub mod display;
 pub mod dma;
 pub mod dmaengine;
 pub mod encoder;
+pub mod exit;
 pub mod filesystem;
 pub mod i2c;
 pub mod input;
@@ -80,6 +81,7 @@ pub mod virtio_mmio;
 pub mod virtio_pci;
 
 pub use dma::{DmaHost, DmaReach, DmaSlab, PoolId, SlabEnd, SlabFreeFn};
+pub use exit::{DriverEnding, DriverExit};
 pub use i2c::{I2cAddress, I2cPort};
 pub use mailbox::MailboxChannel;
 pub use mmio::{MmioMapError, MmioMapper, RegisterBlock, RegisterWindow, WindowError};

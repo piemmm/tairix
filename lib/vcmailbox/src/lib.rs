@@ -912,20 +912,22 @@ pub fn encode_display_done() -> [u32; PROPERTY_WORDS] {
     request(&[(TAG_NOTIFY_DISPLAY_DONE, &[])])
 }
 
-/// The firmware's answer to [`encode_display_done`] when it does not confirm
-/// that it stopped driving the display, in its own codes.
+/// The firmware's answer to [`encode_display_done`] when it refused it, in
+/// its own codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Unconfirmed {
     /// The message's response code; a refusal is `0x8000_0001`.
     pub header: u32,
-    /// The tag's code word, while the message still frames the tag. A
-    /// firmware that did not process the tag leaves it a request's.
+    /// The tag's code word, while the message still frames the tag.
     pub tag: Option<u32>,
 }
 
-/// Whether the firmware's answer to [`encode_display_done`] confirms it has
-/// stopped driving the display: an OK message whose tag it processed. The tag
-/// carries no values, so its response length is not read.
+/// Whether the firmware accepted [`encode_display_done`]: an OK message that
+/// still frames the tag.
+///
+/// The Pi 4's firmware leaves a value-less tag's code word as the request
+/// left it, as it does [`encode_gpio_state_write`]'s, so the message header
+/// is all it answers — and all Linux's `rpi_firmware_property` reads.
 ///
 /// # Errors
 ///
@@ -934,7 +936,7 @@ pub fn decode_display_done_response(words: &[u32; PROPERTY_WORDS]) -> Result<(),
     let tag = locate_tag(words, TAG_NOTIFY_DISPLAY_DONE)
         .ok()
         .map(|tag| tag.code);
-    if words[1] == CODE_RESPONSE_OK && tag.is_some_and(|code| code & TAG_RESPONSE_BIT != 0) {
+    if words[1] == CODE_RESPONSE_OK && tag.is_some() {
         Ok(())
     } else {
         Err(Unconfirmed {
@@ -1119,6 +1121,19 @@ impl FirmwareClock {
     #[must_use]
     pub const fn as_u32(self) -> u32 {
         self as u32
+    }
+
+    /// The least rate the clock is ever asked for, where what it feeds needs
+    /// more than the firmware's own minimum: the HDMI blocks' registers stall
+    /// the bus while their state-machine clock runs below 120 MHz, at zero
+    /// most of all, and the firmware leaves it at zero on a board booted with
+    /// no monitor. Linux's `clk-raspberrypi` holds the same bound.
+    #[must_use]
+    pub const fn least_hz(self) -> u64 {
+        match self {
+            Self::M2mc => 120_000_000,
+            Self::Arm | Self::Core | Self::Emmc2 | Self::PixelBvb => 0,
+        }
     }
 }
 

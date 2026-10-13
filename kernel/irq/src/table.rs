@@ -346,6 +346,10 @@ pub struct IrqTable {
     /// binding is woken by: one is ready while the count has moved past the
     /// last value it took.
     fires: Vec<AtomicU64>,
+    /// Per-line instant of the latest fire, on the installed clock; zero
+    /// before the first or while no clock is installed. Stamped before
+    /// [`Self::fires`] advances, so a waiter that takes the fire sees it.
+    last_fire_ns: Vec<AtomicU64>,
     /// Per-line "it has a binding" flags, written under the `Inner` write
     /// lock and read lock-free by [`IrqTable::fire`].
     bound: Vec<AtomicBool>,
@@ -450,6 +454,7 @@ impl IrqTable {
             storm_fire_count: (0..slots).map(|_| AtomicU32::new(0)).collect(),
             quarantined: (0..slots).map(|_| AtomicBool::new(false)).collect(),
             fires: (0..slots).map(|_| AtomicU64::new(0)).collect(),
+            last_fire_ns: (0..slots).map(|_| AtomicU64::new(0)).collect(),
             bound: (0..slots).map(|_| AtomicBool::new(false)).collect(),
         }
     }
@@ -781,9 +786,17 @@ impl IrqTable {
         // Interrupt context: only the lock-free per-line atomics. Taking
         // `Inner`'s lock here would deadlock a CPU whose parked task holds it.
         let slot = line as usize;
-        let (Some(bound), Some(fires)) = (self.bound.get(slot), self.fires.get(slot)) else {
+        let (Some(bound), Some(fires), Some(last_fire)) = (
+            self.bound.get(slot),
+            self.fires.get(slot),
+            self.last_fire_ns.get(slot),
+        ) else {
             return Ok(FireOutcome::Stray);
         };
+        let now = self.now_ns();
+        if let Some(now) = now {
+            last_fire.store(now, Ordering::Relaxed);
+        }
         // `mask` fenced before returning; advancing the count after it is
         // what a waiter's `SeqCst` take pairs with.
         fires.fetch_add(1, Ordering::SeqCst);
@@ -794,26 +807,26 @@ impl IrqTable {
         // A line firing past its rate budget stays masked and stops being
         // re-armed, so a never-quiesced or hostile source cannot peg a CPU
         // through the mask/wake/re-arm cycle.
-        if self.note_fire_and_quarantined(slot) {
+        if self.note_fire_and_quarantined(slot, now) {
             return Ok(FireOutcome::Quarantined);
         }
         Ok(FireOutcome::Marked)
     }
 
-    /// Record one fire of `line` against its sliding-window rate budget and
-    /// report whether the line is now (or already) **quarantined**.
+    /// Record one fire of `line` at `now` against its sliding-window rate
+    /// budget and report whether the line is now (or already)
+    /// **quarantined**.
     ///
     /// Wait-free, for [`Self::fire`]'s interrupt context; inert until a
     /// clock is installed. Cross-CPU races on the count only shift the trip
     /// point by a few fires, immaterial against [`STORM_FIRE_BUDGET`].
-    fn note_fire_and_quarantined(&self, line: usize) -> bool {
+    fn note_fire_and_quarantined(&self, line: usize, now: Option<u64>) -> bool {
         if self.quarantined[line].load(Ordering::Acquire) {
             return true;
         }
-        let Ok(Some(clock)) = self.clock.get() else {
+        let Some(now) = now else {
             return false;
         };
-        let now = clock.now_ns();
         let start = self.storm_window_start_ns[line].load(Ordering::Relaxed);
         if now.saturating_sub(start) >= STORM_WINDOW_NS {
             self.storm_window_start_ns[line].store(now, Ordering::Relaxed);
@@ -828,6 +841,25 @@ impl IrqTable {
             return true;
         }
         false
+    }
+
+    /// The installed clock's reading, or [`None`] before one is installed.
+    #[must_use]
+    pub fn now_ns(&self) -> Option<u64> {
+        match self.clock.get() {
+            Ok(Some(clock)) => Some(clock.now_ns()),
+            _ => None,
+        }
+    }
+
+    /// The instant, on the installed clock, the line bound to `handle` for
+    /// `caller` last fired: [`None`] for a forged or foreign handle, or before
+    /// a clock is installed or the line has fired.
+    #[must_use]
+    pub fn last_fire_ns(&self, handle: IrqHandle, caller: ProcessId) -> Option<u64> {
+        let line = self.line_for(handle, caller)?;
+        let at = self.last_fire_ns[line as usize].load(Ordering::Relaxed);
+        (at != 0).then_some(at)
     }
 
     /// Whether the line bound to `handle` for `caller` has been
@@ -1674,6 +1706,36 @@ mod tests {
 
     fn leak_clock(now: u64) -> &'static MockClock {
         alloc::boxed::Box::leak(alloc::boxed::Box::new(MockClock::at(now)))
+    }
+
+    #[test]
+    fn a_fire_stamps_its_line_for_the_owner_alone() {
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let out = t.bind(7, ProcessId(1)).unwrap();
+        assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
+        assert_eq!(
+            t.last_fire_ns(out.handle, ProcessId(1)),
+            None,
+            "no clock yet"
+        );
+
+        let clock = leak_clock(500);
+        t.set_clock(clock).expect("clock installs once");
+        assert_eq!(
+            t.last_fire_ns(out.handle, ProcessId(1)),
+            None,
+            "not fired since"
+        );
+        assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
+        clock.set(900);
+        assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
+        assert_eq!(t.last_fire_ns(out.handle, ProcessId(1)), Some(900));
+        assert_eq!(
+            t.last_fire_ns(out.handle, ProcessId(2)),
+            None,
+            "a foreign caller"
+        );
     }
 
     #[test]

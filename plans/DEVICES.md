@@ -588,7 +588,7 @@ volume-policy service.
   the filesystem, mounts under `/Storage/<name>`, publishes the durable
   `id::` root). It then exits `0` — run-to-completion; the kernel-held
   mount outlives it, and a re-plug re-discovers and reloads afresh.
-  Events 4180–4184 log probe/attach/nothing-attachable/device-failed.
+  Events 28080–28084 log probe/attach/nothing-attachable/device-failed.
 - **Naming is deterministic, never a coin-flip:**
   1. the volume's own label, sanitised through the alias character rules
      (ALIAS.md §5.2: lowercased `a-z0-9-_`, everything else dropped,

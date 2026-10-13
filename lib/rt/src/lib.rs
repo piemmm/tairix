@@ -3624,9 +3624,9 @@ fn clamp_utf8(s: &str, max: usize) -> &str {
 }
 
 /// The first event id of the range `lib/rt` owns.
-pub const RT_RANGE_START: u32 = 26_000;
+pub const RT_RANGE_START: u32 = tairix_log::registry::RT.start();
 /// One past the last event id of the range `lib/rt` owns.
-pub const RT_RANGE_END: u32 = 27_000;
+pub const RT_RANGE_END: u32 = tairix_log::registry::RT.end();
 
 /// The event the runtime records when a program dies in its panic handler.
 ///

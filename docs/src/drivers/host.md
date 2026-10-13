@@ -61,7 +61,9 @@ driver; tests wire it to an in-memory map; the Stage 4 QEMU integration
 test wires it to a `.rodata` blob baked in by `build.rs`. `path` is an
 opaque `&str` chosen by the caller; the host stores it verbatim so that
 `reload(handle)` can re-fetch the same image without re-deriving its
-location.
+location. `ImageSource::read_prefix(path, len, buf)` reads at most the
+first `len` bytes; its default reads the image and truncates, and the
+`/System` file service overrides it with a bounded read.
 
 ### Driver spawner
 
@@ -179,10 +181,13 @@ signed bundles under `/System/Drivers/` (`AGENTS.md` §18.6). The
 caller enumerated (a VFS directory walk of `/System/Drivers/` in
 production; the bin-crate boot wiring is the one layer that may name
 both `drvhost` and `devmgr`, `AGENTS.md` §17.4) and an `ImageSource`,
-`scan_store(source, paths, sink) -> DriverStore` reads each bundle,
-parses its `.rxe` manifest with the same `ParsedImage` splitter the
-load gate uses (so the match data can never drift from the gate's view
-of the bytes, `AGENTS.md` §2.2), and decodes its bind table fail-closed.
+`scan_store(source, paths, sink) -> DriverStore` reads each bundle's
+manifest prefix — at most `ParsedImage::PREFIX_MAX` bytes, the most a
+header, capability body and bind table the decode admits can take, so
+none of the program behind them — parses it with the same `ParsedImage`
+splitter the load gate uses (so the match data can never drift from the
+gate's view of the bytes, `AGENTS.md` §2.2), and decodes its bind table
+fail-closed.
 Each accepted bundle becomes an owned `ScannedDriver`, and
 `DriverStore::candidates()` lends the borrowed `DriverCandidate` slice
 that `tairix_devmgr::DeviceManager::autoload` matches against the

@@ -21,7 +21,7 @@
 //! logged and retried at the next reaction, exactly like an unavailable driver
 //! store — never fatal to the observe loop.
 
-use alloc::collections::BTreeSet;
+use alloc::collections::BTreeMap;
 
 use tairix_abi::driver::net_channel::NETCHAN_NODE_COMPATIBLE;
 use tairix_abi::hwtree::{HwMatchKind, HwResourceKind};
@@ -51,6 +51,9 @@ pub trait NetstackBind {
     /// resolvable) so a `network.conf` `<iface>.match.node` binding can name
     /// this physical device by where it sits on the bus.
     ///
+    /// Answers the bound interface's device MAC, which is how a
+    /// `network.conf` `<iface>.match.mac` selector names it.
+    ///
     /// # Errors
     ///
     /// The stack's typed refusal, or a transport failure — treated
@@ -61,7 +64,7 @@ pub trait NetstackBind {
         endpoint_id: u64,
         iface: &[u8; IF_NAME_LEN],
         node_location: u64,
-    ) -> Result<(), Errno>;
+    ) -> Result<[u8; 6], Errno>;
 
     /// Deliver the stack-wide `net.*` policy to the network stack
     /// (`plans/NETWORK.md` N9b-2).
@@ -90,8 +93,7 @@ pub trait NetstackBind {
     ///
     /// # Errors
     ///
-    /// The stack's typed refusal ([`Errno::NotFound`] when the interface is
-    /// not yet bound — the caller retries silently) or a transport failure.
+    /// The stack's typed refusal or a transport failure.
     fn apply_interface_config(&mut self, config: &NetInterfaceConfigMsg) -> Result<(), Errno>;
 
     /// Compose (or reconfigure) a bond interface in the network stack
@@ -104,9 +106,7 @@ pub trait NetstackBind {
     ///
     /// # Errors
     ///
-    /// The stack's typed refusal ([`Errno::NotFound`] when a declared
-    /// member is not yet bound — the caller retries silently) or a
-    /// transport failure.
+    /// The stack's typed refusal or a transport failure.
     fn apply_bond_config(&mut self, config: &NetBondConfigMsg) -> Result<(), Errno>;
 }
 
@@ -119,9 +119,19 @@ pub trait NetstackBind {
 /// (a refused one is retried under the same name next time).
 #[derive(Default)]
 pub struct NetBindState {
-    bound: BTreeSet<u64>,
+    bound: BTreeMap<u64, BoundNic>,
     next_index: u32,
     deferred: bool,
+}
+
+/// A NIC channel handed to the network stack, as a `network.conf` selector
+/// names it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BoundNic {
+    /// The interface's device MAC, as the stack read it from the driver.
+    pub mac: [u8; 6],
+    /// The NIC's hardware location, `0` when none was resolvable.
+    pub node_location: u64,
 }
 
 impl NetBindState {
@@ -134,7 +144,12 @@ impl NetBindState {
     /// Whether the channel `endpoint_id` has already been handed over.
     #[must_use]
     pub fn is_bound(&self, endpoint_id: u64) -> bool {
-        self.bound.contains(&endpoint_id)
+        self.bound.contains_key(&endpoint_id)
+    }
+
+    /// Every NIC handed over.
+    pub fn nics(&self) -> impl Iterator<Item = &BoundNic> {
+        self.bound.values()
     }
 
     /// Whether the last pass left a discovered channel unbound.
@@ -214,7 +229,7 @@ pub fn bind_new_channels(
         let Some(endpoint) = netchan_endpoint(node) else {
             continue;
         };
-        if state.bound.contains(&endpoint) {
+        if state.bound.contains_key(&endpoint) {
             continue;
         }
         let iface = iface_name(state.next_index);
@@ -229,8 +244,10 @@ pub fn bind_new_channels(
         // configuration can bind an admin alias to this physical device.
         let node_location = netchan_node_location(node, nodes);
         match netstack.bind_driver(endpoint, &iface, node_location) {
-            Ok(()) => {
-                state.bound.insert(endpoint);
+            Ok(mac) => {
+                state
+                    .bound
+                    .insert(endpoint, BoundNic { mac, node_location });
                 state.next_index = state.next_index.saturating_add(1);
                 audit(
                     sink,
@@ -372,11 +389,11 @@ mod tests {
     /// answers each with a scripted result.
     struct RecordingBind {
         calls: RefCell<Vec<(u64, [u8; IF_NAME_LEN], u64)>>,
-        results: RefCell<Vec<Result<(), Errno>>>,
+        results: RefCell<Vec<Result<[u8; 6], Errno>>>,
     }
 
     impl RecordingBind {
-        fn new(results: Vec<Result<(), Errno>>) -> Self {
+        fn new(results: Vec<Result<[u8; 6], Errno>>) -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
                 results: RefCell::new(results),
@@ -390,11 +407,11 @@ mod tests {
             endpoint_id: u64,
             iface: &[u8; IF_NAME_LEN],
             node_location: u64,
-        ) -> Result<(), Errno> {
+        ) -> Result<[u8; 6], Errno> {
             self.calls
                 .borrow_mut()
                 .push((endpoint_id, *iface, node_location));
-            self.results.borrow_mut().pop().unwrap_or(Ok(()))
+            self.results.borrow_mut().pop().unwrap_or(Ok(MAC))
         }
 
         fn apply_settings(&mut self, _settings: NetworkSettings) -> Result<(), Errno> {
@@ -409,6 +426,8 @@ mod tests {
             Ok(())
         }
     }
+
+    const MAC: [u8; 6] = [2, 0, 0, 0, 0, 1];
 
     struct NullSink;
     impl Sink for NullSink {
@@ -455,7 +474,7 @@ mod tests {
     fn each_channel_is_bound_once_and_named_in_order() {
         let nodes = alloc::vec![netchan_node(2, 100), netchan_node(3, 200)];
         let mut state = NetBindState::new();
-        let mut bind = RecordingBind::new(alloc::vec![Ok(()), Ok(())]);
+        let mut bind = RecordingBind::new(alloc::vec![Ok(MAC), Ok(MAC)]);
         bind_new_channels(&nodes, &mut state, &mut bind, &NullSink);
         // First pass binds both, names net0/net1. No parent device node is
         // present, so each reports no hardware location (`0`).
@@ -474,7 +493,7 @@ mod tests {
         let nodes = alloc::vec![netchan_node(2, 100)];
         let mut state = NetBindState::new();
         // First call refused, second (retry) accepted.
-        let mut bind = RecordingBind::new(alloc::vec![Ok(()), Err(Errno::NotConnected)]);
+        let mut bind = RecordingBind::new(alloc::vec![Ok(MAC), Err(Errno::NotConnected)]);
         bind_new_channels(&nodes, &mut state, &mut bind, &NullSink);
         assert!(!state.is_bound(100), "a refused bind is not recorded");
         bind_new_channels(&nodes, &mut state, &mut bind, &NullSink);
@@ -501,7 +520,7 @@ mod tests {
         channel.set_identity(8, 7);
         let nodes = alloc::vec![device, channel];
         let mut state = NetBindState::new();
-        let mut bind = RecordingBind::new(alloc::vec![Ok(())]);
+        let mut bind = RecordingBind::new(alloc::vec![Ok(MAC)]);
         bind_new_channels(&nodes, &mut state, &mut bind, &NullSink);
         // The interface is bound carrying the parent's register-window base
         // as its stable hardware location.

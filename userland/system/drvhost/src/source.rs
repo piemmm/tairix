@@ -39,6 +39,17 @@ pub trait ImageSource {
     /// Read the bytes for `path` into `buf`, appending to whatever is
     /// already there.
     fn read(&self, path: &str, buf: &mut Vec<u8>) -> Result<(), Errno>;
+
+    /// Append at most the first `len` bytes of `path` to `buf`.
+    ///
+    /// A source that can read part of an image overrides this, so a reader
+    /// of the manifest at its head moves none of the program behind it.
+    fn read_prefix(&self, path: &str, len: usize, buf: &mut Vec<u8>) -> Result<(), Errno> {
+        let start = buf.len();
+        self.read(path, buf)?;
+        buf.truncate(start.saturating_add(len));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -73,6 +84,21 @@ mod tests {
         let mut out = vec![0xFFu8];
         m.read("/d/one", &mut out).expect("known path");
         assert_eq!(out, vec![0xFF, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_prefix_read_appends_at_most_the_bytes_asked_for() {
+        let mut m = MemMap(BTreeMap::new());
+        m.0.insert("/d/one".to_string(), vec![1u8, 2, 3]);
+        let mut out = vec![0xFFu8];
+        m.read_prefix("/d/one", 2, &mut out).expect("known path");
+        assert_eq!(out, vec![0xFF, 1, 2]);
+        m.read_prefix("/d/one", 9, &mut out).expect("a short image");
+        assert_eq!(out, vec![0xFF, 1, 2, 1, 2, 3]);
+        assert_eq!(
+            m.read_prefix("/d/missing", 2, &mut out),
+            Err(Errno::NotFound)
+        );
     }
 
     #[test]

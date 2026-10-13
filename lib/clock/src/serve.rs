@@ -13,14 +13,14 @@ use tairix_abi::hwtree::HwResource;
 use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
 use tairix_abi::PROC_ID_HEX_LEN;
 use tairix_caps::CapabilitySet;
-use tairix_drvrt::serve::{exit, fail, instance_field, log_event, DutyNode, Endpoint, Service};
+use tairix_drvrt::exit::{end, step, DriverExit};
+use tairix_drvrt::serve::{instance_field, log_event, DutyNode, Endpoint, Service};
 use tairix_drvrt::{Recorder, RtSupplier};
 use tairix_log::{EventId, Field, FieldValue, Level};
 
 use crate::{ClockHardware, Controller, Record};
 
 const EVENT_READY: EventId = EventId(24_300);
-const EVENT_FAILED: EventId = EventId(24_301);
 const EVENT_RAN: EventId = EventId(24_302);
 const EVENT_JOINED: EventId = EventId(24_303);
 const EVENT_STOPPED: EventId = EventId(24_304);
@@ -28,6 +28,7 @@ const EVENT_ABANDONED: EventId = EventId(24_305);
 const EVENT_CUT: EventId = EventId(24_306);
 const EVENT_STUCK: EventId = EventId(24_307);
 const EVENT_REFUSED: EventId = EventId(24_308);
+const EVENT_UNRETURNED: EventId = EventId(24_309);
 
 /// The clock controller node the driver running with `caps` was loaded for.
 ///
@@ -36,14 +37,7 @@ const EVENT_REFUSED: EventId = EventId(24_308);
 /// The exit code to end with, its reason logged: grants that cannot be read,
 /// or a node carrying no clock duty.
 pub fn open(caps: CapabilitySet) -> Result<DutyNode, i32> {
-    DutyNode::open(caps, LinkRole::Clock, EVENT_FAILED)
-}
-
-/// Record that bring-up failed for `reason`, and answer the code the driver
-/// ends with: what a driver's own step, building its hardware, reports.
-#[must_use]
-pub fn bringup_failed(reason: &'static str) -> i32 {
-    fail(EVENT_FAILED, exit::BRINGUP_FAILED, reason)
+    DutyNode::open(caps, LinkRole::Clock)
 }
 
 /// The rate the tree states for the fixed clock at `entry` of `node`'s
@@ -57,9 +51,11 @@ pub fn fixed_rate(node: &DutyNode, entry: u8) -> Result<u64, i32> {
         .filter_map(HwResource::fixed_clock)
         .find_map(|(at, hz)| (at == entry).then_some(hz))
         .ok_or_else(|| {
-            node.fail(
-                exit::NO_RESOURCES,
-                "clock: the tree states no rate for a clock the node is fed from",
+            end(
+                DriverExit::NoResources,
+                &[step(
+                    "clock: the tree states no rate for a clock the node is fed from",
+                )],
             )
         })
 }
@@ -73,9 +69,9 @@ pub fn serve<H: ClockHardware>(node: &DutyNode, hardware: H) -> i32 {
     let endpoint = node.duty().endpoint();
     let Ok(mut controller) = Controller::new(hardware, RtSupplier::new(endpoint), Log, endpoint)
     else {
-        return node.fail(
-            exit::BRINGUP_FAILED,
-            "clock: the clocks' table could not be made",
+        return end(
+            DriverExit::BringupFailed,
+            &[step("clock: the clocks' table could not be made")],
         );
     };
     let mut request = [0u8; CLOCK_MAX_REQUEST];
@@ -97,7 +93,7 @@ pub fn serve<H: ClockHardware>(node: &DutyNode, hardware: H) -> i32 {
         }
         Err(ended) => ended,
     };
-    node.fail(exit::SERVE_FAILED, ended.reason())
+    ended.end()
 }
 
 /// The system log, as a clock endpoint records to it.
@@ -154,6 +150,12 @@ impl Recorder<Record> for Log {
                 Level::Error,
                 EVENT_STUCK,
                 "clock: would not change; left as it is",
+                &[clock_field(clock)],
+            ),
+            Record::Unreturned { clock } => log_event(
+                Level::Warn,
+                EVENT_UNRETURNED,
+                "clock: could not be returned with its last holder; left running",
                 &[clock_field(clock)],
             ),
             Record::Refused { op, caller, reason } => {

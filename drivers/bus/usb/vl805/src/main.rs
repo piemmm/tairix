@@ -69,31 +69,8 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_drv_bus_usb_vl805::wiring::{build_xhci_node, reload_firmware_and_publish};
+    use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
-
-    /// Exit code when the rt-backed driver host could not be built from the
-    /// kernel-delivered grants (the `resource_grants` query was refused or the
-    /// delivery did not fit). A reserved, fail-closed value.
-    const EXIT_NO_HOST: i32 = 80;
-
-    /// Exit code when the delivered grants do not name the controller's
-    /// register BAR and inbound-DMA constraint this driver forwards — an
-    /// unbound or mis-provisioned node. A reserved,
-    /// fail-closed value.
-    const EXIT_NO_RESOURCES: i32 = 81;
-
-    /// Exit code when publishing the xHCI controller node was refused (the
-    /// driver lacks `CAP_HW_EMIT`, or a forwarded resource is not covered by a
-    /// grant). A reserved, fail-closed value; the firmware
-    /// reload is best-effort and never fails the driver (its authoritative
-    /// gate is the controller driver's `Xhci::open`).
-    const EXIT_PUBLISH_FAILED: i32 = 82;
-
-    /// Exit code when the resident park failed — the kernel refused the
-    /// wait-set the lifetime park runs on. Exiting fail-loud beats the
-    /// yield-forever spin a parkless residency would degrade into; the
-    /// spawning supervisor decides whether to relaunch. A reserved value.
-    const EXIT_PARK_FAILED: i32 = 83;
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
@@ -109,19 +86,19 @@ mod program {
             .copied()
             .collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return EXIT_NO_HOST;
+            return end(DriverExit::NoHost, &[]);
         };
         // Build node B from the same delivered grants the host holds — the
         // controller's BAR + DMA, forwarded to the next driver in the chain
         // (no build-time board constant, no second `resource_grants` syscall).
         let Ok(node) = build_xhci_node(host.resources()) else {
-            return EXIT_NO_RESOURCES;
+            return end(DriverExit::NoResources, &[]);
         };
         // Reload the firmware over the mailbox IPC, then publish node B. The
         // reload is best-effort (the firmware outcome is discarded here — the
         // authoritative liveness gate is the bound driver's `Xhci::open`); only a refused publish fails the driver.
         if reload_firmware_and_publish(&host, node).is_err() {
-            return EXIT_PUBLISH_FAILED;
+            return end(DriverExit::NoService, &[]);
         }
         // The controller is the one child; a refused settle only leaves the
         // device manager to wait out its bound for this node.
@@ -131,7 +108,7 @@ mod program {
         // failed park exits fail-loud rather than degrading into a yield
         // spin.
         let _ = tairix_rt::park_forever();
-        EXIT_PARK_FAILED
+        end(DriverExit::ServeFailed, &[])
     }
 
     tairix_rt::entry!(main);

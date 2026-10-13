@@ -83,6 +83,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::MMIO_MAP,
     CapabilityId::IRQ_BIND,
     CapabilityId::HW_EMIT,
+    CapabilityId::LOG_EMIT,
 ];
 
 /// This driver's hardware bind table: the BCM2711 PCIe

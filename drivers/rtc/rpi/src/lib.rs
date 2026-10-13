@@ -73,8 +73,11 @@ const BIND_PRIORITY: u16 = 10;
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the firmware mailbox the clock is reached through, and the
 /// restricted-sender RTC endpoint.
-pub const REQUIRED_CAPABILITIES: &[CapabilityId] =
-    &[CapabilityId::MAILBOX, CapabilityId::IPC_BIND_PRIVILEGED];
+pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
+    CapabilityId::MAILBOX,
+    CapabilityId::IPC_BIND_PRIVILEGED,
+    CapabilityId::LOG_EMIT,
+];
 
 /// The driver's canonical bind table — the single source both the installed
 /// bundle's signed manifest and the autoload match are built from, so the

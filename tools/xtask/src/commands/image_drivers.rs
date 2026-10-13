@@ -1536,12 +1536,10 @@ pub const VIRT_SESSION_NIC_MAC: &str = "52:54:00:00:00:01";
 ///   the runner's to fix.
 ///
 /// Exactly one of the two ever binds: the machine that has a GENET has no
-/// virtio-net NIC and vice versa. The absent one costs a `NotFound` refusal
-/// that the device manager re-pushes on each hardware-tree generation bump
-/// and `netstack` records — bounded by the tree settling, not a retry loop,
-/// and the honest statement that a configured interface's hardware is not
-/// there. Shipping both is what lets this one image boot on the board and
-/// under emulation with networking either way, rather than only on the board.
+/// virtio-net NIC and vice versa. The device manager offers a configuration
+/// only to a NIC it names, so the absent one costs nothing. Shipping both is
+/// what lets this one image boot on the board and under emulation with
+/// networking either way, rather than only on the board.
 ///
 /// DHCPv4 + SLAAC is the addressing every desktop system defaults to, and it
 /// is what makes the DHCP client (`plans/DHCP.md`) reachable without an

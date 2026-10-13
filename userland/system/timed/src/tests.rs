@@ -1008,6 +1008,33 @@ fn a_validated_sample_is_written_back_to_the_chip() {
 }
 
 #[test]
+fn a_board_with_no_chip_records_no_refused_write_back() {
+    let clock = FakeClock::unset();
+    let sink = RecordingSink::default();
+    let mut rtc = FakeRtc::no_reading();
+    rtc.refuse_set = Some(Errno::NotFound);
+    let mut svc = service_with_rtc(
+        clock.clone(),
+        FakeStore::default(),
+        FakeTransport::default(),
+        configured(),
+        sink.clone(),
+        rtc,
+    );
+    let (nonce, at) = in_flight(&mut svc);
+    assert!(matches!(
+        svc.on_datagram(at, &reply(nonce, plausible())),
+        Step::ClockSet(_)
+    ));
+    assert!(!sink.saw(events::RTC_WRITEBACK_REFUSED));
+    assert!(!sink.saw(events::RTC_WRITEBACK));
+    assert_eq!(
+        clock.sets.borrow().last().map(|(_, state)| *state),
+        Some(WallTimeState::Trusted)
+    );
+}
+
+#[test]
 fn a_chip_that_refuses_the_write_back_does_not_undo_the_sync() {
     let clock = FakeClock::unset();
     let sink = RecordingSink::default();

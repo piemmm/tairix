@@ -74,8 +74,9 @@ clock would have accepted anyway.
 
 ## The service endpoint
 
-A driver serves `tairix_abi::rtc_ipc::RTC_ENDPOINT`, a synchronous call
-endpoint bound restricted-sender under `CAP_TIME_SET` — the only principal
+Every driver serves `tairix_abi::rtc_ipc::RTC_ENDPOINT` through the one
+`tairix_drvrt::serve::rtc`, handing it its chip: a synchronous call endpoint
+bound restricted-sender under `CAP_TIME_SET` — the only principal
 with a reason to read or write the board's clock chip is the one that sets the
 machine clock from it, so an existing capability expresses the authority
 exactly and no new one is defined.
@@ -83,9 +84,10 @@ exactly and no new one is defined.
 The id is a single reserved value rather than a per-instance slot range: every
 board TAIRiX targets exposes one RTC, and a second would need a *selection
 policy* that no consumer has. A second driver's `call_create` therefore fails
-closed with `Errno::AlreadyExists`, which it logs and exits on, so the outcome
-is the first RTC in hardware-tree order and the situation is visible in the
-log rather than silently arbitrary.
+closed with `Errno::AlreadyExists`, and that driver declines its node — a
+clean ending, recorded, never restarted — so the outcome is the first RTC in
+hardware-tree order and the situation is visible in the log rather than
+silently arbitrary.
 
 `timed` reads the endpoint at start-up. Because it is a boot-floor service and
 the driver is autoloaded, the endpoint is usually not bound on the first

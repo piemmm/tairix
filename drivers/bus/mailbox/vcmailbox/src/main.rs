@@ -72,6 +72,7 @@ mod program {
     use tairix_abi::time::MonotonicClock;
     use tairix_abi::{CapabilityId, DriverError, Errno, HwNode, MmioMapper};
     use tairix_caps::CapabilitySet;
+    use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
     use tairix_rt::LogSink;
@@ -85,36 +86,6 @@ mod program {
     /// outside every driver's working set or in another shape, or one from a
     /// caller that is not the driver of the device it concerns.
     const REQUEST_REFUSED: EventId = EventId(24_500);
-
-    /// Exit code when the rt-backed driver host could not be built from the
-    /// kernel-delivered grants. A reserved, fail-closed value.
-    const EXIT_NO_HOST: i32 = 80;
-
-    /// Exit code when the delivered grants do not name the single doorbell
-    /// register window this service needs — an unbound or mis-provisioned
-    /// node. A reserved, fail-closed value.
-    const EXIT_NO_RESOURCES: i32 = 81;
-
-    /// Exit code when the mailbox transport could not be built (the doorbell
-    /// window could not be mapped, the DMA property buffer could not be
-    /// carved, or its geometry is unusable). A reserved, fail-closed value.
-    const EXIT_BRINGUP_FAILED: i32 = 82;
-
-    /// Exit code when the call endpoint could not be created (the id is
-    /// already bound, or the service lacks `CAP_IPC_BIND_PRIVILEGED` for a
-    /// restricted-sender endpoint). A reserved, fail-closed value.
-    const EXIT_ENDPOINT_FAILED: i32 = 83;
-
-    /// Exit code when the serve loop's `call_recv` failed — a destroyed
-    /// endpoint or a torn-down task, both terminal. Exiting fail-loud beats
-    /// yield-retrying a dead channel forever, which is a busy spin; the
-    /// spawning supervisor decides whether to relaunch. A reserved value.
-    const EXIT_SERVE_FAILED: i32 = 84;
-
-    /// Exit code when the inbox interrupt every reply wait parks on could not
-    /// be bound (no line granted, or the bind refused). A reserved, fail-closed
-    /// value.
-    const EXIT_IRQ_UNBOUND: i32 = 85;
 
     /// How long each reply wait parks for the firmware's answer: the ≈4 s the
     /// ten-million-poll spin it replaces measured on metal, four times the
@@ -181,26 +152,26 @@ mod program {
         // coherent DMA, so no architecture-specific cache shim is supplied.
         let caps = SERVICE_CAPS.iter().copied().collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return EXIT_NO_HOST;
+            return end(DriverExit::NoHost, &[]);
         };
         // Resolve and map the single granted doorbell window.
         let Ok((base, len)) = sole_register_window(host.resources()) else {
-            return EXIT_NO_RESOURCES;
+            return end(DriverExit::NoResources, &[]);
         };
         let Ok(regs) = host.map_window(base, len) else {
-            return EXIT_BRINGUP_FAILED;
+            return end(DriverExit::BringupFailed, &[]);
         };
         let Ok(buffer) = host.alloc_dma_zeroed(PROPERTY_LEN_BYTES) else {
-            return EXIT_BRINGUP_FAILED;
+            return end(DriverExit::BringupFailed, &[]);
         };
         // Bound before the mailbox turns the interrupt on, so a service that
         // cannot take it leaves the controller as it found it.
         if host.bind_irq().is_err() {
-            return EXIT_IRQ_UNBOUND;
+            return end(DriverExit::BringupFailed, &[]);
         }
         let Ok(mut mailbox) = DmaMailbox::new(regs, buffer, HostInbox(&host), REPLY_WINDOW_NS)
         else {
-            return EXIT_BRINGUP_FAILED;
+            return end(DriverExit::BringupFailed, &[]);
         };
         // The firmware answers property requests one at a time in posting
         // order, so its answer to this probe means it has finished with any
@@ -211,7 +182,7 @@ mod program {
             .and_then(|()| decode_firmware_revision_response(&probe))
             .is_err()
         {
-            return EXIT_BRINGUP_FAILED;
+            return end(DriverExit::BringupFailed, &[]);
         }
         host.device_quiesced();
         let channel = ServiceChannel {
@@ -232,7 +203,7 @@ mod program {
             ENDPOINT_CAPACITY,
         ) != 0
         {
-            return EXIT_ENDPOINT_FAILED;
+            return end(DriverExit::NoService, &[]);
         }
 
         serve(&channel)
@@ -256,7 +227,7 @@ mod program {
         loop {
             let mut ticket = 0u64;
             let Ok(n) = tairix_rt::call_recv(MAILBOX_ENDPOINT, &mut request, &mut ticket) else {
-                return EXIT_SERVE_FAILED;
+                return end(DriverExit::ServeFailed, &[]);
             };
             let mut named = None;
             let admit = |message: &[u32; MAILBOX_PROPERTY_WORDS]| {

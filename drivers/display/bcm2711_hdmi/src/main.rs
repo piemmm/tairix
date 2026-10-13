@@ -27,14 +27,14 @@ mod program {
         BIND_KEYS, BVB_CLOCK, DDC_LINK, HOTPLUG_LINES, HSM_CLOCK, REQUIRED_CAPABILITIES, VARIANTS,
         WINDOWS,
     };
-    use tairix_drvrt::serve::{exit, log_event, DutyNode};
+    use tairix_drvrt::exit::{end, step, DriverExit};
+    use tairix_drvrt::serve::{log_event, DutyNode};
     use tairix_drvrt::Recorder;
     use tairix_linkclient::{ClockClient, DmaClient, I2cClient, IrqLineClient, RtLinkCall};
     use tairix_log::{EventId, Field, FieldValue, Level};
     use tairix_rt::shm::MappedGrant;
     use tairix_rt::ClockDelay;
 
-    const BRINGUP_FAILED: EventId = EventId(24_910);
     const SINK_UNREADABLE: EventId = EventId(24_911);
     const LINK_LOST: EventId = EventId(24_912);
     const UNSCRAMBLED: EventId = EventId(24_913);
@@ -105,17 +105,34 @@ mod program {
         })
     }
 
+    /// The audio clock and DMA line the node links, with the channel opened
+    /// on the line, or [`None`] with why the transmitter carries no sound.
+    fn sound(
+        clock: Option<LinkRequest>,
+        dma: Option<LinkRequest>,
+    ) -> Option<(LinkRequest, LinkRequest, DmaClient<RtLinkCall>)> {
+        let (Some(clock), Some(dma)) = (clock, dma) else {
+            silent("the node links no audio clock or audio DMA line");
+            return None;
+        };
+        let Ok(channel) = DmaClient::open(RtLinkCall::new(dma.endpoint()), dma) else {
+            silent("no DMA channel opened on its audio line");
+            return None;
+        };
+        Some((clock, dma, channel))
+    }
+
     /// Program entry point; on success it never returns.
     fn main() -> i32 {
         let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
-        let node = match DutyNode::open(caps, LinkRole::Encoder, BRINGUP_FAILED) {
+        let node = match DutyNode::open(caps, LinkRole::Encoder) {
             Ok(node) => node,
             Err(code) => return code,
         };
         let Some(variant) = variant() else {
-            return node.fail(
-                exit::NO_RESOURCES,
-                "hdmi: the node matches neither transmitter's binding",
+            return end(
+                DriverExit::NoResources,
+                &[step("hdmi: the node matches neither transmitter's binding")],
             );
         };
         let regs = match windows(&node) {
@@ -142,32 +159,30 @@ mod program {
             line(connected),
             line(removed),
         ) else {
-            return node.fail(
-                exit::NO_RESOURCES,
-                "hdmi: the node lacks a video clock, its DDC bus or a hotplug line",
+            return end(
+                DriverExit::NoResources,
+                &[step(
+                    "hdmi: the node lacks a video clock, its DDC bus or a hotplug line",
+                )],
             );
         };
         let Ok((hd_base, _)) = named_register_window(node.resources(), WINDOWS[6]) else {
-            return node.fail(exit::NO_RESOURCES, "hdmi: the node names no shared block");
+            return end(
+                DriverExit::NoResources,
+                &[step("hdmi: the node names no shared block")],
+            );
         };
         let Ok(ddc) = I2cClient::open(RtLinkCall::new(ddc.endpoint()), ddc, MappedGrant::map)
         else {
-            return node.fail(exit::BRINGUP_FAILED, "hdmi: the DDC bus would not open");
+            return end(
+                DriverExit::BringupFailed,
+                &[step("hdmi: the DDC bus would not open")],
+            );
         };
-        let sound = if let (Some(clock), Some(dma)) = (
+        let sound = sound(
             named(LinkRole::Clock, AUDIO_CLOCK),
             named(LinkRole::Dma, AUDIO_DMA),
-        ) {
-            if let Ok(channel) = DmaClient::open(RtLinkCall::new(dma.endpoint()), dma) {
-                Some((clock, dma, channel))
-            } else {
-                silent("no DMA channel opened on its audio line");
-                None
-            }
-        } else {
-            silent("the node links no audio clock or audio DMA line");
-            None
-        };
+        );
         // Both lines answer through their controller's one endpoint.
         let wakes = [DeviceWake::CallReply(connected.endpoint())];
         let audio_endpoint = sound.as_ref().map(|(_, dma, _)| dma.endpoint());
@@ -186,9 +201,9 @@ mod program {
         };
         let coexists = node.host().property(HwProperty::RadioCoexistence).is_some();
         let Ok(hdmi) = Hdmi::open(regs, variant, links, ClockDelay::new(), coexists, Log) else {
-            return node.fail(
-                exit::BRINGUP_FAILED,
-                "hdmi: the transmitter would not come up",
+            return end(
+                DriverExit::BringupFailed,
+                &[step("hdmi: the transmitter would not come up")],
             );
         };
         let Some(audio_endpoint) = audio_endpoint else {

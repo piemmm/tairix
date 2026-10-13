@@ -17,10 +17,11 @@ mod program {
     use tairix_abi::hwlink::{LinkRequest, LinkRole};
     use tairix_abi::{DriverError, MmioMapper, HW_NODE_MAX_RESOURCES};
     use tairix_audiochan::cyclic::LinkDma;
-    use tairix_audiochan::{exit, fail, serve};
+    use tairix_audiochan::serve;
     use tairix_drv_audio_bcm2711_pwm::jack::Jack;
     use tairix_drv_audio_bcm2711_pwm::pwm::{self, Pwm};
     use tairix_drv_audio_bcm2711_pwm::{timing, CLOCK_HZ, REQUIRED_CAPABILITIES};
+    use tairix_drvrt::exit::{end, error, step, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_linkclient::{ClockClient, DmaClient, RtLinkCall};
 
@@ -30,10 +31,9 @@ mod program {
     fn main() -> i32 {
         let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return fail(
-                exit::NO_HOST,
-                "pwm audio: the node's grants could not be read",
-                None,
+            return end(
+                DriverExit::NoHost,
+                &[step("pwm audio: the node's grants could not be read")],
             );
         };
         let mut granted = [None; HW_NODE_MAX_RESOURCES];
@@ -51,58 +51,54 @@ mod program {
             request_for(LinkRole::Dma),
             request_for(LinkRole::Clock),
         ) else {
-            return fail(
-                exit::NO_RESOURCES,
-                "pwm audio: the node names no single register window, DMA request line and clock",
-                None,
-            );
+            return end(DriverExit::NoResources, &[step("pwm audio: the node names no single register window, DMA request line and clock")]);
         };
         let Ok(regs) = host.map_window(base, len) else {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "pwm audio: the register window would not map",
-                None,
+            return end(
+                DriverExit::BringupFailed,
+                &[step("pwm audio: the register window would not map")],
             );
         };
         let Ok(block) = Pwm::new(&regs) else {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "pwm audio: the register window is too short",
-                None,
+            return end(
+                DriverExit::BringupFailed,
+                &[step("pwm audio: the register window is too short")],
             );
         };
         let mut clock = ClockClient::new(RtLinkCall::new(clock_link.endpoint()), clock_link);
         let clock_hz = match clock.run(CLOCK_HZ) {
             Ok(hz) => hz,
             Err(err) => {
-                return fail(
-                    exit::BRINGUP_FAILED,
-                    "pwm audio: the PWM clock would not run",
-                    Some(DriverError::from_errno(err)),
+                return end(
+                    DriverExit::BringupFailed,
+                    &[
+                        step("pwm audio: the PWM clock would not run"),
+                        error(DriverError::from_errno(err)),
+                    ],
                 );
             }
         };
         let Some((levels, rate)) = timing(clock_hz) else {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "pwm audio: the PWM clock runs too slow to shape onto",
-                None,
+            return end(
+                DriverExit::BringupFailed,
+                &[step("pwm audio: the PWM clock runs too slow to shape onto")],
             );
         };
         if let Err(err) = block.run(levels) {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "pwm audio: the PWM block would not start",
-                Some(err),
+            return end(
+                DriverExit::BringupFailed,
+                &[step("pwm audio: the PWM block would not start"), error(err)],
             );
         }
         let client = match DmaClient::open(RtLinkCall::new(line.endpoint()), line) {
             Ok(client) => client,
             Err(err) => {
-                return fail(
-                    exit::BRINGUP_FAILED,
-                    "pwm audio: no DMA channel opened on the request line",
-                    Some(DriverError::from_errno(err)),
+                return end(
+                    DriverExit::BringupFailed,
+                    &[
+                        step("pwm audio: no DMA channel opened on the request line"),
+                        error(DriverError::from_errno(err)),
+                    ],
                 );
             }
         };
@@ -110,18 +106,19 @@ mod program {
         let mut jack = match Jack::new(channel, rate, levels, DITHER_SEED) {
             Ok(jack) => jack,
             Err(err) => {
-                return fail(
-                    exit::BRINGUP_FAILED,
-                    "pwm audio: too few levels to shape onto",
-                    Some(err),
+                return end(
+                    DriverExit::BringupFailed,
+                    &[step("pwm audio: too few levels to shape onto"), error(err)],
                 )
             }
         };
         if let Err(err) = jack.bring_up() {
-            return fail(
-                exit::BRINGUP_FAILED,
-                "pwm audio: the jack would not ramp to silence",
-                Some(err),
+            return end(
+                DriverExit::BringupFailed,
+                &[
+                    step("pwm audio: the jack would not ramp to silence"),
+                    error(err),
+                ],
             );
         }
         serve(jack, &[DeviceWake::CallReply(line.endpoint())])

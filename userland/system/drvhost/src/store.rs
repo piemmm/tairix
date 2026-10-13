@@ -182,14 +182,16 @@ pub fn scan_store(source: &dyn ImageSource, paths: &[&str], sink: &dyn Sink) -> 
     store
 }
 
-/// Read, parse, and bind-decode a single bundle, returning its owned bind
-/// table on success.
+/// Read, parse, and bind-decode a single bundle's manifest prefix,
+/// returning its owned bind table on success.
 fn scan_one(
     source: &dyn ImageSource,
     path: &str,
     image: &mut Vec<u8>,
 ) -> Result<Vec<DriverBindKey>, HostError> {
-    source.read(path, image).map_err(HostError::SourceFailed)?;
+    source
+        .read_prefix(path, ParsedImage::PREFIX_MAX, image)
+        .map_err(HostError::SourceFailed)?;
     let parsed = ParsedImage::parse(image)?;
     // Decode into a fixed buffer sized to the ABI's bind-key ceiling
     // (a validation bound, not a scalable capacity):
@@ -370,6 +372,53 @@ mod tests {
         }
         out.extend_from_slice(payload);
         out
+    }
+
+    /// A source that refuses whole-image reads and records every prefix
+    /// asked of it.
+    struct PrefixOnly {
+        store: MemStore,
+        asked: RefCell<Vec<usize>>,
+    }
+
+    impl ImageSource for PrefixOnly {
+        fn read(&self, _path: &str, _buf: &mut Vec<u8>) -> Result<(), tairix_abi::Errno> {
+            Err(tairix_abi::Errno::PermissionDenied)
+        }
+
+        fn read_prefix(
+            &self,
+            path: &str,
+            len: usize,
+            buf: &mut Vec<u8>,
+        ) -> Result<(), tairix_abi::Errno> {
+            self.asked.borrow_mut().push(len);
+            self.store.read_prefix(path, len, buf)
+        }
+    }
+
+    #[test]
+    fn the_scan_reads_each_manifest_and_none_of_the_program() {
+        let caps: Vec<u16> = (0..tairix_abi::DRIVER_MANIFEST_MAX_CAPABILITIES).collect();
+        let keys = [DriverBindKey::new(5, compat(b"brcm,bcm2711-genet-v5"));
+            DRIVER_MANIFEST_MAX_BIND_KEYS as usize];
+        let mut store = MemStore::new();
+        store.insert(
+            "/System/Drivers/network",
+            build_image(&caps, &keys, &alloc::vec![0xA5; 1 << 20]),
+        );
+        let src = PrefixOnly {
+            store,
+            asked: RefCell::new(Vec::new()),
+        };
+        let scanned = scan_store(&src, &["/System/Drivers/network"], &RecordingSink::new());
+        assert_eq!(
+            scanned.len(),
+            1,
+            "the largest manifest the decode admits fits"
+        );
+        assert_eq!(scanned.drivers()[0].bind_keys(), &keys);
+        assert_eq!(*src.asked.borrow(), [ParsedImage::PREFIX_MAX]);
     }
 
     #[test]

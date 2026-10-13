@@ -20,8 +20,9 @@
 //! Every decode fails closed: an unknown magic, version, operation, family,
 //! name spelling, or a dirty reserved tail refuses rather than guessing.
 
+use crate::driver::net::MAC_ADDRESS_LEN;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
-use crate::reply::{PAGE_HEADER_LEN, STATUS_REPLY_LEN};
+use crate::reply::{decode_status_reply, encode_status_reply, PAGE_HEADER_LEN, STATUS_REPLY_LEN};
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -574,8 +575,8 @@ pub enum NetstackRequest {
     /// endpoint to bind and *what to call* the interface.
     BindDriver {
         /// The reserved device-channel call-endpoint id the NIC driver
-        /// process bound (a [`crate::driver::net_channel::NET_CHANNEL_ENDPOINT_BASE`]
-        /// block id); the stack `ipc_call`s it as the channel client.
+        /// process bound (a [`crate::driver::net_channel::NET_CHANNEL_ENDPOINTS`]
+        /// id); the stack `ipc_call`s it as the channel client.
         endpoint_id: u64,
         /// The interface's admin-chosen alias, NUL-padded.
         iface: [u8; IF_NAME_LEN],
@@ -1003,6 +1004,39 @@ fn reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
     Ok(())
 }
 
+/// Wire length of the reply to a [`NetstackRequest::BindDriver`]: the status
+/// word, then the bound interface's device MAC, which is how the device
+/// manager knows which `network.conf` configuration the interface takes.
+pub const BIND_DRIVER_REPLY_LEN: usize = STATUS_REPLY_LEN + MAC_ADDRESS_LEN;
+
+/// Encode the reply to a [`NetstackRequest::BindDriver`]: the bound
+/// interface's MAC, or the refusal with no MAC.
+#[must_use]
+pub fn encode_bind_driver_reply(
+    result: Result<[u8; MAC_ADDRESS_LEN], Errno>,
+) -> [u8; BIND_DRIVER_REPLY_LEN] {
+    let mut out = [0u8; BIND_DRIVER_REPLY_LEN];
+    out[..STATUS_REPLY_LEN].copy_from_slice(&encode_status_reply(result.map(|_| ())));
+    if let Ok(mac) = result {
+        out[STATUS_REPLY_LEN..].copy_from_slice(&mac);
+    }
+    out
+}
+
+/// Decode the reply to a [`NetstackRequest::BindDriver`].
+///
+/// # Errors
+///
+/// The refusal the reply carries, or [`Errno::BufferTooSmall`] for a success
+/// too short to carry its MAC.
+pub fn decode_bind_driver_reply(bytes: &[u8]) -> Result<[u8; MAC_ADDRESS_LEN], Errno> {
+    decode_status_reply(bytes)?;
+    bytes
+        .get(STATUS_REPLY_LEN..BIND_DRIVER_REPLY_LEN)
+        .and_then(|mac| <[u8; MAC_ADDRESS_LEN]>::try_from(mac).ok())
+        .ok_or(Errno::BufferTooSmall)
+}
+
 /// Magic number identifying a per-interface configuration message
 /// (`"NIC1"` little-endian). Distinct from [`NETSTACK_REQUEST_MAGIC`] so
 /// the transport can tell the two framed messages apart on the one admin
@@ -1110,7 +1144,7 @@ pub struct NetInterfaceConfigMsg {
     /// The interface's admin-chosen alias, NUL-padded.
     pub alias: [u8; IF_NAME_LEN],
     /// The stable MAC identity to match, or `None` to match by `alias`.
-    pub match_mac: Option<[u8; 6]>,
+    pub match_mac: Option<[u8; MAC_ADDRESS_LEN]>,
     /// The stable hardware-node location to match (a NIC's register-window
     /// base, the [`NetstackRequest::BindDriver::node_location`] the stack
     /// recorded), or `None` to match by [`Self::match_mac`]/`alias`. This
@@ -1132,6 +1166,26 @@ pub struct NetInterfaceConfigMsg {
 }
 
 impl NetInterfaceConfigMsg {
+    /// Whether this configuration names its interface by alias alone, with
+    /// no hardware selector: a bond's own addressing.
+    #[must_use]
+    pub const fn names_by_alias(&self) -> bool {
+        self.match_mac.is_none() && self.match_node.is_none()
+    }
+
+    /// Whether this configuration's hardware selector names the interface
+    /// whose device MAC is `mac` and whose hardware location is
+    /// `node_location`: its MAC where it names one, else its node, which never
+    /// names an unresolved location (`0`). Never one it names by alias alone.
+    #[must_use]
+    pub fn selects(&self, mac: &[u8; MAC_ADDRESS_LEN], node_location: u64) -> bool {
+        match (self.match_mac, self.match_node) {
+            (Some(wanted), _) => wanted == *mac,
+            (None, Some(node)) => node_location != 0 && node_location == node,
+            (None, None) => false,
+        }
+    }
+
     /// Encoded size on the wire: magic (4), version (2), `mac_present`
     /// (1), reserved (1), alias (16), mac (6), ipv4 {method (1), prefix
     /// (1), addr (4), `gw_present` (1), gw (4)}, ipv6 {method (1), prefix
@@ -1240,7 +1294,7 @@ impl NetInterfaceConfigMsg {
                 None
             }
             1 => {
-                let mut mac = [0u8; 6];
+                let mut mac = [0u8; MAC_ADDRESS_LEN];
                 mac.copy_from_slice(&bytes[24..30]);
                 Some(mac)
             }
@@ -1765,7 +1819,7 @@ pub struct NetInterfaceFactsRecord {
     pub kind: NetIfKind,
     /// The device's 48-bit link-layer address. Sensitive: the sysinfo
     /// broker gates the query exposing it on `CAP_SYSINFO_HW`.
-    pub mac: [u8; 6],
+    pub mac: [u8; MAC_ADDRESS_LEN],
     /// Link MTU in bytes.
     pub mtu: u32,
     /// The negotiated offload set
@@ -1812,7 +1866,7 @@ impl NetInterfaceFactsRecord {
         name.copy_from_slice(&bytes[..16]);
         validate_if_name(&name)?;
         let kind = NetIfKind::from_u8(bytes[16])?;
-        let mut mac = [0u8; 6];
+        let mut mac = [0u8; MAC_ADDRESS_LEN];
         mac.copy_from_slice(&bytes[17..23]);
         let mtu = read_u32(bytes, 24);
         let offloads = read_u32(bytes, 28);
@@ -2673,7 +2727,7 @@ pub struct NetNeighborRecord {
     /// The neighbour's address; V4 uses the first four bytes.
     pub addr: [u8; 16],
     /// The neighbour's link-layer address, once resolved.
-    pub mac: Option<[u8; 6]>,
+    pub mac: Option<[u8; MAC_ADDRESS_LEN]>,
 }
 
 impl NetNeighborRecord {
@@ -2724,7 +2778,7 @@ impl NetNeighborRecord {
             return Err(Errno::OutOfRange);
         }
         let mac = if has_mac {
-            let mut mac = [0u8; 6];
+            let mut mac = [0u8; MAC_ADDRESS_LEN];
             mac.copy_from_slice(&bytes[36..42]);
             Some(mac)
         } else {
@@ -3082,6 +3136,8 @@ pub const NETSTACK_MAX_REPLY: usize = STATUS_REPLY_LEN
     + PAGE_HEADER_LEN
     + NETSTACK_LIST_LIMIT_MAX as usize * NetInterfaceStateRecord::WIRE_LEN;
 
+const _: () = assert!(BIND_DRIVER_REPLY_LEN <= NETSTACK_MAX_REPLY);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3378,6 +3434,51 @@ mod tests {
         let mut bad = good;
         bad[40] = 1;
         assert_eq!(NetstackRequest::from_bytes(&bad), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn a_bind_reply_carries_the_interface_mac_or_the_refusal() {
+        let mac = [0xd8, 0x3a, 0xdd, 0x01, 0x02, 0x03];
+        assert_eq!(
+            decode_bind_driver_reply(&encode_bind_driver_reply(Ok(mac))),
+            Ok(mac)
+        );
+        assert_eq!(
+            decode_bind_driver_reply(&encode_bind_driver_reply(Err(Errno::LimitExceeded))),
+            Err(Errno::LimitExceeded)
+        );
+        let success = encode_bind_driver_reply(Ok(mac));
+        assert_eq!(
+            decode_bind_driver_reply(&success[..STATUS_REPLY_LEN]),
+            Err(Errno::BufferTooSmall),
+            "a success with no MAC is no answer"
+        );
+    }
+
+    #[test]
+    fn a_configuration_selects_by_mac_else_by_node_else_by_alias_alone() {
+        let mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let mut msg = NetInterfaceConfigMsg {
+            alias: name("wan"),
+            match_mac: Some(mac),
+            match_node: Some(0xfd58_0000),
+            ipv4: NetIpv4Config::Dhcp,
+            ipv6: NetIpv6Config::Disabled,
+            mtu: 0,
+            dns: NetDnsServers::default(),
+        };
+        assert!(msg.selects(&mac, 0), "the MAC wins over the node");
+        assert!(!msg.selects(&[0; 6], 0xfd58_0000));
+        msg.match_mac = None;
+        assert!(msg.selects(&[0; 6], 0xfd58_0000));
+        assert!(
+            !msg.selects(&mac, 0),
+            "an unresolved location names nothing"
+        );
+        assert!(!msg.names_by_alias());
+        msg.match_node = None;
+        assert!(msg.names_by_alias());
+        assert!(!msg.selects(&mac, 0xfd58_0000));
     }
 
     #[test]

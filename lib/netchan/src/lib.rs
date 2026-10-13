@@ -29,8 +29,8 @@
 //! Every reply is a fully-encoded `netchan-v1` frame carrying a typed
 //! [`Errno`](tairix_abi::Errno) — a service call before attach, a region too
 //! small for the agreed geometry, or a device fault is never a panic and
-//! never a partially-applied action. Every set-up refusal in `serve` exits
-//! with a reserved code from [`exit`] rather than degrading.
+//! never a partially-applied action. Every set-up refusal in `serve` ends
+//! the driver through `tairix_drvrt::exit` rather than degrading.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -43,31 +43,3 @@ pub use server::{Drain, DrainAction, DrainStep, Drained, Masked, NetChannelServe
 mod serve;
 #[cfg(target_os = "none")]
 pub use serve::serve;
-
-/// The reserved, fail-closed process exit codes a NIC driver binary ends
-/// with when it cannot serve its device.
-///
-/// One definition for every link-layer driver process: the codes are the
-/// diagnosis a supervisor reads off a driver that gave up, so two drivers
-/// reporting the same failure must report the same number. `serve` returns
-/// [`NO_SERVICE`](exit::NO_SERVICE) itself; the others are returned by the
-/// binary's own bring-up, before it hands the device over.
-pub mod exit {
-    /// The rt-backed driver host could not be built from the
-    /// kernel-delivered grants (the `resource_grants` query was refused, or
-    /// the delivery did not fit).
-    pub const NO_HOST: i32 = 80;
-    /// The delivered grants do not name the resources this driver needs — an
-    /// unbound, mis-provisioned, or malformed node.
-    pub const NO_RESOURCES: i32 = 81;
-    /// Device bring-up failed: a window could not be mapped, the device is
-    /// not the one the node claimed, it rejected its init sequence, or the
-    /// granted interrupt line could not be bound (the serve loop parks on
-    /// it, so a driver that cannot bind it would degrade into the busy
-    /// re-poll the charter forbids).
-    pub const BRINGUP_FAILED: i32 = 82;
-    /// The device channel could not be stood up: no free reserved endpoint
-    /// id, the bind was refused, the `netchan` node could not be published,
-    /// or the wait set could not be built.
-    pub const NO_SERVICE: i32 = 83;
-}

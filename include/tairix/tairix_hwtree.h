@@ -38,8 +38,8 @@
 #define TAIRIX_HW_RES_FLAG_DMA_SNOOPED 2u
 #define TAIRIX_HW_RES_FLAG_IRQ_MESSAGE 1u
 #define TAIRIX_HW_RES_FLAG_IRQ_EDGE 2u
-#define TAIRIX_HW_NODE_HEADER_LEN 19u
-#define TAIRIX_HW_NODE_WIRE_LEN 1347u
+#define TAIRIX_HW_NODE_HEADER_LEN 20u
+#define TAIRIX_HW_NODE_WIRE_LEN 1348u
 
 /* Device classes (uint16_t). */
 #define TAIRIX_HW_CLASS_ROOT ((uint16_t)0u)
@@ -59,6 +59,14 @@
 #define TAIRIX_HW_CLASS_DMA ((uint16_t)14u)
 #define TAIRIX_HW_CLASS_IOMMU ((uint16_t)15u)
 #define TAIRIX_HW_CLASS_OTHER ((uint16_t)65535u)
+
+/* How a node's last driver ended (uint8_t), kernel-recorded. */
+#define TAIRIX_HW_ENDING_NONE ((uint8_t)0u)
+#define TAIRIX_HW_ENDING_UNLOADED ((uint8_t)1u)
+#define TAIRIX_HW_ENDING_CLEAN ((uint8_t)2u)
+#define TAIRIX_HW_ENDING_REFUSED ((uint8_t)3u)
+#define TAIRIX_HW_ENDING_FAILED ((uint8_t)4u)
+#define TAIRIX_HW_ENDING_CRASHED ((uint8_t)5u)
 
 /* Match-key kinds (uint16_t). */
 #define TAIRIX_HW_MATCH_COMPATIBLE ((uint16_t)0u)
@@ -127,6 +135,8 @@ typedef struct tairix_hw_node {
     uint8_t resource_count;
     uint8_t fault_health;
     uint8_t served;
+    uint8_t presence;
+    uint8_t ending;
     tairix_hw_match_key_t match_keys[TAIRIX_HW_NODE_MAX_MATCH_KEYS];
     tairix_hw_resource_t resources[TAIRIX_HW_NODE_MAX_RESOURCES];
 } tairix_hw_node_t;

@@ -108,6 +108,7 @@ mod program {
     use tairix_drv_bus_usb::domain::{ControllerDomainEvent, ControllerHealth, SkippedPortRetry};
     use tairix_drv_bus_usb::interfaces::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_CAPACITY};
     use tairix_drv_bus_usb::serve::UrbReply;
+    use tairix_drvrt::exit::{end, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_log::{log, Event, EventId, Field, Level};
     use tairix_rt::shm::SharedRegion;
@@ -119,78 +120,47 @@ mod program {
     use tairix_usb::{SlabBank, XhciOpenStage};
     use tairix_util::fmt::format_hex_u64;
 
-    /// Exit code when the rt-backed driver host could not be built from the
-    /// kernel-delivered grants. A reserved, fail-closed value.
-    const EXIT_NO_HOST: i32 = 80;
-
-    /// Exit code when the delivered grants do not name the register BAR and a
-    /// DMA constraint this controller needs.
-    const EXIT_NO_RESOURCES: i32 = 81;
-
-    /// Exit code when controller bring-up / enumeration failed.
-    const EXIT_BRINGUP_FAILED: i32 = 82;
-
-    /// Exit code when the controller came up but the URB transport seam (the
-    /// shared buffer or the call endpoint) could not be created.
-    const EXIT_NO_TRANSPORT: i32 = 83;
-
-    /// Exit code when the controller's interrupt line could not be bound.
-    /// The engine's synchronous event waits park on that line, so a
-    /// controller with no usable interrupt cannot be served — refused
-    /// fail-closed before any register is touched.
-    const EXIT_NO_IRQ: i32 = 84;
-
-    /// Exit code when the controller did not come back within its recovery
-    /// grace window. Every interface node is retracted first; exiting hands
-    /// the controller's memory to the kernel, which quarantines what a
-    /// controller that would not reset may still reach.
-    const EXIT_CONTROLLER_FAILED: i32 = 85;
-
-    /// Exit code when the event loop's own wait-set failed, so nothing it
-    /// serves can wake it again. Every interface node is retracted first.
-    const EXIT_WAIT_FAILED: i32 = 86;
-
     /// Diagnostic event id: a one-shot controller bring-up failure.
-    const HCD_BRINGUP_FAILED: EventId = EventId(4126);
+    const HCD_BRINGUP_FAILED: EventId = EventId(27_026);
 
     /// Diagnostic event id: the one-shot "controller up, serving URBs" beacon.
-    const HCD_READY: EventId = EventId(4101);
+    const HCD_READY: EventId = EventId(27_001);
 
     /// Diagnostic event id: the device disconnected and its interface node was
     /// retracted.
-    const HCD_DISCONNECT: EventId = EventId(4127);
+    const HCD_DISCONNECT: EventId = EventId(27_027);
 
     /// Diagnostic event id: a device (re)attached behind the hub and a fresh
     /// interface node was published.
-    const HCD_ATTACHED: EventId = EventId(4156);
+    const HCD_ATTACHED: EventId = EventId(27_056);
 
     /// Diagnostic event id: URB transport setup or IRQ arming state.
-    const HCD_URB_SETUP: EventId = EventId(4149);
+    const HCD_URB_SETUP: EventId = EventId(27_049);
 
     /// Diagnostic event id: a URB reply was sent or attempted.
-    const HCD_URB_REPLY: EventId = EventId(4152);
+    const HCD_URB_REPLY: EventId = EventId(27_052);
 
     /// Diagnostic event id: a wait-set or IPC transport error happened.
-    const HCD_WAIT_ERROR: EventId = EventId(4154);
+    const HCD_WAIT_ERROR: EventId = EventId(27_054);
 
     /// Security event id: a class driver's control request reached past its
     /// own interface and was refused.
-    const HCD_URB_REFUSED: EventId = EventId(4249);
+    const HCD_URB_REFUSED: EventId = EventId(27_149);
 
     /// Interior fault-domain event id: the controller faulted and the whole
     /// subtree entered its shared recovery grace window (`plans/FIX-IO.md`
     /// IO4/IO5). Classified through the shared `for_fault_domain` vocabulary.
-    const HCD_DOMAIN_RECOVERING: EventId = EventId(4190);
+    const HCD_DOMAIN_RECOVERING: EventId = EventId(27_090);
 
     /// Interior fault-domain event id: the controller demonstrably returned and
     /// the subtree recovered with no reboot.
-    const HCD_DOMAIN_RECOVERED: EventId = EventId(4191);
+    const HCD_DOMAIN_RECOVERED: EventId = EventId(27_091);
 
     /// Interior fault-domain event id: the recovery grace window elapsed with
     /// the controller still faulted — the subtree is failed closed (the
     /// fault-domain owner's own distinct fail-closed event, sticky but
     /// recoverable).
-    const HCD_DOMAIN_OFFLINE: EventId = EventId(4192);
+    const HCD_DOMAIN_OFFLINE: EventId = EventId(27_092);
 
     /// Reserved base of the URB call-endpoint id range the HCDs allocate from.
     ///
@@ -272,7 +242,7 @@ mod program {
 
     /// Diagnostic event id: an isochronous stream ended other than at its
     /// class driver's word.
-    const HCD_STREAM_ENDED: EventId = EventId(4251);
+    const HCD_STREAM_ENDED: EventId = EventId(27_151);
 
     fn reply_to_urb(endpoint_id: u64, reply: UrbReply) {
         let ret = tairix_rt::call_reply(endpoint_id, reply.ticket, &reply.bytes[..reply.len]);
@@ -1236,15 +1206,15 @@ mod program {
             .copied()
             .collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return EXIT_NO_HOST;
+            return end(DriverExit::NoHost, &[]);
         };
         enter_realtime_class();
         let Ok(resources) = derive_controller_resources(host.resources()) else {
-            return EXIT_NO_RESOURCES;
+            return end(DriverExit::NoResources, &[]);
         };
         let delay = ClockDelay::new();
         let Some(irq_handle) = bind_controller_irq(host.irq_line()) else {
-            return EXIT_NO_IRQ;
+            return end(DriverExit::BringupFailed, &[]);
         };
         let wait = IrqEventWait { handle: irq_handle };
 
@@ -1259,22 +1229,22 @@ mod program {
             Ok(device) => device,
             Err(err) => {
                 log_bringup_failure(&err);
-                return EXIT_BRINGUP_FAILED;
+                return end(DriverExit::BringupFailed, &[]);
             }
         };
         log_bringup_summary(&mut device);
 
         let Some(set) = create_event_set(irq_handle) else {
-            return EXIT_NO_TRANSPORT;
+            return end(DriverExit::NoService, &[]);
         };
 
         // Transports are opened as devices need them, so the controller pays
         // for the devices attached, never a fixed table.
         let Some(urb_base) = claim_urb_block() else {
-            return EXIT_NO_TRANSPORT;
+            return end(DriverExit::NoService, &[]);
         };
         let Ok(origin) = tairix_rt::self_origin() else {
-            return EXIT_NO_TRANSPORT;
+            return end(DriverExit::NoService, &[]);
         };
         let mut live = Live {
             device: &mut device,
@@ -1383,12 +1353,12 @@ mod program {
                     wait_ret.unsigned_abs(),
                 );
                 interfaces.retract_all(live);
-                return EXIT_WAIT_FAILED;
+                return end(DriverExit::ServeFailed, &[]);
             }
             // Nothing is retried below a controller failed closed; its reason
             // is already logged and every node retracted.
             if health.is_failed_closed() {
-                return EXIT_CONTROLLER_FAILED;
+                return end(DriverExit::DeviceFault, &[]);
             }
         }
     }

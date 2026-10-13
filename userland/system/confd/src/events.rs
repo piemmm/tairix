@@ -14,9 +14,9 @@ use crate::StoreError;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const CONFD_RANGE_START: u32 = 21_000;
+pub const CONFD_RANGE_START: u32 = tairix_log::registry::CONFD.start();
 /// Range end (exclusive) reserved for `confd` event identifiers.
-pub const CONFD_RANGE_END: u32 = 22_000;
+pub const CONFD_RANGE_END: u32 = tairix_log::registry::CONFD.end();
 
 /// The service bound `APPDATA_ENDPOINT` and is serving. Recorded once at
 /// startup so an operator can see the store came up before any application

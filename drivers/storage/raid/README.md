@@ -163,8 +163,8 @@ mounted filesystem. A retired array's endpoint id is deliberately never recycled
 a grant forwarded before the stop must not later reach a different array.
 
 Every mutation is audited, allowed or refused, naming the operation and the
-array or device and never a token — `4205` an allowed mutation, `4206` a refused
-one with its errno, `4207` a request whose origin could not be attested, `4208`
+array or device and never a token — `28214` an allowed mutation, `28215` a refused
+one with its errno, `28216` a request whose origin could not be attested, `28217`
 a blank device taken in as a candidate. Reads are not audited: a status poll
 would drown the trail.
 

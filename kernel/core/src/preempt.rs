@@ -102,14 +102,22 @@
 //! an in-kernel stall once the burst outlasts its threshold.
 //!
 //! [`yield_if_owed`] is the boundary that bounds it: in-kernel code calls it
-//! between units of work, and it consumes both latches through exactly the
-//! same policy [`preempt_current`] applies at the return-to-user point — both
-//! go through the one private `honour_latches` decision, so the two can never
-//! drift apart: honour a forced yield outright, reschedule a tick when this
-//! CPU owes a switch, otherwise keep a non-tickless policy's deadline alive.
+//! between units of work, and it makes exactly the decision [`preempt_current`]
+//! makes at the return-to-user point — both go through the one private
+//! `honour_owed`, so the two can never drift apart: honour a forced yield
+//! outright, reschedule a tick when this CPU owes a switch, otherwise keep a
+//! non-tickless policy's deadline alive.
 //! A caller may only place it where suspending is already sound (no spin lock
 //! held); at a point the same code path can already park on a slow device, it
 //! is sound by construction.
+//!
+//! # Wakes an interrupt only flagged
+//!
+//! A device or timer interrupt cannot take the wait-queue or scheduler locks
+//! the code it interrupted may hold, so it only flags its wake. Both
+//! boundaries perform those wakes first: left for the dispatcher, a completion
+//! waited on whatever the interrupted CPU ran — a lone user task on a tickless
+//! core, for as long as it ran.
 
 use core::sync::atomic::Ordering;
 
@@ -373,7 +381,7 @@ fn honour_latched_tick(cpu: CpuId) -> bool {
 /// from a context the dispatcher does not own).
 #[must_use]
 pub fn yield_if_owed() -> bool {
-    current_cpu().is_some_and(honour_latches)
+    current_cpu().is_some_and(honour_owed)
 }
 
 /// Make one dispatch decision on `cpu`: retire both reschedule latches the
@@ -448,13 +456,13 @@ pub fn settle_before_user() {
     }
 }
 
-/// Honour `cpu`'s latches until none is owed, masking interrupts again after
+/// Honour what `cpu` owes until nothing is, masking interrupts again after
 /// each switch back in — which may resume the task on another CPU, and with
 /// them on — so the last look is made masked. Returns whether a task was
 /// suspended.
 fn honour_before_user(mut cpu: CpuId) -> bool {
     let mut suspended = false;
-    while honour_latches(cpu) {
+    while honour_owed(cpu) {
         suspended = true;
         mask_interrupts();
         match current_cpu() {
@@ -473,6 +481,42 @@ fn mask_interrupts() {
 
 fn current_cpu() -> Option<CpuId> {
     crate::waitq::wait_arch().and_then(crate::waitq::WaitQueueArch::current_cpu)
+}
+
+/// Perform the wakes interrupts only flagged, then act on `cpu`'s latches:
+/// the one decision both preemption boundaries make. Returns whether the
+/// task was suspended.
+fn honour_owed(cpu: CpuId) -> bool {
+    gives_way_to_interrupt_work(cpu, drain_flagged_wakes()) || honour_latches(cpu)
+}
+
+/// Give `cpu` up when the wakes just performed (`woke`) left it a competitor,
+/// or a foreground signal waits for the dispatcher to deliver it.
+///
+/// Neither waits for a tick: a lone task on a tickless core may not take one
+/// for seconds, and until then the woken task, or the `^C` aimed at this one,
+/// waited behind it.
+fn gives_way_to_interrupt_work(cpu: CpuId, woke: bool) -> bool {
+    let owed = (woke && active_gate().is_none_or(|gate| gate.has_runnable_competitor(cpu)))
+        || crate::procsignal::has_pending_foreground();
+    if !owed || !reschedule_current(cpu, RescheduleAction::Yield) {
+        return false;
+    }
+    count_preemption(cpu);
+    true
+}
+
+/// Perform the wakes device and timer interrupts flagged. A task at either
+/// boundary holds no spin lock, so this is as sound a point as the dispatcher.
+fn drain_flagged_wakes() -> bool {
+    #[cfg(test)]
+    {
+        tests::scripted_drain()
+    }
+    #[cfg(not(test))]
+    {
+        crate::waitq::drain_pending_wakes()
+    }
 }
 
 /// Consume both of `cpu`'s reschedule latches and act on whichever is set.
@@ -528,22 +572,29 @@ mod tests {
 
     struct TestCompetitorGate {
         periodic_rearms: [AtomicU64; crate::cpu_state::TEST_CPUS],
+        competitor_queries: [AtomicU64; crate::cpu_state::TEST_CPUS],
     }
 
     impl TestCompetitorGate {
         const fn new() -> Self {
             Self {
                 periodic_rearms: [const { AtomicU64::new(0) }; crate::cpu_state::TEST_CPUS],
+                competitor_queries: [const { AtomicU64::new(0) }; crate::cpu_state::TEST_CPUS],
             }
         }
 
         fn periodic_rearms(&self, cpu: CpuId) -> u64 {
             self.periodic_rearms[cpu as usize].load(Ordering::Relaxed)
         }
+
+        fn competitor_queries(&self, cpu: CpuId) -> u64 {
+            self.competitor_queries[cpu as usize].load(Ordering::Relaxed)
+        }
     }
 
     impl PreemptCompetitor for TestCompetitorGate {
-        fn has_runnable_competitor(&self, _cpu: CpuId) -> bool {
+        fn has_runnable_competitor(&self, cpu: CpuId) -> bool {
+            self.competitor_queries[cpu as usize].fetch_add(1, Ordering::Relaxed);
             true
         }
 
@@ -583,6 +634,30 @@ mod tests {
     /// Install a competitor gate for the current test thread only.
     fn set_test_gate(gate: &'static dyn PreemptCompetitor) {
         TEST_GATE.with(|g| g.set(Some(gate)));
+    }
+
+    // The real drain consumes process-wide flags another test thread may be
+    // asserting on, so on the host the boundaries drain a per-thread script.
+    std::thread_local! {
+        /// Whether this thread's drain reports a wake, and how often it ran.
+        static DRAIN: core::cell::Cell<(bool, u32)> = const { core::cell::Cell::new((false, 0)) };
+    }
+
+    /// The boundaries' drain on the host: the scripted answer, counted.
+    pub(super) fn scripted_drain() -> bool {
+        DRAIN.with(|drain| {
+            let (woke, runs) = drain.get();
+            drain.set((woke, runs + 1));
+            woke
+        })
+    }
+
+    fn script_drain(woke: bool) {
+        DRAIN.with(|drain| drain.set((woke, drain.get().1)));
+    }
+
+    fn drain_runs() -> u32 {
+        DRAIN.with(|drain| drain.get().1)
     }
 
     #[test]
@@ -906,5 +981,60 @@ mod tests {
         assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
         assert!(!honour_latches(cpu));
         assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
+    }
+
+    /// A wake an interrupt only flagged is performed on the way back to user
+    /// mode with no tick latched, and asks whether it left this CPU a
+    /// competitor. Before, it waited on the interrupted task's next syscall
+    /// or tick. On the host no task is published, so nothing suspends.
+    #[test]
+    fn the_return_to_user_performs_a_flagged_wake_without_a_tick() {
+        let cpu = crate::test_boot::claim_cpu();
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        let queries_before = TEST_COMPETITOR_GATE.competitor_queries(cpu);
+        let runs_before = drain_runs();
+        script_drain(true);
+        assert!(!take_preempt_pending(cpu));
+        assert!(!preempt_current(cpu), "no user task to suspend on the host");
+        script_drain(false);
+        assert_eq!(
+            drain_runs(),
+            runs_before + 1,
+            "the flagged wakes were performed"
+        );
+        assert_eq!(
+            TEST_COMPETITOR_GATE.competitor_queries(cpu),
+            queries_before + 1
+        );
+        assert_eq!(preemption_count(cpu), 0);
+    }
+
+    /// The in-kernel boundary performs them through the same decision.
+    #[test]
+    fn the_in_kernel_boundary_performs_a_flagged_wake() {
+        let cpu = crate::test_boot::claim_cpu();
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        let queries_before = TEST_COMPETITOR_GATE.competitor_queries(cpu);
+        let runs_before = drain_runs();
+        script_drain(true);
+        assert!(!honour_owed(cpu));
+        script_drain(false);
+        assert_eq!(drain_runs(), runs_before + 1);
+        assert_eq!(
+            TEST_COMPETITOR_GATE.competitor_queries(cpu),
+            queries_before + 1
+        );
+    }
+
+    /// A drain that woke nothing asks the scheduler nothing, so an interrupt
+    /// with no flagged wake costs the boundary no query.
+    #[test]
+    fn a_drain_that_woke_nothing_asks_nothing() {
+        let cpu = crate::test_boot::claim_cpu();
+        set_test_gate(&TEST_COMPETITOR_GATE);
+        let queries_before = TEST_COMPETITOR_GATE.competitor_queries(cpu);
+        script_drain(false);
+        assert!(!honour_owed(cpu));
+        assert_eq!(TEST_COMPETITOR_GATE.competitor_queries(cpu), queries_before);
     }
 }

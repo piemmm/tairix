@@ -12,9 +12,9 @@ use tairix_log::EventId;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const NETSTACK_RANGE_START: u32 = 16_000;
+pub const NETSTACK_RANGE_START: u32 = tairix_log::registry::NETSTACK.start();
 /// Range end (exclusive) reserved for `netstack` event identifiers.
-pub const NETSTACK_RANGE_END: u32 = 17_000;
+pub const NETSTACK_RANGE_END: u32 = tairix_log::registry::NETSTACK.end();
 
 /// An admin mutation (address or route add) was applied.
 ///

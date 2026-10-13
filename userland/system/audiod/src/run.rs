@@ -465,7 +465,9 @@ mod program {
             return Err(Errno::PermissionDenied);
         }
         let index = service.bind_slot();
-        let port = tairix_abi::driver::audio_channel::notify_endpoint_for(pid, index as u64);
+        // Every slot past the notify id's own field is refused, never aliased.
+        let port = tairix_abi::driver::audio_channel::notify_endpoint_for(pid, index as u64)
+            .ok_or(Errno::LimitExceeded)?;
         // A slot a reaped device left keeps its port and its wake: both are
         // this service's own and are reused. Anything else is a refusal.
         let exists = -i64::from(Errno::AlreadyExists.as_i32().unsigned_abs());

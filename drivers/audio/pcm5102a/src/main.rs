@@ -9,17 +9,16 @@
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::hwlink::LinkRole;
-    use tairix_audiochan::{exit, fail};
     use tairix_drv_audio_pcm5102a::{Pcm5102a, REQUIRED_CAPABILITIES};
+    use tairix_drvrt::exit::{end, step, DriverExit};
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
 
     fn main() -> i32 {
         let caps = REQUIRED_CAPABILITIES.iter().copied().collect();
         let Ok(host) = RtDriverHost::from_grants_query(caps, RtGrantSyscalls, None) else {
-            return fail(
-                exit::NO_HOST,
-                "pcm5102a: the node's grants could not be read",
-                None,
+            return end(
+                DriverExit::NoHost,
+                &[step("pcm5102a: the node's grants could not be read")],
             );
         };
         let Some(duty) = host
@@ -27,10 +26,9 @@ mod program {
             .find_map(|r| r.link_duty().ok())
             .filter(|duty| duty.role() == LinkRole::Codec)
         else {
-            return fail(
-                exit::NO_RESOURCES,
-                "pcm5102a: the node carries no codec duty",
-                None,
+            return end(
+                DriverExit::NoResources,
+                &[step("pcm5102a: the node carries no codec duty")],
             );
         };
         tairix_codec::serve(Pcm5102a, &duty)

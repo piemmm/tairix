@@ -12,9 +12,9 @@ use tairix_log::EventId;
 ///
 /// Exposed so audit consumers can filter by subsystem in O(1) instead of
 /// matching on individual event identifiers.
-pub const INIT_RANGE_START: u32 = 9_000;
+pub const INIT_RANGE_START: u32 = tairix_log::registry::INIT.start();
 /// Range end (exclusive) reserved for `init` event identifiers.
-pub const INIT_RANGE_END: u32 = 10_000;
+pub const INIT_RANGE_END: u32 = tairix_log::registry::INIT.end();
 
 /// A service was started: its binary was handed to the
 /// [`Spawner`](crate::Spawner) as its service account, and the kernel derived

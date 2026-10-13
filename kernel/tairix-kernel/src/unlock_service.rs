@@ -114,6 +114,7 @@ pub fn record_boot(dtb: u64, mut tree: Vec<HwNode>, audit: &dyn Sink) {
     let binding = crate::root_storage::resolve_root_block_driver(&tree, audit);
     *UNLOCK_BOOT.lock() = UnlockBoot { binding, dtb };
     tairix_kernel_core::callreg::install_link_observer(&crate::hwtree_store::LINK_SERVICE);
+    tairix_kernel_core::hwtree::install_driver_tree(&crate::hwtree_store::HW_TREE);
     let seeded = match tree.try_reserve(1) {
         Ok(()) => {
             tree.push(crate::virtual_bus::node());

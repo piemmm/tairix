@@ -651,8 +651,8 @@ so no valid read is discarded. The loop `quiesce`s the domain around the scrub,
 arms its wait from the min of `recovery_wait_timeout` and
 `fault_domain_wait_timeout`, `poll`s the domain on every wake, and audits the
 device-wide edges through the shared `BlkHealthTransition::for_fault_domain`
-vocabulary (`MSD_DOMAIN_RECOVERING 4171`, `MSD_DOMAIN_RECOVERED 4172`,
-`MSD_DOMAIN_OFFLINE 4173`). So one shared-transport blip is one recovery episode
+vocabulary (`MSD_DOMAIN_RECOVERING 27371`, `MSD_DOMAIN_RECOVERED 27372`,
+`MSD_DOMAIN_OFFLINE 27373`). So one shared-transport blip is one recovery episode
 across the device, not N spurious LUN failures.
 
 **Landed (the first live *interior hardware-tree* fault domain — the xHCI
@@ -688,8 +688,8 @@ that replaced its own. While a failed reset's window runs the children stay
 published and nothing is driven through the controller (a report poll is held,
 any other transfer answered `WouldBlock`); when the window elapses every
 interface node is retracted and the HCD exits (85) with its reason logged. Device-wide edges are audited through the shared
-`for_fault_domain` vocabulary (`HCD_DOMAIN_RECOVERING 4190`,
-`HCD_DOMAIN_RECOVERED 4191`, `HCD_DOMAIN_OFFLINE 4192`). The controller-node
+`for_fault_domain` vocabulary (`HCD_DOMAIN_RECOVERING 27090`,
+`HCD_DOMAIN_RECOVERED 27091`, `HCD_DOMAIN_OFFLINE 27092`). The controller-node
 machine and the reconciliation are proven host-side; the serve-loop wiring is
 metal-only (QEMU models no Pi USB).
 
@@ -840,10 +840,10 @@ serve loop snapshots each LUN's health around `serve_request_recovering` and
 folds every idle grace-window `poll` through one shared `note_health_edge(before,
 after, node_id)` helper, emitting exactly one `lib/log` record per real edge,
 each naming the LUN's fault-domain node (`node_hex`) and never a secret —
-`MSD_HEALTH_DEGRADED (4168, Warn)`, `MSD_HEALTH_RECOVERING (4169, Warn`, the
-grace-window entry`)`, `MSD_HEALTH_RECOVERED (4170, Info`, "the disk came
+`MSD_HEALTH_DEGRADED (27368, Warn)`, `MSD_HEALTH_RECOVERING (27369, Warn`, the
+grace-window entry`)`, `MSD_HEALTH_RECOVERED (27370, Info`, "the disk came
 back"`)`, with the fail-closed edge remaining the existing `MSD_GRACE_EXPIRED
-(4166, Warn)` in the driver's own event-id range. `virtio_blk`/`emmc2` reuse the
+(27366, Warn)` in the driver's own event-id range. `virtio_blk`/`emmc2` reuse the
 same classifier and `note_health_edge` shape when brought up as user-space serve
 processes (§2.2), never a second definition. The `usb_msd` per-device retry/reset
 event (`MSD_RECOVERY_RESET`) and the shared-transport fault-domain edges
@@ -872,8 +872,8 @@ Remaining deliverables:
 - **Interior-node fault-domain health events** (`plans/SYSLOG.md`): the first
   *hardware-tree* interior node's quiesce/resume/grace-expiry events **landed**
   with the xHCI controller wiring (IO4): the HCD serve loop emits
-  `HCD_DOMAIN_RECOVERING 4190` / `HCD_DOMAIN_RECOVERED 4191` /
-  `HCD_DOMAIN_OFFLINE 4192`, naming the controller's owner id and classified
+  `HCD_DOMAIN_RECOVERING 27090` / `HCD_DOMAIN_RECOVERED 27091` /
+  `HCD_DOMAIN_OFFLINE 27092`, naming the controller's owner id and classified
   through the shared `for_fault_domain` vocabulary (the fail-closed edge its own
   distinct event). Remaining are the *other* interior nodes' events (a watched
   hub, a SAS/JBOD expander), emitted against this same vocabulary, landing with
@@ -1668,7 +1668,7 @@ the critical path and land first.
     pointer to look, never a datum to believe (§23.1). The kernel parents it to
     volmgr's own matched node and `grant_covers`-checks every declared
     resource, so the emission can republish only transport volmgr holds. A
-    refused emission is logged (`VOLMGR_RAID_MEMBER_UNPUBLISHED 4190`) and never
+    refused emission is logged (`VOLMGR_RAID_MEMBER_UNPUBLISHED 28090`) and never
     fails the volumes the device did attach.
   - **The agent** is the RAID member-agent driver's `Run` binary matched to
     that node, holding only `CAP_IPC_ENDPOINT` + `CAP_SHM` + `CAP_LOG_EMIT`
@@ -1862,7 +1862,7 @@ the critical path and land first.
   edges are reported through the shared IO5 vocabulary
   (`MountAvailability::health_transition` → `BlkHealthTransition`), with the
   fail-closed "array lost" edge its own event, and the new ids continuing the
-  driver's own run (`RAID_* 4198–4204`).
+  driver's own run (`RAID_* 28207–28213`).
 
   **Durable position.** The scheduler gained the one decision that was missing:
   `MaintenanceAction::Checkpoint { progress, pass_completed }`, ranked above

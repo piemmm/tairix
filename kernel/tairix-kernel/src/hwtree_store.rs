@@ -20,9 +20,11 @@
 //! UNPREDICTABLE on the MMU-off Device memory the boot CPU first runs on, so
 //! callers must not touch the store before the MMU is on.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::{BlkStatus, FaultDomainState};
+use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{
     ancestor_imposed_status_by, HwDeviceClass, HwResource, HwResourceKind, HW_NODE_ROOT,
@@ -50,6 +52,9 @@ struct Inner {
     /// The id the next published node is given: above every id the store has
     /// ever held, so no id is reissued within a boot.
     next_id: u32,
+    /// The admission generation of the driver each driven node is held by,
+    /// so a release that lands after a successor's admission frees nothing.
+    driven: BTreeMap<u32, u64>,
 }
 
 impl Inner {
@@ -92,6 +97,7 @@ impl HwTreeStore {
                 nodes: Vec::new(),
                 generation: 0,
                 next_id: FIRST_ISSUED_ID,
+                driven: BTreeMap::new(),
             }),
         }
     }
@@ -573,10 +579,51 @@ impl HwNodeLiveness for HwTreeStore {
 }
 
 impl HwDriverTree for HwTreeStore {
-    fn driver_admitted(&self, node_id: u32, publishes: bool) {
-        // The node was resolved live for this admission; one a removal has
-        // just taken has no settling left to record.
-        let _ = self.set_settled(node_id, !publishes);
+    fn driver_admitted(&self, node_id: u32, generation: u64, publishes: bool) {
+        // A node a removal has just taken has nothing left to record.
+        let changed = {
+            let mut inner = self.inner.lock();
+            let Some(node) = inner.node_mut(node_id).filter(|node| !node.is_root()) else {
+                return;
+            };
+            let changed = !node.is_driven()
+                || node.is_settled() == publishes
+                || node.driver_ending() != DriverEnding::None
+                || node.fault_health() != FaultDomainState::Healthy;
+            node.set_driven(true);
+            node.set_settled(!publishes);
+            node.set_driver_ending(DriverEnding::None);
+            node.set_fault_health(FaultDomainState::Healthy);
+            inner.driven.insert(node_id, generation);
+            if changed {
+                inner.generation += 1;
+            }
+            changed
+        };
+        if changed {
+            tairix_kernel_core::hw_tree_wake();
+        }
+    }
+
+    fn driver_released(&self, node_id: u32, generation: u64, ending: DriverEnding) {
+        let changed = {
+            let mut inner = self.inner.lock();
+            if inner.driven.get(&node_id) != Some(&generation) {
+                return;
+            }
+            inner.driven.remove(&node_id);
+            let Some(node) = inner.node_mut(node_id) else {
+                return;
+            };
+            node.set_driven(false);
+            node.set_settled(false);
+            node.set_driver_ending(ending);
+            inner.generation += 1;
+            true
+        };
+        if changed {
+            tairix_kernel_core::hw_tree_wake();
+        }
     }
 }
 
@@ -1149,13 +1196,78 @@ mod tests {
         // A driver reloaded for the node is unsettled until it settles again,
         // so what it finds as it comes up is not read as arriving late; one
         // that cannot publish has nothing to settle.
-        store.driver_admitted(2, true);
+        store.driver_admitted(2, 1, true);
         let refound = store.publish_child(2, hid_child()).expect("published");
         assert!(!store
             .node(refound)
             .is_some_and(|node| node.is_hot_arrival()));
-        store.driver_admitted(2, false);
+        store.driver_admitted(2, 2, false);
         assert!(store.node(2).is_some_and(|node| node.is_settled()));
+    }
+
+    /// A node is driven while a live driver holds it: its driver ending
+    /// leaves it neither driven nor settled, records how it ended, and moves
+    /// the generation so the device manager sees it; a release landing after
+    /// a successor's admission takes nothing from the successor.
+    #[test]
+    fn a_node_is_driven_until_its_driver_ends_and_a_late_release_frees_no_successor() {
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("seeds");
+        let driven = |store: &HwTreeStore| store.node(2).is_some_and(|node| node.is_driven());
+        let ending = |store: &HwTreeStore| store.node(2).map(|node| node.driver_ending());
+        assert!(!driven(&store), "no driver yet");
+
+        store.driver_admitted(2, 7, false);
+        assert!(driven(&store));
+        let before = store.generation();
+        store.driver_released(2, 7, DriverEnding::Failed);
+        assert!(!driven(&store));
+        assert!(!store.node(2).is_some_and(|node| node.is_settled()));
+        assert_eq!(ending(&store), Some(DriverEnding::Failed));
+        assert!(store.generation() > before, "the device manager is woken");
+
+        store.driver_admitted(2, 8, false);
+        assert_eq!(
+            ending(&store),
+            Some(DriverEnding::None),
+            "a successor ended nothing yet"
+        );
+        store.driver_released(2, 7, DriverEnding::Crashed);
+        assert!(driven(&store), "a stale release frees no successor");
+        assert_eq!(ending(&store), Some(DriverEnding::None));
+        let unchanged = store.generation();
+        store.driver_released(2, 7, DriverEnding::Crashed);
+        assert_eq!(
+            store.generation(),
+            unchanged,
+            "nothing changed, nothing woken"
+        );
+    }
+
+    /// The health a driver reported of its fault domain is its own view: a
+    /// successor admitted to the node starts the domain healthy, its own
+    /// report the next word.
+    #[test]
+    fn a_successor_inherits_no_fault_health_its_predecessor_reported() {
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("seeds");
+        store.driver_admitted(2, 1, true);
+        store
+            .set_node_health(2, FaultDomainState::Offline)
+            .expect("its own node");
+        store.driver_released(2, 1, DriverEnding::Failed);
+        assert_eq!(
+            store.node(2).map(|node| node.fault_health()),
+            Some(FaultDomainState::Offline),
+            "a node with no driver keeps the last word it had"
+        );
+        let before = store.generation();
+        store.driver_admitted(2, 2, true);
+        assert_eq!(
+            store.node(2).map(|node| node.fault_health()),
+            Some(FaultDomainState::Healthy)
+        );
+        assert!(store.generation() > before);
     }
 
     #[test]

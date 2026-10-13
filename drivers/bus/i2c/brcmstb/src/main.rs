@@ -13,7 +13,8 @@
 mod program {
     use tairix_abi::DriverError;
     use tairix_drv_bus_i2c_brcmstb::{Ddc, AUTO_I2C_WINDOW, BSC_WINDOW, REQUIRED_CAPABILITIES};
-    use tairix_i2cbus::{bringup_failed, declared_speed, serve};
+    use tairix_drvrt::exit::{end, step, DriverExit};
+    use tairix_i2cbus::{declared_speed, serve};
     use tairix_rt::ClockDelay;
 
     fn run() -> Result<i32, i32> {
@@ -22,11 +23,14 @@ mod program {
         let bsc = node.map_named(BSC_WINDOW)?;
         let auto_i2c = node.map_named(AUTO_I2C_WINDOW)?;
         let ddc = Ddc::new(&bsc, &auto_i2c, ClockDelay::new(), speed).map_err(|err| {
-            bringup_failed(if err == DriverError::OutOfRange {
-                "i2c: the controller makes no bus clock at or below the declared speed"
-            } else {
-                "i2c: the register windows do not reach the controller"
-            })
+            end(
+                DriverExit::BringupFailed,
+                &[step(if err == DriverError::OutOfRange {
+                    "i2c: the controller makes no bus clock at or below the declared speed"
+                } else {
+                    "i2c: the register windows do not reach the controller"
+                })],
+            )
         })?;
         Ok(serve(&node, ddc))
     }

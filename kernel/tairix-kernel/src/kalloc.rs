@@ -9,4 +9,4 @@
 //! `tairix-kernel` reaches the heap types through `tairix_kernel::kalloc`
 //! without also naming the `lib/kalloc` crate directly.
 
-pub use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
+pub use tairix_kalloc::{FreeListAllocator, Heap, BOOT_HEAP_BYTES, HEAP_BYTES};

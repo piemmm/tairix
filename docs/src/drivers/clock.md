@@ -103,9 +103,12 @@ serves two roles:
   runs from, and the HDMI blocks' state-machine (13) and pixel-path (14)
   clocks — are served over `clock-v1`, each floored. A clock runs at the rate
   the firmware makes for the highest floor its holders state, never below the
-  least the firmware accepts, and returns to the rate it ran at before once
-  its last holder leaves; one the firmware had not started rests at the least
-  it accepts, since the interface cannot stop a clock. The firmware rounds, so
+  least the firmware accepts — nor, for the state-machine clock, below the
+  120 MHz the HDMI blocks' registers need, which the firmware does not state —
+  and returns to the rate it ran at before once its last holder leaves; one
+  the firmware had not started rests at that least, or where it runs when the
+  least is zero, since the interface cannot stop a clock and answers a zero
+  rate as no such clock. The firmware rounds, so
   every reply carries its own answer. A clock the firmware reports no range
   for is not served, and the ARM clock is never reachable through a link.
 

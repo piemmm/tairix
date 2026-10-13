@@ -395,11 +395,9 @@ installation gets a distinct identity.
 
 ### 1.7 Audit
 
-`lib/ssh::events` claims the `24_000..25_000` `EventId` range. Verified against
-every `*_RANGE_START` in the tree: the highest assigned is `timed` at `23_000`,
-and `22_000..23_000` stays **retired** (a deleted subsystem held it; a shipped
-range is never re-used). `docs/src/security/network.md`'s registry table is the
-format precedent, and `docs/src/security/ssh.md` carries this one.
+`lib/ssh::events` takes the `32_000..33_000` `EventId` range, registered in
+`tairix_log::registry` with its first event; the `ci` stage `event-ids` refuses
+an identifier outside it. `docs/src/security/ssh.md` carries the table.
 
 Every authentication grant and refusal, host-key decision, host-key mint,
 forwarding grant and refusal, rate-limit drop, `StrictModes` refusal, session

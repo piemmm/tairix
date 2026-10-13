@@ -22,12 +22,16 @@ tairix-hid = { path = "../../../lib/hid", version = "=0.0.0" }
 # The configuration descriptor walk, the shared SETUP builders, and the URB
 # link the program drives.
 tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }
+# How the driver ends, and on the target the grants the matched node carried:
+# the URB endpoint, the shared buffer, the interface number.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 
 [target.'cfg(target_os = "none")'.dependencies]
-# The grants the matched node carried: the URB endpoint, the shared buffer,
-# the interface number.
-tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # `_start`, `ipc_call`, the seat injections, and the log sink.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The sink a test reads an ending's record back from.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

@@ -996,7 +996,10 @@ What it guarantees:
   takes the screen over from the firmware has the kernel move its
   framebuffer console onto a block the kernel owns below the engine's DMA
   reach (`console_relocate`) before it tells the firmware the display is the
-  ARM's, because the firmware may then take its own framebuffer back. The
+  ARM's, because the firmware may then take its own framebuffer back. The move
+  waits until the boot has handed console 0 to `login`: the takeover's mode
+  set blanks a sink while it re-locks, and must not land under the Supervisor
+  window or a passphrase prompt. The
   console repaints there from its retained screen in whatever disposition it
   held; the block is the console's for the kernel's life, so a restarted
   engine is answered the same one.

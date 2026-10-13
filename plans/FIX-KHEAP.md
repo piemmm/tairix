@@ -260,14 +260,14 @@ mapped.
   drained region drives `shrink`, and repeat. Booting alone proves nothing
   here: a test kernel that publishes no allocator never installs the source
   (`plans/OPEN-DEFECTS.md` D69).
-- **The bootstrap arena is far larger than boot needs.** The exercise reports
-  the heap's live bytes at `BootCompleted`: 0.84 MiB on riscv64, 1.22 MiB on
-  x86_64, 1.41 MiB on aarch64, against a 64 MiB `.bss` arena. Sizing the
-  arena to what boot actually consumes before the frame allocator exists
-  would reclaim ~62 MiB of `.bss` per image and make every vertical grow the
-  heap as part of booting; it needs the *pre-install* watermark (a lower
-  figure still) and re-validation of the ~80 hand-rolled test kernels that
-  install no source and would then be capped at the smaller arena, so it is
-  staged rather than taken here.
+- **The bootstrap arena is sized to boot.** A kernel that installs the source
+  reserves `tairix_kalloc::BOOT_HEAP_BYTES` (16 MiB); the frame allocator's
+  metadata is carved from RAM rather than drawn from it, and phase `Mem`
+  records the arena's peak use before growth (`4006`): 41 KiB on x86_64,
+  80 KiB on riscv64 and 654 KiB on a four-core aarch64 `virt`, whose
+  secondary-CPU stacks and boot-console grids must come from it
+  (`plans/OPEN-DEFECTS.md` D974). The `kernel_arch_boot` verticals boot the
+  production pipeline in that arena. The hand-rolled test kernels that
+  install no source keep `HEAP_BYTES` (64 MiB).
 - **The teardown batch is a batching granule**, not a limit on how much may
   be torn down: a longer run is simply processed in more batches.

@@ -81,8 +81,9 @@ use crate::sched::{
 };
 use tairix_abi::cpufreq::CpuFreqLimits;
 use tairix_abi::driver::filesystem::DirVisit;
+use tairix_abi::driver::DriverEnding;
 use tairix_abi::hwlink::LinkRole;
-use tairix_abi::hwtree::{HwResource, HwResourceKind};
+use tairix_abi::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::seat::ReleaseSurface;
@@ -1235,6 +1236,35 @@ where
             }
         }
         Ok(base_va)
+    }
+
+    /// Park the caller until the boot no longer holds `console`'s screen,
+    /// so a display engine takes it over only once the boot's prompts are
+    /// done.
+    ///
+    /// The boot pulses the console wait-queue as it lets go; a termination
+    /// deferred against the caller unwinds the wait.
+    fn await_screen_release(
+        &self,
+        caller: &CallerContext<'_>,
+        console: &dyn crate::console::ConsoleWrite,
+    ) -> Result<(), Errno> {
+        if !console.boot_holds_screen() {
+            return Ok(());
+        }
+        let task = caller.task_id.0;
+        crate::waitq::CONSOLE_WAITQ.register(task, crate::waitq::NO_DEADLINE);
+        let released = loop {
+            if !console.boot_holds_screen() {
+                break Ok(());
+            }
+            park_current_task(self.arch);
+            if crate::procsignal::kill_pending(task) {
+                break Err(Errno::Interrupted);
+            }
+        };
+        crate::waitq::CONSOLE_WAITQ.deregister(task);
+        released
     }
 
     /// Move `console`, which paints `surface`, onto a block of kernel memory
@@ -3197,7 +3227,7 @@ where
         // Nothing of the process runs any more. Its lines, endpoints,
         // regions and node go first, so a successor loaded the moment the exit
         // is observed finds none of them still held; its number goes last.
-        let departed = self.reclaim_process_resources(process);
+        let departed = self.reclaim_process_resources(process, DriverEnding::of_status(status));
         finish_death(
             self.caps,
             self.audit,
@@ -3690,7 +3720,11 @@ where
     /// Answers what the departure leaves the caller to finish
     /// ([`finish_death`]).
     #[must_use]
-    pub(crate) fn reclaim_process_resources(&self, process: ProcessId) -> Departed {
+    pub(crate) fn reclaim_process_resources(
+        &self,
+        process: ProcessId,
+        ending: DriverEnding,
+    ) -> Departed {
         let _ = crate::revoke::release_interrupts(
             self.irq,
             self.irq_controller,
@@ -3783,6 +3817,7 @@ where
             self.process_wait,
             self.peer_watch,
             process,
+            ending,
         )
     }
 
@@ -7844,7 +7879,10 @@ where
         let freed = self
             .dma_quarantine
             .release(driver.node, driver.generation)?;
-        self.audit_dma_released(driver.node, freed, DmaReleaseCause::Reset);
+        // A reset that freed nothing decided nothing about any memory.
+        if freed != 0 {
+            self.audit_dma_released(driver.node, freed, DmaReleaseCause::Reset);
+        }
         Ok(freed)
     }
 
@@ -9394,6 +9432,15 @@ where
             return Err(Errno::PermissionDenied);
         }
 
+        // A device's channel is its node's, served by the driver loaded for
+        // that node alone: no other driver can stand in for the device.
+        if let Some(node) = NodeEndpointBlock::device_channel_node(endpoint_id) {
+            if self.aspaces.read().loaded_node(caller.process()) != Some(node) {
+                CallEndpoint::record_create_denied(EndpointId(endpoint_id), self.audit);
+                return Err(Errno::PermissionDenied);
+            }
+        }
+
         // Build the endpoint owned by the calling task. `CallEndpoint::create`
         // runs the bind-time authority checks against the caller's effective
         // set *before* the endpoint exists: the
@@ -10221,16 +10268,14 @@ where
         if self.translation_of(&driver).is_some() {
             return Err(Errno::NotSupported);
         }
-        let (console, surface) = self
+        let console = self
             .consoles
             .iter()
-            .find_map(|device| {
-                device
-                    .write
-                    .surface()
-                    .map(|surface| (device.write, surface))
-            })
+            .map(|device| device.write)
+            .find(|write| write.surface().is_some())
             .ok_or(Errno::NotFound)?;
+        self.await_screen_release(caller, console)?;
+        let surface = console.surface().ok_or(Errno::NotFound)?;
         let surface = if surface.kernel_owned {
             surface
         } else {
@@ -12864,6 +12909,7 @@ fn reclaim_process_bookkeeping(
     process_wait: &(dyn ProcessWait + 'static),
     peer_watch: Option<&PeerWatch>,
     process: ProcessId,
+    ending: DriverEnding,
 ) -> Departed {
     // Drop the signal-intake state of every thread of the process (its opt-in
     // and any pending observed signal): a dead thread's intake must never
@@ -12903,7 +12949,9 @@ fn reclaim_process_bookkeeping(
     // (pipe ends wake their parked peers as they drop), limits, grants, cwd,
     // and any frozen space snapshot all go together, so no stale entry
     // outlives the process.
+    let driver = aspaces.read().loaded_driver(process);
     aspaces.write().withdraw(process);
+    crate::hwtree::driver_released(driver, ending);
     match removed {
         Some(removed) => Departed {
             instance: Some(removed.record.proc_id()),
@@ -13930,6 +13978,7 @@ fn retire_loading_child(
         services.process_wait(),
         Some(services.peer_watch()),
         sec_id,
+        DriverEnding::of_status(status),
     );
     finish_death(
         services.caps(),
@@ -14042,7 +14091,8 @@ where
         if let crate::iommu::DmaPath::Stranded { unit } = dma {
             audit_stranded(self.audit, node.id, unit);
         }
-        self.aspaces
+        let generation = self
+            .aspaces
             .write()
             .admit_driver(sec_id, node.id, dma)
             .map_err(|err| {
@@ -14052,7 +14102,7 @@ where
                     AdmitError::AspaceConflict
                 }
             })?;
-        node.tree.driver_admitted(node.id, publishes);
+        node.tree.driver_admitted(node.id, generation, publishes);
         Ok(())
     }
 
@@ -14380,12 +14430,14 @@ where
         peers: &PeerWatch,
         status: Option<i32>,
     ) {
+        // It never ran, so a fresh attempt meets the same refusal.
         let departed = reclaim_process_bookkeeping(
             self.caps,
             self.aspaces,
             self.process_wait,
             Some(peers),
             sec_id,
+            DriverEnding::Refused,
         );
         finish_death(
             self.caps,
@@ -21676,7 +21728,8 @@ mod tests {
             }
         }
         impl crate::hwtree::HwDriverTree for Removed {
-            fn driver_admitted(&self, _node_id: u32, _publishes: bool) {}
+            fn driver_admitted(&self, _node_id: u32, _generation: u64, _publishes: bool) {}
+            fn driver_released(&self, _node_id: u32, _generation: u64, _ending: DriverEnding) {}
         }
         install_trace_filter();
         let sink = make_sink();
@@ -21765,9 +21818,10 @@ mod tests {
             }
         }
         impl crate::hwtree::HwDriverTree for Recording {
-            fn driver_admitted(&self, node_id: u32, publishes: bool) {
+            fn driver_admitted(&self, node_id: u32, _generation: u64, publishes: bool) {
                 self.0.write().push((node_id, publishes));
             }
+            fn driver_released(&self, _node_id: u32, _generation: u64, _ending: DriverEnding) {}
         }
         install_trace_filter();
         let sink = make_sink();
@@ -22215,6 +22269,7 @@ mod tests {
                 wait,
                 None,
                 ProcessId(pid),
+                DriverEnding::Crashed,
             );
             finish_death(
                 table,
@@ -22311,7 +22366,7 @@ mod tests {
                 self.node,
                 crate::iommu::DmaPath::Untranslated,
             );
-            self.admissions.lock().push(admitted);
+            self.admissions.lock().push(admitted.map(|_| ()));
             false
         }
     }
@@ -22564,7 +22619,14 @@ mod tests {
             "a number that still keys a capability record and an address space was drawable"
         );
 
-        let _ = reclaim_process_bookkeeping(&table, &aspaces, &NULL_PROCESS_WAIT, None, process);
+        let _ = reclaim_process_bookkeeping(
+            &table,
+            &aspaces,
+            &NULL_PROCESS_WAIT,
+            None,
+            process,
+            DriverEnding::Clean,
+        );
         assert!(table.read().caps_of_process(process).is_none());
         assert_eq!(aspaces.read().stale_task_entry(process), None);
         // The records are gone, but the death path's own last steps are not
@@ -32439,7 +32501,7 @@ mod tests {
             [(Some(0x44), true, epoch)],
             "handed over once"
         );
-        let _ = h.reclaim_process_resources(ProcessId(2));
+        let _ = h.reclaim_process_resources(ProcessId(2), DriverEnding::Clean);
         assert_eq!(
             port.calls(),
             [(Some(0x44), true, epoch), (Some(0x44), false, epoch)],
@@ -32490,7 +32552,7 @@ mod tests {
             [(0x44, true), (0x45, true)],
             "a message raises no pin"
         );
-        let _ = h.reclaim_process_resources(ProcessId(3));
+        let _ = h.reclaim_process_resources(ProcessId(3), DriverEnding::Clean);
         assert_eq!(
             *port.wired.lock(),
             [(0x44, true), (0x45, true), (0x45, false)]
@@ -32713,7 +32775,7 @@ mod tests {
         translation
             .map(0x44, generation, &[translated_block(0x8000_0000)], 0)
             .expect("the first carve makes the domain");
-        let _ = h.reclaim_process_resources(ProcessId(2));
+        let _ = h.reclaim_process_resources(ProcessId(2), DriverEnding::Clean);
         let flips: Vec<bool> = port.calls().iter().map(|call| call.1).collect();
         assert_eq!(
             flips,
@@ -36477,7 +36539,7 @@ mod tests {
                 Err(Errno::AlreadyExists),
                 "the role is taken while the driver lives"
             );
-            let _ = h.reclaim_process_resources(driver);
+            let _ = h.reclaim_process_resources(driver, DriverEnding::Clean);
             let replacement = ProcessId(crate::test_boot::claim_peer_task());
             assert!(
                 crate::cpufreq::bind(replacement, limits, 2_000).is_ok(),
@@ -37526,14 +37588,30 @@ mod tests {
         surface: RwLock<Option<crate::console::ConsoleSurface>>,
         refuses: bool,
         offered: RwLock<alloc::vec::Vec<(u64, u64)>>,
+        /// How many more times the boot answers that it holds the screen.
+        held_for: core::sync::atomic::AtomicUsize,
+        /// How many times the hold was asked about.
+        hold_checks: core::sync::atomic::AtomicUsize,
+        moved_while_held: core::sync::atomic::AtomicBool,
     }
 
     impl MovableConsole {
         fn leaked(surface: Option<crate::console::ConsoleSurface>, refuses: bool) -> &'static Self {
+            Self::held(surface, refuses, 0)
+        }
+
+        fn held(
+            surface: Option<crate::console::ConsoleSurface>,
+            refuses: bool,
+            checks: usize,
+        ) -> &'static Self {
             Box::leak(Box::new(Self {
                 surface: RwLock::new(surface),
                 refuses,
                 offered: RwLock::new(alloc::vec::Vec::new()),
+                held_for: core::sync::atomic::AtomicUsize::new(checks),
+                hold_checks: core::sync::atomic::AtomicUsize::new(0),
+                moved_while_held: core::sync::atomic::AtomicBool::new(false),
             }))
         }
 
@@ -37555,6 +37633,10 @@ mod tests {
         }
 
         fn relocate(&self, phys: u64, len: u64) -> Relocation {
+            use core::sync::atomic::Ordering::Relaxed;
+            if self.held_for.load(Relaxed) > 0 {
+                self.moved_while_held.store(true, Relaxed);
+            }
             self.offered.write().push((phys, len));
             let mut surface = self.surface.write();
             let held = *surface;
@@ -37573,6 +37655,14 @@ mod tests {
                 }
                 _ => Relocation::Refused,
             }
+        }
+
+        fn boot_holds_screen(&self) -> bool {
+            use core::sync::atomic::Ordering::Relaxed;
+            self.hold_checks.fetch_add(1, Relaxed);
+            self.held_for
+                .fetch_update(Relaxed, Relaxed, |left| left.checked_sub(1))
+                .is_ok()
         }
     }
 
@@ -37859,6 +37949,72 @@ mod tests {
             "none of those took a block"
         );
         assert_eq!(*console.surface.read(), Some(firmware_console()));
+    }
+
+    /// `console_relocate` moves the console only once the boot lets go of its
+    /// screen, and refuses a caller it would refuse anyway without waiting.
+    #[test]
+    fn console_relocate_takes_the_screen_only_once_the_boot_lets_go() {
+        use core::sync::atomic::Ordering::Relaxed;
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        for (task, node) in [(2, 9), (3, 10)] {
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &[0u8]);
+            aspaces
+                .write()
+                .register(ProcessId(task), space, physmap)
+                .expect("registration succeeds");
+            aspaces
+                .write()
+                .admit_driver(ProcessId(task), node, crate::iommu::DmaPath::Untranslated)
+                .expect("the node has no live driver");
+        }
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+            0,
+            encode_hw_snapshot(
+                0,
+                &[engine_node(9, true, true), engine_node(10, false, true)],
+            ),
+        )));
+        let console = MovableConsole::held(Some(firmware_console()), false, 3);
+        let blocks = ConsoleBlocks::leaked();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source)
+        .with_consoles(console.installed())
+        .with_shared_mem_facility(blocks);
+        let relocate = |task: u64| {
+            let caps = make_caps_record(task, &[CapabilityId::MEM_DMA], sink);
+            let ctx = CallerContext {
+                task_id: SecTaskId(task),
+                caps: &caps,
+            };
+            h.console_relocate(&ctx, 0x1000, HwResource::WIRE_LEN)
+        };
+
+        assert_eq!(relocate(3), Err(Errno::PermissionDenied));
+        assert_eq!(
+            console.hold_checks.load(Relaxed),
+            0,
+            "a refused caller is answered without waiting"
+        );
+        assert_eq!(relocate(2), Ok(HwResource::WIRE_LEN as u64));
+        assert!(
+            console.hold_checks.load(Relaxed) > 3,
+            "the hold is asked until the boot lets go"
+        );
+        assert!(!console.moved_while_held.load(Relaxed));
+        assert_eq!(console.offered.read().len(), 1);
     }
 
     /// `console_relocate` gives back a block the console does not take, and
@@ -38827,6 +38983,96 @@ mod tests {
             .any(|(key, value)| key == "cause" && value == "reset"));
     }
 
+    /// A driver's end tells the tree its node is driven no more and how it
+    /// ended, naming its own admission so a successor's is never taken.
+    #[test]
+    fn reclaiming_a_driver_tells_the_tree_its_node_is_driven_no_more() {
+        struct Releases(tairix_sync::SpinLock<alloc::vec::Vec<(u32, u64, DriverEnding)>>);
+        impl crate::hwtree::HwNodeLiveness for Releases {
+            fn is_live(&self, _node_id: u32) -> bool {
+                true
+            }
+        }
+        impl crate::hwtree::HwDriverTree for Releases {
+            fn driver_admitted(&self, _node_id: u32, _generation: u64, _publishes: bool) {}
+            fn driver_released(&self, node_id: u32, generation: u64, ending: DriverEnding) {
+                self.0.lock().push((node_id, generation, ending));
+            }
+        }
+        static RELEASES: Releases = Releases(tairix_sync::SpinLock::new(alloc::vec::Vec::new()));
+        crate::hwtree::install_driver_tree(&RELEASES);
+        let table = RwLock::new(CapTable::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let task = crate::test_boot::claim_task();
+        let generation = aspaces
+            .write()
+            .admit_driver(ProcessId(task), 0x5150, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+
+        let _ = reclaim_process_bookkeeping(
+            &table,
+            &aspaces,
+            &NULL_PROCESS_WAIT,
+            None,
+            ProcessId(task),
+            DriverEnding::Failed,
+        );
+        assert!(RELEASES
+            .0
+            .lock()
+            .contains(&(0x5150, generation, DriverEnding::Failed)));
+        assert_eq!(aspaces.read().loaded_node(ProcessId(task)), None);
+    }
+
+    /// A quarantine holding nothing, so every release frees nothing.
+    struct EmptyQuarantine;
+
+    impl tairix_kernel_mem::DmaCustody for EmptyQuarantine {
+        fn reserve(&self, _node: u32) -> Result<(), DmaError> {
+            Ok(())
+        }
+        fn unreserve(&self, _node: u32) {}
+        fn hold(&self, _node: u32, _generation: u64, _block: tairix_kernel_mem::FrameBlock) {}
+    }
+
+    impl DmaQuarantineFacility for EmptyQuarantine {
+        fn release(&self, _node: u32, _generation: u64) -> Result<u64, Errno> {
+            Ok(0)
+        }
+        fn retire(&self, _node: u32) -> Result<u64, Errno> {
+            Ok(0)
+        }
+        fn detach(&self, _node: u32) {}
+    }
+
+    #[test]
+    fn a_reset_that_frees_nothing_records_no_release() {
+        static QUARANTINE: EmptyQuarantine = EmptyQuarantine;
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_quarantine(&QUARANTINE);
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+
+        assert_eq!(h.dma_quiesced(&ctx), Ok(0));
+        assert!(!sink
+            .snapshot()
+            .iter()
+            .any(|ev| ev.id == AuditEvent::DmaQuarantineReleased.id()));
+    }
+
     /// A vanished device can master nothing, so a surprise removal retires
     /// the quarantine of every node it took; an orderly retirement of a device
     /// still present frees nothing, but still ends every removed node's
@@ -38910,7 +39156,7 @@ mod tests {
             .write()
             .admit_driver(ProcessId(6), 0x51, crate::iommu::DmaPath::Untranslated)
             .expect("the node has no live driver");
-        let _ = h.reclaim_process_resources(ProcessId(6));
+        let _ = h.reclaim_process_resources(ProcessId(6), DriverEnding::Clean);
         assert!(
             !sink
                 .snapshot()
@@ -38925,7 +39171,7 @@ mod tests {
             .expect("the node has no live driver");
         aspaces.write().note_dma_carved(ProcessId(7), 0x3000);
         aspaces.write().note_dma_freed(ProcessId(7), 0x1000);
-        let _ = h.reclaim_process_resources(ProcessId(7));
+        let _ = h.reclaim_process_resources(ProcessId(7), DriverEnding::Clean);
         let record = sink
             .snapshot()
             .into_iter()
@@ -39424,7 +39670,7 @@ mod tests {
         aspaces.write().note_dma_carved(ProcessId(6), 0x1000);
         assert!(model.attached(FIRST_TRANSLATED_STREAM).is_some());
 
-        let _ = h.reclaim_process_resources(ProcessId(6));
+        let _ = h.reclaim_process_resources(ProcessId(6), DriverEnding::Clean);
         assert_eq!(model.attached(FIRST_TRANSLATED_STREAM), None);
         assert_eq!(model.domains(), 0);
         assert!(
@@ -39474,7 +39720,7 @@ mod tests {
             .map(0x52, generation, &[translated_block(0x8000_0000)], 0)
             .expect("the driver's first carve makes its domain");
 
-        let _ = h.reclaim_process_resources(ProcessId(7));
+        let _ = h.reclaim_process_resources(ProcessId(7), DriverEnding::Clean);
         let record = sink
             .snapshot()
             .into_iter()
@@ -40830,6 +41076,76 @@ mod tests {
         crate::callreg::unregister(EndpointId(served));
     }
 
+    /// Two devices' drivers each bind their own node's channel, with no
+    /// probing and no refusal, and neither can bind the other's.
+    #[test]
+    fn call_create_admits_a_device_channel_only_to_its_nodes_driver() {
+        use tairix_abi::driver::audio_channel::AUDIO_CHANNEL_ENDPOINTS;
+        use tairix_abi::driver::net_channel::NET_CHANNEL_ENDPOINTS;
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let hdmi0 = crate::test_boot::claim_task();
+        let [hdmi1, bystander] = [(); 2].map(|()| crate::test_boot::claim_peer_task());
+        for task in [hdmi0, hdmi1, bystander] {
+            let (space, physmap) = call_aspace(&one_cap_image(CapabilityId::AUDIO_DEVICE));
+            aspaces
+                .write()
+                .register(ProcessId(task), space, physmap)
+                .expect("registration succeeds");
+        }
+        for (task, node) in [(hdmi0, 0x17), (hdmi1, 0x19)] {
+            aspaces
+                .write()
+                .admit_driver(ProcessId(task), node, crate::iommu::DmaPath::Untranslated)
+                .expect("the node has no live driver");
+        }
+        let records = [hdmi0, hdmi1, bystander]
+            .map(|task| make_caps_record(task, &[CapabilityId::IPC_BIND_PRIVILEGED], sink));
+        let ctx = |at: usize, task: u64| CallerContext {
+            task_id: SecTaskId(task),
+            caps: &records[at],
+        };
+        let own = AUDIO_CHANNEL_ENDPOINTS.endpoint(0x17);
+        let other = AUDIO_CHANNEL_ENDPOINTS.endpoint(0x19);
+
+        assert_eq!(
+            h.call_create(&ctx(0, hdmi0), own, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        assert_eq!(
+            h.call_create(&ctx(1, hdmi1), other, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        let refused = |at: usize, task: u64, id: u64| {
+            h.call_create(&ctx(at, task), id, 0x1000, 0x2000, 64, 64, 4)
+        };
+        assert_eq!(refused(0, hdmi0, other), Err(Errno::PermissionDenied));
+        assert_eq!(
+            refused(0, hdmi0, NET_CHANNEL_ENDPOINTS.endpoint(0x19)),
+            Err(Errno::PermissionDenied),
+            "nor another node's channel of any family"
+        );
+        assert_eq!(
+            refused(2, bystander, AUDIO_CHANNEL_ENDPOINTS.endpoint(0x21)),
+            Err(Errno::PermissionDenied),
+            "a task loaded for no node serves no device"
+        );
+        crate::callreg::unregister(EndpointId(own));
+        crate::callreg::unregister(EndpointId(other));
+    }
+
     /// Register a grant-restricted endpoint (required send cap
     /// `CAP_IPC_ENDPOINT`) owned by the calling test, returning it for
     /// unregistration.
@@ -41962,7 +42278,7 @@ mod tests {
             || h.waitset_member_state(&ctx, &member, 0, 0) == crate::fswatch::MemberState::Ready;
         assert!(!ready());
 
-        let _ = h.reclaim_process_resources(ProcessId(peer_process));
+        let _ = h.reclaim_process_resources(ProcessId(peer_process), DriverEnding::Clean);
         assert!(peers.ready(watcher));
         assert!(ready(), "the exit wakes the feed");
         assert_eq!(
@@ -43782,7 +44098,7 @@ mod tests {
             0x2008,
         )
         .expect("carves");
-        let _ = h.reclaim_process_resources(ProcessId(scene.task));
+        let _ = h.reclaim_process_resources(ProcessId(scene.task), DriverEnding::Clean);
         let record = sink
             .snapshot()
             .into_iter()
@@ -47027,7 +47343,7 @@ mod tests {
         // Another task's port survives the reclaim untouched.
         register_port_for(&ipc, 0x5EAD_0022, 0xF0F1, sink);
 
-        let _ = h.reclaim_process_resources(ProcessId(task));
+        let _ = h.reclaim_process_resources(ProcessId(task), DriverEnding::Clean);
         assert!(ipc.read().lookup(EndpointId(id)).is_none());
         assert!(ipc.read().lookup(EndpointId(0x5EAD_0022)).is_some());
 
@@ -47512,7 +47828,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        let _ = h.reclaim_process_resources(ProcessId(client));
+        let _ = h.reclaim_process_resources(ProcessId(client), DriverEnding::Clean);
 
         // The dead poster's call is gone before any server sees it.
         assert!(!ep.has_pending());
@@ -47743,7 +48059,7 @@ mod tests {
             0x5708,
             crate::test_boot::CLAIM_TASK_BASE - 1,
         ] {
-            let _ = h.reclaim_process_resources(ProcessId(other));
+            let _ = h.reclaim_process_resources(ProcessId(other), DriverEnding::Clean);
             assert_eq!(
                 h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN),
                 Ok(ORIGIN_WIRE_LEN as u64),
@@ -47753,7 +48069,7 @@ mod tests {
 
         // The poster's own reclaim does cancel it, and the server learns so
         // by a fail-closed refusal rather than a reply into a dead caller.
-        let _ = h.reclaim_process_resources(ProcessId(poster));
+        let _ = h.reclaim_process_resources(ProcessId(poster), DriverEnding::Clean);
         assert_eq!(
             h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN),
             Err(Errno::NotFound)

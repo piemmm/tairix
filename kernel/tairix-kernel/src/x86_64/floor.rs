@@ -149,7 +149,7 @@ pub fn bring_up_virtio_pci(
         pool
     };
 
-    let waiter: &'static IrqParkWaiter = Box::leak(Box::new(armed.waiter()));
+    let waiter: &'static IrqParkWaiter = Box::leak(Box::new(armed.waiter(audit)));
     let host: &'static FloorHost = Box::leak(Box::new(KernelVirtioHost::new(
         pool,
         caller,

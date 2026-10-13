@@ -37,8 +37,8 @@ use tairix_drv_storage_emmc2::{
 use tairix_fdt::{Fdt, Node};
 use tairix_kernel_core::waitq::deadline_for;
 use tairix_kernel_core::{
-    dma_constraint, park_until, translate_device_addr, wait_now_ns, ConsoleRead, ConsoleWrite,
-    CooperativeYield, DmaConstraint, InitSpawnCtx, IrqParkWaiter, YieldHandle,
+    dma_constraint, park_until, translate_device_addr, wait_now_ns, CooperativeYield,
+    DmaConstraint, InitSpawnCtx, IrqParkWaiter, YieldHandle,
 };
 use tairix_kernel_irq::{IrqTable, Trigger, WaitOutcome};
 use tairix_kernel_mem::{window_slots, DmaPool, FrameAllocator, PageTable, PhysAddr, PhysMap};
@@ -66,7 +66,9 @@ use crate::floor_irq::LineHost;
 use crate::floor_mmio::{bring_up_virtio_mmio, dma_window, register_map, MmioFloorPort};
 use crate::root_mount::LATE_USERS_DB;
 use crate::root_storage::RootBlockBinding;
-use crate::unlock_orchestrate::{finish_unlock, finish_virtio_unlock, UnlockConsole, UnlockEnv};
+use crate::unlock_orchestrate::{
+    finish_unlock, finish_virtio_unlock, Console0, KeySource, UnlockConsole, UnlockEnv,
+};
 use crate::unlock_service::{
     loader_caps, note, note_stage, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_SERVICE,
     UNLOCK_TASK,
@@ -331,12 +333,7 @@ struct Aarch64UnlockConsole;
 static AARCH64_UNLOCK_CONSOLE: Aarch64UnlockConsole = Aarch64UnlockConsole;
 
 impl UnlockConsole for Aarch64UnlockConsole {
-    fn acquire_console0(
-        &self,
-    ) -> (
-        &'static dyn ConsoleWrite,
-        &'static (dyn ConsoleRead + Sync + 'static),
-    ) {
+    fn acquire_console0(&self) -> Console0 {
         // Primary console (index 0): the video console + its keyboard queue
         // when a framebuffer console is active, else the discovered UART. Both
         // input halves are interrupt-fed console queues (the keyboard
@@ -344,9 +341,11 @@ impl UnlockConsole for Aarch64UnlockConsole {
         // `push` wakes `CONSOLE_WAITQ`, so the kthread reader parks for input
         // rather than busy-polling a raw FIFO.
         if video::is_active() {
-            let write: &'static dyn ConsoleWrite = &VIDEO_CONSOLE;
-            let read: &'static (dyn ConsoleRead + Sync + 'static) = &VIDEO_KEYBOARD;
-            (write, read)
+            Console0 {
+                write: &VIDEO_CONSOLE,
+                read: &VIDEO_KEYBOARD,
+                keys: KeySource::InputDevice,
+            }
         } else {
             // Switch the UART console to interrupt-driven receive for the
             // unlock window so a keystroke wakes the parked reader
@@ -354,9 +353,11 @@ impl UnlockConsole for Aarch64UnlockConsole {
             // which `UART_CONSOLE_READ` reads. Idempotent with the
             // `release_console0_to_login` handoff enable.
             crate::aarch64::gic_irq::enable_uart_console_irq();
-            let write: &'static dyn ConsoleWrite = &UART_CONSOLE;
-            let read: &'static (dyn ConsoleRead + Sync + 'static) = &UART_CONSOLE_READ;
-            (write, read)
+            Console0 {
+                write: &UART_CONSOLE,
+                read: &UART_CONSOLE_READ,
+                keys: KeySource::Live,
+            }
         }
     }
 
@@ -623,7 +624,7 @@ fn emmc2_unlock<'a>(
         .ok_or("root-unlock: no published IRQ table")?
         .bind(intid, Some(Trigger::Level), UNLOCK_TASK)?;
     let waiter = Emmc2Completion {
-        waiter: armed.waiter(),
+        waiter: armed.waiter(audit),
     };
 
     let mmio = register_map::<Aarch64Floor>()?;

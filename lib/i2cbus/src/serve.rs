@@ -17,7 +17,8 @@ use tairix_abi::hwtree::HwProperty;
 use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
 use tairix_abi::{Errno, ProcId, PROC_ID_HEX_LEN};
 use tairix_caps::CapabilitySet;
-use tairix_drvrt::serve::{exit, fail, instance_field, log_event, DutyNode, Endpoint, Service};
+use tairix_drvrt::exit::{end, step, DriverExit};
+use tairix_drvrt::serve::{instance_field, log_event, DutyNode, Endpoint, Service};
 use tairix_drvrt::{Recorder, RtSupplier};
 use tairix_log::{EventId, Field, FieldValue, Level};
 use tairix_rt::shm::SharedRegion;
@@ -25,7 +26,6 @@ use tairix_rt::shm::SharedRegion;
 use crate::{BufferHost, Controller, I2cBus, Record};
 
 const EVENT_READY: EventId = EventId(24_100);
-const EVENT_FAILED: EventId = EventId(24_101);
 const EVENT_OPENED: EventId = EventId(24_102);
 const EVENT_CLOSED: EventId = EventId(24_103);
 const EVENT_ABANDONED: EventId = EventId(24_104);
@@ -39,14 +39,7 @@ const EVENT_REFUSED: EventId = EventId(24_106);
 /// The exit code to end with, its reason logged: grants that cannot be read,
 /// or a node carrying no I²C duty.
 pub fn open(caps: CapabilitySet) -> Result<DutyNode, i32> {
-    DutyNode::open(caps, LinkRole::I2c, EVENT_FAILED)
-}
-
-/// Record that bring-up failed for `reason`, and answer the code the driver
-/// ends with: what a driver's own step, building its bus, reports.
-#[must_use]
-pub fn bringup_failed(reason: &'static str) -> i32 {
-    fail(EVENT_FAILED, exit::BRINGUP_FAILED, reason)
+    DutyNode::open(caps, LinkRole::I2c)
 }
 
 /// The speed `node` declares its bus runs at: its `clock-frequency`, or
@@ -64,9 +57,9 @@ pub fn declared_speed(node: &DutyNode) -> Result<NonZeroU32, i32> {
         .ok()
         .and_then(NonZeroU32::new)
         .ok_or_else(|| {
-            node.fail(
-                exit::NO_RESOURCES,
-                "i2c: the node declares a speed no bus runs at",
+            end(
+                DriverExit::NoResources,
+                &[step("i2c: the node declares a speed no bus runs at")],
             )
         })
 }
@@ -78,9 +71,9 @@ pub fn declared_speed(node: &DutyNode) -> Result<NonZeroU32, i32> {
 /// reason logged.
 pub fn serve<B: I2cBus>(node: &DutyNode, bus: B) -> i32 {
     let Ok(instance) = tairix_rt::self_origin().map(|origin| origin.proc_id()) else {
-        return node.fail(
-            exit::BRINGUP_FAILED,
-            "i2c: this process's instance is unknown",
+        return end(
+            DriverExit::BringupFailed,
+            &[step("i2c: this process's instance is unknown")],
         );
     };
     let endpoint = node.duty().endpoint();
@@ -110,7 +103,7 @@ pub fn serve<B: I2cBus>(node: &DutyNode, bus: B) -> i32 {
         }
         Err(ended) => ended,
     };
-    node.fail(exit::SERVE_FAILED, ended.reason())
+    ended.end()
 }
 
 /// A channel's buffer: a region this process made and grants its client.

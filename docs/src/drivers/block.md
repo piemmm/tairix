@@ -838,7 +838,7 @@ kernel through the `CAP_FS_MOUNT`-gated, audited
 and name, opens the filesystem itself, mounts under `/Storage/<name>`,
 and publishes the durable `id::` root. The instance then exits `0`
 (run-to-completion; the kernel-held mount outlives it), logging every
-outcome with stable event ids (4180–4184). Removal handling (surprise
+outcome with stable event ids (28080–28084). Removal handling (surprise
 removal, retained dirty state, force-unmount, verified re-insert) is the
 staged D4 work.
 
@@ -927,7 +927,7 @@ running and nothing released, so an array cannot be stopped out from under a
 mounted filesystem.
 
 Every mutation is audited, allowed or refused, naming the operation and the
-array or device but never a token: `4205` an allowed mutation, `4206` a refused
-one (with the errno), `4207` a request whose origin the kernel could not attest
-(refused unread), and `4208` a blank device taken in as a candidate. Reads are
+array or device but never a token: `28214` an allowed mutation, `28215` a refused
+one (with the errno), `28216` a request whose origin the kernel could not attest
+(refused unread), and `28217` a blank device taken in as a candidate. Reads are
 not audited — a status poll would drown the trail.

@@ -36,6 +36,8 @@ tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0", features = ["t
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 [target.'cfg(target_os = "none")'.dependencies]
+# The one vocabulary the driver ends with.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # The rule the device manager matched the node by, which picks the engine.
 tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 # The node's bring-up and the endpoint's serve loop.

@@ -38,9 +38,9 @@ use crate::switchuser::park_within;
 /// reserved range; the desktop session occupies `20000..21000` (adjacent to
 /// the graphical login's `19000..20000`). Once shipped the numeric values
 /// must never be re-used or re-numbered.
-pub const DESKTOP_SESSION_RANGE_START: u32 = 20_000;
+pub const DESKTOP_SESSION_RANGE_START: u32 = tairix_log::registry::DESKTOP_SESSION.start();
 /// Range end (exclusive) reserved for desktop-session event identifiers.
-pub const DESKTOP_SESSION_RANGE_END: u32 = 21_000;
+pub const DESKTOP_SESSION_RANGE_END: u32 = tairix_log::registry::DESKTOP_SESSION.end();
 
 /// One-shot: a composited desktop frame at full reveal strength has reached
 /// the display — the witness that the desktop is not merely presenting but

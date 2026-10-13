@@ -3459,7 +3459,8 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         ret: AbiType::U64,
         // The caller's device reads the surface by DMA, so the DMA grant
         // gates it; the handler answers only the driver of the node
-        // discovery marked `BootConsole`. Audited: it moves the console.
+        // discovery marked `BootConsole`, once the boot has handed the
+        // console on. Audited: it moves the console.
         required_capability: Some(CapabilityId::MEM_DMA),
         audit: true,
     },

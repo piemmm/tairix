@@ -60,17 +60,23 @@ whoever emitted the two nodes.
   changes. Only the holder of the node's duty may bind it, in every role.
 - The device manager holds a consumer while a supplier its links name is
   undecided: in the tree, matched by an installed driver, not serving the
-  link's role, and not refused — or not in the tree at all, which a pending
-  link and a dead one both are, since no node id is reissued. A supplier no
-  installed driver can serve holds nothing: a clock the firmware owns would
-  otherwise keep its consumers waiting forever, and the consumer's own driver
-  is what learns the link is dead. A link that closes a cycle holds nothing
-  either, as Linux's device links relax one: its members load together, each
-  still held by any supplier outside the cycle. A supplier may sit later in
-  the tree than its consumer, so a pass that decided something is followed by
-  another; a supplier that vanishes takes its bound consumers down before
-  itself. This is the ordering Linux's device links and deferred probe give,
-  decided from the tree rather than by retrying a driver until it succeeds.
+  link's role, not refused and its driver not ended — or not in the tree at
+  all, which a pending link and a dead one both are, since no node id is
+  reissued. A supplier no installed driver can serve holds nothing: a clock
+  the firmware owns would otherwise keep its consumers waiting forever, and
+  the consumer's own driver is what learns the link is dead. Nor does one
+  whose driver ended for good: the kernel marks a node driven while a live
+  driver holds it and clears the mark as the driver's process ends, so the
+  device manager sees the ending in the tree rather than holding the
+  consumers for the rest of the boot. One owed a restart holds them until it
+  serves again or its restarts are spent. A link that closes a cycle holds nothing either, as Linux's
+  device links relax one: its members load together, each still held by any
+  supplier outside the cycle. A supplier may sit later in the tree than its
+  consumer, so a pass that decided something — a supplier's driver ending
+  among it — is followed by another; a supplier that vanishes takes its bound
+  consumers down before itself. This is the ordering Linux's device links and
+  deferred probe give, decided from the tree rather than by retrying a driver
+  until it succeeds.
 
 ## Authority (SL3)
 

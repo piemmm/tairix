@@ -388,11 +388,15 @@ driven over [`encoder-v1`](../lib/encoder.md) by its own driver.
 - **Takeover.** The kernel first moves the boot console off the firmware's
   memory onto a block it owns below the HVS's DMA reach (`console_relocate`),
   so nothing writes or scans out memory the firmware may take back; a console
-  that will not move ends the driver with the firmware told nothing. The
+  that will not move ends the driver with the firmware told nothing. The call
+  waits until the boot has handed the console to `login`, so the takeover's
+  mode set, which blanks a sink while it re-locks, never lands under the
+  Supervisor window or a passphrase prompt. The
   engine then tells the firmware the display is the ARM's
   (`NOTIFY_DISPLAY_DONE`, tag `0x0003_0066`, which the mailbox service admits
-  only for the HVS node's driver) and records the answer: a refusal or an
-  unprocessed tag is logged with the firmware's codes, and the display is
+  only for the HVS node's driver) and records the answer: the message header
+  is all the firmware answers for a tag with no values, as Linux reads it, so
+  a refused message is logged with the firmware's codes, and the display is
   taken over regardless, as Linux's `vc4` does. It brings down whatever pipe
   the firmware left running — the valve's video stopped and its pixels
   drained, the encoder disabled, the valve reset, the HVS channel the

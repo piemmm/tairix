@@ -1009,7 +1009,7 @@ nothing of the VL805's own behaviour.
       LUN), the display service, login's elevation broker — receives
       non-blocking, so a readiness peek whose call was cancelled can
       never park the loop and starve its other sources.
-    - Diagnostics: the controller-reset warning (id 4127, `usb-hcd:
+    - Diagnostics: the controller-reset warning (id 27027, `usb-hcd:
       resetting the controller to recover it`) carries live
       `USBSTS`/`USBCMD`, so a metal capture names which fault bit
       (HSE/HCE/HCHalted) latched — the spontaneous mid-typing fault itself
@@ -1372,7 +1372,7 @@ nothing of the VL805's own behaviour.
     and class or vendor requests addressed to the interface or one of its
     endpoints. Anything else — a `SET_CONFIGURATION`, a `SET_ADDRESS`, a
     request naming a sibling — is refused `PermissionDenied` and logged
-    (event 4249), so a class driver cannot reconfigure the device its
+    (event 27149), so a class driver cannot reconfigure the device its
     siblings share. `wLength` must equal the URB length and the direction must
     match. The control data stage is one page (`CTRL_DATA_LEN`).
   - **The interface number is a node property** (`HwProperty::UsbInterface`),

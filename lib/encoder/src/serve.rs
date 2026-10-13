@@ -6,7 +6,8 @@ use tairix_abi::driver::DeviceWake;
 use tairix_abi::hwlink::LinkDuty;
 use tairix_abi::{DriverError, ProcId, PROC_ID_HEX_LEN};
 use tairix_audiochan::Channel;
-use tairix_drvrt::serve::{exit, fail, instance_field, log_event, Endpoint, Service};
+use tairix_drvrt::exit::{end, step, DriverExit};
+use tairix_drvrt::serve::{instance_field, log_event, Endpoint, Service};
 use tairix_drvrt::{Recorder, RtSupplier, Supplier};
 use tairix_inline::ArrayVec;
 use tairix_log::{EventId, Field, FieldValue, Level};
@@ -17,7 +18,6 @@ const ENCODER_HELD: EventId = EventId(24_800);
 const ENCODER_ABANDONED: EventId = EventId(24_801);
 const ENCODER_MOVED: EventId = EventId(24_802);
 const ENCODER_REFUSED: EventId = EventId(24_803);
-const ENCODER_ENDED: EventId = EventId(24_804);
 
 /// The one engine an encoder serves makes one call at a time beside its
 /// posted wait; the queue's bound is containment, not capacity.
@@ -34,8 +34,7 @@ type Server<E> = EncoderServer<E, RtSupplier, Log>;
 /// driver process.
 ///
 /// Never returns on the success path; a set-up refusal, a lost endpoint or an
-/// event source that faulted ends the driver with [`exit::SERVE_FAILED`] and
-/// its reason logged.
+/// event source that faulted ends the driver, its reason recorded.
 pub fn serve<E: Encoder>(encoder: E, duty: &LinkDuty, wakes: &[DeviceWake]) -> i32 {
     let endpoint = duty.endpoint();
     let mut server = Server::new(encoder, RtSupplier::new(endpoint), Log, endpoint);
@@ -65,10 +64,9 @@ pub fn serve_with_audio<E: Encoder, A: Audio>(
         .chain(audio_wakes.iter().copied())
         .all(|wake| all.try_push(wake).is_ok());
     if !joined {
-        return fail(
-            ENCODER_ENDED,
-            exit::SERVE_FAILED,
-            "encoder: more event sources than one wait set is given",
+        return end(
+            DriverExit::NoService,
+            &[step("more event sources than one wait set is given")],
         );
     }
     let mut with_audio = WithAudio {
@@ -94,7 +92,7 @@ fn run<S: Supplier>(supplier: &mut S, endpoint: u64, wakes: &[DeviceWake]) -> i3
         Ok(service) => service.run(supplier),
         Err(ended) => ended,
     };
-    fail(ENCODER_ENDED, exit::SERVE_FAILED, ended.reason())
+    ended.end()
 }
 
 /// An encoder and the audio its connector carries, served together.

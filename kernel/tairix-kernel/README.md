@@ -29,27 +29,11 @@ QEMU's `isa-debug-exit` device to success on observing
 
 ## Allocator
 
-The crate registers the shared `tairix_kalloc::FreeListAllocator`
-(`lib/kalloc`) over a per-binary static `Heap` as its
-`#[global_allocator]` (re-exported through `src/kalloc.rs`). It is a
-coalescing first-fit free-list allocator: it serves the
-`Arc`/`Vec`/`BTreeMap` traffic the `kernel/core` init sequence and the
-long-lived kernel services produce, and reclaims on `dealloc`.
-
-Documented properties:
-
-* **Reclaims** — `GlobalAlloc::dealloc` returns the block to the free
-  list and coalesces it with its physical neighbours, so steady
-  allocate/free traffic runs in bounded memory.
-* **Deterministic OOM** — exhausting the heap returns `null_mut` per the
-  `GlobalAlloc` contract; allocation failure is never a panic
-  (`AGENTS.md` §4).
-* **Thread-safe** — the free list is guarded by an inline spin lock.
-* **Bounds-checked** — every hole stays within `[heap_base,
-  heap_base + heap_len)` by construction (`AGENTS.md` §4).
-* **One `static mut`** — the heap arena. `AGENTS.md` §2 reserves
-  `static mut` for the per-CPU bootstrap area; the kernel heap is the
-  documented exception.
+Each bin registers the shared `tairix_kalloc::FreeListAllocator`
+(`lib/kalloc`, re-exported through `src/kalloc.rs`) as its
+`#[global_allocator]` over a plain `static` bootstrap arena of
+`BOOT_HEAP_BYTES`, and phase `Mem` installs the frame-backed growth source
+(`kernel/core::kheap`). The allocator's design is in `lib/kalloc/README.md`.
 
 ## Production dispatch callback
 
