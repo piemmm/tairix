@@ -100,6 +100,12 @@ pub enum Spread {
     /// The partition comes from the test binary's own `--list`, so a test
     /// added later cannot fall outside every shard and go uninterpreted while
     /// the stage still reports success.
+    ///
+    /// The work stays that of one process; the makespan falls to the heaviest
+    /// shard. The deal is blind to cost and moves with the host's core count,
+    /// so expensive tests that share a shard on one host need not on another: a
+    /// test is kept cheap to interpret, never left for a slower host's budget
+    /// to find.
     PerCore(&'static str),
 }
 
@@ -247,8 +253,7 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::PerCore(
             "over five hundred tests, and interpreted they cost twenty minutes and more end to \
              end — half the pipeline's whole wall clock in one single-core process, against a \
-             budget only twice that. The runner overran it. Dealt across the host's cores the \
-             work is unchanged and the makespan falls to the longest single test",
+             budget only twice that. The runner overran it",
         ),
     },
     Target {
@@ -273,8 +278,7 @@ pub const TARGETS: &[Target] = &[
         },
         spread: Spread::PerCore(
             "over fifteen hundred tests, and interpreted they cost five minutes end to end in \
-             one single-core process. Dealt across the host's cores the work is unchanged and \
-             the makespan falls to the longest single test",
+             one single-core process",
         ),
     },
     Target {
@@ -289,8 +293,7 @@ pub const TARGETS: &[Target] = &[
         ),
         spread: Spread::PerCore(
             "280 tests, and interpreted they cost over three minutes in one single-core \
-             process. Dealt across the host's cores the work is unchanged and the makespan \
-             falls to the longest single test",
+             process",
         ),
     },
     Target {
@@ -337,8 +340,7 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::PerCore(
             "interpreted, its tests cost eleven minutes in one process, most of it the \
              interrupt controllers' models walking their register files and the tables they \
-             read from memory. Dealt across the host's cores the work is unchanged and the \
-             makespan falls to the longest single test",
+             read from memory",
         ),
     },
     Target {
@@ -367,7 +369,11 @@ pub const TARGETS: &[Target] = &[
                      `fuzz_acpi` harness beside the lib drives only the safe firmware-table \
                      parsers, which the fuzz stage runs",
         },
-        spread: Spread::OneProcess,
+        spread: Spread::PerCore(
+            "interpreted, its tests cost thirteen minutes in one process and over twenty on a \
+             slower runner, and a whole job is admitted behind every sharded one, so whole it \
+             would run last and set the stage's tail",
+        ),
     },
     Target {
         package: "tairix-kernel-iommu-api",
@@ -406,8 +412,7 @@ pub const TARGETS: &[Target] = &[
         ),
         spread: Spread::PerCore(
             "interpreted, its tests cost two minutes in one process, most of it the fault \
-             queue's overflow and the two conformance suites. Dealt across the host's cores \
-             the work is unchanged and the makespan falls to the longest single test",
+             queue's overflow and the two conformance suites",
         ),
     },
     Target {
@@ -436,8 +441,7 @@ pub const TARGETS: &[Target] = &[
         },
         spread: Spread::PerCore(
             "interpreted, the kept tests take tens of minutes in one process, most of it the \
-             conformance suites and the one remapping switch kept; dealt across the host's \
-             cores the work is unchanged and the makespan falls to the longest single test",
+             conformance suites and the one remapping switch kept",
         ),
     },
     Target {
@@ -452,9 +456,7 @@ pub const TARGETS: &[Target] = &[
         ),
         spread: Spread::PerCore(
             "interpreted, its tests cost four and a half minutes in one process, most of it \
-             the two conformance suites and the report queue's repeated rounds. Dealt across \
-             the host's cores the work is unchanged and the makespan falls to the longest \
-             single test",
+             the two conformance suites and the report queue's repeated rounds",
         ),
     },
     Target {
@@ -521,8 +523,7 @@ pub const TARGETS: &[Target] = &[
         ),
         spread: Spread::PerCore(
             "interpreted, its tests cost six minutes in one process, each bringing a device up \
-             over a frame carve of half a mebibyte. Dealt across the host's cores the work is \
-             unchanged and the makespan falls to the longest single test",
+             over a frame carve of half a mebibyte",
         ),
     },
 ];

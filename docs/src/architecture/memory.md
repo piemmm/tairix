@@ -32,8 +32,9 @@ trait that crosses the architecture boundary lives in
 
 Hybrid **buddy + bitmap**:
 
-- A single bitmap covers the whole physical address range described by
-  the [`BootMemoryMap`]. `0 = free`, `1 = allocated, reserved, or
+- A single bitmap covers the usable span, from the lowest to the highest
+  usable frame the [`BootMemoryMap`] describes, and is read and written a
+  word at a time. `0 = free`, `1 = allocated, reserved, or
   non-existent`. The bitmap is the source of truth for ownership, so
   every double-free or stray-free is detected and reported as
   `AllocError::InvariantViolation`.

@@ -2,8 +2,9 @@
 //!
 //! # Layers
 //!
-//! - **Bitmap.** One bit per architectural page-frame across the whole
-//!   physical address range described by the [`BootMemoryMap`].
+//! - **Bitmap.** One bit per page-frame of the usable span, from the lowest
+//!   to the highest usable frame the [`BootMemoryMap`] describes, read and
+//!   written a word at a time.
 //!   `0 = free`, `1 = allocated or reserved or non-existent`. The bitmap
 //!   is the source of truth for "is this frame currently handed out?",
 //!   so a double-free or a free of a reserved frame is detected
@@ -321,6 +322,66 @@ fn zone_boundaries(runs: &[(usize, usize)], reaches: &[core::ops::Range<u64>]) -
     boundaries
 }
 
+/// A bitmap word whose every frame reads free.
+const ALL_FREE: u64 = 0;
+
+/// A bitmap word whose every frame reads used.
+const ALL_USED: u64 = u64::MAX;
+
+/// Bitmap slots `[first, end)`: the words holding them, and the masks of
+/// their slots in the first and last of those words. Every word between is
+/// wholly the run's, so a long run is read and written a word at a time.
+struct SlotRun {
+    words: core::ops::Range<usize>,
+    head: u64,
+    tail: u64,
+}
+
+impl SlotRun {
+    fn new(first: usize, end: usize) -> Self {
+        let Some(last) = end.checked_sub(1).filter(|&last| first <= last) else {
+            return Self {
+                words: 0..0,
+                head: 0,
+                tail: 0,
+            };
+        };
+        Self {
+            words: first / 64..last / 64 + 1,
+            head: u64::MAX << (first % 64),
+            tail: u64::MAX >> (63 - last % 64),
+        }
+    }
+
+    /// Whether every slot of the run reads as it does in `want`.
+    fn reads(&self, bitmap: &[u64], want: u64) -> bool {
+        let agrees = |word: u64, mask: u64| (word ^ want) & mask == 0;
+        match &bitmap[self.words.clone()] {
+            [] => true,
+            [only] => agrees(*only, self.head & self.tail),
+            [first, middle @ .., last] => {
+                agrees(*first, self.head)
+                    && middle.iter().all(|&word| word == want)
+                    && agrees(*last, self.tail)
+            }
+        }
+    }
+
+    /// Set every slot of the run as it is in `want`.
+    fn write(&self, bitmap: &mut [u64], want: u64) {
+        let set = |word: &mut u64, mask: u64| *word = (*word & !mask) | (want & mask);
+        match &mut bitmap[self.words.clone()] {
+            [] => {}
+            [only] => set(only, self.head & self.tail),
+            [first, middle @ .., last] => {
+                set(first, self.head);
+                middle.fill(want);
+                set(last, self.tail);
+            }
+        }
+    }
+}
+
 /// Internal, lock-free state of the frame allocator.
 ///
 /// `FrameAllocatorState` is what the [`SpinLock`] in [`FrameAllocator`]
@@ -347,8 +408,8 @@ struct FrameAllocatorState {
     base_frame: usize,
     /// Number of frames the base-relative arrays cover: `hi - base_frame`,
     /// where `hi` is one past the highest usable frame. A frame outside
-    /// `[base_frame, base_frame + span)` is not represented and is treated
-    /// as "used" by [`Self::bit`] (it is reserved, a hole, or non-existent).
+    /// `[base_frame, base_frame + span)` is not represented, so no run
+    /// reaching it reads free ([`Self::slot_run`] refuses it).
     span: usize,
     /// Bit set = "frame is allocated, reserved, or non-existent", one bit
     /// per frame of the usable span (indexed by `frame - base_frame`).
@@ -413,66 +474,36 @@ impl FrameAllocatorState {
             .saturating_sub(self.reserve_frames.saturating_add(self.committed_frames))
     }
 
-    /// The bitmap slot for `frame`, or `None` when `frame` lies outside the
-    /// represented usable span `[base_frame, base_frame + span)`.
-    #[inline]
-    fn bit_slot(&self, frame: usize) -> Option<usize> {
-        frame
-            .checked_sub(self.base_frame)
-            .filter(|&i| i < self.span)
+    /// The bitmap slots frames `[start, start + count)` occupy, or `None` when
+    /// the run leaves the usable span the bitmap represents.
+    fn slot_run(&self, start: usize, count: usize) -> Option<SlotRun> {
+        let first = start.checked_sub(self.base_frame)?;
+        let end = first.checked_add(count).filter(|&end| end <= self.span)?;
+        Some(SlotRun::new(first, end))
     }
 
-    /// Is `frame` marked used? A frame outside the usable span is not
-    /// represented in the bitmap and is treated as used (reserved, a
-    /// physical-address hole, or non-existent) — so a buddy probe that
-    /// walks off either end of the usable window never merges across it.
-    fn bit(&self, frame: usize) -> bool {
-        match self.bit_slot(frame) {
-            Some(i) => (self.bitmap[i / 64] >> (i % 64)) & 1 == 1,
-            None => true,
-        }
-    }
-    /// Mark a usable-span frame used. Only ever called for a frame the
-    /// caller has already confirmed is inside the span (an allocated block).
-    fn set_bit(&mut self, frame: usize) {
-        let i = frame - self.base_frame;
-        self.bitmap[i / 64] |= 1u64 << (i % 64);
-    }
-    /// Mark a usable-span frame free. Only ever called for a frame inside
-    /// the span (a usable run at construction, or a freed allocation).
-    fn clear_bit(&mut self, frame: usize) {
-        let i = frame - self.base_frame;
-        self.bitmap[i / 64] &= !(1u64 << (i % 64));
+    /// Whether every frame of `[start, start + count)` reads as it does in
+    /// `want`; never for a run that leaves the usable span.
+    fn run_reads(&self, start: usize, count: usize, want: u64) -> bool {
+        self.slot_run(start, count)
+            .is_some_and(|run| run.reads(&self.bitmap, want))
     }
 
-    /// Mark frames `[start, start + count)` as allocated/reserved.
-    fn mark_range_used(&mut self, start: usize, count: usize) {
-        for i in start..start + count {
-            self.set_bit(i);
+    /// Mark frames `[start, start + count)`, a run inside the usable span, as
+    /// they are in `want`.
+    fn mark_run(&mut self, start: usize, count: usize, want: u64) {
+        if let Some(run) = self.slot_run(start, count) {
+            run.write(&mut self.bitmap, want);
         }
     }
 
     /// Are all frames in `[start, start + (1<<order))` free in the bitmap?
     ///
-    /// A block that reaches outside the represented usable span is never
-    /// "free": those frames are not backed by the bitmap and are treated as
-    /// used, so a buddy merge can never fuse a usable block with a
-    /// reserved/hole region beyond the window (`bit` returns `true` for
-    /// them, but the span check short-circuits before indexing).
+    /// A block that reaches outside the usable span is never free, so a buddy
+    /// merge cannot fuse a usable block with the reserved or absent memory
+    /// beyond the window.
     fn block_is_free(&self, start: usize, order: u32) -> bool {
-        let n = 1usize << order;
-        let Some(rel) = start.checked_sub(self.base_frame) else {
-            return false;
-        };
-        if rel.checked_add(n).is_none_or(|e| e > self.span) {
-            return false;
-        }
-        for i in start..start + n {
-            if self.bit(i) {
-                return false;
-            }
-        }
-        true
+        self.run_reads(start, 1usize << order, ALL_FREE)
     }
 
     /// Insert a maximally-aligned free block into the buddy lists.
@@ -822,7 +853,7 @@ impl FrameAllocatorState {
     /// Mark the claimed `2^order` block at `start` used and charge it.
     fn charge(&mut self, start: usize, order: u32, class: MemoryClass) {
         let n = 1usize << order;
-        self.mark_range_used(start, n);
+        self.mark_run(start, n, ALL_USED);
         // Charge every frame of the block, so a free of any part of it reads
         // its own charge back rather than trusting a caller to restate one.
         let rel = start - self.base_frame;
@@ -835,10 +866,8 @@ impl FrameAllocatorState {
             return Err(AllocError::SizeUnsupported);
         }
         let n = 1usize << order;
-        // Range checks: a validly-freed block lies wholly inside the usable
-        // span, since it was handed out from a usable run. Checking against
-        // the span (not the address-space extent) keeps every subsequent
-        // `clear_bit` in bounds.
+        // A validly-freed block lies wholly inside the usable span, since it
+        // was handed out from a usable run.
         let Some(rel) = start.checked_sub(self.base_frame) else {
             return Err(AllocError::OutOfRange);
         };
@@ -848,29 +877,23 @@ impl FrameAllocatorState {
         if start & (n - 1) != 0 {
             return Err(AllocError::InvariantViolation);
         }
-        // Every frame must be allocated (bit=1) and charged to the same
-        // class, which an allocated block's frames always are. The bitmap
-        // cannot tell an allocated frame from a reserved one, but the public
-        // free path only ever sees frames a prior alloc handed out. Both
-        // checks run over the whole range before anything is mutated, so an
-        // untagged or mixed-class range — bookkeeping that has diverged — is
-        // refused like a double-free rather than drifting the class totals.
+        // Every frame must read allocated and be charged to the head's class:
+        // the bitmap alone cannot tell an allocated frame from a reserved one.
+        // Both are checked before anything is mutated, so bookkeeping that has
+        // diverged is refused like a double-free rather than drifting the totals.
         let Some(class) = self.tags[rel].class() else {
             return Err(AllocError::InvariantViolation);
         };
-        for i in start..start + n {
-            if !self.bit(i) {
-                return Err(AllocError::InvariantViolation);
-            }
-            if self.tags[i - self.base_frame].class() != Some(class) {
-                return Err(AllocError::InvariantViolation);
-            }
+        let all_allocated = self.run_reads(start, n, ALL_USED);
+        let all_charged = self.tags[rel..rel + n]
+            .iter()
+            .all(|tag| tag.class() == Some(class));
+        if !(all_allocated && all_charged) {
+            return Err(AllocError::InvariantViolation);
         }
         self.class_frames[class.index()] = self.class_frames[class.index()].saturating_sub(n);
         self.tags[rel..rel + n].fill(FrameTag::UNTRACKED);
-        for i in start..start + n {
-            self.clear_bit(i);
-        }
+        self.mark_run(start, n, ALL_FREE);
 
         // Try to merge with successive buddies.
         let mut cur_start = start;
@@ -1114,9 +1137,7 @@ impl FrameAllocator {
         //    bitmap bit of every usable frame and insert the run as buddy
         //    blocks. Reserved frames keep their "used" bit.
         for &(first, last_excl) in &runs {
-            for i in first..last_excl {
-                state.clear_bit(i);
-            }
+            state.mark_run(first, last_excl - first, ALL_FREE);
             state.usable_frames += last_excl - first;
             state.populate_run(first, last_excl)?;
         }
@@ -1647,13 +1668,27 @@ mod tests {
     /// permanently reserved zero page, and aligned for the largest order
     /// the merge test draws — so `usable_pages` frames enter the pool.
     fn small_map(usable_pages: usize) -> BootMemoryMap {
+        map_of_runs(&[(16, usable_pages)])
+    }
+
+    /// Usable RAM in each `(first frame, frames)` run.
+    fn map_of_runs(runs: &[(usize, usize)]) -> BootMemoryMap {
         let mut m = BootMemoryMap::new();
-        m.push(MemoryRegion {
-            start: PhysAddr::new((16 * PAGE_SIZE) as u64),
-            length: (usable_pages * PAGE_SIZE) as u64,
-            kind: RegionKind::Usable,
-        });
+        for &(first, frames) in runs {
+            m.push(MemoryRegion {
+                start: Frame(first).start(),
+                length: (frames * PAGE_SIZE) as u64,
+                kind: RegionKind::Usable,
+            });
+        }
         m
+    }
+
+    /// Every free run as `(first frame, frames)`, ascending.
+    fn free_runs(a: &FrameAllocator) -> Vec<(u64, u64)> {
+        let mut runs = Vec::new();
+        a.for_each_free_region(|base, len| runs.push((base.frame_index(), len >> PAGE_SHIFT)));
+        runs
     }
 
     #[test]
@@ -1802,6 +1837,103 @@ mod tests {
     }
 
     #[test]
+    fn a_slot_run_writes_and_reads_exactly_its_own_slots() {
+        // Every pairing of slots at or beside a word boundary, over three words.
+        const EDGES: [usize; 10] = [0, 1, 63, 64, 65, 127, 128, 129, 191, 192];
+        let flip = |bitmap: &mut [u64; 3], slot: usize| bitmap[slot / 64] ^= 1 << (slot % 64);
+        for (i, &first) in EDGES.iter().enumerate() {
+            for &end in &EDGES[i..] {
+                let run = SlotRun::new(first, end);
+                for (beside, want) in [(ALL_FREE, ALL_USED), (ALL_USED, ALL_FREE)] {
+                    let mut bitmap = [beside; 3];
+                    run.write(&mut bitmap, want);
+                    for slot in 0..192 {
+                        let expected = if (first..end).contains(&slot) {
+                            want
+                        } else {
+                            beside
+                        };
+                        let bit = (bitmap[slot / 64] >> (slot % 64)) & 1;
+                        assert_eq!(bit, expected & 1, "{first}..{end}, slot {slot}");
+                    }
+                    assert!(
+                        run.reads(&bitmap, want),
+                        "{first}..{end} reads its neighbours"
+                    );
+                    for edge in [first, end.saturating_sub(1)]
+                        .into_iter()
+                        .filter(|_| first < end)
+                    {
+                        flip(&mut bitmap, edge);
+                        assert!(
+                            !run.reads(&bitmap, want),
+                            "{first}..{end} misses slot {edge}"
+                        );
+                        flip(&mut bitmap, edge);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn construction_frees_exactly_the_usable_frames_beside_a_hole_inside_a_word() {
+        let a = FrameAllocator::new(&map_of_runs(&[(100, 100), (230, 170)])).unwrap();
+        assert_eq!(free_runs(&a), [(100, 100), (230, 170)]);
+        assert_eq!(a.free_frames(), 270);
+    }
+
+    #[test]
+    fn a_block_straddling_bitmap_words_marks_reads_and_clears_only_its_own_bits() {
+        // Frames 100..400: the span starts part-way into a word, so the order-7
+        // block at frame 256 owns the top of one word, a whole word and the
+        // bottom of a third, sharing the outer two with free neighbours.
+        let a = FrameAllocator::new(&map_of_runs(&[(100, 300)])).unwrap();
+        let flip = |frame: usize| {
+            let mut state = a.inner.lock();
+            let slot = frame - state.base_frame;
+            state.bitmap[slot / 64] ^= 1 << (slot % 64);
+        };
+        let block = a.alloc_order(MemoryClass::Kernel, 7).unwrap();
+        assert_eq!(block, Frame(256));
+        assert_eq!(free_runs(&a), [(100, 156), (384, 16)]);
+        a.free_order(block, 7)
+            .expect("the neighbours' free bits are not read as the block's");
+        assert_eq!(free_runs(&a), [(100, 300)]);
+
+        assert_eq!(a.alloc_order(MemoryClass::Kernel, 7), Ok(block));
+        flip(383);
+        assert_eq!(
+            a.free_order(block, 7),
+            Err(AllocError::InvariantViolation),
+            "the block's last frame reads free"
+        );
+        flip(383);
+        flip(255);
+        flip(384);
+        a.free_order(block, 7).unwrap();
+        assert_eq!(
+            free_runs(&a),
+            [(100, 155), (256, 128), (385, 15)],
+            "the neighbours' used bits are not cleared"
+        );
+        flip(255);
+        flip(384);
+
+        let mut held = Vec::new();
+        while let Ok(frame) = a.alloc(MemoryClass::Kernel) {
+            held.push(frame);
+        }
+        assert_eq!(held.len(), 300);
+        for frame in held {
+            a.free(frame).unwrap();
+        }
+        let mut merged = [7, 7].map(|order| a.alloc_order(MemoryClass::Kernel, order).unwrap());
+        merged.sort_unstable();
+        assert_eq!(merged, [Frame(128), Frame(256)], "every seam merged back");
+    }
+
+    #[test]
     fn alloc_order_returns_aligned_block() {
         let m = small_map(16);
         let a = FrameAllocator::new(&m).unwrap();
@@ -1918,8 +2050,23 @@ mod tests {
     /// Frames in one 32 MiB largest block, the zone granule.
     const ZONE_GRANULE: usize = 1 << MAX_ORDER;
 
+    /// Half a granule: the largest block a one-granule zone keeping back a
+    /// reserve still gives an ordinary request, so a request of it shows which
+    /// zone the policy chose rather than which zone could serve it.
+    const HALF_GRANULE: u32 = MAX_ORDER - 1;
+
     /// A device reaching the lowest 64 MiB.
     const LOW_REACH: core::ops::Range<u64> = 0..64 * MIB;
+
+    /// Hand `draw` the orders of `frames` frames as descending blocks, so a
+    /// zone is emptied a block at a time rather than a frame at a time.
+    fn draw_blocks(mut frames: usize, mut draw: impl FnMut(u32)) {
+        while frames > 0 {
+            let order = frames.ilog2().min(MAX_ORDER);
+            draw(order);
+            frames -= 1 << order;
+        }
+    }
 
     #[test]
     fn a_busy_pool_keeps_the_memory_below_a_dma_limit_for_the_carve_that_needs_it() {
@@ -1929,15 +2076,17 @@ mod tests {
         // ordinary requests fill two thirds of the machine.
         let carve_after_churn = |a: &FrameAllocator| {
             let mut held = Vec::new();
-            while let Ok(frame) = a.alloc(MemoryClass::Kernel) {
-                held.push(frame);
+            for order in (0..=MAX_ORDER).rev() {
+                while let Ok(block) = a.alloc_order(MemoryClass::Kernel, order) {
+                    held.push((block, order));
+                }
             }
-            held.sort_unstable_by_key(|frame| core::cmp::Reverse(frame.0));
-            for frame in held {
-                a.free(frame).unwrap();
+            held.sort_unstable_by_key(|&(block, _)| core::cmp::Reverse(block.0));
+            for (block, order) in held {
+                a.free_order(block, order).unwrap();
             }
-            for _ in 0..2 * ZONE_GRANULE {
-                a.alloc(MemoryClass::Kernel).unwrap();
+            for _ in 0..(2 * ZONE_GRANULE) >> HALF_GRANULE {
+                a.alloc_order(MemoryClass::Kernel, HALF_GRANULE).unwrap();
             }
             a.alloc_order_under_user(MemoryClass::Dma, 0, Some(ceiling))
         };
@@ -1955,13 +2104,15 @@ mod tests {
     #[test]
     fn ordinary_requests_take_the_highest_zone_first_and_a_lower_one_down_to_its_reserve() {
         let a = FrameAllocator::with_dma_reaches(&map_between(32, 128), &[LOW_REACH]).unwrap();
-        for _ in 0..2 * ZONE_GRANULE {
-            assert!(a.alloc(MemoryClass::Kernel).unwrap().start().as_u64() >= 64 * MIB);
+        for _ in 0..(2 * ZONE_GRANULE) >> HALF_GRANULE {
+            let block = a.alloc_order(MemoryClass::Kernel, HALF_GRANULE).unwrap();
+            assert!(block.start().as_u64() >= 64 * MIB);
         }
         let reserve = 2 * ZONE_GRANULE / ZONE_RESERVE_RATIO;
-        for _ in 0..ZONE_GRANULE - reserve {
-            assert!(a.alloc(MemoryClass::Kernel).unwrap().start().as_u64() < 64 * MIB);
-        }
+        draw_blocks(ZONE_GRANULE - reserve, |order| {
+            let block = a.alloc_order(MemoryClass::Kernel, order).unwrap();
+            assert!(block.start().as_u64() < 64 * MIB);
+        });
         assert_eq!(
             a.alloc(MemoryClass::Kernel).err(),
             Some(AllocError::OutOfMemory),
@@ -1974,18 +2125,18 @@ mod tests {
     fn a_carve_drains_its_own_zone_but_leaves_each_lower_zone_its_reserve() {
         let a = FrameAllocator::with_dma_reaches(&map_between(32, 160), &[LOW_REACH, 0..96 * MIB])
             .unwrap();
-        let carve = |limit: u64| {
-            a.alloc_order_under_user(MemoryClass::Dma, 0, Some(PhysAddr::new(limit * MIB)))
+        let carve = |limit: u64, order: u32| {
+            a.alloc_order_under_user(MemoryClass::Dma, order, Some(PhysAddr::new(limit * MIB)))
         };
         let lowest_reserve = 3 * ZONE_GRANULE / ZONE_RESERVE_RATIO;
-        for _ in 0..2 * ZONE_GRANULE - lowest_reserve {
-            assert!(carve(96).unwrap().start().as_u64() < 96 * MIB);
-        }
-        assert_eq!(carve(96).err(), Some(AllocError::OutOfMemory));
-        for _ in 0..lowest_reserve {
-            assert!(carve(64).unwrap().start().as_u64() < 64 * MIB);
-        }
-        assert_eq!(carve(64).err(), Some(AllocError::OutOfMemory));
+        draw_blocks(2 * ZONE_GRANULE - lowest_reserve, |order| {
+            assert!(carve(96, order).unwrap().start().as_u64() < 96 * MIB);
+        });
+        assert_eq!(carve(96, 0).err(), Some(AllocError::OutOfMemory));
+        draw_blocks(lowest_reserve, |order| {
+            assert!(carve(64, order).unwrap().start().as_u64() < 64 * MIB);
+        });
+        assert_eq!(carve(64, 0).err(), Some(AllocError::OutOfMemory));
     }
 
     #[test]
