@@ -540,3 +540,64 @@ fn field_flags_read_back_what_the_item_set() {
     assert!(flags.is_variable() && flags.is_relative() && flags.contains(FieldFlags::NULL_STATE));
     assert!(!flags.contains(FieldFlags::CONSTANT));
 }
+
+/// The usage at every place of a field's list, found by halving the entries'
+/// starts, is the one a walk from the first entry finds, for a variable field
+/// and an array alike — across single usages, ranges, and the elements past
+/// the list's end.
+#[test]
+fn every_place_halves_to_the_usage_a_walk_finds() {
+    let mut parts = vec![usage_page(0x07)];
+    for at in 0u8..40 {
+        if at % 3 == 0 {
+            parts.push(usage_min(at * 5));
+            parts.push(usage_max(at * 5 + at % 4));
+        } else {
+            parts.push(usage(at * 5));
+        }
+    }
+    let entries = parts.len();
+    parts.extend([
+        logical_min(0),
+        logical_max(120),
+        report_size(1),
+        report_count(100),
+        input(DATA_VAR),
+    ]);
+    parts.extend(parts[..entries].to_vec());
+    parts.extend([report_size(8), report_count(4), input(DATA_ARRAY)]);
+    let model = ReportDescriptor::parse(&join(&parts)).expect("a valid descriptor");
+    let walked = |field: &super::Field, place: u32| {
+        let mut remaining = place;
+        for entry in model.usages(field) {
+            if remaining < entry.len() {
+                return entry.nth(remaining);
+            }
+            remaining -= entry.len();
+        }
+        None
+    };
+    let [variable, array] = model.fields() else {
+        panic!("two fields");
+    };
+    let listed: u32 = model.usages(variable).iter().map(|entry| entry.len()).sum();
+    assert!(
+        listed < u32::from(variable.count),
+        "elements run past the list"
+    );
+    let last = walked(variable, listed - 1);
+    for element in 0..variable.count {
+        let expected = walked(variable, u32::from(element)).or(last);
+        assert_eq!(
+            model.element_usage(variable, element),
+            expected,
+            "element {element}"
+        );
+    }
+    for value in 0..=120 {
+        let expected = u32::try_from(value)
+            .ok()
+            .and_then(|place| walked(array, place));
+        assert_eq!(model.array_usage(array, value), expected, "value {value}");
+    }
+}

@@ -93,6 +93,10 @@ impl ArtworkRasteriser for PanicRasteriser {
 
 /// A cache wired like a real seat's, at a normal pressure band so it retains
 /// entries.
+/// Metered so a draw can be held to allocating nothing.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 fn cache() -> ArtworkCache {
     let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
     gauge.report(PressureBand::Normal);
@@ -946,7 +950,7 @@ fn a_landed_refusal_advances_the_walk_one_tier_at_a_time() {
     let mut c = cache();
     let mut deferring = Deferring::new();
     let own = ArtworkKey::Asset("/Apps/One.app/Resources/icon.png".to_string());
-    let raster = ArtworkKey::Asset(icon_artwork_path(IconKind::AppBundle));
+    let raster = ArtworkKey::Raster(IconKind::AppBundle);
     let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
 
     deferring.land(&own, 8, None);
@@ -971,8 +975,8 @@ fn owned_artwork_tells_a_storing_caller_pending_from_refused() {
     let mut c = cache();
     let mut deferring = Deferring::new();
     let request = IconRequest::kind(IconKind::AppBundle);
-    let raster = ArtworkKey::Asset(icon_artwork_path(IconKind::AppBundle));
-    let vector = ArtworkKey::Asset(icon_vector_path(IconKind::AppBundle));
+    let raster = ArtworkKey::Raster(IconKind::AppBundle);
+    let vector = ArtworkKey::Vector(IconKind::AppBundle);
 
     assert!(matches!(
         c.owned_artwork(&mut deferring, request, 8),
@@ -1068,8 +1072,8 @@ fn a_warm_up_asks_for_the_serving_tier_and_retains_nothing() {
 fn a_warm_up_skips_the_tiers_already_refused() {
     let mut c = cache();
     let mut deferring = Deferring::new();
-    let raster = ArtworkKey::Asset(icon_artwork_path(IconKind::AppBundle));
-    let vector = ArtworkKey::Asset(icon_vector_path(IconKind::AppBundle));
+    let raster = ArtworkKey::Raster(IconKind::AppBundle);
+    let vector = ArtworkKey::Vector(IconKind::AppBundle);
     let request = IconRequest::kind(IconKind::AppBundle);
 
     deferring.land(&raster, 8, None);
@@ -1190,7 +1194,7 @@ fn a_decode_the_cache_cannot_keep_is_reported_once_not_repeated() {
     );
     assert_eq!(
         resolver.declined,
-        vec![(ArtworkKey::Asset(path.clone()), 32)],
+        vec![(ArtworkKey::Raster(IconKind::Folder), 32)],
         "the refusal is reported to the resolver that produced it"
     );
     assert_eq!(cache.charged_bytes(), 0);
@@ -1411,4 +1415,44 @@ fn a_shadow_is_cast_once_from_the_served_picture_and_retained() {
         )
         .expect("served");
     assert!(uncast.shadow().is_none());
+}
+
+/// Once a request's pictures are retained, drawing them again builds no key:
+/// an own icon, a class master and a shadowed glyph are served without one
+/// allocation.
+#[test]
+fn a_retained_icon_is_drawn_again_without_allocating() {
+    use tairix_raster::ShadowCast;
+
+    fn draw(c: &mut ArtworkCache, reader: &mut CountingReader, own: &str) {
+        let mut ras = SquareRasteriser;
+        let mut inline = InlineArtwork::new(reader, &mut ras);
+        let cast = ShadowCast {
+            drop_x: 0,
+            drop_y: 1,
+            radius: 1,
+        };
+        assert!(c
+            .artwork(&mut inline, IconRequest::asset(IconKind::File, own), 16)
+            .is_some());
+        assert!(c
+            .artwork(&mut inline, IconRequest::kind(IconKind::Folder), 16)
+            .is_some());
+        let shadowed = c.shadowed(
+            &mut inline,
+            IconRequest::kind(IconKind::Refresh),
+            16,
+            Some(cast),
+        );
+        assert!(shadowed.is_some_and(|picture| picture.shadow().is_some()));
+    }
+
+    let own = "/Apps/One.app/Resources/icon.png";
+    let mut c = cache();
+    let mut reader = CountingReader::new()
+        .with(own, vec![0u8; 64])
+        .with(&icon_artwork_path(IconKind::Folder), vec![0u8; 64]);
+    draw(&mut c, &mut reader, own);
+    let ((), metering) = tairix_fuzzseed::meter::metered(|| draw(&mut c, &mut reader, own));
+    assert_eq!(metering.allocations, 0, "{metering:?}");
 }

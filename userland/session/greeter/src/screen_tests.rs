@@ -21,9 +21,76 @@ use super::{LoginScreen, Step};
 use crate::accounts::SessionTransport;
 use crate::cursor::pointer_image;
 use crate::frame::{rect_of, Present, Scanout};
+use crate::verify::Answer;
 use crate::wait::ENERGY_SAVING_AFTER_NS;
 
 const SECRET: &str = "open-sesame";
+
+/// What a park round holding one input did: the step it took, and the frame
+/// the round then drew.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Drawn {
+    present: Present,
+    verified: bool,
+    answer: Option<Answer>,
+}
+
+impl Drawn {
+    /// A round that did nothing.
+    const QUIET: Self = Self {
+        present: Present::Nothing,
+        verified: false,
+        answer: None,
+    };
+
+    fn of<T: SessionTransport>(step: Step, login: &mut LoginScreen<T>) -> Self {
+        Self {
+            present: login.draw(),
+            verified: step.verified,
+            answer: step.answer,
+        }
+    }
+}
+
+/// `event` through `login` and the frame drawn, as a round holding just it.
+fn input<T: SessionTransport>(
+    login: &mut LoginScreen<T>,
+    event: &InputEvent,
+    now_ns: u64,
+) -> Drawn {
+    let step = login.on_input(event, now_ns);
+    Drawn::of(step, login)
+}
+
+/// A pointer report through `login` and the frame drawn.
+fn point<T: SessionTransport>(
+    login: &mut LoginScreen<T>,
+    report: &PointerInput,
+    now_ns: u64,
+) -> Drawn {
+    let step = login.on_pointer(report, now_ns);
+    Drawn::of(step, login)
+}
+
+/// A touch gesture through `login` and the frame drawn.
+fn gesture<T: SessionTransport>(
+    login: &mut LoginScreen<T>,
+    gesture: tairix_touch::Gesture,
+    now_ns: u64,
+) -> Drawn {
+    let step = login.on_gesture(gesture, now_ns);
+    Drawn::of(step, login)
+}
+
+/// `login` brought up to date and the frame drawn.
+fn refreshed<T: SessionTransport>(
+    login: &mut LoginScreen<T>,
+    now_ns: u64,
+    wall: Option<Time64>,
+) -> Drawn {
+    login.refresh(now_ns, wall);
+    Drawn::of(Step::quiet(), login)
+}
 
 /// A screen large enough for the panel and a row of tiles.
 fn mode() -> DisplayMode {
@@ -305,16 +372,12 @@ fn on_screen(value: i32) -> u32 {
 
 /// Pick the focused tile, then type `secret` and submit it. Returns the step
 /// the submitting event produced.
-fn offer<T: SessionTransport>(
-    screen: &mut LoginScreen<T>,
-    secret: &str,
-    now_ns: u64,
-) -> crate::Step {
-    screen.on_input(&key(NamedKey::Enter), now_ns);
+fn offer<T: SessionTransport>(screen: &mut LoginScreen<T>, secret: &str, now_ns: u64) -> Drawn {
+    input(screen, &key(NamedKey::Enter), now_ns);
     for ch in secret.chars() {
-        screen.on_input(&typed(ch), now_ns);
+        input(screen, &typed(ch), now_ns);
     }
-    screen.on_input(&key(NamedKey::Enter), now_ns)
+    input(screen, &key(NamedKey::Enter), now_ns)
 }
 
 #[test]
@@ -371,7 +434,7 @@ fn the_opening_frame_is_black_and_the_chooser_appears_out_of_it() {
         frames += 1;
         assert!(frames <= 1_000, "the fade never stopped asking for frames");
         now += login.park_timeout(now, None);
-        login.refresh(now, None);
+        refreshed(&mut login, now, None);
         let sample = brightness(login.frame(), x, y);
         assert!(sample >= lightest, "the veil darkened at frame {frames}");
         lightest = sample;
@@ -428,7 +491,7 @@ fn a_veil_step_reblits_the_surface_and_never_repaints_it() {
 #[test]
 fn a_repaint_reuses_the_buffer_it_already_holds() {
     let mut login = ready();
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
     let held = login
         .painted
         .as_ref()
@@ -437,7 +500,7 @@ fn a_repaint_reuses_the_buffer_it_already_holds() {
         .as_ptr();
 
     stamp(&mut login, centre());
-    assert_ne!(login.on_input(&typed('x'), 0).present, Present::Nothing);
+    assert_ne!(input(&mut login, &typed('x'), 0).present, Present::Nothing);
 
     assert_ne!(
         kept(&login, centre()),
@@ -454,6 +517,29 @@ fn a_repaint_reuses_the_buffer_it_already_holds() {
         held,
         "and it is the same buffer, not a fresh screenful"
     );
+}
+
+/// A burst of keystrokes only owes the frame: the surface is painted and
+/// composed once, when the round draws, however many keys the burst held.
+#[test]
+fn a_burst_of_keystrokes_is_painted_once_when_the_round_draws() {
+    let mut login = ready();
+    input(&mut login, &key(NamedKey::Enter), 0);
+    stamp(&mut login, centre());
+    let before = login.frame().to_vec();
+    for ch in "burst".chars() {
+        let step = login.on_input(&typed(ch), 0);
+        assert!(!step.verified);
+    }
+    assert_eq!(
+        kept(&login, centre()),
+        Some(MARK),
+        "no keystroke painted on its own"
+    );
+    assert_eq!(login.frame(), before.as_slice(), "nor composed the frame");
+    assert_ne!(login.draw(), Present::Nothing);
+    assert_ne!(kept(&login, centre()), Some(MARK), "the draw painted it");
+    assert_eq!(login.draw(), Present::Nothing, "and nothing is owed twice");
 }
 
 /// A theme with no motion has nothing to arrive out of: the screen opens on
@@ -506,7 +592,7 @@ fn a_verified_secret_fades_the_screen_to_black() {
     // Typing a secret takes longer than picking the account animates, so the
     // screen the fade covers is a settled one.
     let start = settled_ns();
-    login.refresh(start, None);
+    refreshed(&mut login, start, None);
 
     let opening = login.begin_session_fade(start);
     assert_ne!(opening, Present::Nothing, "the fade has a first frame");
@@ -592,7 +678,7 @@ fn input_during_the_fade_is_ignored() {
     let _ = login.begin_session_fade(0);
 
     for event in [key(NamedKey::Escape), typed('x'), key(NamedKey::Enter)] {
-        let step = login.on_input(&event, 0);
+        let step = input(&mut login, &event, 0);
         assert_eq!(
             step.present,
             Present::Nothing,
@@ -628,7 +714,7 @@ fn about_to_leave() -> (LoginScreen<Authority>, u64) {
     // Typing a secret takes longer than picking the account animates, so
     // what the fade covers is a settled screen.
     let start = settled_ns();
-    login.refresh(start, None);
+    refreshed(&mut login, start, None);
     login.repaint();
     (login, start)
 }
@@ -687,7 +773,7 @@ fn a_move_during_the_fade_presents_nothing_and_still_tracks_the_pointer() {
     let veiled = login.frame().to_vec();
 
     let corner = (30, 30);
-    let step = login.on_pointer(&moved_from(centre(), corner), start);
+    let step = point(&mut login, &moved_from(centre(), corner), start);
 
     assert_eq!(step.present, Present::Nothing, "a move nobody can see");
     assert_eq!(login.frame(), veiled.as_slice(), "and nothing was drawn");
@@ -718,7 +804,7 @@ fn an_unveiled_screen_still_draws_its_pointer() {
     confined(&drawn_over(&login));
 
     assert!(!offer(&mut login, "wrong", 0).verified);
-    login.refresh(Timeline::FRAME_NS, None);
+    refreshed(&mut login, Timeline::FRAME_NS, None);
     login.repaint();
     confined(&drawn_over(&login));
 }
@@ -781,12 +867,12 @@ fn a_lockout_counts_down_on_the_screen_and_clears() {
     offer(&mut login, "wrong", 0);
 
     let after_ten = 10 * 1_000_000_000;
-    let step = login.refresh(after_ten, None);
+    let step = refreshed(&mut login, after_ten, None);
     assert_ne!(step.present, Present::Nothing, "the countdown repainted");
     assert!(login.notice().contains("10"));
 
     let expired = 21 * 1_000_000_000;
-    login.refresh(expired, None);
+    refreshed(&mut login, expired, None);
     assert!(
         !login.notice().contains("10"),
         "the lockout cleared, got {:?}",
@@ -817,7 +903,7 @@ fn an_unreachable_authority_keeps_the_surface_alive() {
         0,
         "the refusal's shake still owes the frame that ends it"
     );
-    login.refresh(settled_ns(), None);
+    refreshed(&mut login, settled_ns(), None);
     assert_eq!(
         login.park_timeout(settled_ns(), None),
         resting(settled_ns()),
@@ -834,15 +920,15 @@ fn no_accounts_still_reaches_the_authority_by_name() {
     login.repaint();
 
     // The lone tile leads to a typed login name, then to the secret.
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
     for ch in "ann".chars() {
-        login.on_input(&typed(ch), 0);
+        input(&mut login, &typed(ch), 0);
     }
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
     for ch in SECRET.chars() {
-        login.on_input(&typed(ch), 0);
+        input(&mut login, &typed(ch), 0);
     }
-    let step = login.on_input(&key(NamedKey::Enter), 0);
+    let step = input(&mut login, &key(NamedKey::Enter), 0);
     assert!(step.verified);
 }
 
@@ -878,7 +964,7 @@ fn a_running_lockout_is_the_nearer_deadline() {
         0,
         "a shake whose span ran out still owes the frame that ends it"
     );
-    login.refresh(settled_ns(), Some(twenty_past));
+    refreshed(&mut login, settled_ns(), Some(twenty_past));
     assert_eq!(
         login.park_timeout(settled_ns(), Some(twenty_past)),
         1_000_000_000,
@@ -893,9 +979,9 @@ fn a_keystroke_presents_only_what_it_changed() {
         Authority::accepting("ann", SECRET),
     );
     login.repaint();
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
 
-    let step = login.on_input(&typed('x'), 0);
+    let step = input(&mut login, &typed('x'), 0);
     let Present::Region(region) = step.present else {
         panic!("a keystroke touches the field, not the screen: {step:?}");
     };
@@ -911,9 +997,12 @@ fn a_wake_with_nothing_to_do_presents_nothing() {
     );
     login.repaint();
     let noon = Time64::from_secs(1_700_000_060);
-    assert_ne!(login.refresh(0, Some(noon)).present, Present::Nothing);
+    assert_ne!(
+        refreshed(&mut login, 0, Some(noon)).present,
+        Present::Nothing
+    );
     assert_eq!(
-        login.refresh(0, Some(noon)).present,
+        refreshed(&mut login, 0, Some(noon)).present,
         Present::Nothing,
         "the same minute a second time changes nothing"
     );
@@ -966,7 +1055,7 @@ fn the_pointer_is_drawn_over_the_surface_and_only_where_it_sits() {
 }
 
 /// The region `step` presented, or a failure naming what came instead.
-fn presented(step: crate::Step) -> Rect {
+fn presented(step: Drawn) -> Rect {
     let Present::Region(region) = step.present else {
         panic!("a sub-screen change is a region present, got {step:?}");
     };
@@ -986,10 +1075,10 @@ fn a_move_presents_the_old_and_new_cursor_rectangles_and_nothing_larger() {
     // Onto the backdrop first, so the only thing the next move changes is
     // the pointer itself.
     let corner = (30, 30);
-    login.on_pointer(&moved_from(centre(), corner), 0);
+    point(&mut login, &moved_from(centre(), corner), 0);
 
     let along = (70, 30);
-    let step = login.on_pointer(&moved_from(corner, along), 0);
+    let step = point(&mut login, &moved_from(corner, along), 0);
     let expected = cursor_rect(&image, corner.0, corner.1)
         .union(&cursor_rect(&image, along.0, along.1))
         .intersection(&login.screen());
@@ -997,7 +1086,7 @@ fn a_move_presents_the_old_and_new_cursor_rectangles_and_nothing_larger() {
 
     // And into the corner, where the union runs off the screen: what is
     // presented is the part that is on it.
-    let step = login.on_pointer(&moved_from(along, (0, 0)), 0);
+    let step = point(&mut login, &moved_from(along, (0, 0)), 0);
     let clipped = cursor_rect(&image, along.0, along.1)
         .union(&cursor_rect(&image, 0, 0))
         .intersection(&login.screen());
@@ -1015,7 +1104,7 @@ fn a_move_that_changes_no_control_state_renders_the_surface_once_in_total() {
     // Away from the centred panel, so nothing the sweep passes over is a
     // tile whose focus would honestly change.
     let start = (30, 30);
-    login.on_pointer(&moved_from(centre(), start), 0);
+    point(&mut login, &moved_from(centre(), start), 0);
     stamp(&mut login, start);
 
     // The stream a hand resting on the mouse produces.
@@ -1023,7 +1112,7 @@ fn a_move_that_changes_no_control_state_renders_the_surface_once_in_total() {
     for step in 1..=50 {
         let to = (start.0 + step, start.1);
         assert_ne!(
-            login.on_pointer(&moved_from(from, to), 0).present,
+            point(&mut login, &moved_from(from, to), 0).present,
             Present::Nothing
         );
         from = to;
@@ -1040,10 +1129,10 @@ fn a_move_that_changes_no_control_state_renders_the_surface_once_in_total() {
 fn the_frame_after_a_move_is_what_a_full_repaint_would_have_drawn() {
     let spot = (240, 180);
     let mut moved = ready();
-    moved.on_pointer(&moved_from(centre(), spot), 0);
+    point(&mut moved, &moved_from(centre(), spot), 0);
 
     let mut fresh = ready();
-    fresh.on_pointer(&moved_from(centre(), spot), 0);
+    point(&mut fresh, &moved_from(centre(), spot), 0);
     assert_eq!(fresh.repaint(), Present::Whole);
 
     let differences = differing(moved.frame(), fresh.frame());
@@ -1062,13 +1151,13 @@ fn a_run_of_moves_merges_into_one_present_covering_every_one_of_them() {
     let mut login = ready();
     let image = arrow();
     let start = (100, 100);
-    login.on_pointer(&moved_from(centre(), start), 0);
+    point(&mut login, &moved_from(centre(), start), 0);
 
     let mut merged = Present::Nothing;
     let mut from = start;
     for step in 1..=8 {
         let to = (start.0 + step * 3, start.1);
-        let present = login.on_pointer(&moved_from(from, to), 0).present;
+        let present = point(&mut login, &moved_from(from, to), 0).present;
         merged = merged.merged(present, login.scanout.mode());
         from = to;
     }
@@ -1094,16 +1183,16 @@ fn a_run_of_moves_merges_into_one_present_covering_every_one_of_them() {
 fn a_move_onto_the_field_presents_the_field_and_the_pointer_together() {
     let mut login = ready();
     let image = arrow();
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
 
     let away = (5, 5);
-    login.on_pointer(&moved_from(centre(), away), 0);
+    point(&mut login, &moved_from(centre(), away), 0);
     let field = login
         .surface
         .field_rect(login.screen(), login.scale, &login.theme);
     let onto = (field.origin.x + 2, field.origin.y + 2);
 
-    let step = login.on_pointer(&moved_from(away, onto), 0);
+    let step = point(&mut login, &moved_from(away, onto), 0);
     let expected = cursor_rect(&image, away.0, away.1)
         .union(&cursor_rect(&image, onto.0, onto.1))
         .union(&field)
@@ -1114,28 +1203,31 @@ fn a_move_onto_the_field_presents_the_field_and_the_pointer_together() {
 #[test]
 fn a_keystroke_and_a_clock_tick_each_rebuild_the_surface() {
     let mut login = ready();
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
     stamp(&mut login, centre());
-    assert_ne!(login.on_input(&typed('x'), 0).present, Present::Nothing);
+    assert_ne!(input(&mut login, &typed('x'), 0).present, Present::Nothing);
     assert_ne!(kept(&login, centre()), Some(MARK), "a keystroke");
 
     let mut login = ready();
     stamp(&mut login, centre());
     let noon = Time64::from_secs(1_700_000_060);
-    assert_ne!(login.refresh(0, Some(noon)).present, Present::Nothing);
+    assert_ne!(
+        refreshed(&mut login, 0, Some(noon)).present,
+        Present::Nothing
+    );
     assert_ne!(kept(&login, centre()), Some(MARK), "a clock tick");
 }
 
 #[test]
 fn a_verdict_and_the_countdown_it_starts_each_rebuild_the_surface() {
     let mut login = ready();
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
     for ch in "wrong".chars() {
-        login.on_input(&typed(ch), 0);
+        input(&mut login, &typed(ch), 0);
     }
 
     stamp(&mut login, centre());
-    let verdict = login.on_input(&key(NamedKey::Enter), 0);
+    let verdict = input(&mut login, &key(NamedKey::Enter), 0);
     assert_eq!(
         verdict.answer.map(|answer| answer.verdict),
         Some(Verdict::Refused)
@@ -1144,7 +1236,7 @@ fn a_verdict_and_the_countdown_it_starts_each_rebuild_the_surface() {
     assert_ne!(kept(&login, centre()), Some(MARK), "a verdict");
 
     stamp(&mut login, centre());
-    let counted = login.refresh(10 * 1_000_000_000, None);
+    let counted = refreshed(&mut login, 10 * 1_000_000_000, None);
     assert_ne!(counted.present, Present::Nothing);
     assert_ne!(
         kept(&login, centre()),
@@ -1214,7 +1306,7 @@ fn a_moved_pointer_leaves_nothing_painted_behind_it() {
     login.set_pointer(image.clone());
     login.repaint();
     let corner = (30, 30);
-    login.on_pointer(&moved_from(centre(), corner), 0);
+    point(&mut login, &moved_from(centre(), corner), 0);
 
     let sits = cursor_rect(&image, corner.0, corner.1);
     let changed = differing(&bare, login.frame());
@@ -1235,19 +1327,19 @@ fn motion_that_moves_nothing_presents_nothing() {
     );
     login.set_pointer(arrow());
     login.repaint();
-    login.on_pointer(&moved_from(centre(), (30, 30)), 0);
+    point(&mut login, &moved_from(centre(), (30, 30)), 0);
 
-    let step = login.on_pointer(&PointerInput::MovedBy { dx: 0, dy: 0 }, 0);
+    let step = point(&mut login, &PointerInput::MovedBy { dx: 0, dy: 0 }, 0);
     assert_eq!(step.present, Present::Nothing);
 
     // Nor does motion the screen edge swallows.
-    let step = login.on_pointer(&PointerInput::MovedBy { dx: -1000, dy: 0 }, 0);
+    let step = point(&mut login, &PointerInput::MovedBy { dx: -1000, dy: 0 }, 0);
     assert_ne!(
         step.present,
         Present::Nothing,
         "the pointer reached the edge"
     );
-    let step = login.on_pointer(&PointerInput::MovedBy { dx: -1000, dy: 0 }, 0);
+    let step = point(&mut login, &PointerInput::MovedBy { dx: -1000, dy: 0 }, 0);
     assert_eq!(step.present, Present::Nothing, "and stayed there");
 }
 
@@ -1262,7 +1354,7 @@ fn a_pointer_that_would_not_rasterise_leaves_a_working_screen_with_none_drawn() 
 
     // No `set_pointer`: the screen still tracks and hit-tests, draws no
     // cursor, and asks for no paint it does not owe.
-    let step = login.on_pointer(&moved_from(centre(), (30, 30)), 0);
+    let step = point(&mut login, &moved_from(centre(), (30, 30)), 0);
     assert_eq!(step.present, Present::Nothing);
     assert_eq!(login.frame(), bare.as_slice(), "nothing was drawn for it");
     assert_eq!(login.repaint(), Present::Whole);
@@ -1285,7 +1377,7 @@ fn a_button_where_nothing_answers_it_presents_nothing() {
     );
     login.set_pointer(arrow());
     login.repaint();
-    login.on_pointer(&moved_from(centre(), (30, 30)), 0);
+    point(&mut login, &moved_from(centre(), (30, 30)), 0);
     let bare = login.frame().to_vec();
 
     for report in [
@@ -1293,7 +1385,7 @@ fn a_button_where_nothing_answers_it_presents_nothing() {
         PointerInput::Released(PointerButtonCode::Primary),
         PointerInput::Scrolled { dx: 0, dy: 3 },
     ] {
-        let step = login.on_pointer(&report, 0);
+        let step = point(&mut login, &report, 0);
         assert_eq!(step.present, Present::Nothing, "{report:?} changed nothing");
         assert!(!step.verified);
     }
@@ -1327,7 +1419,7 @@ fn a_touch_points_and_clicks_as_the_mouse_does() {
     let mut gestures = Vec::new();
     login.feed_touch(&frame.stamped(1, 0), &mut gestures);
     assert_eq!(gestures, [Gesture::MovedTo(SurfacePoint { x: 0, y: 0 })]);
-    let step = login.on_gesture(gestures[0], 0);
+    let step = gesture(&mut login, gestures[0], 0);
     assert_ne!(
         step.present,
         Present::Nothing,
@@ -1343,7 +1435,7 @@ fn a_touch_points_and_clicks_as_the_mouse_does() {
     login.expire_touch(hold_ns, &mut gestures);
     let press = Gesture::Pressed(TouchPress::Fingers(PointerButton::Primary));
     assert_eq!(gestures, [press]);
-    let pressed = login.on_gesture(press, hold_ns);
+    let pressed = gesture(&mut login, press, hold_ns);
     assert_eq!(
         pressed.present,
         Present::Nothing,
@@ -1358,7 +1450,10 @@ fn a_touch_points_and_clicks_as_the_mouse_does() {
             at: None,
         }),
     ] {
-        assert_eq!(login.on_gesture(nothing, hold_ns).present, Present::Nothing);
+        assert_eq!(
+            gesture(&mut login, nothing, hold_ns).present,
+            Present::Nothing
+        );
     }
 }
 
@@ -1372,12 +1467,12 @@ fn the_account_the_authority_was_asked_about_is_the_one_picked() {
         Authority::accepting("bo", SECRET),
     );
     login.repaint();
-    login.on_input(&key(NamedKey::Tab), 0);
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Tab), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
     for ch in SECRET.chars() {
-        login.on_input(&typed(ch), 0);
+        input(&mut login, &typed(ch), 0);
     }
-    let step = login.on_input(&key(NamedKey::Enter), 0);
+    let step = input(&mut login, &key(NamedKey::Enter), 0);
     assert!(step.verified);
 }
 
@@ -1414,7 +1509,7 @@ fn a_focus_change_arms_motion_and_settles_cleanly() {
     login.repaint();
     assert_eq!(login.park_timeout(0, None), resting(0));
 
-    let step = login.on_input(&key(NamedKey::Tab), 0);
+    let step = input(&mut login, &key(NamedKey::Tab), 0);
     assert_ne!(step.present, Present::Nothing, "focus move presents");
 
     let millis = Theme::dark()
@@ -1434,7 +1529,7 @@ fn a_focus_change_arms_motion_and_settles_cleanly() {
     let mut saw_present = false;
     loop {
         now = now.saturating_add(step_ns);
-        let step = login.refresh(now, None);
+        let step = refreshed(&mut login, now, None);
         match step.present {
             Present::Nothing => {}
             Present::Region(_) | Present::Whole => saw_present = true,
@@ -1448,7 +1543,7 @@ fn a_focus_change_arms_motion_and_settles_cleanly() {
     assert_eq!(login.park_timeout(now, None), resting(now));
 
     // A refresh that finds nothing to do still presents nothing.
-    let quiet = login.refresh(now.saturating_add(1), None);
+    let quiet = refreshed(&mut login, now.saturating_add(1), None);
     assert_eq!(quiet.present, Present::Nothing);
 }
 
@@ -1537,7 +1632,7 @@ fn ribboned() -> LoginScreen<Authority> {
         Authority::accepting("ann", SECRET),
     );
     assert!(login.raise_ribbon(0), "the heap gives a ribbon");
-    login.refresh(0, None);
+    refreshed(&mut login, 0, None);
     login.repaint();
     login
 }
@@ -1611,7 +1706,7 @@ fn a_screen_left_alone_puts_its_display_to_sleep_after_thirty_minutes() {
     );
     let noon = Time64::from_secs(1_700_000_060);
     assert_eq!(
-        login.refresh(SLEPT + 60 * SEC, Some(noon)).present,
+        refreshed(&mut login, SLEPT + 60 * SEC, Some(noon)).present,
         Present::Nothing,
         "a sleeping screen presents nothing, not even the minute turning"
     );
@@ -1627,7 +1722,11 @@ fn a_screen_left_alone_puts_its_display_to_sleep_after_thirty_minutes() {
 fn input_puts_the_sleep_off_by_the_whole_wait() {
     let mut login = ready();
     let mut panel = Panel::switchable();
-    login.on_pointer(&PointerInput::Scrolled { dx: 0, dy: 1 }, 10 * SEC);
+    point(
+        &mut login,
+        &PointerInput::Scrolled { dx: 0, dy: 1 },
+        10 * SEC,
+    );
     assert_eq!(login.sleep_if_idle(&mut panel, SLEPT), None);
     assert_eq!(login.park_timeout(SLEPT, None), 10 * SEC);
     assert_eq!(
@@ -1660,7 +1759,7 @@ fn input_while_asleep_reaches_nothing_and_wakes_the_display() {
     let _ = login.sleep_if_idle(&mut panel, SLEPT);
     let woke = SLEPT + 10 * SEC;
 
-    assert_eq!(login.on_input(&key(NamedKey::Enter), woke), Step::quiet());
+    assert_eq!(input(&mut login, &key(NamedKey::Enter), woke), Drawn::QUIET);
     let opened = login
         .wake(&mut panel, woke, None)
         .expect("the display wakes");
@@ -1691,14 +1790,14 @@ fn input_while_asleep_reaches_nothing_and_wakes_the_display() {
 #[test]
 fn a_secret_half_typed_when_the_screen_sleeps_is_erased() {
     let mut login = ready();
-    login.on_input(&key(NamedKey::Enter), 0);
+    input(&mut login, &key(NamedKey::Enter), 0);
     for ch in "open-".chars() {
-        login.on_input(&typed(ch), 0);
+        input(&mut login, &typed(ch), 0);
     }
     let mut panel = Panel::switchable();
     let _ = login.sleep_if_idle(&mut panel, SLEPT);
     let woke = SLEPT + SEC;
-    login.on_input(&key(NamedKey::Enter), woke);
+    input(&mut login, &key(NamedKey::Enter), woke);
     let _ = login.wake(&mut panel, woke, None);
 
     assert_eq!(
@@ -1707,9 +1806,9 @@ fn a_secret_half_typed_when_the_screen_sleeps_is_erased() {
         "back on the chooser"
     );
     for ch in "sesame".chars() {
-        login.on_input(&typed(ch), woke);
+        input(&mut login, &typed(ch), woke);
     }
-    let step = login.on_input(&key(NamedKey::Enter), woke);
+    let step = input(&mut login, &key(NamedKey::Enter), woke);
     assert!(
         !step.verified && step.answer.is_none(),
         "the rest of the secret did not complete what was typed before"
@@ -1740,13 +1839,13 @@ fn a_display_that_cannot_switch_off_sleeps_black() {
     );
     assert_eq!(login.park_timeout(SLEPT, None), WAITSET_TIMEOUT_NONE);
     assert_eq!(
-        login.refresh(SLEPT + SceneClock::FRAME_NS, None).present,
+        refreshed(&mut login, SLEPT + SceneClock::FRAME_NS, None).present,
         Present::Nothing,
         "nor does the ribbon move behind the black"
     );
 
     let woke = SLEPT + SEC;
-    login.on_pointer(&PointerInput::MovedBy { dx: 3, dy: 0 }, woke);
+    point(&mut login, &PointerInput::MovedBy { dx: 3, dy: 0 }, woke);
     let opened = login
         .wake(&mut panel, woke, None)
         .expect("a black screen wakes");
@@ -1780,7 +1879,7 @@ fn a_display_that_will_not_wake_stays_asleep_and_the_next_input_asks_again() {
     let _ = login.sleep_if_idle(&mut panel, SLEPT);
     panel.refuse = Some(DriverError::DeviceFault);
     let woke = SLEPT + SEC;
-    login.on_input(&key(NamedKey::Enter), woke);
+    input(&mut login, &key(NamedKey::Enter), woke);
     assert_eq!(
         login.wake(&mut panel, woke, None),
         Err(DriverError::DeviceFault)
@@ -1790,7 +1889,7 @@ fn a_display_that_will_not_wake_stays_asleep_and_the_next_input_asks_again() {
     assert_eq!(login.park_timeout(woke, None), WAITSET_TIMEOUT_NONE);
 
     panel.refuse = None;
-    login.on_input(&key(NamedKey::Enter), woke + SEC);
+    input(&mut login, &key(NamedKey::Enter), woke + SEC);
     assert!(login
         .wake(&mut panel, woke + SEC, None)
         .is_ok_and(|opened| opened != Present::Nothing));
@@ -1803,7 +1902,7 @@ fn the_pointer_follows_the_hand_while_the_screen_sleeps() {
     let mut login = ready();
     let mut panel = Panel::switchable();
     let _ = login.sleep_if_idle(&mut panel, SLEPT);
-    let step = login.on_pointer(&moved_from(centre(), (30, 30)), SLEPT + SEC);
+    let step = point(&mut login, &moved_from(centre(), (30, 30)), SLEPT + SEC);
     assert_eq!(step.present, Present::Nothing);
     assert_eq!(login.cursor.at(), Point::new(30, 30));
 }
@@ -1815,7 +1914,7 @@ fn a_ribbon_frame_recomposes_what_it_moved_and_paints_nothing() {
     let mut login = ribboned();
     let before = login.frame().to_vec();
     stamp(&mut login, (0, 0));
-    let step = login.refresh(SceneClock::FRAME_NS, None);
+    let step = refreshed(&mut login, SceneClock::FRAME_NS, None);
     assert_ne!(step.present, Present::Nothing, "the ribbon moved");
     assert_ne!(step.present, Present::Whole, "and only where it moved");
     assert_eq!(
@@ -1837,7 +1936,7 @@ fn a_ribbon_frame_recomposes_what_it_moved_and_paints_nothing() {
 fn a_ribbon_frame_leaves_no_stale_pixel() {
     let mut login = ribboned();
     for frame in 1..=6 {
-        login.refresh(frame * SceneClock::FRAME_NS, None);
+        refreshed(&mut login, frame * SceneClock::FRAME_NS, None);
     }
     let composed = login.frame().to_vec();
     login.repaint();
@@ -1850,7 +1949,7 @@ fn a_ribbon_frame_leaves_no_stale_pixel() {
 fn the_ribbon_keeps_the_column_dark() {
     let mut login = ribboned();
     for frame in 1..=6 {
-        login.refresh(frame * 30 * SceneClock::FRAME_NS, None);
+        refreshed(&mut login, frame * 30 * SceneClock::FRAME_NS, None);
     }
     let column = login.surface.column_rect(login.screen(), Scale::ONE);
     let painted = login.painted.as_ref().expect("a surface is kept");
@@ -1882,7 +1981,7 @@ fn the_ribbon_asks_for_its_frames_and_holds_still_under_reduced_motion() {
         still(),
     );
     assert!(calm.raise_ribbon(0));
-    calm.refresh(0, None);
+    refreshed(&mut calm, 0, None);
     calm.repaint();
     assert_eq!(
         calm.park_timeout(0, None),
@@ -1890,7 +1989,7 @@ fn the_ribbon_asks_for_its_frames_and_holds_still_under_reduced_motion() {
         "a still ribbon arms no frame"
     );
     assert_eq!(
-        calm.refresh(10 * SceneClock::FRAME_NS, None).present,
+        refreshed(&mut calm, 10 * SceneClock::FRAME_NS, None).present,
         Present::Nothing
     );
 }
@@ -1914,20 +2013,20 @@ fn a_lockout_on_one_account_does_not_hold_back_another() {
         Some(Duration64::from_secs(20))
     );
 
-    login.on_input(&key(NamedKey::Escape), SEC);
-    login.on_input(&key(NamedKey::Tab), SEC);
-    login.on_input(&key(NamedKey::Enter), SEC);
+    input(&mut login, &key(NamedKey::Escape), SEC);
+    input(&mut login, &key(NamedKey::Tab), SEC);
+    input(&mut login, &key(NamedKey::Enter), SEC);
     assert_eq!(login.surface.selected_account(), Some("bo"));
-    login.refresh(2 * SEC, None);
+    refreshed(&mut login, 2 * SEC, None);
     assert!(
         !login.notice().contains("try again"),
         "ann's lockout is on bo's prompt: {:?}",
         login.notice()
     );
     for ch in SECRET.chars() {
-        login.on_input(&typed(ch), 2 * SEC);
+        input(&mut login, &typed(ch), 2 * SEC);
     }
-    assert!(login.on_input(&key(NamedKey::Enter), 2 * SEC).verified);
+    assert!(input(&mut login, &key(NamedKey::Enter), 2 * SEC).verified);
 }
 
 /// Going back to the account that was locked out finds its lockout still
@@ -1943,12 +2042,12 @@ fn a_lockout_is_still_counting_when_its_account_is_picked_again() {
     );
     login.repaint();
     offer(&mut login, "wrong", 0);
-    login.on_input(&key(NamedKey::Escape), SEC);
-    login.refresh(2 * SEC, None);
+    input(&mut login, &key(NamedKey::Escape), SEC);
+    refreshed(&mut login, 2 * SEC, None);
     assert!(!login.notice().contains("try again"), "not on the chooser");
-    login.on_input(&key(NamedKey::Enter), 3 * SEC);
+    input(&mut login, &key(NamedKey::Enter), 3 * SEC);
     assert_eq!(login.surface.selected_account(), Some("ann"));
-    login.refresh(4 * SEC, None);
+    refreshed(&mut login, 4 * SEC, None);
     assert!(
         login.notice().contains("16"),
         "ann's lockout counts on: {:?}",

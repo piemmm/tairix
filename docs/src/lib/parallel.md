@@ -46,9 +46,10 @@ dispatch. `for_each_drawn` takes the iterator that splits them instead: the
 dispatching thread draws them a round at a time and the runner's index `i`
 visits the round's piece `i`. A round is four pieces for each participant, so a
 straggler is absorbed however wide the runner: it lives on the dispatching
-thread's stack for a runner up to 32 participants wide, so such a dispatch
-allocates nothing, and in one buffer reserved for the dispatch past that, a
-stack round at a time if the reservation is refused. No participant waits on a
+thread's stack for a runner up to 32 participants wide, or for pieces that fit
+one stack round however wide the runner, so such a dispatch allocates nothing,
+and past that in one buffer reserved for the dispatch and sized to the pieces
+it holds, a stack round at a time if the reservation is refused. No participant waits on a
 lock or runs the iterator, a skipped index leaves its piece unvisited rather
 than another, and `Reversed` visits each round's pieces last first. `fold_drawn` joins the answers on the calling
 thread in the order the pieces were drawn, so its result is the serial fold's —

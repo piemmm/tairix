@@ -275,8 +275,9 @@ the pointer is shaken; the other three are asked for.
   enlarged size and resamples every step between from that, outside its cache,
   into the two buffers it trades with the compositor and one resample scratch,
   so a step allocates nothing once they have grown and growing never evicts
-  the images the pointer returns to. At rest the pointer is its own crisp
-  cached image again, and the enlarged buffers are let go.
+  the images the pointer returns to; a step that leaves its pixel side as it
+  was draws nothing. At rest the pointer is its own crisp cached image again,
+  and the enlarged buffers are let go.
 - **Pointer trails** (`cursor.trail` = `off` | `short` | `medium` | `long`):
   three, five or eight copies, each where the pointer was a fixed interval
   ago, read from its path rather than from the samples the device reported, so
@@ -292,9 +293,11 @@ the pointer is shaken; the other three are asked for.
   reports (Caps Lock, an unmapped key) cannot spoil a tap, because nothing on
   the desktop could have acted on it either.
 
-The session steps all of them once a frame, against the one clock reading the
-frame is shown at, and each asks for a frame only while it is changing, so an
-idle desktop with every aid on still parks indefinitely. Under the screensaver
+The session lets them take in where the pointer is on every wake, so a shake
+and a trail follow its path more finely than a frame, and steps what they
+draw once a frame, against the one clock reading the frame is shown at; each
+asks for a frame only while it is changing, so an idle desktop with every aid
+on still parks indefinitely. Under the screensaver
 nothing is drawn and whatever was in flight is dropped. The login screen draws
 its own pointer and offers none of them: it runs before any user's settings.
 

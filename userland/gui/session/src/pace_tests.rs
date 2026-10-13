@@ -216,3 +216,50 @@ fn a_long_hold_across_a_background_spell_comes_due_rather_than_waiting() {
     assert!(!pacer.admit(SAMPLE_NS, true));
     assert!(pacer.admit(Timeline::FRAME_NS * 10_000, true));
 }
+
+#[test]
+fn a_flood_of_samples_inside_one_period_steps_the_animations_once() {
+    let mut pacer = FramePacer::new();
+    let mut steps = 0u32;
+    let mut at = 0;
+    while at < Timeline::FRAME_NS * 4 {
+        if pacer.due(at) {
+            steps += 1;
+        }
+        let _ = pacer.admit(at, true);
+        at += SAMPLE_NS;
+    }
+    assert_eq!(steps, 4, "one step a frame period, not one a sample");
+}
+
+#[test]
+fn an_animation_overdue_between_frames_parks_until_its_frame() {
+    let mut pacer = FramePacer::new();
+    assert!(pacer.admit(0, true));
+    let now = SAMPLE_NS;
+    assert_eq!(
+        pacer.step_deadline_ns(now, WAITSET_TIMEOUT_NONE, 0),
+        Timeline::FRAME_NS - now,
+        "an overdue step waits for the frame rather than spinning"
+    );
+    assert_eq!(
+        pacer.step_deadline_ns(now, WAITSET_TIMEOUT_NONE, Timeline::FRAME_NS * 3),
+        Timeline::FRAME_NS * 3,
+        "a step owed after the frame is left where it is"
+    );
+    assert_eq!(
+        pacer.step_deadline_ns(now, 1, 0),
+        1,
+        "a shorter park stands"
+    );
+    assert_eq!(
+        pacer.step_deadline_ns(now, WAITSET_TIMEOUT_NONE, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
+        "nothing owed arms nothing"
+    );
+    assert_eq!(
+        pacer.step_deadline_ns(Timeline::FRAME_NS, WAITSET_TIMEOUT_NONE, 0),
+        0,
+        "a frame that is due takes the step at once"
+    );
+}

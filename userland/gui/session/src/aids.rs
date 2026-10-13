@@ -114,8 +114,22 @@ impl PointerAids {
         }
     }
 
+    /// Take in that the pointer is at `at` at `now_ns`: on every wake, so a
+    /// shake and a trail follow its path more finely than a frame. Nothing
+    /// is taken in while the pointer is withheld from the screen.
+    pub fn observe(&mut self, now_ns: u64, at: Point, compositor: &Compositor) {
+        if compositor.cursor_hidden() {
+            return;
+        }
+        if self.policy.shake {
+            self.shake.observe(now_ns, at, compositor.scale());
+        }
+        self.trail.observe(now_ns, at);
+    }
+
     /// Step every aid to `now_ns` with the pointer at `at`, and put what each
-    /// now draws on screen.
+    /// now draws on screen: once a frame, so drawing costs the frame rate
+    /// rather than the pointer's sample rate.
     pub fn advance(
         &mut self,
         now_ns: u64,
@@ -127,18 +141,17 @@ impl PointerAids {
             self.rest(at, cursor, compositor);
             return;
         }
-        let scale = compositor.scale();
         let enlargement = if self.policy.shake {
-            self.shake.observe(now_ns, at, scale);
             self.shake.level(now_ns, compositor.theme().motion())
         } else {
             0
         };
         cursor.set_enlargement(enlargement, at, compositor);
-        self.trail.observe(now_ns, at);
         self.trail.ghosts(now_ns, at, &mut self.ghosts);
         compositor.set_pointer_trail(&self.ghosts);
-        let halo = self.beacon.halo(now_ns, compositor.theme(), scale);
+        let halo = self
+            .beacon
+            .halo(now_ns, compositor.theme(), compositor.scale());
         compositor.set_pointer_halo(&halo);
     }
 

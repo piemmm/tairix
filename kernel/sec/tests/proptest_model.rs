@@ -11,9 +11,11 @@
 //!   and therefore a subset of both (no ambient authority),
 //! * [`TaskCapabilities::delegate`] never widens the effective set and a
 //!   refused delegation leaves it untouched,
-//! * [`TaskCapabilities::revoke`] only ever shrinks the effective set, and
+//! * [`TaskCapabilities::revoke`] only ever shrinks the effective set,
 //! * the registry's contents (membership, cardinality, per-task effective
-//!   set) match the model.
+//!   set) match the model, and
+//! * a record a holder keeps is current exactly while the table still holds
+//!   that same record, so a thread's cached authority is never stale.
 //!
 //! A second model drives the session bookkeeping — placement by every
 //! selector, departure, and the exits an anchor's session holds — against a
@@ -37,10 +39,11 @@
 //! `--seed`), so a fresh-seed counterexample is still reproducible.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
-use tairix_abi::CapabilityId;
+use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities, TaskId, UserId};
 use tairix_log::{Event, Sink};
@@ -97,6 +100,10 @@ enum Cmd {
     Remove {
         task: u64,
     },
+    /// Keep the task's record as a syscall or a thread's cache keeps it.
+    Hold {
+        task: u64,
+    },
 }
 
 /// Reference image of one task's authority.
@@ -124,7 +131,21 @@ fn command() -> impl Strategy<Value = Cmd> {
         (task_id(), id_vec()).prop_map(|(task, requested)| Cmd::Delegate { task, requested }),
         (task_id(), 0u16..=CAP_MAX).prop_map(|(task, cap)| Cmd::Revoke { task, cap }),
         task_id().prop_map(|task| Cmd::Remove { task }),
+        task_id().prop_map(|task| Cmd::Hold { task }),
     ]
+}
+
+/// The live record of `task`, or [`None`] when it has none; any other refusal
+/// fails the case, since the host heap never refuses a copy.
+fn live_record(
+    table: &mut CapTable,
+    task: u64,
+) -> Result<Option<&mut TaskCapabilities>, TestCaseError> {
+    match table.caps_for_mut(TaskId(task)) {
+        Ok(caps) => Ok(Some(caps)),
+        Err(Errno::NotFound) => Ok(None),
+        Err(error) => Err(TestCaseError::fail(format!("unexpected {error:?}"))),
+    }
 }
 
 fn program() -> impl Strategy<Value = Vec<Cmd>> {
@@ -148,6 +169,7 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
     let sink = NullSink;
     let mut table = CapTable::new();
     let mut model: BTreeMap<u64, TaskModel> = BTreeMap::new();
+    let mut held: Vec<(u64, Arc<TaskCapabilities>)> = Vec::new();
 
     for c in cmds {
         match c {
@@ -179,7 +201,7 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
             Cmd::Delegate { task, requested } => {
                 let req = build(requested);
                 let req_m: BTreeSet<u16> = requested.iter().copied().collect();
-                let live = table.caps_for_mut(TaskId(*task));
+                let live = live_record(&mut table, *task)?;
                 let entry = model.get_mut(task);
                 match (live, entry) {
                     (Some(caps), Some(state)) => {
@@ -200,7 +222,7 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
                 }
             }
             Cmd::Revoke { task, cap: c } => {
-                let live = table.caps_for_mut(TaskId(*task));
+                let live = live_record(&mut table, *task)?;
                 let entry = model.get_mut(task);
                 match (live, entry) {
                     (Some(caps), Some(state)) => {
@@ -222,6 +244,11 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
                 let modelled = model.remove(task).is_some();
                 prop_assert_eq!(live, modelled);
             }
+            Cmd::Hold { task } => {
+                if let Some(record) = table.snapshot_of(TaskId(*task)) {
+                    held.push((*task, record));
+                }
+            }
         }
 
         // Registry-wide invariants after each command.
@@ -235,6 +262,14 @@ fn check_captable(cmds: &[Cmd]) -> Result<(), TestCaseError> {
             // The upstream bounds never change; effective stays within them.
             prop_assert_eq!(to_model(caps.user_grant()), state.user_grant.clone());
             prop_assert_eq!(to_model(caps.manifest_request()), state.manifest.clone());
+        }
+        for (task, record) in &held {
+            let live = table.snapshot_of(TaskId(*task));
+            prop_assert_eq!(
+                record.is_current(),
+                live.is_some_and(|live| Arc::ptr_eq(&live, record)),
+                "a held record is current exactly while the table holds it"
+            );
         }
     }
     Ok(())

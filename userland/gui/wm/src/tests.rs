@@ -2331,6 +2331,42 @@ fn a_trail_ghost_is_the_cursor_at_its_opacity_and_lies_beneath_it() {
     );
 }
 
+/// A locate beacon's halo damages many small rectangles a frame; composing
+/// them over a window allocates nothing, frame after frame of its run.
+#[test]
+fn a_halo_over_a_window_composes_its_frames_without_allocating() {
+    let screen = mode(300, 300);
+    let mut c = new_compositor(screen, BLUE).expect("compositor");
+    let mut display = TakingDisplay {
+        mode: screen,
+        presents: 0,
+    };
+    c.add_window(Point::new(40, 40), opaque(220, 220, GREEN));
+    c.set_cursor(solid_cursor(4, RED), Point::new(150, 150));
+    let ring = |radius| {
+        let mut halo = Halo::new();
+        assert!(halo.push(HaloRing {
+            radius,
+            width: 4,
+            color: Color::rgb(0, 255, 0),
+        }));
+        halo
+    };
+    // A first run grows the storage the compositor keeps to this halo's size.
+    let run = [20, 40, 60, 80, 100];
+    for radius in run {
+        c.set_pointer_halo(&ring(radius));
+        c.present(&mut display).expect("presented");
+    }
+
+    for radius in run {
+        assert!(c.set_pointer_halo(&ring(radius)));
+        let (presented, metering) = tairix_fuzzseed::meter::metered(|| c.present(&mut display));
+        presented.expect("presented");
+        assert_eq!(metering.allocations, 0, "radius {radius}: {metering:?}");
+    }
+}
+
 #[test]
 fn a_halo_recomposes_its_rings_and_leaves_the_hole_inside_them_alone() {
     let mut c = new_compositor(mode(300, 300), BLUE).expect("compositor");
@@ -7106,6 +7142,40 @@ fn an_enlarged_pointer_stays_enlarged_across_a_change_of_shape() {
 }
 
 #[test]
+fn a_step_that_keeps_the_pointers_pixel_side_redraws_nothing() {
+    let mut c = new_compositor(mode(400, 400), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    router.handle(moved(100, 100), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    let span = u64::from(ENLARGED_SIDE_PX - CURSOR_BASE_SIDE_PX);
+    let side = |permille: u16| span * u64::from(permille) / u64::from(FULLY_ENLARGED);
+    let (from, to) = (FULLY_ENLARGED / 2, FULLY_ENLARGED / 2 + 1);
+    assert_eq!(side(from), side(to), "both steps draw one side");
+    assert!(ctrl.set_enlargement(from, router.pointer(), &mut c));
+    c.composite();
+    let drawn = c.cursor_bounds();
+    assert!(!ctrl.set_enlargement(to, router.pointer(), &mut c));
+    assert!(!c.has_damage(), "the pointer is not drawn again");
+    assert_eq!(c.cursor_bounds(), drawn);
+    assert!(
+        !ctrl.refresh(router.pointer(), &router, &mut c),
+        "nor redrawn by the next refresh"
+    );
+    assert!(ctrl.set_enlargement(FULLY_ENLARGED, router.pointer(), &mut c));
+    assert_eq!(
+        c.cursor_bounds().expect("a cursor is shown").width,
+        ENLARGED_SIDE_PX
+    );
+    assert!(ctrl.set_enlargement(0, router.pointer(), &mut c));
+    assert_eq!(
+        c.cursor_bounds().expect("a cursor is shown").width,
+        CURSOR_BASE_SIDE_PX,
+        "at rest it is its own image again"
+    );
+}
+
+#[test]
 fn a_pointer_already_drawn_large_grows_half_again() {
     let mut c = new_compositor(mode(400, 400), BLUE).expect("compositor");
     let mut router = InputRouter::new();
@@ -9487,6 +9557,36 @@ fn a_repaint_of_kept_content_allocates_nothing_of_its_own() {
     c.present(&mut display).expect("presented");
 
     let ((), metering) = tairix_fuzzseed::meter::metered(|| repaint(&mut c));
+    assert_eq!(metering.allocations, 0, "{metering:?}");
+}
+
+/// A frame that repaints kept window content and presents it allocates nothing
+/// once the compositor's kept storage has grown: the source list each
+/// composited rectangle draws from is held inline, not built on the heap.
+#[test]
+fn a_frame_repainting_kept_window_content_and_presenting_it_allocates_nothing() {
+    let screen = mode(20, 20);
+    let mut c = new_compositor(screen, BLUE).expect("compositor");
+    let mut display = TakingDisplay {
+        mode: screen,
+        presents: 0,
+    };
+    let below = c.add_window(Point::new(2, 3), opaque(10, 8, GREEN));
+    let id = c.add_window(Point::new(4, 5), opaque(8, 6, GREEN));
+    assert_ne!(below, id);
+    let area = two_rect_damage();
+    let frame = |c: &mut Compositor, display: &mut TakingDisplay| {
+        assert!(c.repaint_window(id, (8, 6), &area, |surface, rects| {
+            paint_marked_rects(surface, rects, RED);
+        }));
+        c.present(display).expect("presented");
+    };
+    frame(&mut c, &mut display);
+    frame(&mut c, &mut display);
+
+    let presents = display.presents;
+    let ((), metering) = tairix_fuzzseed::meter::metered(|| frame(&mut c, &mut display));
+    assert_eq!(display.presents, presents + 1, "the frame was presented");
     assert_eq!(metering.allocations, 0, "{metering:?}");
 }
 

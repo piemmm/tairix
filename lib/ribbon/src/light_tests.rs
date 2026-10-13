@@ -13,9 +13,9 @@ use tairix_theme::motion::{seconds, SceneClock};
 
 use super::{
     along, bernstein, curtain, falloff_reach, index_of, monotone, narrow, needed_pushes,
-    sample_across, tone_entry, tone_index, Fall, Light, Rows, CONTROLS, DITHER_LANES, EDGE_MARGIN,
-    EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN, PIXELS_PER_SAMPLE,
-    QUIET_LIGHT, STRANDS, STRAND_COUNT, TERM_CUT, TONE_LEN,
+    sample_across, tone_entry, tone_index, Fall, Light, Rows, Tally, CHUNK, CONTROLS, DITHER_LANES,
+    EDGE_MARGIN, EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN,
+    PIXELS_PER_SAMPLE, QUIET_LIGHT, STRANDS, STRAND_COUNT, TERM_CUT, TONE_LEN,
 };
 
 const WIDE: (u32, u32) = (640, 360);
@@ -619,6 +619,69 @@ fn an_area_reaching_off_the_screen_paints_its_part_on_it() {
             }
         }
     }
+}
+
+/// An area the light does not reach is the sky, over that area and nowhere
+/// else.
+#[test]
+fn an_unlit_area_lays_the_sky_over_itself_alone() {
+    let mut light = Light::new(WIDE, Rect::EMPTY, 5.0).expect("a ribbon");
+    let mut part = Surface::new(640, 360).expect("a surface");
+    let area = Rect::new(0, 0, 640, 4);
+    light.paint(&mut part, area);
+    let black = SKY.premultiply();
+    for y in 0..360 {
+        for x in 0..640 {
+            let expected = if y < 4 {
+                Some(black)
+            } else {
+                Some(Pixel::TRANSPARENT)
+            };
+            assert_eq!(part.get(x, y), expected, "({x}, {y})");
+        }
+    }
+}
+
+/// A paint sums and writes only the rows a chunk's light reaches, and a
+/// strip is painted as two chunks rather than leaving its leading column a
+/// chunk of its own.
+#[test]
+fn a_paint_sums_only_what_the_light_reaches_and_a_strip_is_two_chunks() {
+    let mut light = Light::new(WIDE, Rect::EMPTY, 5.0).expect("a ribbon");
+    let _ = painted(&mut light);
+    let (columns, rows) = light.grid;
+    let every = index_of(columns) * index_of(rows);
+    assert!(
+        light.tally.summed * 2 < every,
+        "{} of {every} sample rows summed",
+        light.tally.summed
+    );
+    let mut damage = Region::new();
+    light.step(5.7, Rect::EMPTY, &mut damage);
+    let strips = light.strips.len();
+    assert!(strips > 1, "the frame moved more than one strip");
+    light.tally = Tally::default();
+    light.paint_moved(&mut Surface::new(640, 360).expect("a surface"), |_, _| {});
+    assert!(
+        light.tally.chunks <= 2 * strips,
+        "{} chunks for {strips} strips",
+        light.tally.chunks
+    );
+}
+
+/// The text's clear space is not toned to be covered by the sky after: only
+/// the chunks beside its edges, whose other columns the light rises in, write
+/// any of it.
+#[test]
+fn a_paint_tones_the_clear_space_only_beside_its_edges() {
+    let mut light = Light::new(WIDE, CLOCK, 3.0).expect("a ribbon");
+    let _ = painted(&mut light);
+    let edges = 2 * u64::from((CHUNK + 1) * PIXELS_PER_SAMPLE) * u64::from(CLOCK.height);
+    assert!(
+        light.tally.over_clear <= edges,
+        "{} pixels of the clear space toned",
+        light.tally.over_clear
+    );
 }
 
 /// A strip repaints the pixel before its first sample, which blends it, and

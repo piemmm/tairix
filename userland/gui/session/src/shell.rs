@@ -647,6 +647,12 @@ impl DesktopShell {
         self.aids.locate(now_ns);
     }
 
+    /// Let the pointer aids take in where the pointer is at `now_ns`: on
+    /// every wake.
+    pub fn observe_pointer_aids(&mut self, now_ns: u64, compositor: &Compositor) {
+        self.aids.observe(now_ns, self.router.pointer(), compositor);
+    }
+
     /// Step the pointer aids to `now_ns` and put what they draw on screen:
     /// once a frame, before it is presented.
     pub fn advance_pointer_aids(&mut self, now_ns: u64, compositor: &mut Compositor) {

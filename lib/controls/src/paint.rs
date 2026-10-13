@@ -2221,6 +2221,18 @@ pub struct Run<'a> {
     pub tail: &'a str,
 }
 
+impl<'a> Run<'a> {
+    /// What is drawn, in order: the text, the mark where it is elided, and
+    /// the tail.
+    const fn pieces(self) -> [&'a str; 3] {
+        [
+            self.text,
+            if self.elided { ELLIPSIS } else { "" },
+            self.tail,
+        ]
+    }
+}
+
 impl<'a> From<(&'a str, bool)> for Run<'a> {
     fn from((text, elided): (&'a str, bool)) -> Self {
         Self {
@@ -2270,16 +2282,7 @@ pub fn paint_run<'a>(
     color: Color,
     shadow: Option<TextShadow>,
 ) {
-    let run = run.into();
-    if let Some(shadow) = shadow {
-        paint_run_shadow(surface, font, run, at, shadow);
-    }
-    let (x, y) = at;
-    let mut pen = font.draw_text(surface, x, y, run.text, color);
-    if run.elided {
-        pen = font.draw_text(surface, pen, y, ELLIPSIS, color);
-    }
-    font.draw_text(surface, pen, y, run.tail, color);
+    let _ = font.draw_run(surface, at, &run.into().pieces(), color, shadow);
 }
 
 /// Draw only the shadow [`paint_run`] draws under a fitted run, so text laid
@@ -2292,10 +2295,5 @@ fn paint_run_shadow(
     at: (i32, i32),
     shadow: TextShadow,
 ) {
-    let (x, y) = at;
-    let mut pen = font.draw_shadow(surface, x, y, run.text, shadow);
-    if run.elided {
-        pen = font.draw_shadow(surface, pen, y, ELLIPSIS, shadow);
-    }
-    font.draw_shadow(surface, pen, y, run.tail, shadow);
+    let _ = font.draw_run_shadow(surface, at, &run.pieces(), shadow);
 }

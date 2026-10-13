@@ -32,6 +32,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_collections::SmallVec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
@@ -421,6 +422,12 @@ impl FieldControl {
     }
 }
 
+/// Flags a set lays out without the heap; a set of more spills to it.
+const INLINE_FLAGS: usize = 8;
+
+/// Where each flag of a set is drawn, in layout order.
+type FlagRects = SmallVec<Rect, INLINE_FLAGS>;
+
 /// A small set of independent flags on one line — the read, write and execute
 /// bits of one permission class, say — each a labelled [`Checkbox`].
 ///
@@ -531,14 +538,21 @@ impl FlagSet {
     /// slot too narrow for the boxes themselves narrows them, evenly. This is
     /// the one layout the paint and both hit tests read, so a press can never
     /// land on a flag drawn elsewhere.
-    fn flag_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+    fn flag_rects(&self, bounds: Rect, scale: Scale, theme: &Theme) -> FlagRects {
+        let mut rects = FlagRects::new();
         let Some((x, y, w, h)) = surface_rect(bounds) else {
-            return Vec::new();
+            return rects;
         };
-        let natural: Vec<u32> = self.natural_widths(scale, theme).collect();
+        let mut natural = SmallVec::<u32, INLINE_FLAGS>::new();
+        for width in self.natural_widths(scale, theme) {
+            // A set the heap cannot lay out has no flag to draw or press.
+            if natural.try_push(width).is_err() {
+                return rects;
+            }
+        }
         let total = natural.iter().copied().fold(0u32, u32::saturating_add);
-        if total == 0 || w == 0 || h == 0 {
-            return Vec::new();
+        if total == 0 || w == 0 || h == 0 || rects.try_reserve(natural.len()).is_err() {
+            return rects;
         }
         let side = box_side(scale, theme);
         let count = u32::try_from(natural.len()).unwrap_or(u32::MAX);
@@ -557,7 +571,6 @@ impl FlagSet {
         };
         let last = natural.len().saturating_sub(1);
         let mut left = x;
-        let mut rects = Vec::with_capacity(natural.len());
         for (index, want) in natural.iter().enumerate() {
             // The last flag takes the rounding remainder, so a narrowed set
             // still fills its slot to the pixel.
@@ -566,7 +579,8 @@ impl FlagSet {
             } else {
                 width_of(*want)
             };
-            rects.push(Rect::new(to_i32(left), to_i32(y), width, h));
+            // Reserved for every flag, so this never grows the list.
+            let _ = rects.try_push(Rect::new(to_i32(left), to_i32(y), width, h));
             left = left.saturating_add(width);
         }
         rects

@@ -46,6 +46,7 @@
 //! shrink visits only what it actually releases.
 
 use alloc::sync::Arc;
+use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};
 use core::ops::Deref;
 
@@ -103,6 +104,16 @@ pub enum Served<'a, V> {
     /// the whole budget, or the cache is poisoned). Correct, just not
     /// accelerated.
     Uncached(V),
+}
+
+/// What a serving lookup found once the cache was readied for it.
+enum Prepared {
+    /// The cache serves nothing: poisoned, or refused its classification.
+    Uncached,
+    /// The key is retained.
+    Hit,
+    /// The key is absent, and an admission would be under this policy.
+    Miss(CachePolicy),
 }
 
 impl<V> Deref for Served<'_, V> {
@@ -381,7 +392,11 @@ where
     /// never served, and the caller falls back to building the value
     /// itself exactly as it would for a cache that refused it.
     #[must_use]
-    pub fn peek(&self, generation: &E, key: &K) -> Option<&V> {
+    pub fn peek<Q>(&self, generation: &E, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if self.poisoned || self.generation.as_ref() != Some(generation) {
             return None;
         }
@@ -403,30 +418,77 @@ where
     where
         F: FnOnce() -> Option<V>,
     {
-        if self.poisoned {
-            return build().map(Served::Uncached);
+        match self.prepare(generation, &key) {
+            Prepared::Uncached => build().map(Served::Uncached),
+            Prepared::Hit => self.serve_hit(&key),
+            Prepared::Miss(policy) => {
+                let value = build()?;
+                self.admit(policy, key, value)
+            }
         }
+    }
 
+    /// [`get_or_build`](Self::get_or_build) for a caller holding `key` only in
+    /// a borrowed form: `own` makes the key the entry is admitted under, and is
+    /// called only on a miss, so a hit builds no key at all.
+    pub fn get_or_build_borrowed<Q, O, F>(
+        &mut self,
+        generation: &E,
+        key: &Q,
+        own: O,
+        build: F,
+    ) -> Option<Served<'_, V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+        O: FnOnce() -> K,
+        F: FnOnce() -> Option<V>,
+    {
+        match self.prepare(generation, key) {
+            Prepared::Uncached => build().map(Served::Uncached),
+            Prepared::Hit => self.serve_hit(key),
+            Prepared::Miss(policy) => {
+                let value = build()?;
+                self.admit(policy, own(), value)
+            }
+        }
+    }
+
+    /// Ready a serving lookup of `key` at `generation`: enter the generation,
+    /// enforce the band, and count the hit or the miss.
+    fn prepare<Q>(&mut self, generation: &E, key: &Q) -> Prepared
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if self.poisoned {
+            return Prepared::Uncached;
+        }
         self.enter_generation(generation);
         self.enforce_pressure();
-
         let Some(policy) = self.policy else {
-            return build().map(Served::Uncached);
+            return Prepared::Uncached;
         };
-
-        if self.entries.contains_key(&key) {
+        if self.entries.contains_key(key) {
             self.accounting.record_hit(policy.class());
-            // The lookup is the use the recency order tracks, so this is the
-            // one accessor that refreshes it.
-            return self
-                .entries
-                .get(&key)
-                .map(|entry| Served::Cached(&entry.value));
+            Prepared::Hit
+        } else {
+            self.accounting.record_miss(policy.class());
+            Prepared::Miss(policy)
         }
+    }
 
-        self.accounting.record_miss(policy.class());
-        let value = build()?;
-        self.admit(policy, key, value)
+    /// The retained value for a key [`Self::prepare`] found. The lookup is the
+    /// use the recency order tracks, so this is the one accessor that
+    /// refreshes it.
+    fn serve_hit<Q>(&mut self, key: &Q) -> Option<Served<'_, V>>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.entries
+            .get(key)
+            .map(|entry| Served::Cached(&entry.value))
     }
 
     /// Look `key` up at `generation`, counting the hit or the miss and
@@ -440,7 +502,11 @@ where
     /// before the pass ([`enforce_pressure`](Self::enforce_pressure)), and
     /// looks up through this. A generation different from the retained one
     /// empties the cache first, as every lookup does.
-    pub fn find(&mut self, generation: &E, key: &K) -> Option<&V> {
+    pub fn find<Q>(&mut self, generation: &E, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if self.poisoned {
             return None;
         }
@@ -1051,6 +1117,47 @@ mod tests {
             .get_or_build(&1, 7, || panic!("must not rebuild a cached entry"))
             .expect("cached");
         assert!(second.is_cached());
+        assert_eq!(cache.accounting().hits(), 1);
+        assert_eq!(cache.accounting().misses(), 1);
+    }
+
+    /// A borrowed lookup builds its owned key only on a miss: a hit is served
+    /// from the borrowed form alone.
+    #[test]
+    fn a_borrowed_lookup_builds_its_owned_key_only_on_a_miss() {
+        let mut cache: ReclaimCache<alloc::string::String, Block, u64, BuildFastHash> =
+            ReclaimCache::new(
+                "test.cache",
+                candidate(Sensitivity::UserData),
+                CacheBudget::from_backing(64 * 1024),
+                leak_gauge(PressureBand::Normal),
+                leak_sink(),
+                BuildFastHash::new(),
+            );
+        let mut owned = 0;
+        let built = cache
+            .get_or_build_borrowed(
+                &1,
+                "icon",
+                || {
+                    owned += 1;
+                    alloc::string::String::from("icon")
+                },
+                || Some(Block::of(64, 0xAA)),
+            )
+            .expect("built");
+        assert!(built.is_cached());
+        let served = cache
+            .get_or_build_borrowed(
+                &1,
+                "icon",
+                || panic!("a hit builds no key"),
+                || panic!("nor rebuilds the entry"),
+            )
+            .expect("cached");
+        assert!(served.is_cached());
+        assert_eq!(owned, 1);
+        assert_eq!(cache.peek(&1, "icon"), Some(&Block::of(64, 0xAA)));
         assert_eq!(cache.accounting().hits(), 1);
         assert_eq!(cache.accounting().misses(), 1);
     }

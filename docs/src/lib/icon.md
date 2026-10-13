@@ -192,8 +192,9 @@ artwork, so every draw site falls back to its built-in picture.
 
 A picture's soft shadow is its own entry: `IconArtwork::shadowed(request,
 side, cast)` resolves the picture and then the shadow `cast` throws from its
-coverage (`tairix_raster::cast_shadow`), retained under `ArtworkKey::Shadow`
-beside the picture it was cast from, so a frame blits a mask and never blurs.
+coverage (`tairix_raster::cast_shadow`), retained in a slot of its own — the
+picture's key and side with the cast — beside the picture it was cast from, so
+a frame blits a mask and never blurs.
 A shadow is cast in this process from pixels already retained, so no resolver
 is handed one. Only a cast mask is kept: one that cannot be cast or kept is
 withheld for that draw (`IconPicture::shadow_withheld`) — the tile then draws
@@ -202,7 +203,12 @@ none rather than blurring itself — and asked for again next time.
 A bundle is keyed by its *directory*, not by the asset its manifest names, so
 the manifest read is paid once per bundle and a bundle that declares no icon
 (or names one that will not decode) remembers that refusal too rather than
-re-reading it every frame.
+re-reading it every frame. A kind's shipped masters are keyed by the kind
+(`ArtworkKey::Raster`, `ArtworkKey::Vector`), not by a formatted path.
+
+A lookup compares the slot it wants in a borrowed form taken from the request,
+so a retained picture is served without building a key: only a miss builds the
+key the resolver is handed and the slot is retained under.
 
 ## What pressure may take, and what it may not
 

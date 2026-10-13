@@ -99,6 +99,9 @@ impl View {
                 }
             }
             InputEvent::ModifiersChanged { modifiers } => {
+                if *modifiers == self.modifiers {
+                    return Outcome::none();
+                }
                 // Shift squares a shape being dragged, so its preview moves.
                 let before = self.preview_bounds();
                 self.modifiers = *modifiers;
@@ -3728,16 +3731,11 @@ impl View {
 
     fn zoom_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         let mut label = String::new();
+        let shown = self.viewport.rung();
         for (rung, &zoom) in ZOOMS.iter().enumerate().rev() {
             label.clear();
             write_zoom(&mut label, Zoom::of(zoom).percent());
-            menu.radio(
-                Action::Zoom(rung),
-                &label,
-                "",
-                self.viewport.rung() == Some(rung),
-                plate,
-            );
+            menu.radio(Action::Zoom(rung), &label, "", shown == Some(rung), plate);
         }
     }
 }

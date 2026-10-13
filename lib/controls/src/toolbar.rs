@@ -22,6 +22,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_collections::SmallVec;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -349,8 +350,18 @@ impl Toolbar {
     fn layout(&self, slot: u32, gap: u32) -> Lanes {
         let double = slot.saturating_mul(2);
         let across = self.lanes.max(1);
-        let mut spans = Vec::with_capacity(self.entries.len());
-        let mut lines: Vec<Line> = Vec::new();
+        let mut spans = Spans::new();
+        let mut lines = Lines::new();
+        // A strip the heap cannot lay out seats no tool, so none can be hit.
+        if spans.try_reserve(self.entries.len()).is_err()
+            || lines.try_reserve(self.entries.len()).is_err()
+        {
+            return Lanes {
+                spans: Spans::new(),
+                lines: Lines::new(),
+                grid: slot,
+            };
+        }
         let mut used = 0u16;
         let mut prev: Option<u16> = None;
         for (index, entry) in self.entries.iter().enumerate() {
@@ -367,7 +378,9 @@ impl Toolbar {
                     .unwrap_or(across)
                     .clamp(1, across)
             };
-            spans.push(Span {
+            // Reserved for every tool, as is a line per tool, so neither push
+            // grows its list.
+            let _ = spans.try_push(Span {
                 length,
                 breadth,
                 lanes: taken,
@@ -380,7 +393,7 @@ impl Toolbar {
                     used = used.saturating_add(taken);
                 }
                 _ => {
-                    lines.push(Line {
+                    let _ = lines.try_push(Line {
                         first: index,
                         end: index + 1,
                         length,
@@ -1002,7 +1015,15 @@ impl Toolbar {
                 .map(|span| span.lanes)
                 .fold(0u16, u16::saturating_add)
         };
-        let focus = self.focus.unwrap_or(0);
+        // From no focus a step lands on the first line forward and the last
+        // one back, as a single-lane step lands on the first or last tool.
+        let Some(focus) = self.focus else {
+            return if forward {
+                0
+            } else {
+                lines.last().map_or(0, |row| row.first)
+            };
+        };
         let Some(from) = Self::line_of(&lines, focus) else {
             return 0;
         };
@@ -1051,10 +1072,18 @@ struct Line {
 /// The tools' spans, the lines they are packed into, and how broad the
 /// lanes stand side by side.
 struct Lanes {
-    spans: Vec<Span>,
-    lines: Vec<Line>,
+    spans: Spans,
+    lines: Lines,
     grid: u32,
 }
+
+/// Tools a strip lays out without the heap; a strip of more spills to it.
+const INLINE_TOOLS: usize = 32;
+
+type Spans = SmallVec<Span, INLINE_TOOLS>;
+type Lines = SmallVec<Line, INLINE_TOOLS>;
+type Seats = SmallVec<Option<Rect>, INLINE_TOOLS>;
+type Dividers = SmallVec<i32, INLINE_TOOLS>;
 
 /// The run of the strip tools are seated into, and the placement they share.
 #[derive(Copy, Clone)]
@@ -1150,8 +1179,8 @@ fn axes(orientation: ScrollOrientation, bounds: Rect) -> ((i32, u32), (i32, u32)
 /// clamped against what that band can show, and whether the overflow slots
 /// are reserved.
 struct Measure {
-    spans: Vec<Span>,
-    lines: Vec<Line>,
+    spans: Spans,
+    lines: Lines,
     band: Band,
     model: ScrollModel,
     reserved: bool,
@@ -1160,8 +1189,14 @@ struct Measure {
 impl Measure {
     /// Seat the lines from line `start`, answering where each drawn tool sits
     /// and the dividers between them.
-    fn seats(&self, start: usize) -> (Vec<Option<Rect>>, Vec<i32>) {
-        let mut seats = alloc::vec![None; self.spans.len()];
+    fn seats(&self, start: usize) -> (Seats, Dividers) {
+        let mut seats = Seats::new();
+        // Seats reserved for every tool, or none seated, which no tool is hit in.
+        if seats.try_reserve(self.spans.len()).is_ok() {
+            for _ in 0..self.spans.len() {
+                let _ = seats.try_push(None);
+            }
+        }
         let dividers = seat(&self.lines, &self.spans, &self.band, start, &mut seats);
         (seats, dividers)
     }
@@ -1176,9 +1211,9 @@ impl Measure {
 /// affordances actually offered, and the clamped scroll model over the tools.
 struct Strip {
     /// One entry per tool, `None` for a tool the strip had no room to seat.
-    seats: Vec<Option<Rect>>,
+    seats: Seats,
     /// Where each divider falls along the strip.
-    dividers: Vec<i32>,
+    dividers: Dividers,
     back: Option<Rect>,
     forward: Option<Rect>,
     model: ScrollModel,
@@ -1240,11 +1275,15 @@ fn seat(
     band: &Band,
     start: usize,
     seats: &mut [Option<Rect>],
-) -> Vec<i32> {
-    let mut dividers = Vec::new();
+) -> Dividers {
+    let mut dividers = Dividers::new();
     let Some(run) = lines.get(start..) else {
         return dividers;
     };
+    // A divider per line at most: reserved, so the pushes below never grow it.
+    if dividers.try_reserve(run.len()).is_err() {
+        return dividers;
+    }
     let end = band.start.saturating_add(to_i32(band.length));
     let mut along = band.start.saturating_add(to_i32(band.gap));
     for (offset, line) in run.iter().enumerate() {
@@ -1256,7 +1295,7 @@ fn seat(
             break;
         }
         if gutter > 0 {
-            dividers.push(along.saturating_add(to_i32(band.gap) / 2));
+            let _ = dividers.try_push(along.saturating_add(to_i32(band.gap) / 2));
         }
         let mut lane = 0u16;
         for index in line.first..line.end {

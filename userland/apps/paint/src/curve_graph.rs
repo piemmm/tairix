@@ -305,8 +305,8 @@ impl CurveGraph {
         fill_area(surface, plot, Color::from(palette.document));
         let quiet = palette.on_surface_muted;
         if let Some((histogram, shown)) = histogram {
-            for column in 0..plot.width {
-                let tall = u32::from(histogram.column(shown, column, plot.width));
+            for (column, tall) in (0..plot.width).zip(histogram.columns(shown, plot.width)) {
+                let tall = u32::from(tall);
                 let height =
                     u32::try_from(u64::from(plot.height) * u64::from(tall) / 1000).unwrap_or(0);
                 let x = plot.left().saturating_add_unsigned(column);

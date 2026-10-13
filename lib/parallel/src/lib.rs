@@ -354,10 +354,10 @@ const DRAWN_BATCH: usize = 32 * OVERSUBSCRIPTION;
 /// the runner's index `i` visits the round's piece `i`, so no participant
 /// waits on a lock and the iterator runs only where it was made. A round is
 /// four pieces for each participant, so a straggler is absorbed however wide
-/// the runner: on the dispatching thread's stack for a runner up to 32 wide,
-/// and past that from one buffer reserved for the dispatch, or a stack round
-/// at a time should that be refused. The pieces must be independent, as
-/// [`for_each`]'s elements are.
+/// the runner: on the dispatching thread's stack for a runner up to 32 wide or
+/// pieces that fit one, and past that from one buffer reserved for the
+/// dispatch, or a stack round at a time should that be refused. The pieces must
+/// be independent, as [`for_each`]'s elements are.
 ///
 /// A runner one thread wide visits the pieces in order on the calling thread.
 pub fn for_each_drawn<I>(runner: &dyn JobRunner, pieces: I, visit: &(dyn Fn(I::Item) + Sync))
@@ -389,7 +389,7 @@ where
         return pieces.fold(start, |joined, piece| join(joined, visit(piece)));
     }
     #[cfg(feature = "pool")]
-    if let Some(mut round) = HeapRound::for_runner(runner) {
+    if let Some(mut round) = HeapRound::for_runner(runner, pieces.size_hint().1) {
         return fold_rounds(runner, &mut round, &mut pieces, start, visit, join);
     }
     let mut round = ArrayVec::<Slot<I::Item, R>, DRAWN_BATCH>::new();
@@ -433,10 +433,13 @@ struct HeapRound<T> {
 
 #[cfg(feature = "pool")]
 impl<T> HeapRound<T> {
-    /// The round `runner` wants, when that is more than a stack round and the
-    /// heap holds it.
-    fn for_runner(runner: &dyn JobRunner) -> Option<Self> {
-        let len = runner.width().saturating_mul(OVERSUBSCRIPTION);
+    /// The round `runner` wants for at most `pieces` pieces, when that is more
+    /// than a stack round and the heap holds it.
+    fn for_runner(runner: &dyn JobRunner, pieces: Option<usize>) -> Option<Self> {
+        let len = runner
+            .width()
+            .saturating_mul(OVERSUBSCRIPTION)
+            .min(pieces.unwrap_or(usize::MAX));
         if len <= DRAWN_BATCH {
             return None;
         }
@@ -721,6 +724,23 @@ mod tests {
             )
         };
         assert_eq!(sum(&Reversed::new(width)), sum(&SERIAL));
+    }
+
+    /// A wide runner reserves a heap round only for pieces a stack round cannot
+    /// hold, and only as much of one as they fill: a frame's few bands allocate
+    /// nothing however wide the machine.
+    #[test]
+    fn a_heap_round_is_reserved_only_for_pieces_a_stack_round_cannot_hold() {
+        let wide = Reversed::new(2 * DRAWN_BATCH / OVERSUBSCRIPTION);
+        assert!(HeapRound::<u8>::for_runner(&wide, Some(DRAWN_BATCH)).is_none());
+        let fitted = HeapRound::<u8>::for_runner(&wide, Some(DRAWN_BATCH + 1)).expect("reserved");
+        assert_eq!(fitted.len, DRAWN_BATCH + 1, "only what the pieces fill");
+        let unbounded = HeapRound::<u8>::for_runner(&wide, None).expect("reserved");
+        assert_eq!(
+            unbounded.len,
+            2 * DRAWN_BATCH,
+            "a round for every participant"
+        );
     }
 
     /// The length an iterator reports is never what decides which pieces are

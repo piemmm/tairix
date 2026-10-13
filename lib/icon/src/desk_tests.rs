@@ -555,8 +555,7 @@ fn a_refusal_lands_like_a_picture() {
 #[test]
 fn a_landed_class_picture_names_the_request_that_falls_back_to_it() {
     let mut desk = ArtworkDesk::new();
-    let class = crate::icon_artwork_path(crate::IconKind::AppBundle);
-    let _ = desk.collect(&asset(&class), 8);
+    let _ = desk.collect(&ArtworkKey::Raster(crate::IconKind::AppBundle), 8);
     let running = desk.next_job().expect("a job");
     let _ = desk.deliver(&running, Some(picture(8)));
 

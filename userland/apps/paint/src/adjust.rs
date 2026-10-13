@@ -23,7 +23,9 @@ use crate::curve_graph::{CurveEdit, CurveGraph};
 use crate::filter::{Filter, Parameter};
 use crate::histogram::{Histogram, Plot};
 use crate::layout::Faces;
-use crate::panel::{switch, Cell, Height, Panel, PanelArt, PanelEvent, PanelOutcome, Part};
+use crate::panel::{
+    switch, Cell, Height, Panel, PanelArt, PanelEvent, PanelOutcome, Part, MOST_PARTS,
+};
 use crate::tone::{Channel, ColourBalance, HueRange, HueRanges, Tones, WhiteBalance};
 use crate::track::Track;
 
@@ -431,7 +433,7 @@ impl AdjustPane {
             PanelOutcome::Custom { part, rect } => {
                 self.custom_pointer(part, rect, event, scale, damage)
             }
-            other => self.answer(other, bounds, damage),
+            other => self.answer(other, bounds, (faces, scale, theme), damage),
         };
         self.follow_focus();
         answer
@@ -459,7 +461,7 @@ impl AdjustPane {
                     settled: self.reset(),
                 }
             }
-            other => self.answer(other, bounds, damage),
+            other => self.answer(other, bounds, (faces, scale, theme), damage),
         };
         self.follow_focus();
         answer
@@ -473,7 +475,7 @@ impl AdjustPane {
         damage: &mut Region,
     ) -> AdjustOutcome {
         match self.panel.commit(bounds, context, damage) {
-            Some(event) => self.answer(PanelOutcome::Event(event), bounds, damage),
+            Some(event) => self.answer(PanelOutcome::Event(event), bounds, context, damage),
             None => AdjustOutcome::Ignored,
         }
     }
@@ -486,7 +488,7 @@ impl AdjustPane {
         damage: &mut Region,
     ) -> AdjustOutcome {
         let answer = match self.panel.blur(bounds, context, damage) {
-            Some(event) => self.answer(PanelOutcome::Event(event), bounds, damage),
+            Some(event) => self.answer(PanelOutcome::Event(event), bounds, context, damage),
             None => AdjustOutcome::Ignored,
         };
         self.follow_focus();
@@ -516,17 +518,24 @@ impl AdjustPane {
         &mut self,
         outcome: PanelOutcome,
         bounds: Rect,
+        look: (Faces, Scale, &Theme),
         damage: &mut Region,
     ) -> AdjustOutcome {
         match outcome {
             PanelOutcome::Ignored => AdjustOutcome::Ignored,
             PanelOutcome::Taken | PanelOutcome::Custom { .. } => AdjustOutcome::Taken,
             PanelOutcome::Left { forward } => AdjustOutcome::Left { forward },
-            PanelOutcome::Event(event) => self.event(event, bounds, damage),
+            PanelOutcome::Event(event) => self.event(event, bounds, look, damage),
         }
     }
 
-    fn event(&mut self, event: PanelEvent, bounds: Rect, damage: &mut Region) -> AdjustOutcome {
+    fn event(
+        &mut self,
+        event: PanelEvent,
+        bounds: Rect,
+        look: (Faces, Scale, &Theme),
+        damage: &mut Region,
+    ) -> AdjustOutcome {
         let part = match event {
             PanelEvent::Chosen { part, .. }
             | PanelEvent::Number { part, .. }
@@ -610,8 +619,10 @@ impl AdjustPane {
             .setting
             .as_ref()
             .is_some_and(|setting| setting.filter != before);
-        self.sync();
-        damage.add(bounds);
+        // A number or a handle moves what its own value shows and nothing
+        // else, so only the parts that now show something else are repainted.
+        let changed = self.sync_changed();
+        self.panel.report_parts(&changed, bounds, look, damage);
         if moved {
             AdjustOutcome::Changed { settled }
         } else if settled {
@@ -696,16 +707,24 @@ impl AdjustPane {
 
     /// Show the settings in every part.
     fn sync(&mut self) {
+        let _ = self.sync_changed();
+    }
+
+    /// Show the settings in every part, answering which parts now draw
+    /// something else.
+    fn sync_changed(&mut self) -> [bool; MOST_PARTS] {
+        let mut changed = [false; MOST_PARTS];
         let Some(setting) = &self.setting else {
-            return;
+            return changed;
         };
         let withheld = self.panel.withheld();
-        for (index, &role) in self.roles.iter().enumerate() {
+        for ((index, &role), changed) in self.roles.iter().enumerate().zip(&mut changed) {
             if let Some(part) = self.panel.part_mut(index) {
-                setting.show(role, part, withheld);
+                *changed = setting.show(role, part, withheld);
             }
         }
         self.sync_pickers();
+        changed
     }
 
     /// Show which eyedropper is taken up, and offer Auto only with a
@@ -740,9 +759,15 @@ impl AdjustPane {
                 ),
                 None => ("Auto", ControlRole::Neutral, ready && !withheld),
             };
-            let mut rebuilt = Button::new(ButtonContent::Label(String::from(label)), role);
             let mut kept = state;
             kept.enabled = enabled;
+            let same = button.role() == role
+                && matches!(button.content(), ButtonContent::Label(shown) if shown == label);
+            if same {
+                button.set_state(kept);
+                continue;
+            }
+            let mut rebuilt = Button::new(ButtonContent::Label(String::from(label)), role);
             rebuilt.set_state(kept);
             *button = rebuilt;
         }
@@ -951,10 +976,20 @@ impl Setting {
         }
     }
 
-    /// Show the settings in `part`, which plays `role`; a part held off
-    /// while the pane is `withheld` stays so.
-    fn show(&self, role: Role, part: &mut Part, withheld: bool) {
+    /// Show the settings in `part`, which plays `role`, answering whether that
+    /// changed what it draws; a part held off while the pane is `withheld`
+    /// stays so.
+    fn show(&self, role: Role, part: &mut Part, withheld: bool) -> bool {
         let channel = self.channel;
+        // Every cell is shown whether or not an earlier one changed.
+        let cells = |part: &mut Part, values: &[i32]| {
+            values
+                .iter()
+                .enumerate()
+                .fold(false, |changed, (cell, &value)| {
+                    part.show(cell, value) || changed
+                })
+        };
         match (role, &self.filter) {
             (Role::Parameter(index), filter) => part.show(0, filter.value(index)),
             (Role::Channel, _) => part.show(0, to_i32_index(channel.index())),
@@ -962,20 +997,32 @@ impl Setting {
             (Role::Tones, _) => part.show(0, to_i32_index(self.tones.index())),
             (Role::Input, Filter::Levels(levels)) => {
                 let levels = levels.of(channel);
-                part.show(0, i32::from(levels.black));
-                part.show(1, tairix_util::mathf::round_i32(levels.grey()));
-                part.show(2, i32::from(levels.white));
+                cells(
+                    part,
+                    &[
+                        i32::from(levels.black),
+                        tairix_util::mathf::round_i32(levels.grey()),
+                        i32::from(levels.white),
+                    ],
+                )
             }
             (Role::InputFields, Filter::Levels(levels)) => {
                 let levels = levels.of(channel);
-                part.show(0, i32::from(levels.black));
-                part.show(1, i32::from(levels.gamma));
-                part.show(2, i32::from(levels.white));
+                cells(
+                    part,
+                    &[
+                        i32::from(levels.black),
+                        i32::from(levels.gamma),
+                        i32::from(levels.white),
+                    ],
+                )
             }
             (Role::Output | Role::OutputFields, Filter::Levels(levels)) => {
                 let levels = levels.of(channel);
-                part.show(0, i32::from(levels.out_black));
-                part.show(1, i32::from(levels.out_white));
+                cells(
+                    part,
+                    &[i32::from(levels.out_black), i32::from(levels.out_white)],
+                )
             }
             (Role::Point, Filter::Curves(curves)) => {
                 let chosen = self
@@ -983,41 +1030,43 @@ impl Setting {
                     .selected()
                     .and_then(|index| curves.of(channel).points().get(index).copied());
                 let (input, output) = chosen.unwrap_or((0, 0));
-                part.show(0, i32::from(input));
-                part.show(1, i32::from(output));
+                let mut changed = cells(part, &[i32::from(input), i32::from(output)]);
                 if let Part::Fields(cells) = part {
                     for cell in cells {
                         let mut state = cell.field.state();
-                        state.enabled = chosen.is_some() && !withheld;
+                        let enabled = chosen.is_some() && !withheld;
+                        changed |= state.enabled != enabled;
+                        state.enabled = enabled;
                         cell.field.set_state(state);
                     }
                 }
+                changed
             }
             (Role::Hue, Filter::HueSaturation(ranges)) => {
-                part.show(0, i32::from(ranges.of(self.range).hue));
+                part.show(0, i32::from(ranges.of(self.range).hue))
             }
             (Role::Saturation, Filter::HueSaturation(ranges)) => {
-                part.show(0, i32::from(ranges.of(self.range).saturation));
+                part.show(0, i32::from(ranges.of(self.range).saturation))
             }
             (Role::Lightness, Filter::HueSaturation(ranges)) => {
-                part.show(0, i32::from(ranges.of(self.range).lightness));
+                part.show(0, i32::from(ranges.of(self.range).lightness))
             }
             (Role::Axis(axis), Filter::ColourBalance(balance)) => {
                 let moved = balance.tones[self.tones.index()]
                     .get(axis)
                     .copied()
                     .unwrap_or(0);
-                part.show(0, i32::from(moved));
+                part.show(0, i32::from(moved))
             }
             (Role::KeepLuminosity, Filter::ColourBalance(balance)) => {
-                part.show(0, i32::from(balance.keep_luminosity));
+                part.show(0, i32::from(balance.keep_luminosity))
             }
             (Role::Kelvin, Filter::WhiteBalance(balance)) => {
-                part.show(0, i32::from(balance.kelvin));
+                part.show(0, i32::from(balance.kelvin))
             }
             (Role::Tint, Filter::WhiteBalance(balance)) => part.show(0, i32::from(balance.tint)),
             (Role::Preview, _) => part.show(0, i32::from(self.preview)),
-            _ => {}
+            _ => false,
         }
     }
 }
@@ -1355,8 +1404,8 @@ fn draw_histogram(
         Plot::Blue => Color::rgba(50, 90, 210, 255),
         Plot::Luma => Color::from(palette.on_surface_muted),
     };
-    for column in 0..plate.width {
-        let tall = u32::from(histogram.column(plot, column, plate.width));
+    for (column, tall) in (0..plate.width).zip(histogram.columns(plot, plate.width)) {
+        let tall = u32::from(tall);
         let height = u32::try_from(u64::from(plate.height) * u64::from(tall) / 1000).unwrap_or(0);
         let x = plate.left().saturating_add_unsigned(column);
         fill_area(

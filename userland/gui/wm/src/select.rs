@@ -176,6 +176,14 @@ pub struct CursorEpoch {
     pub shadow: bool,
 }
 
+/// What an installed pointer image was drawn as.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Drawn {
+    epoch: CursorEpoch,
+    /// The physical side it was grown to, or `None` for its own cached image.
+    enlarged: Option<u32>,
+}
+
 /// How far a shaken pointer grows, in logical pixels: four times the
 /// reference pointer, which reads at a glance from across a large screen.
 pub const ENLARGED_SIDE_PX: u32 = 4 * CURSOR_BASE_SIDE_PX;
@@ -247,8 +255,8 @@ pub struct CursorController {
     /// The shape the seat holds the pointer in, whatever is under it: a drag
     /// the desktop carries shows its verdict wherever the pointer goes.
     held: Option<CursorKind>,
-    /// What is installed: the epoch the kind was drawn for and how enlarged.
-    shown: Option<(CursorEpoch, u16)>,
+    /// What is installed.
+    shown: Option<Drawn>,
     /// The pointer's side in *logical* pixels: the reference side magnified
     /// by the user's chosen pointer size. Physical pixels come from pairing
     /// it with the output's scale.
@@ -390,8 +398,9 @@ impl CursorController {
     /// The kind on screen is rasterised once at its enlarged size and every
     /// step between is resampled from that, into the buffer the previous
     /// step's image returns, so growing and shrinking over many frames costs
-    /// no rasterisation and no allocation past the first frames. At `0` the
-    /// pointer is its own crisp cached image again, and the enlarged
+    /// no rasterisation and no allocation past the first frames, and a step
+    /// that leaves the pointer's pixel side as it was redraws nothing. At `0`
+    /// the pointer is its own crisp cached image again, and the enlarged
     /// buffers are let go.
     pub fn set_enlargement(
         &mut self,
@@ -404,7 +413,9 @@ impl CursorController {
             return false;
         }
         self.enlargement = permille;
-        compositor.has_cursor() && self.install(self.kind, at, compositor)
+        compositor.has_cursor()
+            && self.shown != Some(self.drawing(compositor))
+            && self.install(self.kind, at, compositor)
     }
 
     /// The cursor sets this controller chooses artwork from.
@@ -501,9 +512,8 @@ impl CursorController {
         let kind = self
             .held
             .unwrap_or_else(|| desired_cursor(at, router, compositor));
-        let epoch = self.epoch(compositor);
         if kind == self.kind
-            && self.shown == Some((epoch, self.enlargement))
+            && self.shown == Some(self.drawing(compositor))
             && compositor.has_cursor()
         {
             return false;
@@ -525,19 +535,40 @@ impl CursorController {
         }
     }
 
-    /// The logical side a fully enlarged pointer is drawn at: the enlarged
-    /// size, or half again the user's own where that is already larger.
-    fn enlarged_logical_side(&self) -> u32 {
+    /// The physical side a fully enlarged pointer is drawn at for `epoch`:
+    /// the enlarged size, or half again the user's own where that is already
+    /// larger.
+    fn peak_side(&self, epoch: CursorEpoch, compositor: &Compositor) -> u32 {
         let (num, den) = ENLARGED_BEYOND;
-        ENLARGED_SIDE_PX.max(self.logical_side.saturating_mul(num) / den)
+        let logical = ENLARGED_SIDE_PX.max(self.logical_side.saturating_mul(num) / den);
+        compositor.scale().scale_length(logical).max(epoch.side)
+    }
+
+    /// What the pointer is to be drawn as now: its epoch, and the physical
+    /// side it is grown to while it is enlarged at all.
+    fn drawing(&self, compositor: &Compositor) -> Drawn {
+        let epoch = self.epoch(compositor);
+        let enlarged = (self.enlargement > 0).then(|| {
+            let peak = self.peak_side(epoch, compositor);
+            let grown = u64::from(peak - epoch.side) * u64::from(self.enlargement)
+                / u64::from(FULLY_ENLARGED);
+            u32::try_from(grown).map_or(peak, |grown| epoch.side + grown)
+        });
+        Drawn { epoch, enlarged }
     }
 
     /// Rasterise `kind` for `epoch` and install it so its hotspot lands on
     /// `pointer`, enlarged as far as asked. Fails closed (leaving any
     /// current cursor untouched) if the cursor cannot be drawn.
     fn install(&mut self, kind: CursorKind, pointer: Point, compositor: &mut Compositor) -> bool {
-        let epoch = self.epoch(compositor);
-        let image = if self.enlargement == 0 {
+        let drawing = self.drawing(compositor);
+        let epoch = drawing.epoch;
+        let image = if let Some(side) = drawing.enlarged {
+            let Some(image) = self.enlarged(kind, epoch, side, compositor) else {
+                return false;
+            };
+            image
+        } else {
             self.release_enlarged();
             let registry = &self.registry;
             let Some(served) = self
@@ -547,33 +578,26 @@ impl CursorController {
                 return false;
             };
             (*served).clone()
-        } else {
-            let Some(image) = self.enlarged(kind, epoch, compositor) else {
-                return false;
-            };
-            image
         };
         let replaced = compositor.set_cursor(image, pointer);
-        if self.enlargement > 0 {
+        if drawing.enlarged.is_some() {
             self.spare = replaced;
         }
         self.kind = kind;
-        self.shown = Some((epoch, self.enlargement));
+        self.shown = Some(drawing);
         true
     }
 
-    /// `kind` drawn for `epoch`, grown [`enlargement`](Self::enlargement) of
-    /// the way to its enlarged size, or `None` when it cannot be drawn.
+    /// `kind` drawn for `epoch` grown to `side` physical pixels, or `None`
+    /// when it cannot be drawn.
     fn enlarged(
         &mut self,
         kind: CursorKind,
         epoch: CursorEpoch,
+        side: u32,
         compositor: &Compositor,
     ) -> Option<CursorImage> {
-        let peak_side = compositor
-            .scale()
-            .scale_length(self.enlarged_logical_side())
-            .max(epoch.side);
+        let peak_side = self.peak_side(epoch, compositor);
         let peak_epoch = CursorEpoch {
             side: peak_side,
             ..epoch
@@ -584,11 +608,8 @@ impl CursorController {
             self.peak = Some((kind, peak_epoch, image));
         }
         let (_, _, peak) = self.peak.as_ref()?;
-        let grown = u64::from(peak_side - epoch.side) * u64::from(self.enlargement)
-            / u64::from(FULLY_ENLARGED);
-        let side = u64::from(epoch.side) + grown;
         let across = u64::from(peak.width().max(peak.height()));
-        let target = u32::try_from(across * side / u64::from(peak_side.max(1))).ok()?;
+        let target = u32::try_from(across * u64::from(side) / u64::from(peak_side.max(1))).ok()?;
         peak.resampled_to(target, self.spare.take(), &mut self.scratch)
     }
 

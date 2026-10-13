@@ -18,61 +18,69 @@
 //! `plans/OPEN-DEFECTS.md` D131 — until that is resolved these models are
 //! unverified, so do not read their presence as coverage.
 //!
-//! Coverage:
-//!
-//! * `loom_owner_push_then_pop_no_stealer`: a sanity case that the
-//!   single-thread path is sound.
-//! * `loom_owner_push_versus_stealer`: the *non-trivial* interleaving
-//!   the spec is most concerned with — the owner racing a single
-//!   stealer for the last element. The invariant is: the element is
-//!   handed to *exactly one* of the two, never lost, never duplicated.
+//! Each model checks that a task is handed to exactly one party, never lost
+//! and never duplicated: two consumers racing for the last entry, and two
+//! producers pushing at once.
 
 #![cfg(loom)]
 
-use loom::sync::Arc;
+use loom::sync::Arc as LoomArc;
 use loom::thread;
+use std::sync::Arc;
 
 use tairix_kernel_sched_mlfq::runqueue::{RunDeque, Steal};
 
+fn taken(steal: Steal<Arc<u64>>) -> Option<u64> {
+    match steal {
+        Steal::Stolen(task) => Some(*task),
+        Steal::Empty | Steal::Retry => None,
+    }
+}
+
 #[test]
-fn loom_owner_push_then_pop_no_stealer() {
+fn loom_push_then_steal_single_thread() {
     loom::model(|| {
         let q = RunDeque::try_new(4).expect("cap 4");
-        q.push(7).expect("push");
-        assert_eq!(q.pop(), Some(7));
-        assert_eq!(q.pop(), None);
+        q.push(Arc::new(7)).expect("push");
+        assert_eq!(taken(q.steal()), Some(7));
+        assert_eq!(q.steal(), Steal::Empty);
     });
 }
 
 #[test]
-fn loom_owner_push_versus_stealer() {
+fn loom_two_consumers_race_for_the_last_entry() {
     loom::model(|| {
-        let q = Arc::new(RunDeque::try_new(2).expect("cap 2"));
-        // Owner pushes one element; concurrently, a stealer attempts to
-        // claim it. The owner then pops. The element must end up with
-        // exactly one of the two parties.
-        q.push(42).expect("push");
+        let q = LoomArc::new(RunDeque::try_new(2).expect("cap 2"));
+        q.push(Arc::new(42)).expect("push");
 
         let q2 = q.clone();
-        let stealer = thread::spawn(move || match q2.steal() {
-            Steal::Stolen(v) => Some(v),
-            Steal::Empty | Steal::Retry => None,
-        });
-        let owner_got = q.pop();
-        let stealer_got = stealer.join().expect("join");
+        let rival = thread::spawn(move || taken(q2.steal()));
+        let mine = taken(q.steal());
+        let theirs = rival.join().expect("join");
 
-        let count = owner_got.iter().count() + stealer_got.iter().count();
-        assert!(
-            count <= 1,
-            "element must not be observed by both owner and stealer"
-        );
+        let count = mine.iter().count() + theirs.iter().count();
+        assert!(count <= 1, "an entry is never handed to both");
         if count == 0 {
-            // Stealer's Retry race lost; element still in the deque.
-            assert_eq!(q.pop(), Some(42));
+            assert_eq!(taken(q.steal()), Some(42), "a lost race leaves it queued");
         } else {
-            let observed = owner_got.or(stealer_got).expect("one side won");
-            assert_eq!(observed, 42);
-            assert_eq!(q.pop(), None);
+            assert_eq!(mine.or(theirs), Some(42));
+            assert_eq!(q.steal(), Steal::Empty);
         }
+    });
+}
+
+#[test]
+fn loom_two_producers_never_share_a_slot() {
+    loom::model(|| {
+        let q = LoomArc::new(RunDeque::try_new(2).expect("cap 2"));
+        let q2 = q.clone();
+        let rival = thread::spawn(move || q2.push(Arc::new(2)).is_ok());
+        assert!(q.push(Arc::new(1)).is_ok());
+        assert!(rival.join().expect("join"));
+
+        let mut got = [taken(q.steal()), taken(q.steal())];
+        got.sort_unstable();
+        assert_eq!(got, [Some(1), Some(2)], "both pushes kept");
+        assert_eq!(q.steal(), Steal::Empty);
     });
 }

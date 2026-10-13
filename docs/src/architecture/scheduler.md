@@ -119,12 +119,16 @@ policy is the classical MLFQ as described in:
 > Three Easy Pieces*, ch. 8. <https://pages.cs.wisc.edu/~remzi/OSTEP/>
 
 The run-queue is a bounded variant of the Chase–Lev work-stealing
-deque (Chase & Lev, SPAA '05) with two TAIRiX-specific simplifications:
+deque (Chase & Lev, SPAA '05):
 
 1. The buffer is bounded, so a misbehaving task source cannot
-   amplify into a kernel-wide DoS (`AGENTS.md` §5).
-2. The slot payload is the `Copy` `TaskId` (a `u64`), not a typed
-   pointer; lost-CAS races therefore cannot leak or double-free.
+   amplify into a kernel-wide DoS.
+2. A slot holds the queued task itself (an `Arc` of its record), owned by
+   the slot until the one consumer whose compare-exchange claims its index
+   takes it; a full ring refuses a push, so no unclaimed slot is rewritten.
+3. Chase–Lev has a single producer, but a task is pushed by whichever CPU
+   spawns, wakes or migrates it, so producers serialise on a per-deque lock.
+   Consumers never take it.
 
 ### Bands and demotion
 
@@ -175,8 +179,8 @@ Each CPU owns three [`RunDeque`]s (one per band). A CPU's
 
 Both the local consume and the steal use the same `RunDeque::steal`
 entry point — the queue is a single-end FIFO consumer, so MLFQ
-fairness within a band is preserved. Push is wait-free; consume
-is lock-free with a bounded retry loop on `Steal::Retry`.
+fairness within a band is preserved. Consume is lock-free with a bounded
+retry loop on `Steal::Retry`; push holds the producer lock for a few stores.
 
 ## EEVDF policy (`scheduler-eevdf`, default)
 
@@ -807,8 +811,9 @@ indefinitely block another).
 
 #### Why the entry point does *not* dispatch
 
-`step` reads the task registry through an `RwLock` and locks the
-overflow `SpinLock`; `spawn` writes the registry. Both lock kinds
+`step` locks the overflow `SpinLock` and the run queues (and MLFQ's
+boost reads the task registry through its `RwLock`); `spawn` writes the
+registry. Both lock kinds
 are explicitly forbidden from interrupt context by `lib/sync`
 (see `lib/sync/src/rwlock.rs` module docs: "Process /
 kernel-thread context only. Never from an interrupt handler.").
@@ -1221,15 +1226,21 @@ These hold at every API boundary:
 1. **No global mutable state outside per-CPU areas.** The
    `Scheduler<A>` owns a `Box<[CpuState]>` and a single
    `RwLock<BTreeMap<TaskId, Arc<TaskInner>>>` registry, plus a
-   `SpinLock<Vec<TaskId>>` overflow list. Each is documented at its
+   `SpinLock<Vec<Arc<TaskInner>>>` overflow list. Each is documented at its
    field. Static / `lazy_static` mutable state is forbidden
    (`AGENTS.md` §2.1).
-2. **Bounded queues.** Every `RunDeque` has its capacity fixed at
+2. **A pick needs no lookup.** Every run-queue entry and overflow slot holds
+   the task itself, so `step` — pick, dispatch, requeue, steal, overflow
+   drain — never takes the registry; the registry serves only the
+   id-addressed calls (`unpark`, `stop`, `exit`, the observations). A stale
+   entry names the record it was queued for, never a later task that drew
+   the same id.
+3. **Bounded queues.** Every `RunDeque` has its capacity fixed at
    construction. Push returns `Err(task)` on overflow; the scheduler
    routes the task into the overflow list rather than panicking.
-3. **No `panic!`, `unwrap`, `expect` in the dispatch path.** Every
+4. **No `panic!`, `unwrap`, `expect` in the dispatch path.** Every
    reachable failure produces a typed [`SchedError`].
-4. **Cancellation safety.** `unpark`, `stop`, `resume` and `exit` can race
+5. **Cancellation safety.** `unpark`, `stop`, `resume` and `exit` can race
    with the task's own body. After the body returns, every policy settles
    the task through the one shared `park::settle` (`kernel/sched/api`),
    whose every transition is a compare-exchange from the state it was
@@ -1252,7 +1263,7 @@ These hold at every API boundary:
    the body's own `Park` or `Yield`, either of which would leave the task
    where a wake or its own entry could run it; a park is kept beneath it.
 
-5. **SMP quiescence and reclamation ownership.** `exit(id)` returns an
+6. **SMP quiescence and reclamation ownership.** `exit(id)` returns an
    `ExitDisposition` so its caller can reclaim a task's resources
    *safely* on SMP. Reclaiming a task's address space (or anything its
    user code can still reach) while another CPU is still executing that
@@ -1271,7 +1282,7 @@ These hold at every API boundary:
      prompt reschedule — every CPU, when no current-task slot the killer can
      see names the task yet — and returns `ExitDisposition::Deferred`. It
      does **not** mark the task `Exited`: the owning dispatch performs that
-     final transition itself when its body returns (invariant 4), so no
+     final transition itself when its body returns (invariant 5), so no
      policy ever exposes an `Exited` task that is still running. The mark and
      the body probe are paired against the dispatch's release of the body and
      its read of the mark (`park::doom` / `park::observe_doom`, one sequential
@@ -1303,7 +1314,7 @@ These hold at every API boundary:
    the death in the kill gate first and only then ask the scheduler; see the
    kernel signals doc.
 
-6. **Task identity is drawn, not counted.** A `TaskId` comes from one
+7. **Task identity is drawn, not counted.** A `TaskId` comes from one
    process-wide random generator (`choose_task_id`), never a per-policy
    counter, so an id discloses nothing about how many tasks the system has
    admitted or when, and two policies in one image can never mint the same
@@ -1336,12 +1347,12 @@ These hold at every API boundary:
    returns it. The held set grows fallibly, so an admission it cannot hold
    is refused as `SchedError::OutOfMemory` rather than aborting.
 
-7. **A reserved identity is admitted, never drawn.** `spawn_parked_as` is
+8. **A reserved identity is admitted, never drawn.** `spawn_parked_as` is
    the birth form the boot path uses to admit PID 1 at `INIT_TASK_ID`; the
    reserved ids (`NO_TASK`, `INIT_TASK_ID`) are never candidates for a draw,
    and admitting one a live task already holds is `SchedError::TaskIdInUse`.
 
-8. **Competing weight is exact.** Under CFQ and EEVDF a CPU's competing
+9. **Competing weight is exact.** Under CFQ and EEVDF a CPU's competing
    weight moves only through each task's weight ledger, which takes off
    exactly what it put on and changes it under the same lock the task's
    departures take (see
@@ -1416,10 +1427,12 @@ The scheduler's behaviour is covered by:
 * `kernel/sched/mlfq/tests/scheduler.rs` — MLFQ-specific integration
   tests (fairness across ≥ 4 cores, work-stealing balance, IPI-based
   preemption, cancellation safety, error surface).
-* `kernel/sched/mlfq/tests/loom.rs` — Loom model check over the
-  run-queue's lock-free fast path (single producer racing a single
-  stealer for the last element). Compiled into an empty binary when
-  `--cfg loom` is not set so default `cargo test` stays fast.
+* `kernel/sched/mlfq/tests/loom.rs` — Loom models of the run-queue (two
+  consumers racing for the last entry, two producers pushing at once).
+  Compiled into an empty binary when `--cfg loom` is not set; under it the
+  crate graph does not yet build (`plans/OPEN-DEFECTS.md` D131), so the
+  concurrent hand-off is covered by `runqueue.rs`'s multi-producer,
+  multi-consumer test, which miri interprets.
 
 In addition, every module carries `#[cfg(test)] mod tests` with
 focused unit coverage. The tests use the in-memory [`TestArch`]

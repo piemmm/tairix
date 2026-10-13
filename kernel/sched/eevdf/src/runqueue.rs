@@ -12,25 +12,26 @@
 //! is picked — so a heap is all the set needs. Both heaps keep room for every
 //! entry, reserved fallibly on push, so a promotion never allocates. Equal keys
 //! break on arrival order: task ids are drawn at random, and letting one decide
-//! who runs first would hand the choice to the draw.
+//! who runs first would hand the choice to the draw. Each entry carries its
+//! task, so a pick hands the dispatcher the task itself.
 //!
 //! Virtual time is fixed-point in the shared [`SCALE`] sub-units per tick of
 //! service.
 
+use alloc::collections::binary_heap::PeekMut;
 use alloc::collections::{BinaryHeap, VecDeque};
 use core::cmp::Reverse;
 
+use tairix_kernel_sched_api::queue::Keyed;
 use tairix_kernel_sched_api::share::SCALE;
 use tairix_kernel_sched_api::SchedClass;
 use tairix_sync::SpinLock;
 
-use crate::TaskId;
-
 /// A time-shared task as the scheduler queues it.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Entry {
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct Entry<T> {
     /// The ready task.
-    pub id: TaskId,
+    pub task: T,
     /// Virtual eligible time `ve`: the task may run once `V` reaches it.
     pub eligible: u64,
     /// Virtual deadline `vd`: the earliest among eligible entries runs.
@@ -38,23 +39,23 @@ pub(crate) struct Entry {
 }
 
 /// An eligible entry, ordered `(deadline, arrival)`.
-type EligibleKey = Reverse<(u64, u64, TaskId)>;
+type Eligible<T> = Keyed<Reverse<(u64, u64)>, T>;
 
 /// A pending entry, ordered `(eligible, deadline, arrival)`.
-type PendingKey = Reverse<(u64, u64, u64, TaskId)>;
+type Pending<T> = Keyed<Reverse<(u64, u64, u64)>, T>;
 
 /// Mutable interior of a [`RunQueue`], guarded by one `SpinLock`.
-struct Inner {
+struct Inner<T> {
     /// Strict-priority real-time band, in FIFO arrival order, dispatched (and
     /// stolen) before any time-shared entry whatever its deadline — the
     /// [`SchedClass::Realtime`] guarantee. A task re-enqueued after a yield
     /// goes to the back, so equal real-time peers share the CPU round-robin.
     /// Real-time tasks carry no virtual time.
-    rt_ready: VecDeque<TaskId>,
+    rt_ready: VecDeque<T>,
     /// Time-shared entries `V` has reached: the pick set.
-    eligible: BinaryHeap<EligibleKey>,
+    eligible: BinaryHeap<Eligible<T>>,
     /// Time-shared entries `V` has not reached yet.
-    pending: BinaryHeap<PendingKey>,
+    pending: BinaryHeap<Pending<T>>,
     /// Arrival counter supplying the tie-break half of a key. One increment
     /// per enqueue, so it cannot wrap in any real uptime.
     next_seq: u64,
@@ -74,42 +75,47 @@ struct Inner {
     capacity: usize,
 }
 
-impl Inner {
+impl<T> Inner<T> {
     fn fair_len(&self) -> usize {
         self.eligible.len() + self.pending.len()
     }
 
     /// Move every pending entry `V` has reached into the eligible heap.
     fn promote(&mut self) {
-        while let Some(&Reverse((eligible, deadline, seq, id))) = self.pending.peek() {
+        while let Some(top) = self.pending.peek_mut() {
+            let Reverse((eligible, deadline, seq)) = top.key;
             if eligible > self.virtual_time {
                 break;
             }
-            self.pending.pop();
+            let task = PeekMut::pop(top).task;
             // Room for every entry is reserved on push, so this never grows.
-            self.eligible.push(Reverse((deadline, seq, id)));
+            self.eligible.push(Keyed {
+                key: Reverse((deadline, seq)),
+                task,
+            });
         }
     }
 
     /// The next time-shared entry by the EEVDF rule, or `None` when there is
     /// none: the earliest deadline among eligible entries, else the earliest
     /// eligible entry, ties on its deadline.
-    fn take_fair(&mut self) -> Option<(TaskId, u64)> {
+    fn take_fair(&mut self) -> Option<(T, u64)> {
         self.promote();
-        if let Some(Reverse((_, _, id))) = self.eligible.pop() {
-            return Some((id, self.virtual_time));
+        if let Some(slot) = self.eligible.pop() {
+            return Some((slot.task, self.virtual_time));
         }
-        let Reverse((eligible, _, _, id)) = self.pending.pop()?;
-        Some((id, eligible))
+        let slot = self.pending.pop()?;
+        let Reverse((eligible, _, _)) = slot.key;
+        Some((slot.task, eligible))
     }
 }
 
-/// Per-CPU EEVDF run queue.
-pub(crate) struct RunQueue {
-    inner: SpinLock<Inner>,
+/// Per-CPU EEVDF run queue of `T`, the handle a queued task is held by.
+pub(crate) struct RunQueue<T> {
+    inner: SpinLock<Inner<T>>,
 }
 
-impl RunQueue {
+impl<T> RunQueue<T> {
     /// Construct an empty queue bounded to `capacity` time-shared entries.
     ///
     /// Returns `None` if `capacity` is not a power of two `>= 2`, the
@@ -179,13 +185,13 @@ impl RunQueue {
         g.rt_ready.len() + g.fair_len()
     }
 
-    /// Queue a time-shared entry. Returns `Err(id)` when the queue is at its
+    /// Queue a time-shared entry. Hands the task back when the queue is at its
     /// bound or its storage cannot grow, and the caller routes it to overflow.
-    pub(crate) fn push(&self, entry: Entry) -> Result<(), TaskId> {
+    pub(crate) fn push(&self, entry: Entry<T>) -> Result<(), T> {
         let mut g = self.inner.lock();
         let entries = g.fair_len() + 1;
         if entries > g.capacity {
-            return Err(entry.id);
+            return Err(entry.task);
         }
         // Each heap keeps room for every entry, so moving one between them
         // never has to allocate.
@@ -194,28 +200,33 @@ impl RunQueue {
         if g.eligible.try_reserve(eligible_room).is_err()
             || g.pending.try_reserve(pending_room).is_err()
         {
-            return Err(entry.id);
+            return Err(entry.task);
         }
         let seq = g.next_seq;
         g.next_seq = g.next_seq.wrapping_add(1);
         if entry.eligible <= g.virtual_time {
-            g.eligible.push(Reverse((entry.deadline, seq, entry.id)));
+            g.eligible.push(Keyed {
+                key: Reverse((entry.deadline, seq)),
+                task: entry.task,
+            });
         } else {
-            g.pending
-                .push(Reverse((entry.eligible, entry.deadline, seq, entry.id)));
+            g.pending.push(Keyed {
+                key: Reverse((entry.eligible, entry.deadline, seq)),
+                task: entry.task,
+            });
         }
         Ok(())
     }
 
     /// Push a real-time task onto the back of the strict-priority band (FIFO
-    /// / round-robin). Returns `Err(id)` when the band is at its bound or
+    /// / round-robin). Hands the task back when the band is at its bound or
     /// cannot grow, exactly like [`Self::push`].
-    pub(crate) fn push_rt(&self, id: TaskId) -> Result<(), TaskId> {
+    pub(crate) fn push_rt(&self, task: T) -> Result<(), T> {
         let mut g = self.inner.lock();
         if g.rt_ready.len() >= g.capacity || g.rt_ready.try_reserve(1).is_err() {
-            return Err(id);
+            return Err(task);
         }
-        g.rt_ready.push_back(id);
+        g.rt_ready.push_back(task);
         Ok(())
     }
 
@@ -226,16 +237,16 @@ impl RunQueue {
     /// clock can transiently produce — the earliest-eligible entry runs and
     /// `V` is advanced to it, so a CPU holding runnable work never idles
     /// waiting for virtual time to pass.
-    pub(crate) fn pick(&self) -> Option<(TaskId, SchedClass)> {
+    pub(crate) fn pick(&self) -> Option<(T, SchedClass)> {
         let mut g = self.inner.lock();
-        if let Some(id) = g.rt_ready.pop_front() {
-            return Some((id, SchedClass::Realtime));
+        if let Some(task) = g.rt_ready.pop_front() {
+            return Some((task, SchedClass::Realtime));
         }
-        let (id, reached) = g.take_fair()?;
+        let (task, reached) = g.take_fair()?;
         if reached > g.virtual_time {
             g.virtual_time = reached;
         }
-        Some((id, SchedClass::TimeShared))
+        Some((task, SchedClass::TimeShared))
     }
 
     /// Remove the task this CPU would run next, for another CPU to run.
@@ -243,13 +254,13 @@ impl RunQueue {
     /// The same rule as [`Self::pick`], without advancing this CPU's clock:
     /// the task will run against the stealing CPU's. Weight bookkeeping is the
     /// caller's, as the task changes CPU.
-    pub(crate) fn steal(&self) -> Option<(TaskId, SchedClass)> {
+    pub(crate) fn steal(&self) -> Option<(T, SchedClass)> {
         let mut g = self.inner.lock();
-        if let Some(id) = g.rt_ready.pop_front() {
-            return Some((id, SchedClass::Realtime));
+        if let Some(task) = g.rt_ready.pop_front() {
+            return Some((task, SchedClass::Realtime));
         }
-        let (id, _) = g.take_fair()?;
-        Some((id, SchedClass::TimeShared))
+        let (task, _) = g.take_fair()?;
+        Some((task, SchedClass::TimeShared))
     }
 
     /// Advance `V` by `ticks` of time-shared service apportioned over the
@@ -277,11 +288,15 @@ mod tests {
 
     use tairix_fuzzseed::Prng;
 
+    use crate::TaskId;
+
     const FAIR: SchedClass = SchedClass::TimeShared;
 
-    fn e(id: TaskId, eligible: u64, deadline: u64) -> Entry {
+    type RunQueue = super::RunQueue<TaskId>;
+
+    fn e(task: TaskId, eligible: u64, deadline: u64) -> Entry<TaskId> {
         Entry {
-            id,
+            task,
             eligible,
             deadline,
         }

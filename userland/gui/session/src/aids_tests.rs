@@ -15,6 +15,13 @@ fn every_aid() -> AidPolicy {
     }
 }
 
+/// A wake at `now_ns` with a frame due: the aids take in the pointer and
+/// draw.
+fn frame(shell: &mut DesktopShell, comp: &mut Compositor, now_ns: u64) {
+    shell.observe_pointer_aids(now_ns, comp);
+    shell.advance_pointer_aids(now_ns, comp);
+}
+
 /// A shell showing its pointer at the centre of the screen, with `policy`.
 fn desktop(policy: AidPolicy) -> (DesktopShell, Compositor) {
     let mut shell = shell();
@@ -22,14 +29,19 @@ fn desktop(policy: AidPolicy) -> (DesktopShell, Compositor) {
     shell.set_pointer_aids(policy);
     let _ = shell.apply(moved(960, 540), &mut comp, 0);
     shell.refresh_cursor(&mut comp);
-    shell.advance_pointer_aids(0, &mut comp);
+    frame(&mut shell, &mut comp, 0);
     comp.composite();
     (shell, comp)
 }
 
 /// Shake the pointer across 120 pixels and back `strokes` times, 60 ms a
-/// stroke, stepping the aids each frame; answer the instant it ends at.
-fn shake(shell: &mut DesktopShell, comp: &mut Compositor, from_ns: u64, strokes: u32) -> u64 {
+/// stroke, on wakes `wake` is given; answer the instant it ends at.
+fn shake_with(
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+    (from_ns, strokes): (u64, u32),
+    mut wake: impl FnMut(&mut DesktopShell, &mut Compositor, u64),
+) -> u64 {
     let mut now = from_ns;
     for index in 0..strokes {
         let (from, to) = if index % 2 == 0 {
@@ -41,10 +53,15 @@ fn shake(shell: &mut DesktopShell, comp: &mut Compositor, from_ns: u64, strokes:
             now += 15 * MS;
             let x = from + (to - from) * step / 4;
             let _ = shell.apply(moved(x, 540), comp, now);
-            shell.advance_pointer_aids(now, comp);
+            wake(shell, comp, now);
         }
     }
     now
+}
+
+/// Shake the pointer `strokes` times, with a frame due on every wake.
+fn shake(shell: &mut DesktopShell, comp: &mut Compositor, from_ns: u64, strokes: u32) -> u64 {
+    shake_with(shell, comp, (from_ns, strokes), frame)
 }
 
 /// Step the aids a frame at a time from `from_ns` for `span_ns`.
@@ -52,7 +69,7 @@ fn frames(shell: &mut DesktopShell, comp: &mut Compositor, from_ns: u64, span_ns
     let mut now = from_ns;
     while now < from_ns + span_ns {
         now += 16 * MS;
-        shell.advance_pointer_aids(now, comp);
+        frame(shell, comp, now);
     }
     now
 }
@@ -85,6 +102,27 @@ fn a_shaken_pointer_grows_on_screen_and_comes_home() {
         (home.width, home.height),
         (native.width, native.height),
         "back at its own size"
+    );
+}
+
+#[test]
+fn a_shake_taken_in_between_frames_is_drawn_only_at_the_frames() {
+    let (mut shell, mut comp) = desktop(every_aid());
+    let native = comp.cursor_bounds().expect("a pointer is shown");
+    let end = shake_with(&mut shell, &mut comp, (0, 6), |shell, comp, now| {
+        shell.observe_pointer_aids(now, comp);
+    });
+    let shown = comp.cursor_bounds().expect("a pointer is shown");
+    assert_eq!(
+        (shown.width, shown.height),
+        (native.width, native.height),
+        "nothing is drawn between frames"
+    );
+    frames(&mut shell, &mut comp, end, 200 * MS);
+    assert_eq!(
+        comp.cursor_bounds().expect("a pointer is shown").width,
+        ENLARGED_SIDE_PX,
+        "the frames draw the shake that was taken in"
     );
 }
 
@@ -128,7 +166,7 @@ fn a_trail_asks_for_frames_only_until_it_catches_up() {
     for step in 1..=20 {
         now += 8 * MS;
         let _ = shell.apply(moved(960 + step * 6, 540), &mut comp, now);
-        shell.advance_pointer_aids(now, &mut comp);
+        frame(&mut shell, &mut comp, now);
     }
     assert!(shell.pointer_aids_park_deadline_ns(now, WAITSET_TIMEOUT_NONE) < WAITSET_TIMEOUT_NONE);
     let rested = frames(&mut shell, &mut comp, now, 600 * MS);

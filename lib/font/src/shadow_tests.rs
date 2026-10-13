@@ -31,7 +31,7 @@ fn shadow() -> TextShadow {
 /// `text` drawn at `(x, y)` over `shadow`: every shadow first, then the ink.
 fn draw_shadowed(surface: &mut Surface, (x, y): (i32, i32), text: &str, shadow: TextShadow) {
     let font = font();
-    font.draw_shadow(surface, x, y, text, shadow);
+    font.draw_run_shadow(surface, (x, y), &[text], shadow);
     font.draw_text(surface, x, y, text, INK);
 }
 
@@ -56,7 +56,7 @@ fn a_shadow_inks_ground_the_plain_draw_left_alone() {
 fn the_shadow_falls_away_softly_below_the_ink() {
     let font = font();
     let mut surface = ground(40, 48);
-    font.draw_shadow(&mut surface, 8, 4, "H", shadow());
+    font.draw_run_shadow(&mut surface, (8, 4), &["H"], shadow());
     let bottom = 4 + crate::atlas::CELL_HEIGHT;
     let column = 8 + crate::atlas::CELL_WIDTH / 2;
     let reach = shadow().reach() + shadow().drop();
@@ -140,11 +140,30 @@ fn a_shadow_returns_the_plain_runs_pen() {
     let proportional = tairix_abi::font_ipc::FamilyKey::new("inter").expect("a family key");
     for font in [BitmapFont::console(), BitmapFont::new(proportional, 20)] {
         assert_eq!(
-            font.draw_shadow(&mut ground(64, 40), 3, 4, "Hi", shadow()),
+            font.draw_run_shadow(&mut ground(64, 40), (3, 4), &["Hi"], shadow()),
             font.draw_text(&mut ground(64, 40), 3, 4, "Hi", INK),
             "the shadow moved the pen"
         );
     }
+}
+
+#[test]
+fn a_run_drawn_in_pieces_is_the_run_drawn_whole() {
+    let font = font();
+    let (mut pieces, mut whole) = (ground(96, 40), ground(96, 40));
+    let pen = font.draw_run(
+        &mut pieces,
+        (2, 4),
+        &["Hi", "\u{2026}", "x"],
+        INK,
+        Some(shadow()),
+    );
+    let whole_pen = font.draw_run(&mut whole, (2, 4), &["Hi\u{2026}x"], INK, Some(shadow()));
+    assert_eq!(pen, whole_pen);
+    assert!(
+        pieces.pixels() == whole.pixels(),
+        "the pieces' shadow went down as more than one"
+    );
 }
 
 #[test]
@@ -167,8 +186,8 @@ fn a_faded_shadow_is_lighter_and_a_full_strength_one_is_unchanged() {
     assert_eq!(shadow().faded(u8::MAX), shadow());
     let font = font();
     let (mut full, mut half) = (ground(40, 40), ground(40, 40));
-    font.draw_shadow(&mut full, 8, 4, "H", shadow());
-    font.draw_shadow(&mut half, 8, 4, "H", shadow().faded(128));
+    font.draw_run_shadow(&mut full, (8, 4), &["H"], shadow());
+    font.draw_run_shadow(&mut half, (8, 4), &["H"], shadow().faded(128));
     let below = 4 + crate::atlas::CELL_HEIGHT + 1;
     let at = |surface: &Surface| darkness(surface.get(12, below));
     assert!(

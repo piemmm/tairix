@@ -273,4 +273,8 @@ to the boot seat through `key_inject`, `pointer_inject` or `touch_inject`. An
 interface that goes, or faults four times running, is let go of first — every
 key, button and contact it held released — and the driver exits; a re-plug
 autoloads a fresh instance on a fresh node. The live report path is a metal
-acceptance item.
+acceptance item. `tests/fuzz_usb_hid.rs` (`cargo xtask fuzz`) holds its reading
+of the configuration descriptor to reading back any configuration assembled
+from interfaces exactly as it was assembled, and to never panicking or naming
+an endpoint no address can name, however the bytes are mutated, cut short or
+made up.

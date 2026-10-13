@@ -422,6 +422,18 @@ pub const TARGETS: &[Target] = &[
             "lib/hid Report Descriptor parser, report normaliser, and boot keyboard/mouse decoders (hostile device-written HID bytes)",
     },
     Target {
+        package: "tairix-drv-input-usb-hid",
+        test: "fuzz_usb_hid",
+        description:
+            "usb_hid configuration-descriptor reading: the HID interface, its stated report length, its interrupt endpoint (hostile device-written bytes)",
+    },
+    Target {
+        package: "tairix-virtio-input",
+        test: "fuzz_virtio_input",
+        description:
+            "lib/virtio_input configuration probes and event decoders: keys, motion, wheels, the multi-touch slot protocol (hostile device-written bytes)",
+    },
+    Target {
         package: "tairix-touch",
         test: "fuzz_touch",
         description:

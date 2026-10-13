@@ -116,18 +116,19 @@ to black on success — and reports the soonest frame any of them needs as one
 deadline. Every duration is theme data; a reduced-motion theme makes all four
 instant, which asks for no frames; the ribbon holds still under it too.
 
-A wake drains the whole burst the seat is holding before it presents: every
-record is applied, what each changed is merged into one rectangle, and the
-display is called once with it. A present is a round trip and a moving mouse
-outpaces the screen, so one per report would be one round trip per report. A
-drain that changed nothing presents nothing.
+A wake drains the whole burst the seat is holding before it draws: every
+record is applied and owes the frame what it changed, and the round paints the
+surface at most once, composes what is owed once, and presents the union once.
+A paint is a whole surface and a present a round trip, and a moving mouse or a
+repeating key outpaces the screen, so one per record would be one of each per
+record. A round that changed nothing presents nothing.
 
 ## The pointer
 
 The seat reports relative motion, so `screen` keeps the running position,
 holds it inside the frame, and hands the surface the absolute position it
 hit-tests. One seat report expands to at most two surface events — a button is
-a move *and* a transition — and they present as one frame.
+a move *and* a transition — and they are drawn as one frame.
 
 The built-in arrow is rasterised **once** at start-up for the active scale and
 sampled over the surface as the frame is composed — never painted into it — so
@@ -194,7 +195,7 @@ reported for; picking another account is never held behind it.
   held inside the screen for every screen shape, and the built-in arrow
   resolved for a scale.
 * `frame` — the surface-to-scan-out composition over the ribbon, the pointer
-  sampled over both, the merge that turns a drain's changes into one present,
+  sampled over both, the merge that turns a round's changes into one present,
   and the black a sleeping display is left on.
 * `scene` — the ribbon of light behind the column, its own layer.
 * `wait` — the lockout countdown, the park deadline, the thirty-minute idle

@@ -110,10 +110,10 @@ const MIN_PREEMPTIONS_PER_CPU: u64 = 10;
 /// (no flaky tests).
 const WITNESS_SPIN: u64 = 20_000_000;
 
-/// Number of busy witness tasks pinned per CPU. Two so each CPU stays
-/// contended (and therefore keeps its one-shot armed) even after the
-/// short workload tasks drain — a single sole task would disarm under the
-/// tickless model and never observe a further tick.
+/// Number of busy witness tasks queued on each CPU before any CPU steps. Two
+/// so each CPU stays contended (and therefore keeps its one-shot armed) even
+/// after the short workload tasks drain — a single sole task would disarm
+/// under the tickless model and never observe a further tick.
 const WITNESSES_PER_CPU: u32 = 2;
 
 /// BSP-computed LAPIC-timer calibration, packed into a `u64` (ticks/s
@@ -452,6 +452,27 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     };
     let arch = Arc::new(SmpArch);
     let sched = Arc::new(Scheduler::new(cfg, arch).expect("scheduler"));
+    // Tickless preemption witnesses spin past one quantum and yield until
+    // every CPU has seen `MIN_PREEMPTIONS_PER_CPU` ticks. They are queued
+    // before any CPU steps: a CPU holding two is never idle, so none is
+    // stolen, where one taken by an idle AP leaves a CPU that never ticks.
+    for cpu in 0..cpu_count {
+        for _ in 0..WITNESSES_PER_CPU {
+            sched
+                .spawn(cpu, Priority::Normal, move |_ctx| {
+                    let mut x = WITNESS_SPIN;
+                    while x > 0 {
+                        x = core::hint::black_box(x - 1);
+                    }
+                    if min_preemptions(cpu_count) >= MIN_PREEMPTIONS_PER_CPU {
+                        TaskAction::Exit
+                    } else {
+                        TaskAction::Yield
+                    }
+                })
+                .expect("spawn witness");
+        }
+    }
     // Leak one Arc into the global pointer so APs can clone it.
     let raw = Arc::into_raw(sched.clone()).cast_mut();
     SCHED_PTR.store(raw, Ordering::Release);
@@ -585,36 +606,6 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
                 TaskAction::Exit
             })
             .expect("spawn");
-    }
-    // Tickless preemption witnesses: the short workload
-    // tasks above each run far under one quantum, so the one-shot is
-    // re-armed before it can fire — under the tickless model they alone
-    // would never drive a timer tick on any CPU. To prove the per-CPU LAPIC
-    // one-shot genuinely fires under contention, spawn busy witnesses
-    // ([`WITNESSES_PER_CPU`] per CPU so each CPU stays contended after the
-    // workload drains): each runs a long black-box spin (well past one
-    // quantum, so the armed one-shot fires once), then yields so it is
-    // re-dispatched and re-armed, repeating until *every* CPU has observed
-    // at least [`MIN_PREEMPTIONS_PER_CPU`] ticks — then exits. It does not
-    // touch `EXECUTIONS`, so the workload exec assertion is unaffected, and
-    // it exits, so `live_task_count` still reaches 0 for the step-loop
-    // termination.
-    for cpu in 0..cpu_count {
-        for _ in 0..WITNESSES_PER_CPU {
-            sched
-                .spawn(cpu, Priority::Normal, move |_ctx| {
-                    let mut x = WITNESS_SPIN;
-                    while x > 0 {
-                        x = core::hint::black_box(x - 1);
-                    }
-                    if min_preemptions(cpu_count) >= MIN_PREEMPTIONS_PER_CPU {
-                        TaskAction::Exit
-                    } else {
-                        TaskAction::Yield
-                    }
-                })
-                .expect("spawn witness");
-        }
     }
     let _ = writeln!(
         com1,

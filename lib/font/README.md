@@ -84,7 +84,7 @@ the payload exceeds the pre-Korean size ceiling.
   check and a row address are paid per row rather than per pixel and a glyph
   off the edge clips instead of being tested pixel by pixel. `text_width` and
   `truncate_to_width` give the shared layout arithmetic.
-- `TextShadow` / `font::BitmapFont::draw_shadow` — the
+- `TextShadow` / `font::BitmapFont::draw_run` — the
   one soft shadow for text over ground the caller cannot know: the scene
   behind the login screen's chrome, an icon label on a picture. The shadow is
   the run's own coverage laid into one block, blurred by three passes of
@@ -94,9 +94,11 @@ the payload exceeds the pre-Korean size ceiling.
   derived in exactly one place. The block is cut to what the surface admits
   and grown back by the blur's reach, so a cut shadow draws exactly the pixels
   the whole one would and a long run costs no more than the surface it lands
-  on. `draw_shadow` draws the shadow alone and returns the pen `draw_text`
-  does, so text puts every run's shadow down before any ink. `TextShadow::faded` takes a shadow down with a fading
-  line.
+  on. A run given as pieces — a name, its ellipsis, its kept tail — takes
+  one shadow and one pass over the caches; `draw_run_shadow` draws the shadow
+  alone and returns the pen the ink would, so text laid out as several runs
+  puts every run's shadow down before any ink. `TextShadow::faded` takes a
+  shadow down with a fading line.
 - `font::BitmapFont::elide_to_width` / `font::BitmapFont::wrap_to_width` —
   the two shared fitters over that arithmetic, so no text region writes its
   own break loop (`AGENTS.md` §2.2). The first returns the longest prefix

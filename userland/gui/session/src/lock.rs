@@ -208,7 +208,7 @@ impl ScreenLock {
     /// Step the locked surface's motion to `now_ns`, repainting it when the
     /// step changed what it draws.
     ///
-    /// The embedder calls this on every wake while locked, and parks until
+    /// The embedder calls this once a frame while locked, and parks until
     /// [`park_deadline_ns`](Self::park_deadline_ns). The surface is the same
     /// engine the login screen animates, so the lock animates with it rather
     /// than freezing whatever it was mid-way through. An unlocked screen, and

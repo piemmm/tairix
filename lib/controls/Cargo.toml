@@ -33,6 +33,9 @@ tairix-icon = { path = "../icon", version = "=0.0.0" }
 # The allocation-free string a colour picker spells its hex notation into, so
 # a drag rewrites the field without an allocation per sample.
 tairix-inline = { path = "../inline", version = "=0.0.0" }
+# The flag rectangles a pointer event or a paint lays out, inline for the few
+# flags a set holds, so neither allocates.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
 # The shared pointer/keyboard input vocabulary a control's interaction
 # consumes; the same events the window manager routes.
 tairix-input = { path = "../input", version = "=0.0.0" }
@@ -53,6 +56,9 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+# The metered allocator a pointer event or a layout is held to allocating
+# nothing by.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 
 [features]
 # Exposes `testkit`'s shared theme fixtures (e.g. the heavy-contrast theme

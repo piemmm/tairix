@@ -23,8 +23,9 @@ and the caller keeps it.
   visited exactly once.
 - `for_each_drawn` / `fold_drawn` — the same visit for pieces an iterator
   splits off one borrow at a time (row bands, parts of differing lengths): the
-  dispatching thread draws them into a fixed batch on its stack and index `i`
-  visits piece `i`, so a dispatch allocates nothing and takes no lock.
+  dispatching thread draws them into a batch on its stack — a reserved one,
+  sized to the pieces, only for more than a stack batch holds on a runner wider
+  than 32 — and index `i` visits piece `i`, taking no lock.
   `fold_drawn` joins the answers in the order the pieces were drawn, so its
   result is the serial fold's.
 - `bands` — the one split policy: how many pieces `units` units of work should

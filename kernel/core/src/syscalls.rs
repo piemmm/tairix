@@ -5908,23 +5908,16 @@ where
         target: u64,
         cap: CapabilityId,
     ) -> SyscallResult {
-        // The target task is named by raw `TaskId`. `caps_for_mut`
-        // returns `None` for an unknown task; that is a stable
-        // condition (`Errno::NotFound`) rather than a kernel bug.
+        // The target task is named by raw `TaskId`; an unknown one is
+        // `NotFound`, a stable condition rather than a kernel bug.
         let mut guard = self.caps.write();
-        let entry = guard.caps_for_mut(SecTaskId(target));
-        match entry {
-            Some(record) => {
-                // `revoke` is idempotent — it returns `false` if the
-                // capability was not held, but the audit record it
-                // emits via the underlying `TaskCapabilities::revoke`
-                // is the security-relevant signal (the *attempt* is
-                // the event). The boolean is intentionally discarded.
-                let _ = record.revoke(cap, self.audit);
-                Ok(0)
-            }
-            None => Err(Errno::NotFound),
-        }
+        // `revoke` answers `false` for a capability not held, but the audit
+        // record it emits is the security-relevant signal: the attempt is the
+        // event.
+        let _ = guard
+            .caps_for_mut(SecTaskId(target))?
+            .revoke(cap, self.audit);
+        Ok(0)
     }
 
     fn clock_get(&self, caller: &CallerContext<'_>) -> SyscallResult {
@@ -15267,25 +15260,14 @@ where
             return DispatchOutcome::NoCallerContext { cpu };
         };
 
-        // Snapshot the caller's capability record under a *briefly* held
-        // read lock, then drop the guard before dispatching. The dispatcher
-        // checks the required capability against this consistent
-        // point-in-time snapshot (check before any
-        // state touch), so there is no TOCTOU between the snapshot and the
-        // check. Holding the read lock across the whole call instead would
-        // self-deadlock the caps-mutating handlers — `exit`, `cap_delegate`,
-        // `cap_revoke` all take `self.caps.write()`, and the
-        // writer-preference `RwLock` cannot grant a writer while this thread
-        // still holds a reader. Revocation by another CPU mid-call therefore
-        // takes effect from the caller's *next* syscall, the same
-        // credential-snapshot semantics a POSIX kernel gives a syscall in
-        // flight; the mutating handlers operate on the live table under
-        // their own write lock, so the revocation itself is not lost. The
-        // snapshot shares the record rather than copying it, so taking one
-        // allocates nothing.
+        // The caller's record, a point-in-time snapshot the dispatcher checks
+        // the required capability against before touching any state. It is
+        // the copy the thread's own gate keeps, so the shared table is read
+        // only after the record changed. A revocation by another CPU mid-call
+        // takes effect from the caller's next syscall, as a POSIX kernel's
+        // credential does for a syscall in flight.
         let task_id = SecTaskId(sched_task_id);
-        let snapshot = self.caps.read().snapshot_of(task_id);
-        let Some(caps_snapshot) = snapshot else {
+        let Some(caps_snapshot) = gate.credential(self.caps) else {
             self.audit_no_caller_context(cpu, "no_capability_record");
             return DispatchOutcome::NoCallerContext { cpu };
         };

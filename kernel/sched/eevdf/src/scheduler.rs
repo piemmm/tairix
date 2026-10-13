@@ -27,7 +27,7 @@ use crate::{
 /// Per-CPU scheduler state: the virtual-time run queue plus the timer
 /// observation counter and last-run bookkeeping.
 struct CpuState {
-    queue: RunQueue,
+    queue: RunQueue<Arc<TaskInner>>,
     last_run_tick: AtomicU64,
     /// Cumulative ticks this CPU has spent inside task bodies, accumulated
     /// on the same dispatch bracket that credits the task; the busy half of
@@ -72,7 +72,7 @@ pub struct Scheduler<A: SchedulerArch> {
     /// Where each CPU begins its work-stealing scan. The shared per-CPU
     /// generator, not a private one: a scan rotation is not policy.
     victim_scan: StealScan,
-    overflow: SpinLock<Vec<TaskId>>,
+    overflow: SpinLock<Vec<Arc<TaskInner>>>,
     preemptions: Box<[AtomicU64]>,
     current: Box<[AtomicU64]>,
     /// Static [`CoreClass`] of each CPU, snapshotted once at construction
@@ -306,14 +306,18 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// Place `task` on `rq`'s clock with zero lag: eligible at its virtual
     /// time `V`, deadline one request later — the EEVDF admission rule for a
     /// task joining a CPU's competition, whether new, woken or migrated.
-    fn admit(&self, task: &TaskInner, rq: &RunQueue) -> Entry {
+    fn place<T>(&self, task: &TaskInner, rq: &RunQueue<T>) {
         let eligible = rq.virtual_time();
         let deadline = eligible.saturating_add(self.request(task.weight()));
         task.set_virtual(eligible, deadline);
+    }
+
+    /// `task`'s entry at the virtual time it holds.
+    fn entry(task: &Arc<TaskInner>) -> Entry<Arc<TaskInner>> {
         Entry {
-            id: task.id,
-            eligible,
-            deadline,
+            task: Arc::clone(task),
+            eligible: task.eligible(),
+            deadline: task.deadline(),
         }
     }
 
@@ -336,28 +340,23 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// overflow list when that queue is at its compile-time bound. The task
     /// stays in this CPU's competition, so its count is only re-taken, to
     /// pick up a priority or class it adopted while it ran.
-    fn enqueue_home(&self, task: &TaskInner) {
+    fn enqueue_home(&self, task: &Arc<TaskInner>) {
         let home = task.home_cpu.load(Ordering::Acquire);
         // Queued even if it has left the competition since it was made ready:
         // an exit in between retired it trusting this entry to drop its record.
         let _ = self.count_on(task, home);
-        let full = match self.cpus.get(home as usize) {
+        let refused = match self.cpus.get(home as usize) {
             Some(cpu) => {
                 if task.load_sched_class().is_realtime() {
-                    cpu.queue.push_rt(task.id).is_err()
+                    cpu.queue.push_rt(Arc::clone(task)).err()
                 } else {
-                    let entry = Entry {
-                        id: task.id,
-                        eligible: task.eligible(),
-                        deadline: task.deadline(),
-                    };
-                    cpu.queue.push(entry).is_err()
+                    cpu.queue.push(Self::entry(task)).err()
                 }
             }
-            None => true,
+            None => Some(Arc::clone(task)),
         };
-        if full {
-            self.overflow.lock().push(task.id);
+        if let Some(task) = refused {
+            self.overflow.lock().push(task);
         }
     }
 
@@ -368,23 +367,23 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// left. A real-time task joins the strict-priority band (weight counted,
     /// no virtual-time placement); a time-shared task is EEVDF-admitted to the
     /// fair set.
-    fn admit_fresh_on(&self, task: &TaskInner, cpu: CpuId) {
+    fn admit_fresh_on(&self, task: &Arc<TaskInner>, cpu: CpuId) {
         // Queued even if it has left the competition since it was made ready:
         // an exit in between retired it trusting this entry to drop its record.
         let _ = self.count_on(task, cpu);
-        let full = match self.cpus.get(cpu as usize) {
+        let refused = match self.cpus.get(cpu as usize) {
             Some(state) => {
                 if task.load_sched_class().is_realtime() {
-                    state.queue.push_rt(task.id).is_err()
+                    state.queue.push_rt(Arc::clone(task)).err()
                 } else {
-                    let entry = self.admit(task, &state.queue);
-                    state.queue.push(entry).is_err()
+                    self.place(task, &state.queue);
+                    state.queue.push(Self::entry(task)).err()
                 }
             }
-            None => true,
+            None => Some(Arc::clone(task)),
         };
-        if full {
-            self.overflow.lock().push(task.id);
+        if let Some(task) = refused {
+            self.overflow.lock().push(task);
         }
     }
 
@@ -518,7 +517,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// * [`SchedError::InvalidState`] if the task is terminal.
     pub fn resume(&self, id: TaskId) -> SchedResult<()> {
         let task = self.lookup(id)?;
-        park::resume_task(&*task, |resumed| self.admit_woken(resumed))
+        park::resume_task(&task, |resumed| self.admit_woken(resumed))
     }
 
     /// Wake a parked task, re-admitting it to its home CPU. Cancellation-safe.
@@ -530,7 +529,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     ///   which is what the wake asked for.
     pub fn unpark(&self, id: TaskId) -> SchedResult<()> {
         let task = self.lookup(id)?;
-        park::unpark_task(&*task, |woken| self.admit_woken(woken))
+        park::unpark_task(&task, |woken| self.admit_woken(woken))
     }
 
     /// Place a woken task and send its placement IPI.
@@ -540,7 +539,7 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// queued behind its old home's backlog. An out-of-range placement falls
     /// to the overflow list, so a woken task is never left
     /// runnable-but-unqueued.
-    fn admit_woken(&self, task: &TaskInner) {
+    fn admit_woken(&self, task: &Arc<TaskInner>) {
         let home = task.home_cpu.load(Ordering::Acquire);
         let target = self.placement_for(task.load_priority(), home);
         task.home_cpu.store(target, Ordering::Release);
@@ -692,11 +691,11 @@ impl<A: SchedulerArch> Scheduler<A> {
         let me = self.cpu_state(cpu)?;
         self.drain_overflow(cpu);
 
-        if let Some((id, band)) = me.queue.pick() {
-            return Ok(self.dispatch(cpu, id, band));
+        if let Some((task, band)) = me.queue.pick() {
+            return Ok(self.dispatch(cpu, &task, band));
         }
-        if let Some((id, band)) = self.try_steal(cpu) {
-            return Ok(self.dispatch(cpu, id, band));
+        if let Some((task, band)) = self.try_steal(cpu) {
+            return Ok(self.dispatch(cpu, &task, band));
         }
         Ok(StepOutcome::Idle)
     }
@@ -704,44 +703,34 @@ impl<A: SchedulerArch> Scheduler<A> {
     /// Best-effort drain of the overflow list back onto each task's home
     /// CPU. A task that still does not fit is left for a later step.
     fn drain_overflow(&self, current_cpu: CpuId) {
-        let mut g = self.overflow.lock();
-        let pending: Vec<TaskId> = g.drain(..).collect();
-        drop(g);
-        for id in pending {
-            let Ok(task) = self.lookup(id) else { continue };
+        let pending = core::mem::take(&mut *self.overflow.lock());
+        for task in pending {
             if self.take_entry(&task, || true) != Taken::Ready {
                 continue;
             }
             let home = task.home_cpu.load(Ordering::Acquire);
             // Re-home in the task's scheduling class. Its weight is still
             // counted on `home`, so only the band placement is restored.
-            let placed = match self.cpus.get(home as usize) {
+            let refused = match self.cpus.get(home as usize) {
                 Some(cpu) => {
                     if task.load_sched_class().is_realtime() {
-                        cpu.queue.push_rt(id).is_ok()
+                        cpu.queue.push_rt(task).err()
                     } else {
-                        let entry = Entry {
-                            id,
-                            eligible: task.eligible(),
-                            deadline: task.deadline(),
-                        };
-                        cpu.queue.push(entry).is_ok()
+                        cpu.queue.push(Self::entry(&task)).err()
                     }
                 }
-                None => false,
+                None => Some(task),
             };
-            if placed {
+            match refused {
+                Some(task) => self.overflow.lock().push(task),
                 // `home` may be idle, and a queue entry alone cannot wake it.
-                if home != current_cpu {
-                    self.arch.send_ipi(home);
-                }
-            } else {
-                self.overflow.lock().push(id);
+                None if home != current_cpu => self.arch.send_ipi(home),
+                None => {}
             }
         }
     }
 
-    fn try_steal(&self, cpu: CpuId) -> Option<(TaskId, SchedClass)> {
+    fn try_steal(&self, cpu: CpuId) -> Option<(Arc<TaskInner>, SchedClass)> {
         let n = self.cpus.len();
         if n <= 1 {
             return None;
@@ -752,10 +741,7 @@ impl<A: SchedulerArch> Scheduler<A> {
             if v == cpu as usize {
                 continue;
             }
-            if let Some((id, band)) = self.cpus[v].queue.steal() {
-                let Ok(task) = self.lookup(id) else {
-                    continue;
-                };
+            if let Some((task, band)) = self.cpus[v].queue.steal() {
                 // Migrate: the ledger moves the weight off the victim. An entry
                 // whose task is no longer ready is spent, so keep looking.
                 let moved = self.take_entry(&task, || {
@@ -773,9 +759,9 @@ impl<A: SchedulerArch> Scheduler<A> {
                 // task only rebases onto this CPU's clock, since a task carries
                 // no lag across CPUs.
                 if !band.is_realtime() {
-                    let _ = self.admit(&task, &self.cpus[cpu as usize].queue);
+                    self.place(&task, &self.cpus[cpu as usize].queue);
                 }
-                return Some((id, band));
+                return Some((task, band));
             }
         }
         None
@@ -802,11 +788,9 @@ impl<A: SchedulerArch> Scheduler<A> {
 
     /// Run `id`, picked from `band` on this CPU or stolen from another's, for
     /// one body invocation, and settle what its return owes.
-    fn dispatch(&self, cpu: CpuId, id: TaskId, band: SchedClass) -> StepOutcome {
-        let Some(task) = self.tasks.read().get(&id).cloned() else {
-            return StepOutcome::Idle;
-        };
-        let claimed = self.take_entry(&task, || {
+    fn dispatch(&self, cpu: CpuId, task: &Arc<TaskInner>, band: SchedClass) -> StepOutcome {
+        let id = task.id;
+        let claimed = self.take_entry(task, || {
             task.cas_state(TaskState::Ready, TaskState::Running).is_ok()
         });
         if claimed != Taken::Ready {
@@ -858,7 +842,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         // just completed is counted by `settle_run_accounting` and never
         // also as in-flight — one span, one place.
         self.clear_current(cpu);
-        let ran = self.settle_run_accounting(cpu, &task, tick);
+        let ran = self.settle_run_accounting(cpu, task, tick);
 
         // Time-shared service paces this CPU's virtual clock, advanced
         // before the task can leave the competition so the share reflects the
@@ -868,7 +852,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         }
 
         let doomed = park::observe_doom(&task.doomed);
-        let settled = park::settle(&*task, action, doomed, |transition: &dyn Fn() -> bool| {
+        let settled = park::settle(&**task, action, doomed, |transition: &dyn Fn() -> bool| {
             task.ledger.depart(transition, &self.competition())
         });
         match settled {
@@ -876,25 +860,25 @@ impl<A: SchedulerArch> Scheduler<A> {
                 if let Some(mut guard) = task.body.try_lock() {
                     *guard = None;
                 }
-                self.drop_record(&task);
+                self.drop_record(task);
             }
             // A woken task rejoins with zero lag, so the run is not charged.
-            Settled::Park => park::commit_park(&*task, |woken| self.admit_woken(woken)),
+            Settled::Park => park::commit_park(task, |woken| self.admit_woken(woken)),
             Settled::Released => {}
             Settled::Requeue => {
                 let dest = self.class_home(task.load_priority(), cpu);
                 if dest == cpu && task.load_sched_class() == band {
                     if !band.is_realtime() {
-                        self.charge(&task, ran);
+                        self.charge(task, ran);
                     }
-                    self.enqueue_home(&task);
+                    self.enqueue_home(task);
                 } else {
                     // A task on the wrong class of core for its priority, or
                     // one that changed band while it ran, rejoins afresh: on
                     // the preferred CPU's clock with zero lag, the same rule a
                     // steal follows.
                     task.home_cpu.store(dest, Ordering::Release);
-                    self.admit_fresh_on(&task, dest);
+                    self.admit_fresh_on(task, dest);
                     // `dest` may be idle, and a queue entry alone cannot
                     // wake it; signalling after publishing orders the entry
                     // before the target looks.
@@ -1033,7 +1017,7 @@ impl<A: SchedulerArch> Scheduler<A> {
         self.tasks
             .read()
             .get(&id)
-            .map_or(TaskState::Exited, |t| t.load_state())
+            .map_or(TaskState::Exited, ParkableTask::load_state)
     }
 
     /// Number of live (non-[`TaskState::Exited`]) tasks.
@@ -1690,6 +1674,33 @@ mod tests {
         assert_eq!(sched.state_of(id), TaskState::Stopped);
     }
 
+    /// A queue entry carries its task, so a dispatch, the requeue after it, a
+    /// steal and an overflow drain never take the task registry: all of them
+    /// run while it is write-locked.
+    #[test]
+    fn a_dispatch_runs_with_the_task_registry_write_locked() {
+        let (arch, sched) = mk(2);
+        let id = sched
+            .spawn(0, Priority::Normal, |_| TaskAction::Yield)
+            .expect("spawn");
+        let task = sched.lookup(id).expect("live");
+        let home = task.home_cpu.load(Ordering::Acquire);
+        let other = 1 - home;
+        let registry = sched.tasks.write();
+
+        arch.set_current_cpu(home);
+        assert_eq!(sched.step(home), Ok(StepOutcome::Ran(id)), "dispatched");
+        arch.set_current_cpu(other);
+        assert_eq!(sched.step(other), Ok(StepOutcome::Ran(id)), "stolen");
+
+        let queued = task.home_cpu.load(Ordering::Acquire);
+        let (entry, _) = sched.cpus[queued as usize].queue.pick().expect("requeued");
+        sched.overflow.lock().push(entry);
+        arch.set_current_cpu(home);
+        assert_eq!(sched.step(home), Ok(StepOutcome::Ran(id)), "drained");
+        drop(registry);
+    }
+
     /// A task drained from overflow onto another CPU's queue is announced to
     /// that CPU, which may be idle.
     #[test]
@@ -1702,7 +1713,7 @@ mod tests {
         task.home_cpu.store(0, Ordering::Release);
         task.store_state(TaskState::Ready);
         assert!(sched.count_on(&task, 0));
-        sched.overflow.lock().push(id);
+        sched.overflow.lock().push(task);
         let before = arch.ipi_count(0);
         sched.drain_overflow(1);
         assert_eq!(arch.ipi_count(0), before + 1);
@@ -2039,8 +2050,14 @@ mod tests {
         let task = sched.tasks.read().get(&id).cloned().expect("task");
         assert!(sched.count_on(&task, 0));
         task.home_cpu.store(0, Ordering::Release);
-        let entry = sched.admit(&task, &sched.cpus[0].queue);
-        sched.cpus[0].queue.push(entry).expect("seed perf queue");
+        sched.place(&task, &sched.cpus[0].queue);
+        assert!(
+            sched.cpus[0]
+                .queue
+                .push(Scheduler::<TestArch>::entry(&task))
+                .is_ok(),
+            "seed perf queue"
+        );
         assert_eq!(sched.class_of(home_of(&sched, id)), CoreClass::Performance);
         assert_eq!(sched.cpus[0].queue.competing_weight(), 1);
 

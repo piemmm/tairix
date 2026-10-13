@@ -948,12 +948,14 @@ mod program {
         }
     }
 
-    /// Step everything the session animates to `now_ns`, so the frame
-    /// presented next carries it: the desktop's screen fade, the pointer
-    /// aids, the locked screen's own surface, a credential prompt's password
-    /// marker, the screensaver, and the backdrop dissolving into another. All of them are
-    /// idle once nothing is in flight, which is what leaves an idle desktop's
-    /// park indefinite.
+    /// Step everything the session animates to `now_ns` when `pacer` has a
+    /// frame due, so the frame presented next carries it: the desktop's
+    /// screen fade, the pointer aids, the locked screen's own surface, a
+    /// credential prompt's password marker, the screensaver, and the backdrop
+    /// dissolving into another. Between frames only the pointer aids take in
+    /// where the pointer is. All of them are idle once nothing is in flight,
+    /// which is what leaves an idle desktop's park indefinite; what each owes
+    /// next is folded through [`FramePacer::step_deadline_ns`].
     #[allow(clippy::too_many_arguments)] // Every surface the session animates.
     fn animate<S: DirectorySource>(
         fade: &mut ScreenFade,
@@ -962,9 +964,13 @@ mod program {
         clock: &mut SessionClock,
         shell: &mut DesktopShell,
         desktop: &Desktop<S>,
-        compositor: &mut Compositor,
+        (compositor, pacer): (&mut Compositor, &FramePacer),
         now_ns: u64,
     ) {
+        shell.observe_pointer_aids(now_ns, compositor);
+        if !pacer.due(now_ns) {
+            return;
+        }
         fade.advance(now_ns, compositor);
         shell.advance_pointer_aids(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
@@ -992,7 +998,7 @@ mod program {
     /// Read the wall clock when the label it produced has gone stale, and put
     /// the new one on the bar.
     ///
-    /// This runs on every wake, but the clock owns the cadence: it is read
+    /// This runs on every frame, but the clock owns the cadence: it is read
     /// only once the minute its label was right for has turned, which is the
     /// same deadline the park is shortened to. An idle desktop therefore
     /// reads it once a minute however often something else wakes the loop —
@@ -3333,20 +3339,24 @@ mod program {
                 park = frame_stats.park_deadline_ns(now_ns, park);
                 park = frames.park_deadline_ns(now_ns, park);
                 park = shell.taskbar_park_deadline_ns(now_ns, park);
-                park = shell.backdrop_park_deadline_ns(now_ns, park);
                 park = shell.tooltip_park_deadline_ns(now_ns, park);
                 park = menu.park_deadline_ns(now_ns, park);
-                park = shell.pointer_aids_park_deadline_ns(now_ns, park);
-                park = fade.park_deadline_ns(now_ns, park);
-                park = clock.park_deadline_ns(now_ns, park);
-                park = lock.park_deadline_ns(now_ns, park);
-                park = elevate.park_deadline_ns(now_ns, park);
                 park = resolution.park_deadline_ns(now_ns, park);
                 park = keyboard.park_deadline_ns(now_ns, park);
                 park = pointer.park_deadline_ns(now_ns, park);
                 park = idle.park_deadline_ns(now_ns, park);
-                park = saver.park_deadline_ns(now_ns, park);
                 park = effects.park_deadline_ns(now_ns, park);
+                // Exactly what `animate` steps, which it steps only on a
+                // frame the pacer has due.
+                let mut step = WAITSET_TIMEOUT_NONE;
+                step = shell.backdrop_park_deadline_ns(now_ns, step);
+                step = shell.pointer_aids_park_deadline_ns(now_ns, step);
+                step = fade.park_deadline_ns(now_ns, step);
+                step = clock.park_deadline_ns(now_ns, step);
+                step = lock.park_deadline_ns(now_ns, step);
+                step = elevate.park_deadline_ns(now_ns, step);
+                step = saver.park_deadline_ns(now_ns, step);
+                park = pacer.step_deadline_ns(now_ns, park, step);
                 serve_park_ns(&switch, departure.as_ref(), now_ns, park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
@@ -3456,7 +3466,7 @@ mod program {
                     &mut clock,
                     &mut shell,
                     &desktop,
-                    &mut compositor,
+                    (&mut compositor, &pacer),
                     now_ns,
                 );
                 // A display switched off is presented nothing: no frame sent
@@ -4611,7 +4621,7 @@ mod program {
                 &mut clock,
                 &mut shell,
                 &desktop,
-                &mut compositor,
+                (&mut compositor, &pacer),
                 now_ns,
             );
             // The desktop layer surface's two feeds, resolved once a frame so

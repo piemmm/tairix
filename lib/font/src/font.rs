@@ -782,28 +782,60 @@ impl BitmapFont {
         client::with_client(|client| self.draw_on(client, surface, x, y, text, color))
     }
 
-    /// Draw only `shadow` for `text` with its pen starting at `(x, y)`,
-    /// returning the pen its ink would end at.
+    /// Draw the run `pieces` make one after another from the pen at `(x, y)`
+    /// in `color`, over `shadow` where there is one, returning the pen after
+    /// the last.
+    ///
+    /// A fitted name, the mark that ends it and the tail kept after the mark
+    /// are one run: their shadow goes down as one before any of their ink, so
+    /// no piece's shadow lands on a neighbour's strokes, and one pass over the
+    /// font's caches serves the lot. Only the ink decides the pen, so a run
+    /// lays out identically with the shadow on or off.
+    pub fn draw_run(
+        self,
+        surface: &mut Surface,
+        (x, y): (i32, i32),
+        pieces: &[&str],
+        color: Color,
+        shadow: Option<TextShadow>,
+    ) -> i32 {
+        client::with_client(|client| {
+            self.warm_run(client, pieces);
+            if let Some(shadow) = shadow {
+                shadow::draw_run_shadow(self, client, surface, (x, y), pieces, shadow);
+            }
+            pieces.iter().fold(x, |pen, piece| {
+                self.ink_on(client, surface, pen, y, piece, color)
+            })
+        })
+    }
+
+    /// Draw only the shadow [`draw_run`](Self::draw_run) lays under `pieces`,
+    /// returning the pen their ink would end at.
     ///
     /// Text keeps its separation over ground the drawer does not control —
     /// an account name over a photograph, a caption over a wallpaper — when
-    /// its shadow goes down first and [`draw_text`](Self::draw_text) inks it
-    /// after. Every run's shadow goes down before any ink, so no run's shadow
-    /// lands on a neighbour's strokes: a name and the mark that ends it, the
-    /// lines of a wrapped label. Only the ink decides the pen, so a run lays
-    /// out identically with the shadow on or off.
-    pub fn draw_shadow(
+    /// its shadow goes down first and its ink after. Text laid out as several
+    /// runs, the lines of a wrapped label, puts every run's shadow down this
+    /// way before inking any.
+    pub fn draw_run_shadow(
         self,
         surface: &mut Surface,
-        x: i32,
-        y: i32,
-        text: &str,
+        at: (i32, i32),
+        pieces: &[&str],
         shadow: TextShadow,
     ) -> i32 {
         client::with_client(|client| {
-            client.warm(text, self.family, self.pixel_height, self.weight);
-            shadow::draw_run_shadow(self, client, surface, (x, y), text, shadow)
+            self.warm_run(client, pieces);
+            shadow::draw_run_shadow(self, client, surface, at, pieces, shadow)
         })
+    }
+
+    /// Fetch whatever glyphs of `pieces` the client does not yet hold.
+    fn warm_run(self, client: &mut impl FontClient, pieces: &[&str]) {
+        for piece in pieces {
+            client.warm(piece, self.family, self.pixel_height, self.weight);
+        }
     }
 
     /// [`draw_text`](Self::draw_text) against a client the caller already

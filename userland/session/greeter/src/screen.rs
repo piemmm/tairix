@@ -16,6 +16,7 @@ use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::window_ipc::PointerAction;
 use tairix_abi::{DriverError, WAITSET_TIMEOUT_NONE};
+use tairix_controls::damage;
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_display::{DisplaySleep, SwitchedOff};
 use tairix_geometry::{Point, Rect, Scale};
@@ -35,11 +36,10 @@ use crate::scene::Scene;
 use crate::verify::{Answer, SessionVerifier};
 use crate::wait::{frame_budget, park_timeout, Cooldown, Idle};
 
-/// What one round of the screen did.
+/// What one input did, beyond what it owes the frame
+/// ([`draw`](LoginScreen::draw)).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Step {
-    /// What to hand the display, if anything.
-    pub present: Present,
     /// Whether a secret was verified. The screen is finished: the authority
     /// is watching for the exit and starts the session itself.
     pub verified: bool,
@@ -51,7 +51,6 @@ impl Step {
     /// Nothing happened.
     const fn quiet() -> Self {
         Self {
-            present: Present::Nothing,
             verified: false,
             answer: None,
         }
@@ -102,6 +101,12 @@ pub struct LoginScreen<T: SessionTransport> {
     /// Whether [`painted`](Self::painted) must be painted again before the next
     /// blit. Set by everything the paint reads changing, cleared by the paint.
     paint_owed: bool,
+    /// What of the frame is owed a compose since it was last
+    /// [drawn](Self::draw), so a burst of events costs one paint and one
+    /// compose rather than one of each per event.
+    owed: damage::Repaint,
+    /// Whether the ribbon moved since the frame was last drawn.
+    ribbon_owed: bool,
     /// When the screen last saw input, which is when its display is put to
     /// sleep from.
     idle: Idle,
@@ -213,6 +218,8 @@ impl<T: SessionTransport> LoginScreen<T> {
             pointer: None,
             painted: None,
             paint_owed: true,
+            owed: damage::Repaint::clean(),
+            ribbon_owed: false,
             idle: Idle::new(0),
             sleep: DisplaySleep::new(),
             wake_owed: false,
@@ -301,7 +308,70 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// Used for the first frame and after anything that changes more than one
     /// part of the surface.
     pub fn repaint(&mut self) -> Present {
-        self.compose(None)
+        self.owe(Repaint::Scanout(None));
+        self.draw()
+    }
+
+    /// Compose everything owed since the frame was last drawn — once, however
+    /// many events, lockout ticks and animation steps owed it — and answer
+    /// what to present.
+    ///
+    /// A surface that could not be painted leaves the frame on screen as it
+    /// is and stays owed, so the next draw composes it.
+    pub fn draw(&mut self) -> Present {
+        if self.owed.is_clean() && !self.ribbon_owed {
+            return Present::Nothing;
+        }
+        if self.paint_owed {
+            self.paint();
+        }
+        // The veil is applied as the surface is blitted, so it is read here
+        // rather than painted in: a fade step re-blits what is already painted.
+        // A screen that is leaving hands the composer no pointer, so the first
+        // veiled frame, which covers the whole screen, paints the arrow out.
+        let drawn = self.draws_pointer();
+        let reveal = self.surface.reveal();
+        let Self {
+            scanout,
+            pointer,
+            painted,
+            scene,
+            owed,
+            ribbon_owed,
+            ..
+        } = self;
+        let Some(painted) = painted.as_ref() else {
+            return Present::Nothing;
+        };
+        let cursor = if drawn { pointer.as_ref() } else { None };
+        let ground = scene.as_ref().map(Scene::layer);
+        let mode = *scanout.mode();
+        let mut compose = |rect| scanout.compose(painted, ground, cursor, rect, reveal);
+        let surface = match owed {
+            damage::Repaint::Whole => compose(None),
+            damage::Repaint::Parts(parts) => parts
+                .rects()
+                .iter()
+                .fold(Present::Nothing, |present, rect| {
+                    present.merged(compose(Some(*rect)), &mode)
+                }),
+        };
+        let ribbon = match scene.as_ref() {
+            Some(scene) if *ribbon_owed && surface != Present::Whole => scene
+                .damage()
+                .rects()
+                .iter()
+                .fold(Present::Nothing, |present, strip| {
+                    present.merged(compose(Some(*strip)), &mode)
+                }),
+            _ => Present::Nothing,
+        };
+        match owed {
+            damage::Repaint::Whole => *owed = damage::Repaint::clean(),
+            damage::Repaint::Parts(parts) => parts.clear(),
+        }
+        *ribbon_owed = false;
+        surface.merged(ribbon, &mode)
     }
 
     /// Put the chrome up for `wall` and begin the fade the screen arrives out
@@ -313,19 +383,18 @@ impl<T: SessionTransport> LoginScreen<T> {
     pub fn open(&mut self, now_ns: u64, wall: Option<Time64>) -> Present {
         self.idle = Idle::new(now_ns);
         if let Some(chrome) = self.teller.tell(wall) {
-            let _ = self.surface.set_chrome(chrome);
+            let told = Repaint::of(self.surface.set_chrome(chrome));
+            self.owe(told);
         }
-        match self.begin_entry_fade(now_ns) {
-            Present::Nothing => self.repaint(),
-            veiled => veiled,
-        }
+        self.owe(Repaint::Scanout(None));
+        self.begin_entry_fade(now_ns)
     }
 
-    /// Apply one input event.
+    /// Apply one input event, owing the frame what it changed.
     ///
     /// The verdict a submitted secret produced is applied before this
     /// returns: a refusal's lockout starts counting from `now_ns` and is
-    /// already on screen in the frame this round presents.
+    /// already on screen in the frame this round draws.
     ///
     /// While the display sleeps the event reaches nothing: it only owes the
     /// display its wake.
@@ -336,18 +405,19 @@ impl<T: SessionTransport> LoginScreen<T> {
             return Step::quiet();
         }
         let round = self.apply(event, now_ns);
+        self.owe(round.repaint);
         Step {
-            present: self.present_for(round.repaint),
             verified: round.verified,
             answer: round.answer,
         }
     }
 
-    /// Apply one pointer report from the seat.
+    /// Apply one pointer report from the seat, owing the frame what it
+    /// changed.
     ///
     /// The report is relative motion or a button, so the running position is
     /// kept here and the surface is given the absolute events it hit-tests.
-    /// One report expands to as many as two of them, and they present
+    /// One report expands to as many as two of them, and they are drawn
     /// together: a press is a move and a press, not two frames.
     ///
     /// A move also repaints the pointer itself — the union of where it was
@@ -434,22 +504,19 @@ impl<T: SessionTransport> LoginScreen<T> {
                 break;
             }
         }
-        Step {
-            present: self.present_for(repaint),
-            verified,
-            answer,
-        }
+        self.owe(repaint);
+        Step { verified, answer }
     }
 
     /// Bring the clock, the lockout, the surface's animations and the ribbon
-    /// up to date.
+    /// up to date, owing the frame what they changed.
     ///
-    /// Called on every round the loop wakes for. Nothing repaints unless one
-    /// of them actually changed, so a wake that finds nothing to do presents
-    /// nothing — and nothing at all is presented while the display sleeps.
-    pub fn refresh(&mut self, now_ns: u64, wall: Option<Time64>) -> Step {
+    /// Called on every round the loop wakes for. Nothing is owed unless one
+    /// of them actually changed, so a wake that finds nothing to do draws
+    /// nothing — and nothing at all is owed while the display sleeps.
+    pub fn refresh(&mut self, now_ns: u64, wall: Option<Time64>) {
         if !self.sleep.is_awake() {
-            return Step::quiet();
+            return;
         }
         let clock = self.teller.tell(wall).map_or(Repaint::Nothing, |chrome| {
             Repaint::of(self.surface.set_chrome(chrome))
@@ -459,22 +526,12 @@ impl<T: SessionTransport> LoginScreen<T> {
             .remaining(now_ns, self.surface.selected_account());
         let cooldown = Repaint::of(self.surface.set_cooldown(remaining));
         let motion = Repaint::of(self.surface.advance(now_ns));
-        // The ribbon moves first, so a round that repaints the surface too
-        // composes it over the ribbon as it now stands.
         let moved = self
             .scene
             .as_mut()
             .is_some_and(|scene| scene.advance(now_ns));
-        let surface = self.present_for(clock.merged(cooldown).merged(motion));
-        let ribbon = if moved && surface != Present::Whole {
-            self.compose_ribbon()
-        } else {
-            Present::Nothing
-        };
-        Step {
-            present: surface.merged(ribbon, self.scanout.mode()),
-            ..Step::quiet()
-        }
+        self.owe(clock.merged(cooldown).merged(motion));
+        self.ribbon_owed |= moved;
     }
 
     /// The relative nanosecond timeout for the next park.
@@ -520,6 +577,9 @@ impl<T: SessionTransport> LoginScreen<T> {
         self.rest();
         let _ = self.scanout.blacken();
         let _ = display.present(self.scanout.frame());
+        // The black stands until a wake opens the whole screen again.
+        self.owed = damage::Repaint::clean();
+        self.ribbon_owed = false;
         self.sleep.switch_off(Some(display), true)
     }
 
@@ -563,7 +623,8 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// to cover, so the opening frame is the screen itself.
     pub fn begin_entry_fade(&mut self, now_ns: u64) -> Present {
         let outcome = self.surface.begin_entry_fade(now_ns, &self.theme);
-        self.present_for(Repaint::of(outcome))
+        self.owe(Repaint::of(outcome));
+        self.draw()
     }
 
     /// Begin the fade to black the screen leaves through, and present its
@@ -582,7 +643,8 @@ impl<T: SessionTransport> LoginScreen<T> {
         if self.surface.session_fade_finished() {
             return Present::Nothing;
         }
-        self.present_for(Repaint::of(outcome))
+        self.owe(Repaint::of(outcome));
+        self.draw()
     }
 
     /// Whether the screen has finished going black, so its owner may leave.
@@ -603,7 +665,8 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// Darken the fade to `now_ns` and present what changed.
     pub fn session_fade_step(&mut self, now_ns: u64) -> Present {
         let darkened = Repaint::of(self.surface.advance(now_ns));
-        self.present_for(darkened)
+        self.owe(darkened);
+        self.draw()
     }
 
     /// The most frames the fade can ever ask for.
@@ -704,77 +767,21 @@ impl<T: SessionTransport> LoginScreen<T> {
         }
     }
 
-    /// Present what `repaint` changed, or nothing when it changed nothing.
-    fn present_for(&mut self, repaint: Repaint) -> Present {
-        match repaint {
-            Repaint::Nothing => Present::Nothing,
-            Repaint::Scanout(damage) => self.compose(damage),
+    /// Owe the frame what `repaint` changed: the pixels to compose, and the
+    /// surface's paint where its own content changed.
+    fn owe(&mut self, repaint: Repaint) {
+        let damage = match repaint {
+            Repaint::Nothing => return,
+            Repaint::Scanout(damage) => damage,
             Repaint::Painted(damage) => {
                 self.paint_owed = true;
-                self.compose(damage)
+                damage
             }
-        }
-    }
-
-    /// Copy `damage` of the painted surface into the frame over the ribbon,
-    /// with the pointer over both, rendering the surface first when nothing
-    /// holds it.
-    ///
-    /// A screen that is leaving hands the composer no pointer, so the first
-    /// veiled frame — which covers the whole screen — is also the one that
-    /// paints the arrow out.
-    fn compose(&mut self, damage: Option<Rect>) -> Present {
-        if self.paint_owed {
-            self.paint();
-        }
-        let drawn = self.draws_pointer();
-        // The veil is applied as the surface is blitted, so it is read here
-        // rather than painted in: a fade step re-blits what is already painted.
-        let reveal = self.surface.reveal();
-        let Self {
-            scanout,
-            pointer,
-            painted,
-            scene,
-            ..
-        } = self;
-        let Some(painted) = painted.as_ref() else {
-            return Present::Nothing;
         };
-        let cursor = if drawn { pointer.as_ref() } else { None };
-        let ground = scene.as_ref().map(Scene::layer);
-        scanout.compose(painted, ground, cursor, damage, reveal)
-    }
-
-    /// Compose the pixels the ribbon's last frame moved, with the surface
-    /// over them as it stands and the pointer over both.
-    fn compose_ribbon(&mut self) -> Present {
-        if self.paint_owed {
-            self.paint();
+        match damage {
+            Some(rect) => self.owed.add(rect),
+            None => self.owed = damage::Repaint::Whole,
         }
-        let drawn = self.draws_pointer();
-        let reveal = self.surface.reveal();
-        let Self {
-            scanout,
-            pointer,
-            painted,
-            scene,
-            ..
-        } = self;
-        let (Some(painted), Some(scene)) = (painted.as_ref(), scene.as_ref()) else {
-            return Present::Nothing;
-        };
-        let cursor = if drawn { pointer.as_ref() } else { None };
-        let mode = *scanout.mode();
-        scene
-            .damage()
-            .rects()
-            .iter()
-            .fold(Present::Nothing, |present, strip| {
-                let strip =
-                    scanout.compose(painted, Some(scene.layer()), cursor, Some(*strip), reveal);
-                present.merged(strip, &mode)
-            })
     }
 
     /// Paint the surface, with no cursor drawn into it, into the retained

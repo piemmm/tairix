@@ -15,6 +15,8 @@
 //! * the [`park`] handshake — the park/unpark window, its wake token, the
 //!   job-control stop, taking a task from a run-queue entry, and the settle
 //!   after a body returns, which are task lifecycle rather than policy;
+//! * [`queue::Keyed`], the heap slot a run queue orders its ready tasks in,
+//!   carrying each task so a pick needs no registry lookup;
 //! * the [`share`] accounting the proportional-share policies divide a CPU
 //!   by — band weights, the per-run charge, and the ledger of where each
 //!   task's weight is counted; and
@@ -37,6 +39,7 @@ pub mod error;
 pub mod outcome;
 pub mod park;
 pub mod policy;
+pub mod queue;
 pub mod share;
 pub mod steal;
 pub mod task;

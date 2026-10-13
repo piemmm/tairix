@@ -20,6 +20,12 @@ without a page takes the page in force at its main item, as Windows and Linux
 read it. Push and Pop save and restore the global state with the report id; a
 long item is skipped; of a delimiter set only the first usage is taken.
 
+Beside each usage entry the model keeps the place in its field's list where
+the entry starts, so the usage of an element or an array value is found by
+halving those starts rather than walking the list from its first entry: a
+report's decode costs its elements times the logarithm of its usage entries,
+not their product.
+
 The bounds are defences on untrusted input, not capacities: a descriptor of at
 most 4096 bytes, 256 fields, 128 collections, 1024 usage entries, a collection
 depth of 16, a global stack of 8, a report of at most 4096 bytes and an

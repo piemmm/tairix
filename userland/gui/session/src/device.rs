@@ -130,6 +130,10 @@ pub struct DeviceInputSource<C, T> {
     /// What the frames read so far meant and the desktop has not yet been
     /// handed.
     gestures: VecDeque<Gesture>,
+    /// The wake's clock reading at which the pointer channel was found
+    /// empty, so the touch frames read after it in that wake are not each
+    /// preceded by another read of it.
+    pointer_dry_at: Option<u64>,
 }
 
 impl<C, T> DeviceInputSource<C, T> {
@@ -165,6 +169,7 @@ impl<C, T> DeviceInputSource<C, T> {
             wheel: (WheelAxis::new(), WheelAxis::new()),
             recogniser: Recogniser::new(TouchSettings::DEFAULT),
             gestures: VecDeque::new(),
+            pointer_dry_at: None,
         })
     }
 
@@ -552,9 +557,12 @@ impl<C: PointerInputChannel, T: TouchInputChannel> InputSource for DeviceInputSo
             if let Some(gesture) = self.gestures.pop_front() {
                 return Ok(Some(self.gesture_event(gesture, now_ns)));
             }
-            if let Some(bytes) = self.channel.next_record()? {
-                let record = PointerInput::from_bytes(&bytes)?;
-                return Ok(Some(self.pointer_event(record, now_ns)));
+            if self.pointer_dry_at != Some(now_ns) {
+                if let Some(bytes) = self.channel.next_record()? {
+                    let record = PointerInput::from_bytes(&bytes)?;
+                    return Ok(Some(self.pointer_event(record, now_ns)));
+                }
+                self.pointer_dry_at = Some(now_ns);
             }
             if let Some(bytes) = self.touch.next_frame()? {
                 let frame = TouchFrame::from_bytes(&bytes)?;
@@ -599,6 +607,9 @@ mod tests {
     struct QueueChannel {
         records: VecDeque<[u8; PointerInput::WIRE_LEN]>,
         fault: Option<Errno>,
+        /// How many times the channel was read, each a system call on the
+        /// seat.
+        reads: usize,
     }
 
     impl QueueChannel {
@@ -606,6 +617,7 @@ mod tests {
             Self {
                 records: events.iter().map(PointerInput::to_le_bytes).collect(),
                 fault: None,
+                reads: 0,
             }
         }
 
@@ -620,6 +632,7 @@ mod tests {
 
     impl PointerInputChannel for QueueChannel {
         fn next_record(&mut self) -> Result<Option<[u8; PointerInput::WIRE_LEN]>, Errno> {
+            self.reads += 1;
             if let Some(errno) = self.fault.take() {
                 return Err(errno);
             }
@@ -1049,10 +1062,36 @@ mod tests {
             .records
             .push_back(PointerInput::Released(PointerButtonCode::Primary).to_le_bytes());
         assert_eq!(
-            drain(&mut source, 1_000),
+            drain(&mut source, 1_001),
             [released(PointerButton::Primary)]
         );
-        assert!(source.quiet_since(1_000 * MS + 1));
+        assert!(source.quiet_since(1_001 * MS + 1));
+    }
+
+    /// A burst of touch frames costs one read of the pointer channel a wake,
+    /// not one before every frame; the next wake reads it afresh.
+    #[test]
+    fn a_touch_burst_reads_the_empty_pointer_channel_once_a_wake() {
+        let mut source = source(&[]);
+        for frame in 0..64u16 {
+            touch(
+                &mut source,
+                TouchSurface::Touchpad,
+                u64::from(frame),
+                &[Contact::finger(1, 100 + frame, 100)],
+            );
+        }
+        let _ = drain(&mut source, 64);
+        assert_eq!(source.channel.reads, 1, "one read for the whole burst");
+        source
+            .channel
+            .records
+            .push_back(PointerInput::Pressed(PointerButtonCode::Primary).to_le_bytes());
+        assert_eq!(
+            drain(&mut source, 65),
+            [pressed(PointerButton::Primary)],
+            "the next wake reads the channel again"
+        );
     }
 
     #[test]

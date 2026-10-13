@@ -57,7 +57,10 @@ repaints nothing inside the text.
 The light is summed at every other pixel each way and blended up to every
 pixel as it is toned and dithered. A frame repaints only the rows each column's
 light reaches now and reached the frame before — under half the screen — in
-strips a few dozen pixels wide.
+strips a few dozen pixels wide. Any paint, a whole screen's included, sums and
+writes a chunk of sample columns only over the rows its light reaches and lays
+the sky over the rest of it, and a lone column left at a chunk's end joins the
+chunk before it, so a strip is two chunks rather than three.
 
 ## Pacing
 
@@ -82,8 +85,9 @@ to roaming freely and moving independently, the clear space to staying
 ribbon rising nearer the text than its glow's whole tail would let it, the
 light that shows to be the first toning step that lifts every pixel a whole
 level, strips to matching the whole with and without text, the light to being soft everywhere and
-black beyond the rows it reports, and a frame to repainting under half the
-screen. The clock's own tests live with `SceneClock` in `lib/theme`.
+black beyond the rows it reports, an unlit area to laying the sky over itself
+alone, a paint to summing under half the screen's sample rows and a strip to
+being two chunks, and a frame to repainting under half the screen. The clock's own tests live with `SceneClock` in `lib/theme`.
 
 ## Stability
 

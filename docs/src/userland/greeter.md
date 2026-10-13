@@ -164,20 +164,23 @@ presents only the damage rectangle the surface reported — the field for a
 keystroke, the panel for a verdict, the chrome band for a clock tick — so a
 keystroke uploads a small rectangle rather than a screen.
 
-A wake also drains a whole burst before it presents. Every waiting keyboard
-and pointer record is applied, what each changed is merged into one
-rectangle, and the display is called once with it, because a present is a
-round trip to the display service and a moving mouse delivers reports far
-faster than a screen refreshes. A drain that changed nothing calls nothing;
-a verified secret stops the drain there and then, having presented what the
-records before it changed.
+A wake also drains a whole burst before it draws. Every waiting keyboard,
+pointer and touch record is applied and only *owes* the frame what it
+changed; the round's clock, lockout and ribbon steps owe theirs too, and the
+round then paints the surface at most once, composes what is owed once, and
+calls the display once with the union, because a paint is a whole surface, a
+present is a round trip to the display service, and a moving mouse or a
+repeating key delivers records far faster than a screen refreshes. A round
+that changed nothing calls nothing; a verified secret stops the drain there
+and then, and what the records before it changed is presented before the
+fade begins.
 
 ## The pointer
 
 The seat reports *relative* motion, so the screen keeps the running position
 and holds it inside the frame, and hands the surface the absolute position it
 hit-tests. One seat report expands to at most two surface events (a button is
-a move **and** a transition) and they present as one frame, not two.
+a move **and** a transition) and they are drawn as one frame, not two.
 
 Touch reaches the screen through the seat's gesture recogniser
 ([`tairix-touch`](../lib/touch.md)) at its default settings — no user is

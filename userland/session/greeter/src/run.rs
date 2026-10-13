@@ -289,21 +289,11 @@ mod program {
         Lost,
     }
 
-    /// Drain the seat's pointer channel into the screen and present the
-    /// union of everything it changed, once.
-    ///
-    /// A burst of motion is a stream of reports the seat already holds, and
-    /// each present is a round trip to the display service, so the whole
-    /// burst is applied and then shown as one frame. A drain that changed
-    /// nothing shows nothing.
-    fn drain_pointer<T: SessionTransport>(
-        screen: &mut LoginScreen<T>,
-        display: &mut Option<Ring>,
-    ) -> Drained {
-        let mode = *screen.mode();
+    /// Drain the seat's pointer channel into the screen, which owes its frame
+    /// what the burst changed until the round draws it once.
+    fn drain_pointer<T: SessionTransport>(screen: &mut LoginScreen<T>) -> Drained {
         let mut wire = [0u8; PointerInput::WIRE_LEN];
-        let mut pending = Present::Nothing;
-        let drained = loop {
+        loop {
             let read = tairix_rt::pointer_read(SEAT_PRIMARY, &mut wire);
             if read == 0 {
                 break Drained::Empty;
@@ -317,30 +307,22 @@ mod program {
                 continue;
             };
             let step = screen.on_pointer(&input, tairix_rt::clock_get());
-            pending = pending.merged(step.present, &mode);
             if let Some(answer) = step.answer {
                 audit(answer.verdict);
             }
             if step.verified {
                 break Drained::Verified;
             }
-        };
-        show(display, screen.frame(), pending);
-        drained
+        }
     }
 
-    /// Drain the seat's touch channel through the screen's recogniser and
-    /// present the union of everything it changed, once; then act on any touch
-    /// whose deadline has passed, every queued frame having been read.
-    fn drain_touch<T: SessionTransport>(
-        screen: &mut LoginScreen<T>,
-        display: &mut Option<Ring>,
-    ) -> Drained {
-        let mode = *screen.mode();
+    /// Drain the seat's touch channel through the screen's recogniser, then act
+    /// on any touch whose deadline has passed, every queued frame having been
+    /// read; the screen owes its frame what they changed.
+    fn drain_touch<T: SessionTransport>(screen: &mut LoginScreen<T>) -> Drained {
         let mut wire = [0u8; TouchFrame::WIRE_LEN];
         let mut gestures = Vec::new();
-        let mut pending = Present::Nothing;
-        let drained = 'drain: loop {
+        'drain: loop {
             let read = tairix_rt::touch_read(SEAT_PRIMARY, &mut wire);
             if read == 0 {
                 screen.expire_touch(tairix_rt::clock_get(), &mut gestures);
@@ -351,7 +333,6 @@ mod program {
             }
             for gesture in gestures.drain(..) {
                 let step = screen.on_gesture(gesture, tairix_rt::clock_get());
-                pending = pending.merged(step.present, &mode);
                 if let Some(answer) = step.answer {
                     audit(answer.verdict);
                 }
@@ -362,21 +343,14 @@ mod program {
             if read == 0 {
                 break Drained::Empty;
             }
-        };
-        show(display, screen.frame(), pending);
-        drained
+        }
     }
 
-    /// Drain the seat's keyboard channel into the screen and present the
-    /// union of everything it changed, once.
-    fn drain_keyboard<T: SessionTransport>(
-        screen: &mut LoginScreen<T>,
-        display: &mut Option<Ring>,
-    ) -> Drained {
-        let mode = *screen.mode();
+    /// Drain the seat's keyboard channel into the screen, which owes its frame
+    /// what the keystrokes changed until the round draws it once.
+    fn drain_keyboard<T: SessionTransport>(screen: &mut LoginScreen<T>) -> Drained {
         let mut wire = [0u8; KeyInput::WIRE_LEN];
-        let mut pending = Present::Nothing;
-        let drained = loop {
+        loop {
             let read = tairix_rt::keyboard_read(SEAT_PRIMARY, &mut wire);
             if read == 0 {
                 break Drained::Empty;
@@ -391,16 +365,13 @@ mod program {
             };
             let event = tairix_window::key_input_event(input);
             let step = screen.on_input(&event, tairix_rt::clock_get());
-            pending = pending.merged(step.present, &mode);
             if let Some(answer) = step.answer {
                 audit(answer.verdict);
             }
             if step.verified {
                 break Drained::Verified;
             }
-        };
-        show(display, screen.frame(), pending);
-        drained
+        }
     }
 
     /// Frames for `mode`, established the one way every presenter does.
@@ -452,13 +423,16 @@ mod program {
     /// none, present nothing; with one, frames established afresh — the
     /// output may be a new sink, or a restarted service holding none of the
     /// old ones — and the screen rebuilt in place when the mode is another,
-    /// then shown whole.
-    fn follow_output<T: SessionTransport>(screen: &mut LoginScreen<T>, display: &mut Option<Ring>) {
+    /// answering the whole of it to show.
+    fn follow_output<T: SessionTransport>(
+        screen: &mut LoginScreen<T>,
+        display: &mut Option<Ring>,
+    ) -> Present {
         let output = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query();
         *display = None;
         // A refused query is a lost seat, which the next drain observes.
         let Ok(Some(mode)) = output else {
-            return;
+            return Present::Nothing;
         };
         let rebuilt = if &mode == screen.mode() {
             None
@@ -469,7 +443,7 @@ mod program {
                     Level::Warn,
                     "greeter: the display's new mode describes no drawable screen",
                 );
-                return;
+                return Present::Nothing;
             };
             Some(scanout)
         };
@@ -477,17 +451,16 @@ mod program {
             Ok(ring) => *display = Some(ring),
             // It moved again, and that announcement brings the screen onto
             // where it went.
-            Err(FramesRefused::Configure(Errno::Stale)) => return,
+            Err(FramesRefused::Configure(Errno::Stale)) => return Present::Nothing,
             Err(refused) => {
                 record(SCREEN_UNAVAILABLE, Level::Warn, refused.reason());
-                return;
+                return Present::Nothing;
             }
         }
-        let all = match rebuilt {
+        match rebuilt {
             Some(scanout) => screen.adopt_scanout(scanout, tairix_rt::clock_get()),
             None => screen.repaint(),
-        };
-        show(display, screen.frame(), all);
+        }
     }
 
     /// Own the seat and run the screen until a secret is verified.
@@ -579,9 +552,10 @@ mod program {
     ///
     /// Each round drains the seat, wakes a sleeping display for whatever
     /// input reached it, brings the clock, any lockout and the ribbon up to
-    /// date, puts the display to sleep once the screen has been left alone
-    /// long enough, and then parks on `set` until either input arrives or the
-    /// nearest of those falls due. A sleeping screen arms no timer at all.
+    /// date, draws and presents what all of that changed once, puts the
+    /// display to sleep once the screen has been left alone long enough, and
+    /// then parks on `set` until either input arrives or the nearest of those
+    /// falls due. A sleeping screen arms no timer at all.
     fn park_loop<T: SessionTransport>(
         screen: &mut LoginScreen<T>,
         display: &mut Option<Ring>,
@@ -591,18 +565,22 @@ mod program {
         let mut told_unwakeable = false;
         let mut token = SEAT_TOKEN;
         loop {
-            if token == DISPLAY_OUTPUT_TOKEN {
-                follow_output(screen, display);
-            }
-            let drained = match drain_keyboard(screen, display) {
-                Drained::Empty => match drain_pointer(screen, display) {
-                    Drained::Empty => drain_touch(screen, display),
+            let mut round = if token == DISPLAY_OUTPUT_TOKEN {
+                follow_output(screen, display)
+            } else {
+                Present::Nothing
+            };
+            let drained = match drain_keyboard(screen) {
+                Drained::Empty => match drain_pointer(screen) {
+                    Drained::Empty => drain_touch(screen),
                     ended => ended,
                 },
                 ended => ended,
             };
             match drained {
                 Drained::Verified => {
+                    let verified = round.merged(screen.draw(), screen.mode());
+                    show(display, screen.frame(), verified);
                     fade_out(screen, display, set);
                     return 0;
                 }
@@ -622,7 +600,7 @@ mod program {
                 Ok(Present::Nothing) => {}
                 Ok(opening) => {
                     told_unwakeable = false;
-                    show(display, screen.frame(), opening);
+                    round = round.merged(opening, screen.mode());
                 }
                 Err(refusal) => {
                     if !told_unwakeable {
@@ -636,10 +614,10 @@ mod program {
                 }
             }
             // The clock, a running lockout and the ribbon ask the authority
-            // nothing, so this round has a frame to show and no verdict to
-            // audit.
-            let refreshed = screen.refresh(now, wall);
-            show(display, screen.frame(), refreshed.present);
+            // nothing, so they add to the round's frame and to no verdict.
+            screen.refresh(now, wall);
+            round = round.merged(screen.draw(), screen.mode());
+            show(display, screen.frame(), round);
             let slept = display
                 .as_mut()
                 .and_then(|ring| screen.sleep_if_idle(ring, tairix_rt::clock_get()));
@@ -699,9 +677,9 @@ mod program {
             let Some(due) = screen.session_fade_due(tairix_rt::clock_get()) else {
                 return;
             };
-            if drain_keyboard(screen, display) == Drained::Lost
-                || drain_pointer(screen, display) == Drained::Lost
-                || drain_touch(screen, display) == Drained::Lost
+            if drain_keyboard(screen) == Drained::Lost
+                || drain_pointer(screen) == Drained::Lost
+                || drain_touch(screen) == Drained::Lost
             {
                 return;
             }

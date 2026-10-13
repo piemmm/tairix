@@ -25,7 +25,9 @@
 //! [`Timeline::FRAME_NS`] is the shortest gap between two frames worth
 //! drawing, which is the same fact whether a frame carries an animation step
 //! or a drag — so there is no second frame-period constant, and an animated
-//! surface is never woken for a frame the pacer would then refuse. Real vsync
+//! surface is never woken for a frame the pacer would then refuse. What the
+//! session animates is stepped only on a frame that is [due](FramePacer::due),
+//! so a burst of input between frames costs no animation step at all. Real vsync
 //! takes the deadline from the flip a display driver signals, in this same
 //! place (`plans/FIX-DISPLAY-ACCELERATION.md`); no driver reports a refresh
 //! today, so a mode field for one would be an ABI with no producer.
@@ -82,6 +84,24 @@ impl FramePacer {
             self.last_ns = Some(now_ns);
         }
         true
+    }
+
+    /// Whether a frame drawn at `now_ns` is due: what the session steps
+    /// everything it animates on, so an animation costs one step a frame
+    /// however often input wakes the loop.
+    #[must_use]
+    pub fn due(&self, now_ns: u64) -> bool {
+        self.remaining_ns(now_ns) == 0
+    }
+
+    /// `park_ns` shortened to when an animation stepped only on a
+    /// [`due`](Self::due) frame takes the step it owes `step_ns` from now —
+    /// none at [`WAITSET_TIMEOUT_NONE`](tairix_abi::WAITSET_TIMEOUT_NONE) —
+    /// but never to before that frame, so one left overdue between frames
+    /// waits for it rather than spinning the loop.
+    #[must_use]
+    pub fn step_deadline_ns(&self, now_ns: u64, park_ns: u64, step_ns: u64) -> u64 {
+        park_ns.min(step_ns.max(self.remaining_ns(now_ns)))
     }
 
     /// `park_ns` shortened to the moment a held frame comes due, or left

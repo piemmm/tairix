@@ -8843,10 +8843,7 @@ fn landed_class_artwork(kinds: &[IconKind]) -> tairix_icon::Landed {
     let mut desk = tairix_icon::ArtworkDesk::new();
     for &kind in kinds {
         for side in 1..=THICKNESS {
-            desk.want(
-                &tairix_icon::ArtworkKey::Asset(tairix_icon::icon_artwork_path(kind)),
-                side,
-            );
+            desk.want(&tairix_icon::ArtworkKey::Raster(kind), side);
         }
     }
     while let Some(job) = desk.next_job() {

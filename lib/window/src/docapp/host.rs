@@ -45,6 +45,7 @@ use tairix_rt::work::{Desk, Worker, WorkerGuard};
 use tairix_theme::{Theme, ThemeRegistry};
 use tairix_util::defer::JobQueue;
 
+use super::title::Title;
 use super::{
     AppRequest, AppView, DocumentView, Outcome, Relayout, Request, ToolGone, ToolMove, ViewOutcome,
 };
@@ -502,10 +503,7 @@ struct Chrome {
     pointing: Pointing,
     /// The session refused its last present, which has been said.
     present_refused: bool,
-    title: String,
-    /// The title as it now reads, written here before it is compared with
-    /// the one shown, so a paint builds no title of its own.
-    title_draft: String,
+    title: Title,
     owed: Repaint,
 }
 
@@ -517,8 +515,7 @@ impl Chrome {
             focused: true,
             pointing: Pointing::new(),
             present_refused: false,
-            title,
-            title_draft: String::new(),
+            title: Title::new(title),
             owed: Repaint::Whole,
         }
     }
@@ -558,8 +555,7 @@ impl Chrome {
     }
 
     /// Paint what the window owes of `damage` through `render` and present
-    /// it, its title first brought into line with the one in
-    /// `title_draft`.
+    /// it, its title first brought into line with the one it now reads.
     ///
     /// Each reported rectangle is painted under its own clip, so a keystroke
     /// rasterises what it changed rather than everything the changes' bounds
@@ -574,9 +570,13 @@ impl Chrome {
         if owed == Repaint::Nothing {
             return Ok(());
         }
-        if self.title_draft != self.title && client.set_title(self.id(), &self.title_draft).is_ok()
+        let id = self.id();
+        if self
+            .title
+            .changed()
+            .is_some_and(|title| client.set_title(id, title).is_ok())
         {
-            mem::swap(&mut self.title, &mut self.title_draft);
+            self.title.sent();
         }
         let repaint = if self.pane.content_released() {
             Repaint::Whole
@@ -836,7 +836,7 @@ impl<A: DocumentApp> DocWindow<A> {
             }
         }
         if self.chrome.owed != Repaint::Nothing {
-            self.view.write_title(&mut self.chrome.title_draft);
+            self.view.write_title(&mut self.chrome.title.draft);
         }
         let focused = self.focus_told;
         let (view, layout) = (&self.view, &self.layout);
@@ -2095,9 +2095,8 @@ impl<A: DocumentApp> Host<A> {
                     tool.chrome.owe(Repaint::Whole);
                 }
                 tool.rect = rect;
-                if tool.chrome.title != wanted.title {
-                    tool.chrome.title_draft.clear();
-                    tool.chrome.title_draft.push_str(wanted.title);
+                if tool.chrome.title.draft != wanted.title {
+                    tool.chrome.title.read(wanted.title);
                     tool.chrome.owe(Repaint::Whole);
                 }
                 continue;
@@ -2331,8 +2330,7 @@ impl<A: DocumentApp> Host<A> {
         }
         for window in &mut self.app_windows {
             if window.chrome.owed != Repaint::Nothing {
-                window.chrome.title_draft.clear();
-                window.chrome.title_draft.push_str(window.view.title());
+                window.chrome.title.read(window.view.title());
             }
             let (view, layout) = (&window.view, &window.layout);
             let painted =

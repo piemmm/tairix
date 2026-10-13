@@ -1626,7 +1626,8 @@ grows, and released as it shrinks unless the band began with it (a press with
 anchor is held in layout coordinates, so the listing scrolling under it grows
 it. Which entries it covers is arithmetic over the view's lines and slots, and
 a sweep visits only the entries entering or leaving the band, so it costs what
-changes rather than what it covers. Held in the strip at either end of the item
+changes rather than what it covers; a tile along its edge has its name laid out
+once while it stays there, not on every pointer sample. Held in the strip at either end of the item
 area, the band scrolls the listing — faster the deeper it is, by the elapsed
 time at that speed so a late wake loses no travel — paced by a one-shot
 deadline on the loop's park that is armed only while a step is due; there is no

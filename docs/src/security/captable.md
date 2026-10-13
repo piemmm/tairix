@@ -220,12 +220,8 @@ it outright before examining any payload.
 
 ## Wiring / Lifecycle
 
-Stage 2.7 follow-up (f4) wires `CapTable` into `KernelState`, the
-in-memory record `kernel_main` builds during the init phases. The
-table is placed under a reader-preferring `lib/sync::RwLock`, the
-same primitive `Scheduler::tasks` uses, so the syscall dispatcher's
-hot path (the `cap_query` predicate and the IPC capability checks)
-takes only a shared lock:
+`CapTable` lives in `KernelState`, the in-memory record `kernel_main`
+builds during the init phases, under a `lib/sync::RwLock`:
 
 ```text
 KernelState {
@@ -237,16 +233,26 @@ KernelState {
 }
 ```
 
-Lock-ordering policy: every dispatcher entry point identifies the
-caller through the per-CPU current-task slot **first**, then takes
-either `caps.read()` (for `cap_query` and the IPC capability checks)
-or `caps.write()` (for `cap_delegate` / `cap_revoke`). The lock is
-held only for the duration of the in-registry mutation; the
-`TaskCapabilities` reference handed to `CallerContext` lives inside
-the read-guard, so a concurrent `cap_revoke` waits until the active
-syscall returns. `AGENTS.md` §5.4 step 1 ("identify the caller")
-explicitly forbids re-locking mid-dispatch: the registry is consulted
-exactly once per syscall.
+A syscall identifies its caller through the per-CPU current-task slot,
+then takes the caller's record from the thread's own kill gate rather
+than from the table. The gate keeps the record the thread last read
+(`ThreadGate::credential`) and reuses it while
+`TaskCapabilities::is_current` holds, so the syscall path takes no lock
+and touches no line another process's syscalls share; the table is read,
+under its shared lock, only on a thread's first syscall and after its
+record was superseded. The record the syscall holds is a point-in-time
+snapshot: the dispatcher checks the required capability against it before
+touching any state, and a revocation made mid-call takes effect from the
+caller's next syscall.
+
+A record is superseded whenever the table stops holding it. A mutation
+(`caps_for_mut`, behind `cap_delegate` and `cap_revoke`) copies a record
+any thread or syscall still shares and marks the shared one superseded, so
+a revocation by one thread reaches every sibling's next syscall; a
+replacement (`insert` over an existing process) and a removal mark theirs
+the same way. The copy is fallible: a heap that refuses it fails the
+mutation with `OutOfMemory` and changes nothing. Mutations take
+`caps.write()` for exactly the in-registry change.
 
 `KernelState` is one-shot `Box::leak`'d during the `Syscall` init
 phase so the `KernelDispatchHook` published into the

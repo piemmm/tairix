@@ -4423,6 +4423,89 @@ mod tests {
         );
     }
 
+    /// Each thread answers its syscalls from its own gate's copy of the
+    /// process record, and a revocation still reaches the next syscall of
+    /// every thread of the process.
+    #[test]
+    fn a_revocation_reaches_the_next_syscall_of_every_thread_of_the_process() {
+        // Its threads publish their gates on CPU 0, as the other dispatch tests' do.
+        let _gate = crate::procsignal::running_kill_test_lock();
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let slot = leak_dispatch_slot();
+        let boot = bootinfo_with_slot(log_sink, audit_sink, make_memory_map(), slot);
+        let (state, _) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let hook = slot.get().expect("the syscall phase publishes its hook");
+        let answers: &'static tairix_sync::SpinLock<alloc::vec::Vec<(u64, u64)>> =
+            Box::leak(Box::new(tairix_sync::SpinLock::new(alloc::vec::Vec::new())));
+        let query = move |ctx: &mut tairix_kernel_sched_api::TaskContext| {
+            let gate = crate::procsignal::gate_of(ctx.task_id).expect("admitted with one");
+            let _published = crate::kthread::publish_gate_for_test(ctx.cpu, gate);
+            let mut args = [0; tairix_abi::SYSCALL_MAX_ARGS];
+            args[0] = u64::from(tairix_abi::CapabilityId::FS_MOUNT.as_u16());
+            let held = match hook.dispatch(
+                u64::from(tairix_abi::SyscallNumber::CAP_QUERY.as_u16()),
+                tairix_kernel_syscall::RawArgs(args),
+            ) {
+                crate::DispatchOutcome::Returned(Ok(held))
+                | crate::DispatchOutcome::Reschedule {
+                    result: Ok(held), ..
+                } => held,
+                other => panic!("cap_query refused: {other:?}"),
+            };
+            answers.lock().push((ctx.task_id, held));
+            tairix_kernel_sched_api::TaskAction::Yield
+        };
+        let leader = state
+            .scheduler
+            .spawn(0, Priority::Normal, query)
+            .expect("the leader is admitted");
+        let sibling = state
+            .scheduler
+            .spawn(0, Priority::Normal, query)
+            .expect("the sibling is admitted");
+        let process = SecProcessId(leader);
+        let mut mount = CapabilitySet::empty();
+        mount.insert(tairix_abi::CapabilityId::FS_MOUNT);
+        crate::procsignal::install_gate(leader, process).expect("a gate installs");
+        crate::procsignal::install_gate(sibling, process).expect("a gate installs");
+        state.caps.write().insert(TaskCapabilities::derive(
+            process,
+            UserId(0),
+            mount,
+            mount,
+            audit_sink,
+        ));
+        state
+            .caps
+            .write()
+            .register_thread(SecTaskId(sibling), process)
+            .expect("the sibling joins the process");
+
+        let round = |held: u64| {
+            answers.lock().clear();
+            for _ in 0..16 {
+                if answers.lock().len() == 2 {
+                    break;
+                }
+                assert!(matches!(state.scheduler.step(0), Ok(StepOutcome::Ran(_))));
+            }
+            let mut seen = answers.lock().clone();
+            seen.sort_unstable();
+            let mut expected = [(leader, held), (sibling, held)];
+            expected.sort_unstable();
+            assert_eq!(seen, expected, "every thread answers {held}");
+        };
+        round(1);
+        assert!(state
+            .caps
+            .write()
+            .caps_for_mut(SecTaskId(leader))
+            .expect("registered")
+            .revoke(tairix_abi::CapabilityId::FS_MOUNT, audit_sink));
+        round(0);
+    }
+
     /// The user-fault resolver reads through the filesystem and parks there,
     /// so a fault is a kernel body too: a thread that faults owing a death is
     /// never resolved, and dies of that death at the fault's boundary rather

@@ -27,6 +27,7 @@ use tairix_abi::time::Duration64;
 use tairix_abi::DriverError;
 use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
+use tairix_collections::SmallVec;
 use tairix_controls::{damage, FurniturePart, ResizeEdge, TitleBarEvent, WindowFrame};
 use tairix_cursor::CursorImage;
 use tairix_hash::BuildFastHash;
@@ -4713,7 +4714,11 @@ impl Compositor {
         else {
             return;
         };
-        let sources = covering_sources(windows, span, chrome, &epoch, fallback);
+        // A span the heap cannot hold composes nothing this frame, as a
+        // rectangle that cannot reach its scan-out bytes does.
+        let Some(sources) = covering_sources(windows, span, chrome, &epoch, fallback) else {
+            return;
+        };
         let shared = SpanShared {
             area,
             under,
@@ -5143,6 +5148,10 @@ fn frame_region(frame: &mut [u8], top: u32, bottom: u32, stride: usize) -> Optio
     frame.get_mut(start..end)
 }
 
+/// The layers one row of a band lays, inline for the windows a rectangle
+/// usually reaches: four casters, each a shadow and a body.
+type RowStack<'a> = SmallVec<RowLayer<'a>, 8>;
+
 /// Compose one band's rows of a segment.
 ///
 /// This is the whole of a segment's per-row work, whichever way the rectangle was
@@ -5170,8 +5179,11 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
     };
     let rows = band.back.rows();
     let base = rows.start;
-    // A caster lays two layers on a row: its shadow, then itself.
-    let mut window_rows: Vec<RowLayer<'_>> = Vec::with_capacity(sources.len().saturating_mul(2));
+    // A caster lays two layers on a row: its shadow, then itself. A band the
+    // heap cannot lay them for composes nothing, as a span it cannot hold does.
+    let Ok(mut window_rows) = RowStack::try_with_capacity(sources.len().saturating_mul(2)) else {
+        return;
+    };
     for py in rows {
         let Ok(y) = i32::try_from(py) else { continue };
         let Some((_, back_row)) = band.back.row_span_mut(py, left, area.width) else {
@@ -5201,11 +5213,12 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         }
         window_rows.clear();
         for (window, chrome) in sources {
+            // Reserved for two layers per source, so neither push grows it.
             if let Some(cast) = window.shadow_row(y, shadow) {
-                window_rows.push(RowLayer::Shadow(cast));
+                let _ = window_rows.try_push(RowLayer::Shadow(cast));
             }
             if let Some(body) = window.row(y, *chrome) {
-                window_rows.push(RowLayer::Body(body));
+                let _ = window_rows.try_push(RowLayer::Body(body));
             }
         }
         let dither = DitherRow::at(py);
@@ -5511,13 +5524,15 @@ fn frame_share(before: u64, after: u64) -> u32 {
     u32::try_from(after.saturating_sub(before)).unwrap_or(u32::MAX)
 }
 
-/// The furniture to draw window `id` from: the retained entry, or the one
-/// this pass built because the cache would not keep it.
-///
-/// `None` means the window has none to draw — it is undecorated, or its
-/// frame could not be rendered at all — which draws the client alone rather
-/// than failing the frame.
-/// Each window of `span` with the furniture it draws from.
+/// Windows a composited rectangle's source list holds without the heap; a
+/// rectangle under more spills to it.
+const INLINE_SOURCES: usize = 16;
+
+/// A composited rectangle's windows, each with the furniture it draws from.
+type Sources<'a> = SmallVec<(&'a Window, Option<&'a WindowChrome>), INLINE_SOURCES>;
+
+/// Each window of `span` with the furniture it draws from, or [`None`] when
+/// the heap refuses a span wider than [`INLINE_SOURCES`].
 ///
 /// Both are fixed for the whole rectangle, so the cache lookups happen once
 /// rather than once per scanline.
@@ -5527,15 +5542,22 @@ fn covering_sources<'a>(
     chrome: &'a ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
     epoch: &ChromeEpoch,
     fallback: &'a ChromeFallback,
-) -> Vec<(&'a Window, Option<&'a WindowChrome>)> {
-    let mut sources = Vec::with_capacity(span.len());
-    sources.extend(span.iter().filter_map(|&index| {
-        let window = windows.get(index)?;
-        Some((window, resolve_chrome(chrome, epoch, window.id(), fallback)))
-    }));
-    sources
+) -> Option<Sources<'a>> {
+    let mut sources = Sources::try_with_capacity(span.len()).ok()?;
+    for window in span.iter().filter_map(|&index| windows.get(index)) {
+        let source = (window, resolve_chrome(chrome, epoch, window.id(), fallback));
+        // Reserved for the whole span, so this never grows the list.
+        sources.try_push(source).ok()?;
+    }
+    Some(sources)
 }
 
+/// The furniture to draw window `id` from: the retained entry, or the one
+/// this pass built because the cache would not keep it.
+///
+/// `None` means the window has none to draw — it is undecorated, or its
+/// frame could not be rendered at all — which draws the client alone rather
+/// than failing the frame.
 fn resolve_chrome<'a>(
     cache: &'a ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
     epoch: &ChromeEpoch,

@@ -148,10 +148,9 @@ impl Landed {
     #[must_use]
     pub fn resolves(&self, request: IconRequest<'_>, side: u32) -> bool {
         request.tiers().any(|tier| {
-            self.jobs.contains(&ArtworkJob {
-                key: tier.cache_key(),
-                side,
-            })
+            self.jobs
+                .iter()
+                .any(|job| job.side == side && tier.names(&job.key))
         })
     }
 }

@@ -23,7 +23,7 @@ extern crate alloc;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::{
     AppIdentity, CapabilitySummary, Errno, Origin, ProcId, SpawnSession, TrustDomain,
@@ -32,6 +32,7 @@ use tairix_abi::{
 use tairix_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
 use tairix_crypto::Ed25519PublicKey;
 use tairix_log::{Field, Sink};
+use tairix_util::fallible::collected;
 
 use crate::audit::{record, AuditEvent};
 use crate::charge::ResourceCharges;
@@ -215,12 +216,12 @@ impl Default for ProcName {
 ///
 /// Carries no [`Eq`]/[`PartialEq`]: nothing in the kernel compares a whole
 /// record, and the per-process I/O counters are live accounting state, not
-/// a value with a meaningful equality. [`Clone`] is still needed — a
-/// mutation of a record some syscall's snapshot still shares copies it
-/// ([`CapTable::caps_for_mut`]) — so the counters are [`Arc`]-shared
-/// [`AtomicU64`]s: the copy shares the same underlying counters rather than
-/// resetting a fresh pair, so an increment made through a snapshot still
-/// lands on the one total the registry's live entry reads back.
+/// a value with a meaningful equality. A mutation of a record a thread or a
+/// syscall still shares copies it ([`CapTable::caps_for_mut`]), so the
+/// counters are [`Arc`]-shared [`AtomicU64`]s: the copy shares the same
+/// underlying counters rather than resetting a fresh pair, so an increment
+/// made through a snapshot still lands on the one total the registry's live
+/// entry reads back.
 #[derive(Clone, Debug)]
 pub struct TaskCapabilities {
     /// The **process** (thread group) this record authorises.
@@ -376,6 +377,19 @@ pub struct TaskCapabilities {
     /// What the process holds against its object limits, shared by every
     /// copy of its record for the same reason as [`Self::io_bytes_read`].
     charges: Arc<ResourceCharges>,
+    /// Set when the table stops holding this record: see [`Self::is_current`].
+    superseded: Supersession,
+}
+
+/// Whether a record has left the table. A copy is a new record, so cloning
+/// yields one that is current.
+#[derive(Debug, Default)]
+struct Supersession(AtomicBool);
+
+impl Clone for Supersession {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
 }
 
 /// Add `delta` to the value `counter` holds, clamping at [`u64::MAX`]
@@ -459,7 +473,58 @@ impl TaskCapabilities {
             io_bytes_read: Arc::new(AtomicU64::new(0)),
             io_bytes_written: Arc::new(AtomicU64::new(0)),
             charges: Arc::new(ResourceCharges::new()),
+            superseded: Supersession::default(),
         }
+    }
+
+    /// Whether this is still its process's live record: `false` once a
+    /// mutation copied it, a replacement displaced it, or the process left the
+    /// table. A thread may keep using a record it holds exactly while this is
+    /// `true`, which is what lets a syscall read its caller's authority
+    /// without the table's lock.
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        !self.superseded.0.load(Ordering::Acquire)
+    }
+
+    /// Mark this record as no longer the table's. Ordered after every write
+    /// the table made under its lock, so a thread that sees the mark and
+    /// re-reads the table finds the record that replaced it.
+    fn supersede(&self) {
+        self.superseded.0.store(true, Ordering::Release);
+    }
+
+    /// A copy of this record, or [`None`] when the heap refuses its buffers.
+    fn try_clone(&self) -> Option<Self> {
+        let supplementary_gids = collected(
+            self.supplementary_gids.len(),
+            self.supplementary_gids.iter().copied(),
+        )?;
+        let spawn_path = collected(self.spawn_path.len(), self.spawn_path.iter().copied())?;
+        Some(Self {
+            process: self.process,
+            owner: self.owner,
+            primary_gid: self.primary_gid,
+            supplementary_gids,
+            user_grant: self.user_grant,
+            manifest_request: self.manifest_request,
+            effective: self.effective,
+            system_principal: self.system_principal,
+            sandboxed: self.sandboxed,
+            proc_id: self.proc_id,
+            parent_proc_id: self.parent_proc_id,
+            session: self.session,
+            login_session: self.login_session,
+            name: self.name.clone(),
+            spawn_path,
+            app: self.app,
+            start_time: self.start_time,
+            console: self.console,
+            io_bytes_read: Arc::clone(&self.io_bytes_read),
+            io_bytes_written: Arc::clone(&self.io_bytes_written),
+            charges: Arc::clone(&self.charges),
+            superseded: Supersession::default(),
+        })
     }
 
     /// Mark this record as belonging to the **system principal**: a program
@@ -1138,8 +1203,9 @@ pub struct CapTable {
     /// One record per process, keyed by the process (its leader's id).
     ///
     /// Shared, so a syscall's point-in-time snapshot ([`Self::snapshot_of`])
-    /// is a reference count rather than a copy; a mutation copies the record
-    /// only while some snapshot of it is still held.
+    /// and each thread's cached copy are reference counts rather than copies;
+    /// a mutation copies a record any of them still holds and supersedes the
+    /// held one ([`TaskCapabilities::is_current`]).
     entries: BTreeMap<ProcessId, Arc<TaskCapabilities>>,
     /// Every live thread, mapped to the process it belongs to. A process's
     /// leader maps to its own process, so [`Self::process_of`] is a single
@@ -1320,7 +1386,11 @@ impl CapTable {
         if !caps.proc_id().is_kernel() {
             self.instances.insert(caps.proc_id(), process);
         }
-        self.entries.insert(process, Arc::new(caps))
+        let previous = self.entries.insert(process, Arc::new(caps));
+        if let Some(previous) = &previous {
+            previous.supersede();
+        }
+        previous
     }
 
     /// Attach `thread` to the already-registered process `process`, so the
@@ -1442,10 +1512,16 @@ impl CapTable {
     /// syscall dispatcher's `cap_delegate` / `cap_revoke` paths,
     /// which call `TaskCapabilities::{delegate,revoke,apply_token}`
     /// directly on the borrowed record. Because the record is the process's,
-    /// a mutation by one thread is immediately in force for its siblings.
-    pub fn caps_for_mut(&mut self, thread: TaskId) -> Option<&mut TaskCapabilities> {
-        let process = self.process_of(thread)?;
-        self.entries.get_mut(&process).map(Arc::make_mut)
+    /// a mutation by one thread is in force for every sibling's next syscall.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a thread with no record;
+    /// [`Errno::OutOfMemory`], changing nothing, when the record is shared and
+    /// the heap refuses its copy.
+    pub fn caps_for_mut(&mut self, thread: TaskId) -> Result<&mut TaskCapabilities, Errno> {
+        let process = self.process_of(thread).ok_or(Errno::NotFound)?;
+        self.caps_of_process_mut(process)
     }
 
     /// Borrow a process's record directly, without resolving a thread.
@@ -1460,8 +1536,27 @@ impl CapTable {
 
     /// Mutably borrow a process's record directly, without resolving a
     /// thread. The counterpart of [`Self::caps_of_process`].
-    pub fn caps_of_process_mut(&mut self, process: ProcessId) -> Option<&mut TaskCapabilities> {
-        self.entries.get_mut(&process).map(Arc::make_mut)
+    ///
+    /// A record some thread or syscall still holds is copied first and the
+    /// held one superseded, so a holder keeps a consistent snapshot and learns
+    /// to re-read.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::caps_for_mut`].
+    pub fn caps_of_process_mut(
+        &mut self,
+        process: ProcessId,
+    ) -> Result<&mut TaskCapabilities, Errno> {
+        let entry = self.entries.get_mut(&process).ok_or(Errno::NotFound)?;
+        if Arc::get_mut(entry).is_none() {
+            let copy = entry.try_clone().ok_or(Errno::OutOfMemory)?;
+            let copy = Arc::try_new(copy).map_err(|_| Errno::OutOfMemory)?;
+            core::mem::replace(entry, copy).supersede();
+        }
+        // Unique now: nothing can share a record without the table, which
+        // `&mut self` holds, so this never copies.
+        Ok(Arc::make_mut(entry))
     }
 
     /// Narrow the process `target` belongs to down to `requested`, on behalf
@@ -1517,9 +1612,7 @@ impl CapTable {
             );
             return Err(Errno::PermissionDenied);
         }
-        self.caps_for_mut(target)
-            .ok_or(Errno::NotFound)?
-            .delegate(requested, audit)
+        self.caps_for_mut(target)?.delegate(requested, audit)
     }
 
     /// The process-instance identity currently registered for `process`, or
@@ -1605,6 +1698,7 @@ impl CapTable {
             }
         }
         let record = self.entries.remove(&process)?;
+        record.supersede();
         self.instances.remove(&record.proc_id());
         let released = self
             .sessions
@@ -1756,6 +1850,10 @@ mod tests {
     use tairix_abi::{CapabilityId, ABI_VERSION_CURRENT};
     use tairix_crypto::Ed25519SecretKey;
     use tairix_crypto::Ed25519Signature;
+
+    /// Metered so a test can refuse the heap to one call on its own thread.
+    #[global_allocator]
+    static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
     fn caps_of(items: &[CapabilityId]) -> CapabilitySet {
         let mut s = CapabilitySet::empty();
@@ -3227,7 +3325,91 @@ mod tests {
             .expect("present")
             .has(tairix_abi::CapabilityId::FS_MOUNT));
         assert!(table.caps_of_process(ProcessId(6)).is_none());
-        assert!(table.caps_of_process_mut(ProcessId(5)).is_some());
+        assert!(table.caps_of_process_mut(ProcessId(5)).is_ok());
+        assert_eq!(
+            table.caps_of_process_mut(ProcessId(6)).err(),
+            Some(Errno::NotFound)
+        );
+        assert_eq!(table.caps_for_mut(TaskId(6)).err(), Some(Errno::NotFound));
+    }
+
+    #[test]
+    fn a_mutation_supersedes_the_record_a_holder_shares_and_keeps_its_own_current() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(
+            5,
+            &[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW],
+        ));
+        let held = table.snapshot_of(TaskId(5)).expect("registered");
+        assert!(held.is_current());
+
+        let sink = RecordingSink::new();
+        assert!(table
+            .caps_for_mut(TaskId(5))
+            .expect("copied")
+            .revoke(CapabilityId::FS_MOUNT, &sink));
+        assert!(!held.is_current(), "the holder learns to re-read");
+        assert!(held.has(CapabilityId::FS_MOUNT), "and keeps its snapshot");
+
+        let fresh = table.snapshot_of(TaskId(5)).expect("registered");
+        assert!(fresh.is_current());
+        assert!(!fresh.has(CapabilityId::FS_MOUNT));
+        assert!(
+            Arc::ptr_eq(&fresh.charges, &held.charges),
+            "the copy shares the process's accounting"
+        );
+    }
+
+    #[test]
+    fn an_unshared_record_is_mutated_in_place() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[CapabilityId::FS_MOUNT]));
+        let before: *const TaskCapabilities = table.caps_for(TaskId(5)).expect("registered");
+        let sink = RecordingSink::new();
+        let record = table.caps_for_mut(TaskId(5)).expect("registered");
+        assert!(core::ptr::eq(before, record), "no holder, no copy");
+        assert!(record.revoke(CapabilityId::FS_MOUNT, &sink));
+        assert!(table
+            .snapshot_of(TaskId(5))
+            .expect("registered")
+            .is_current());
+    }
+
+    #[test]
+    fn a_replaced_or_removed_record_is_no_longer_current() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[CapabilityId::FS_MOUNT]));
+        let placeholder = table.snapshot_of(TaskId(5)).expect("registered");
+        let displaced = table
+            .insert(make_caps(5, &[CapabilityId::NET_RAW]))
+            .expect("replaced");
+        assert!(Arc::ptr_eq(&displaced, &placeholder));
+        assert!(!placeholder.is_current());
+
+        let effective = table.snapshot_of(TaskId(5)).expect("registered");
+        assert!(effective.is_current());
+        let _ = table.remove(ProcessId(5)).expect("present");
+        assert!(
+            !effective.is_current(),
+            "a holder re-reads and finds nothing"
+        );
+    }
+
+    #[test]
+    fn a_shared_record_whose_copy_the_heap_refuses_is_left_as_it_was() {
+        let mut table = CapTable::new();
+        table.insert(make_caps(5, &[CapabilityId::FS_MOUNT]));
+        let held = table.snapshot_of(TaskId(5)).expect("registered");
+        let refused = tairix_fuzzseed::meter::refusing_above(
+            core::mem::size_of::<TaskCapabilities>() - 1,
+            || table.caps_for_mut(TaskId(5)).err(),
+        );
+        assert_eq!(refused, Some(Errno::OutOfMemory));
+        assert!(held.is_current(), "nothing was superseded");
+        assert!(Arc::ptr_eq(
+            &held,
+            &table.snapshot_of(TaskId(5)).expect("registered")
+        ));
     }
 
     #[test]

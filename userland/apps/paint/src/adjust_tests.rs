@@ -202,6 +202,50 @@ fn levels_handles_and_fields_set_the_channel_shown() {
     );
 }
 
+/// A live edit leaves the field being typed in as it is: typing `2.5` into
+/// the gamma lands 2.50, where re-spelling every field after each key turned
+/// the first digit into `2.00` under the caret and mangled the rest.
+#[test]
+fn typing_a_decimal_is_not_respelled_under_the_caret() {
+    let mut pane = Pane::of(Filter::Levels(Levels::IDENTITY));
+    pane.type_into(Role::InputFields, 1, "2.5");
+    assert_eq!(pane.levels().of(Channel::Composite).gamma, 250);
+}
+
+/// A key typed into one setting repaints the parts that now show something
+/// else, not the whole pane.
+#[test]
+fn a_typed_setting_repaints_only_what_it_moved() {
+    let mut pane = Pane::of(Filter::Levels(Levels::IDENTITY));
+    let fields = pane.placed(Role::InputFields);
+    let output = pane.placed(Role::Output);
+    pane.click(fields.controls[0].center());
+    pane.chord(Key::Char('a'));
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut damage = Region::new();
+    pane.pane.on_key(
+        Keystroke {
+            key: Key::Char('9'),
+            modifiers: Modifiers::default(),
+            at_ns: 0,
+        },
+        (BOUNDS, VIEWPORT),
+        (Faces::of(theme, Scale::ONE), Scale::ONE, theme),
+        &mut damage,
+    );
+    assert_eq!(pane.levels().of(Channel::Composite).black, 9);
+    assert!(damage.intersects(fields.rect), "the fields it was typed in");
+    assert!(
+        damage.intersects(pane.placed(Role::Input).rect),
+        "and the track that shows the same black"
+    );
+    assert!(
+        !damage.intersects(output.rect),
+        "but not the output levels, which did not move"
+    );
+}
+
 #[test]
 fn reset_and_escape_return_the_settings_to_where_they_started() {
     let mut pane = Pane::of(Filter::Levels(Levels::IDENTITY));

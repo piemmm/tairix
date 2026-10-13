@@ -14,11 +14,11 @@
 // Re-exports under `cfg(loom)`.
 #[cfg(loom)]
 pub(crate) use loom::sync::atomic::{
-    fence, AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering,
+    fence, AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };
 
 // Re-exports under normal (non-`loom`) builds.
 #[cfg(not(loom))]
 pub(crate) use core::sync::atomic::{
-    fence, AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering,
+    fence, AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };

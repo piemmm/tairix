@@ -29,9 +29,9 @@ use tairix_cursor::CursorTheme;
 use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_hash::BuildFastHash;
 use tairix_icon::{
-    artwork_cache, icon_artwork_path, icon_vector_path, ArtworkCache, ArtworkDesk, ArtworkJob,
-    ArtworkKey, ArtworkResolver, IconArtworkSource, IconKind, IconSet, InlineArtwork, Landed,
-    NoArtwork, Resolved, MAX_ARTWORK_BYTES,
+    artwork_cache, icon_artwork_path, ArtworkCache, ArtworkDesk, ArtworkJob, ArtworkKey,
+    ArtworkResolver, IconArtworkSource, IconKind, IconSet, InlineArtwork, Landed, NoArtwork,
+    Resolved, MAX_ARTWORK_BYTES,
 };
 use tairix_log::{Event, Sink};
 use tairix_proglib::{
@@ -12300,10 +12300,7 @@ fn arriving_icon_artwork_repaints_only_the_icons_it_pictures() {
         "the fixture's two icons draw different pictures"
     );
 
-    let pictures_the_folder = |job: &ArtworkJob| {
-        matches!(&job.key, ArtworkKey::Asset(path)
-            if *path == icon_artwork_path(folder) || *path == icon_vector_path(folder))
-    };
+    let pictures_the_folder = |job: &ArtworkJob| matches!(&job.key, ArtworkKey::Raster(kind) | ArtworkKey::Vector(kind) if *kind == folder);
     let landed = land(&desk, pictures_the_folder);
     assert!(!landed.is_empty(), "the folder's picture was asked for");
 
@@ -12330,7 +12327,7 @@ fn arriving_artwork_over_an_empty_column_repaints_nothing() {
     let desktop: Desktop<TreeSource> = Desktop::new(TreeSource::fixture(), Vec::new());
     let desk = RefCell::new(ArtworkDesk::new());
     desk.borrow_mut()
-        .want(&ArtworkKey::Asset(icon_artwork_path(IconKind::Folder)), 48);
+        .want(&ArtworkKey::Raster(IconKind::Folder), 48);
     let landed = land(&desk, |_| true);
     assert!(!landed.is_empty(), "a decode landed");
     let mut icons = tairix_controls::damage::sink();

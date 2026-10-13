@@ -1331,3 +1331,51 @@ fn the_arrow_keys_walk_a_two_lane_tool_box_by_line_and_by_tool() {
     assert_eq!(press(&mut tool_box, NamedKey::Home), Some(0));
     assert_eq!(press(&mut tool_box, NamedKey::End), Some(4));
 }
+
+/// With no tool focused, a step along the axis lands on the first line forward
+/// and the last line back, as a single-lane step lands on the first or last
+/// tool, rather than stepping past the first line.
+#[test]
+fn a_line_step_from_no_focus_lands_on_the_first_or_last_line() {
+    let theme = Theme::dark();
+    let bounds = grid_bounds();
+    let mut tool_box = grid(5);
+    tool_box.on_key(
+        Key::Named(NamedKey::Down),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(
+        tool_box.focused(),
+        Some(0),
+        "the first line, not the second"
+    );
+    let mut tool_box = grid(5);
+    tool_box.on_key(
+        Key::Named(NamedKey::Up),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(tool_box.focused(), Some(4), "the last line");
+}
+
+/// A pointer event lays the strip out where it is handled, inline, so moving
+/// over a tool box allocates nothing.
+#[test]
+fn a_pointer_event_over_a_tool_box_allocates_nothing() {
+    let theme = Theme::dark();
+    let bounds = grid_bounds();
+    let mut tool_box = grid(5);
+    let mut damage = sink();
+    let over = Rect::new(0, xi(GAP), CH, CH).center();
+    let moved = InputEvent::PointerMoved { to: over };
+    let _ = tool_box.on_pointer(&moved, bounds, Scale::ONE, &theme, &mut damage);
+    let (_, metering) = tairix_fuzzseed::meter::metered(|| {
+        tool_box.on_pointer(&moved, bounds, Scale::ONE, &theme, &mut damage)
+    });
+    assert_eq!(metering.allocations, 0, "{metering:?}");
+}

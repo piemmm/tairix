@@ -1772,6 +1772,28 @@ fn centre(rect: Rect) -> Point {
     )
 }
 
+/// A flag set lays its flags out inline, so a hit test — which every pointer
+/// event over it makes — allocates nothing beyond what measuring its labels
+/// costs. The host test font keeps no measurement memo, so that cost is not
+/// zero here; the session's font client serves a repeat measure from one.
+#[test]
+fn a_flag_set_lays_its_flags_out_without_allocating() {
+    let theme = Theme::dark();
+    let set = rwx(true, false, true);
+    let bounds = Rect::new(0, 0, set.measured_width(Scale::ONE, &theme), H);
+    let first = set
+        .flag_rect(0, bounds, Scale::ONE, &theme)
+        .expect("a seated flag");
+    let (_, measuring) = tairix_fuzzseed::meter::metered(|| set.measured_width(Scale::ONE, &theme));
+    let (hit, hitting) =
+        tairix_fuzzseed::meter::metered(|| set.flag_at(bounds, Scale::ONE, &theme, centre(first)));
+    assert_eq!(hit, Some(0));
+    assert_eq!(
+        hitting.allocations, measuring.allocations,
+        "laying out the flags adds nothing to measuring them"
+    );
+}
+
 #[test]
 fn a_flag_set_measures_every_flag_and_the_room_after_it() {
     let theme = Theme::dark();

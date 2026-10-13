@@ -82,11 +82,27 @@ fn columns_stand_against_the_tallest_level_between_the_ends() {
         255 * 255,
         "the spike at black is not the scale"
     );
-    assert_eq!(histogram.column(Plot::Red, 0, 256), 1000, "held to the top");
-    assert_eq!(histogram.column(Plot::Red, 128, 256), 1000);
-    assert_eq!(histogram.column(Plot::Red, 200, 256), 0);
     assert_eq!(
-        histogram.column(Plot::Red, 64, 128),
+        histogram.columns(Plot::Red, 256).next().expect("a column"),
+        1000,
+        "held to the top"
+    );
+    assert_eq!(
+        histogram
+            .columns(Plot::Red, 256)
+            .nth(128)
+            .expect("a column"),
+        1000
+    );
+    assert_eq!(
+        histogram
+            .columns(Plot::Red, 256)
+            .nth(200)
+            .expect("a column"),
+        0
+    );
+    assert_eq!(
+        histogram.columns(Plot::Red, 128).nth(64).expect("a column"),
         1000,
         "a column covers two levels"
     );
@@ -95,5 +111,5 @@ fn columns_stand_against_the_tallest_level_between_the_ends() {
         None,
     )
     .expect("room");
-    assert_eq!(empty.column(Plot::Luma, 3, 10), 0);
+    assert_eq!(empty.columns(Plot::Luma, 10).nth(3).expect("a column"), 0);
 }

@@ -1186,6 +1186,18 @@ fn a_modifier_change_mid_shape_repaints_the_preview() {
         &mut damage,
     );
     assert!(!damage.is_empty(), "the squared preview is drawn");
+    let mut again = Region::new();
+    let _ = window.view.on_pointer(
+        &InputEvent::ModifiersChanged { modifiers: shift },
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut again,
+    );
+    assert!(
+        again.is_empty(),
+        "modifiers restated unchanged draw nothing"
+    );
 }
 
 /// An action that needs the floating selection down waits for it: the
@@ -4060,6 +4072,63 @@ fn the_pixel_grid_shows_from_the_zoom_the_settings_name() {
         .view
         .adopt(&preferences, &window.layout, &mut Region::new());
     assert!(!window.view.pixel_grid_shown(), "never");
+}
+
+#[test]
+fn a_style_change_repaints_only_what_it_draws_differently() {
+    use crate::preferences::{Preferences, Surround};
+    use tairix_colour::Rgb;
+    let mut window = Window::white(16, 16);
+    let canvas = window.layout.canvas();
+    let picture = window
+        .view
+        .viewport()
+        .to_screen(Bounds::picture(16, 16), (16, 16), canvas);
+    assert!(
+        !picture.is_empty() && picture != canvas,
+        "the surround shows"
+    );
+    let mut preferences = Preferences::default();
+    let adopt = |window: &mut Window, preferences: &Preferences| {
+        let mut damage = Region::new();
+        window.view.adopt(preferences, &window.layout, &mut damage);
+        damage
+    };
+    preferences.grid.shown = true;
+    preferences.grid.snap = true;
+    assert!(
+        adopt(&mut window, &preferences).is_empty(),
+        "flags draw nothing"
+    );
+    preferences.grid.colour = Rgb::new(1, 2, 3);
+    assert!(
+        adopt(&mut window, &preferences).is_empty(),
+        "no grid shown here"
+    );
+    preferences.pixel_grid_from = 900;
+    assert!(
+        adopt(&mut window, &preferences).is_empty(),
+        "shown at neither"
+    );
+    window.act(Action::Grid);
+    preferences.grid.opacity = 900;
+    assert_eq!(adopt(&mut window, &preferences).rects(), [picture]);
+    preferences.checker_side = 4;
+    assert_eq!(adopt(&mut window, &preferences).rects(), [picture]);
+    preferences.pixel_grid_from = 100;
+    assert_eq!(adopt(&mut window, &preferences).rects(), [picture]);
+    preferences.surround = Surround::Chosen(Rgb::new(9, 9, 9));
+    let damage = adopt(&mut window, &preferences);
+    assert!(
+        !damage.intersects(picture),
+        "the picture is not the surround"
+    );
+    let area = |rect: &Rect| u64::from(rect.width) * u64::from(rect.height);
+    assert_eq!(
+        damage.rects().iter().map(area).sum::<u64>(),
+        area(&canvas) - area(&picture),
+        "every pixel about the picture",
+    );
 }
 
 #[test]

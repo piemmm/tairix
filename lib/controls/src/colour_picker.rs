@@ -367,7 +367,18 @@ impl Layout {
 
     /// Where the plane marker for `hsv` is drawn, within the plane.
     fn marker(&self, hsv: Hsv) -> Rect {
-        let (cx, cy) = marker_centre(self.inner(Part::Plane), hsv);
+        self.marker_at(marker_centre(self.inner(Part::Plane), hsv))
+    }
+
+    /// Where the wheel's triangle marker for `hsv` is drawn, within the plane.
+    fn triangle_marker(&self, hsv: Hsv) -> Rect {
+        let (x, y) = Wheel::in_area(self.inner(Part::Ring)).point_of(hsv);
+        self.marker_at((mathf::round_i32(x), mathf::round_i32(y)))
+    }
+
+    /// The rectangle a marker centred on `(cx, cy)` is drawn in, within the
+    /// plane.
+    fn marker_at(&self, (cx, cy): (i32, i32)) -> Rect {
         let reach = self.measures.marker + 1;
         let side = reach * 2 + 1;
         Rect::new(cx - to_i32(reach), cy - to_i32(reach), side, side).intersection(&self.plane)
@@ -1364,7 +1375,17 @@ impl ColourPicker {
                     damage.add(layout.marker(hsv));
                 }
             }
-            PickerView::Wheel | PickerView::Sliders => damage.add(layout.plane),
+            // The ring is drawn from the geometry alone and the triangle from
+            // the hue, so a saturation or value change moves only the marker.
+            PickerView::Wheel => {
+                if hsv.hue != self.hsv.hue {
+                    damage.add(layout.plane);
+                } else if (hsv.saturation, hsv.value) != (self.hsv.saturation, self.hsv.value) {
+                    damage.add(layout.triangle_marker(self.hsv));
+                    damage.add(layout.triangle_marker(hsv));
+                }
+            }
+            PickerView::Sliders => damage.add(layout.plane),
         }
         damage.add(layout.alpha);
         damage.add(layout.now);

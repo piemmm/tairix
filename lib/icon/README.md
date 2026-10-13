@@ -112,8 +112,8 @@ over a resolution-independent design grid, so the same glyph is
   lookup a headless build or a test uses. A retained `Artwork` may carry the
   rectangle its picture was fitted to (a thumbnail's, `Fitted`), which a draw
   outlines, and `IconArtwork::shadowed` serves a picture with the soft shadow
-  cast once from its coverage and retained as its own entry
-  (`ArtworkKey::Shadow`).
+  cast once from its coverage and retained as its own entry. A lookup
+  compares its slot borrowed from the request, so a hit builds no key.
 - `ArtworkResolver` is the seam between deciding what a draw needs and
   producing it, because a read plus a sandbox round trip must never happen
   inside a paint. `InlineArtwork` reads and decodes on the calling thread; a

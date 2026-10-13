@@ -35,3 +35,7 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 [dev-dependencies]
 # The sink a test reads an ending's record back from.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The fuzz harness draws its inputs through the shared seed/budget seam: one
+# place picks the per-run seed, logs it, and bounds the smoke/soak loop. Test
+# scaffolding only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

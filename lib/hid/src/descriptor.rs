@@ -401,6 +401,9 @@ pub struct ReportDescriptor {
     fields: Vec<Field>,
     collections: Vec<Collection>,
     usages: Vec<UsageEntry>,
+    /// Beside each usage entry, the place in its field's list its first
+    /// usage takes, so a place is found by halving rather than by walking.
+    starts: Vec<u32>,
     reports: Vec<ReportLength>,
     report_ids: bool,
 }
@@ -486,16 +489,10 @@ impl ReportDescriptor {
         if element >= field.count {
             return None;
         }
-        let entries = self.usages(field);
-        let mut remaining = u32::from(element);
-        for entry in entries {
-            if remaining < entry.len() {
-                return entry.nth(remaining);
-            }
-            remaining -= entry.len();
-        }
-        let last = entries.last()?;
-        last.nth(last.len() - 1)
+        self.usage_at(field, u32::from(element)).or_else(|| {
+            let last = self.usages(field).last()?;
+            last.nth(last.len() - 1)
+        })
     }
 
     /// The usage an array `field` selects with `value`: the usage at
@@ -505,14 +502,22 @@ impl ReportDescriptor {
         if !field.in_range(value) {
             return None;
         }
-        let mut remaining = u32::try_from(value - field.logical.0).ok()?;
-        for entry in self.usages(field) {
-            if remaining < entry.len() {
-                return entry.nth(remaining);
-            }
-            remaining -= entry.len();
-        }
-        None
+        self.usage_at(field, u32::try_from(value - field.logical.0).ok()?)
+    }
+
+    /// The usage at `place` in `field`'s usage list, `None` past its end.
+    ///
+    /// Decoding a report asks this of every element, so it halves the
+    /// entries' starts: a walk from the first entry would make a report's
+    /// decode quadratic in its descriptor.
+    fn usage_at(&self, field: &Field, place: u32) -> Option<Usage> {
+        let range = usize::from(field.usages.start)..usize::from(field.usages.end);
+        let starts = self.starts.get(range.clone())?;
+        let at = starts
+            .partition_point(|&start| start <= place)
+            .checked_sub(1)?;
+        let entry = self.usages.get(range)?.get(at)?;
+        entry.nth(place - starts[at])
     }
 
     /// Element of a variable `field` that carries `usage`.
@@ -744,6 +749,7 @@ struct Model {
     fields: Vec<Field>,
     collections: Vec<Collection>,
     usages: Vec<UsageEntry>,
+    starts: Vec<u32>,
     reports: Vec<ReportLength>,
 }
 
@@ -933,9 +939,12 @@ impl Parser {
             self.unprefixed_data = true;
         }
         let first = u16::try_from(self.model.usages.len()).map_err(|_| DescriptorError::TooMany)?;
+        let mut place = 0u32;
         for index in 0..self.locals.entries.len() {
             let entry = self.resolve(self.locals.entries[index])?;
             push(&mut self.model.usages, entry, MAX_USAGE_ENTRIES)?;
+            push(&mut self.model.starts, place, MAX_USAGE_ENTRIES)?;
+            place = place.saturating_add(entry.len());
         }
         let last = u16::try_from(self.model.usages.len()).map_err(|_| DescriptorError::TooMany)?;
         let logical = range(globals.logical_min, globals.logical_max);
@@ -1011,6 +1020,7 @@ impl Parser {
             fields: self.model.fields,
             collections: self.model.collections,
             usages: self.model.usages,
+            starts: self.model.starts,
             reports: self.model.reports,
             report_ids,
         })

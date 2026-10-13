@@ -45,6 +45,9 @@
 //! `captable::uid_zero_gets_no_extra_powers`) lock this invariant in.
 
 #![no_std]
+// `Arc::try_new`, so a record copy the heap refuses fails the mutation
+// instead of aborting the kernel.
+#![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 

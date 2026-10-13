@@ -151,27 +151,31 @@ impl Histogram {
         }
     }
 
-    /// How tall column `column` of `columns` across stands, in thousandths
-    /// of the height: the tallest level the column covers, against
-    /// [`scale`](Self::scale), held to the top.
-    #[must_use]
-    pub fn column(&self, plot: Plot, column: u32, columns: u32) -> u16 {
+    /// How tall each of `columns` columns across stands, in thousandths of
+    /// the height: the tallest level a column covers, against
+    /// [`scale`](Self::scale), held to the top. The scale is found once for
+    /// the whole plot, not once a column.
+    pub fn columns(&self, plot: Plot, columns: u32) -> impl Iterator<Item = u16> + '_ {
         let scale = self.scale(plot);
-        if scale == 0 || columns == 0 {
-            return 0;
-        }
-        let start = usize::try_from(u64::from(column) * 256 / u64::from(columns)).unwrap_or(256);
-        let end = usize::try_from((u64::from(column) + 1) * 256 / u64::from(columns))
-            .unwrap_or(256)
-            .max(start + 1)
-            .min(256);
-        let tallest = self.counts(plot)[start.min(255)..end]
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0);
-        u16::try_from((u128::from(tallest.min(scale)) * 1000 / u128::from(scale)).min(1000))
-            .unwrap_or(1000)
+        let counts = self.counts(plot);
+        (0..columns).map(move |column| {
+            if scale == 0 {
+                return 0;
+            }
+            let start =
+                usize::try_from(u64::from(column) * 256 / u64::from(columns)).unwrap_or(256);
+            let end = usize::try_from((u64::from(column) + 1) * 256 / u64::from(columns))
+                .unwrap_or(256)
+                .max(start + 1)
+                .min(256);
+            let tallest = counts[start.min(255)..end]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            u16::try_from((u128::from(tallest.min(scale)) * 1000 / u128::from(scale)).min(1000))
+                .unwrap_or(1000)
+        })
     }
 }
 

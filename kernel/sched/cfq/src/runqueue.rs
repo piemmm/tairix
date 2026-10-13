@@ -1,9 +1,10 @@
 //! Per-CPU weighted-vruntime run queue for the CFQ policy.
 //!
 //! Each CPU owns one [`RunQueue`]: an ordered set of ready [`Entry`]
-//! records (a [`TaskId`] keyed by its current virtual runtime) kept under
-//! a single `SpinLock`, plus a monotonic `min_vruntime` floor and the
-//! total weight of the tasks the CPU owns.
+//! records (a task keyed by its current virtual runtime, carried so a pick
+//! hands the dispatcher the task itself) kept under a single `SpinLock`, plus
+//! a monotonic `min_vruntime` floor and the total weight of the tasks the CPU
+//! owns.
 //!
 //! Unlike the MLFQ sibling's per-band Chase–Lev deques, CFQ orders the
 //! ready set by a continuous virtual runtime and always dispatches the
@@ -23,10 +24,9 @@
 use alloc::collections::{BinaryHeap, VecDeque};
 use core::cmp::Reverse;
 
+use tairix_kernel_sched_api::queue::Keyed;
 use tairix_kernel_sched_api::share::SCALE;
 use tairix_sync::SpinLock;
-
-use crate::TaskId;
 
 /// Virtual-runtime head start a task joining the competition is placed
 /// ahead of the CPU's timeline floor by.
@@ -44,17 +44,17 @@ use crate::TaskId;
 pub(crate) const SLEEPER_CREDIT: u64 = SCALE;
 
 /// A ready task as tracked by a [`RunQueue`].
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Entry {
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct Entry<T> {
     /// The ready task.
-    pub id: TaskId,
+    pub task: T,
     /// The task's virtual runtime `vruntime` (fixed point). The smallest
     /// `vruntime` among ready entries wins the pick.
     pub vruntime: u64,
 }
 
 /// Mutable interior of a [`RunQueue`], guarded by one `SpinLock`.
-struct Inner {
+struct Inner<T> {
     /// Strict-priority real-time band, in FIFO arrival order. Any entry
     /// here is dispatched (and stolen) before *any* time-shared entry in
     /// [`Self::ready`], regardless of virtual runtime — the
@@ -63,9 +63,9 @@ struct Inner {
     /// share the CPU round-robin. Real-time tasks carry no virtual runtime;
     /// only [`Self::total_weight`] counts them (for load-balanced
     /// placement). Bounded by [`Self::capacity`] exactly like the fair set.
-    rt_ready: VecDeque<TaskId>,
-    /// Ready set keyed by `(vruntime, seq, id)` so the top of the heap is
-    /// the smallest-vruntime task, ties broken by arrival order. The CFS
+    rt_ready: VecDeque<T>,
+    /// Ready set keyed by `(vruntime, seq)` so the top of the heap is the
+    /// smallest-vruntime task, ties broken by arrival order. The CFS
     /// red-black tree analog.
     ///
     /// The tie-break is the enqueue sequence rather than the task id
@@ -76,7 +76,7 @@ struct Inner {
     /// would be an arbitrary winner; even ordered ids would systematically
     /// favour one task over another. Arrival order is the fair answer and
     /// the one a reader expects of a run queue.
-    ready: BinaryHeap<Reverse<(u64, u64, TaskId)>>,
+    ready: BinaryHeap<Keyed<Reverse<(u64, u64)>, T>>,
     /// Monotonic enqueue counter supplying the FIFO half of a `ready` key.
     ///
     /// One increment per enqueue, so it cannot wrap in any real uptime; a
@@ -99,12 +99,12 @@ struct Inner {
     capacity: usize,
 }
 
-/// Per-CPU CFQ run queue.
-pub(crate) struct RunQueue {
-    inner: SpinLock<Inner>,
+/// Per-CPU CFQ run queue of `T`, the handle a queued task is held by.
+pub(crate) struct RunQueue<T> {
+    inner: SpinLock<Inner<T>>,
 }
 
-impl RunQueue {
+impl<T> RunQueue<T> {
     /// Construct an empty queue bounded to `capacity` ready entries.
     ///
     /// Returns `None` if `capacity` is not a power of two `>= 2`,
@@ -172,63 +172,72 @@ impl RunQueue {
         g.rt_ready.len() + g.ready.len()
     }
 
-    /// Push a ready entry. Returns `Err(id)` if the queue is at its
+    /// Push a ready entry. Hands the task back if the queue is at its
     /// compile-time bound or its storage cannot grow (the caller then routes
     /// it to overflow).
-    pub(crate) fn push(&self, entry: Entry) -> Result<(), TaskId> {
+    pub(crate) fn push(&self, entry: Entry<T>) -> Result<(), T> {
         let mut g = self.inner.lock();
         if g.ready.len() >= g.capacity || g.ready.try_reserve(1).is_err() {
-            return Err(entry.id);
+            return Err(entry.task);
         }
         let seq = g.next_seq;
         g.next_seq = g.next_seq.wrapping_add(1);
-        g.ready.push(Reverse((entry.vruntime, seq, entry.id)));
+        g.ready.push(Keyed {
+            key: Reverse((entry.vruntime, seq)),
+            task: entry.task,
+        });
         Ok(())
     }
 
     /// Push a real-time task onto the back of the strict-priority band
-    /// (FIFO / round-robin). Returns `Err(id)` if the band is at its
+    /// (FIFO / round-robin). Hands the task back if the band is at its
     /// compile-time bound or cannot grow (the caller then routes it to
     /// overflow), exactly like [`Self::push`].
-    pub(crate) fn push_rt(&self, id: TaskId) -> Result<(), TaskId> {
+    pub(crate) fn push_rt(&self, task: T) -> Result<(), T> {
         let mut g = self.inner.lock();
         if g.rt_ready.len() >= g.capacity || g.rt_ready.try_reserve(1).is_err() {
-            return Err(id);
+            return Err(task);
         }
-        g.rt_ready.push_back(id);
+        g.rt_ready.push_back(task);
         Ok(())
     }
 
     /// Pick and remove the smallest-vruntime ready task (the leftmost
     /// entity), advancing the monotonic floor to it so the timeline never
     /// runs backwards.
-    pub(crate) fn pick(&self) -> Option<Entry> {
+    pub(crate) fn pick(&self) -> Option<Entry<T>> {
         let mut g = self.inner.lock();
         // Strict priority: any ready real-time task is dispatched before the
         // smallest-vruntime fair task, and its pick never advances the fair
         // timeline floor (a real-time task carries no vruntime).
-        if let Some(id) = g.rt_ready.pop_front() {
-            return Some(Entry { id, vruntime: 0 });
+        if let Some(task) = g.rt_ready.pop_front() {
+            return Some(Entry { task, vruntime: 0 });
         }
-        let Reverse((vruntime, _seq, id)) = g.ready.pop()?;
+        let Keyed {
+            key: Reverse((vruntime, _seq)),
+            task,
+        } = g.ready.pop()?;
         if vruntime > g.min_vruntime {
             g.min_vruntime = vruntime;
         }
-        Some(Entry { id, vruntime })
+        Some(Entry { task, vruntime })
     }
 
     /// Steal the smallest-vruntime ready entry for another CPU, if any.
     /// Weight bookkeeping is settled by the caller as the task changes
     /// owning CPU.
-    pub(crate) fn steal(&self) -> Option<Entry> {
+    pub(crate) fn steal(&self) -> Option<Entry<T>> {
         let mut g = self.inner.lock();
         // Steal a waiting real-time task first: moving it to an idle CPU
         // shortens its dispatch latency, and it stays strict-priority there.
-        if let Some(id) = g.rt_ready.pop_front() {
-            return Some(Entry { id, vruntime: 0 });
+        if let Some(task) = g.rt_ready.pop_front() {
+            return Some(Entry { task, vruntime: 0 });
         }
-        let Reverse((vruntime, _seq, id)) = g.ready.pop()?;
-        Some(Entry { id, vruntime })
+        let Keyed {
+            key: Reverse((vruntime, _seq)),
+            task,
+        } = g.ready.pop()?;
+        Some(Entry { task, vruntime })
     }
 }
 
@@ -236,8 +245,12 @@ impl RunQueue {
 mod tests {
     use super::*;
 
-    fn e(id: TaskId, vruntime: u64) -> Entry {
-        Entry { id, vruntime }
+    use crate::TaskId;
+
+    type RunQueue = super::RunQueue<TaskId>;
+
+    fn e(task: TaskId, vruntime: u64) -> Entry<TaskId> {
+        Entry { task, vruntime }
     }
 
     #[test]
@@ -262,9 +275,9 @@ mod tests {
         q.push(e(1, 30)).expect("push");
         q.push(e(2, 10)).expect("push");
         q.push(e(3, 20)).expect("push");
-        assert_eq!(q.pick().map(|x| x.id), Some(2));
-        assert_eq!(q.pick().map(|x| x.id), Some(3));
-        assert_eq!(q.pick().map(|x| x.id), Some(1));
+        assert_eq!(q.pick().map(|x| x.task), Some(2));
+        assert_eq!(q.pick().map(|x| x.task), Some(3));
+        assert_eq!(q.pick().map(|x| x.task), Some(1));
         assert_eq!(q.pick(), None);
     }
 
@@ -277,9 +290,9 @@ mod tests {
         q.push(e(5, 7)).expect("push");
         q.push(e(2, 7)).expect("push");
         q.push(e(9, 7)).expect("push");
-        assert_eq!(q.pick().map(|x| x.id), Some(5), "first in, first picked");
-        assert_eq!(q.pick().map(|x| x.id), Some(2));
-        assert_eq!(q.pick().map(|x| x.id), Some(9));
+        assert_eq!(q.pick().map(|x| x.task), Some(5), "first in, first picked");
+        assert_eq!(q.pick().map(|x| x.task), Some(2));
+        assert_eq!(q.pick().map(|x| x.task), Some(9));
     }
 
     #[test]
@@ -302,11 +315,15 @@ mod tests {
         for id in 1..=4 {
             q.push(e(id, 100 * SCALE)).expect("push");
         }
-        assert_eq!(q.pick().map(|x| x.id), Some(1), "the floor is established");
+        assert_eq!(
+            q.pick().map(|x| x.task),
+            Some(1),
+            "the floor is established"
+        );
         let joiner = q.front();
         q.push(e(9, joiner)).expect("push");
         assert_eq!(
-            q.pick().map(|x| x.id),
+            q.pick().map(|x| x.task),
             Some(9),
             "a joiner outranks entries level with the floor despite arriving last"
         );

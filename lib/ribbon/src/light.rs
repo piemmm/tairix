@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use crate::SKY;
 use core::f64::consts::{FRAC_PI_2, TAU};
 use core::iter::successors;
-use core::ops::Range;
+use core::ops::{Range, RangeInclusive};
 
 use tairix_geometry::{Rect, Region};
 use tairix_raster::{DitherRow, Pixel, Surface};
@@ -509,9 +509,9 @@ const PIXELS_PER_SAMPLE: u32 = 2;
 /// light is summed down a column and written along a row.
 const CHUNK: u32 = 16;
 
-/// Lanes in a row of a chunk's toned samples: its columns and the right
-/// neighbour they blend into.
-const CHUNK_LANES: usize = CHUNK as usize + 1;
+/// Lanes in a row of a chunk's toned samples: its columns, a lone column
+/// left over that joins it, and the right neighbour they blend into.
+const CHUNK_LANES: usize = CHUNK as usize + 2;
 
 /// Sample columns whose pixels are repainted as one strip.
 const STRIP: u32 = 32;
@@ -650,6 +650,21 @@ pub struct Light {
     toned: Vec<u64>,
     /// A pixel row blended from the two sample rows about it.
     between: Vec<u64>,
+    #[cfg(test)]
+    tally: Tally,
+}
+
+/// The work paints have done, which tests measure rather than time.
+#[cfg(test)]
+#[derive(Copy, Clone, Debug, Default)]
+struct Tally {
+    /// Sample rows summed, one column at a time.
+    summed: usize,
+    /// Chunks written.
+    chunks: usize,
+    /// Pixels written inside the text's clear space, which the sky then
+    /// covers.
+    over_clear: u64,
 }
 
 impl Light {
@@ -711,6 +726,8 @@ impl Light {
             sums,
             toned,
             between,
+            #[cfg(test)]
+            tally: Tally::default(),
         };
         light.arrange(on_screen(exclusion, size));
         light.place(t);
@@ -781,7 +798,9 @@ impl Light {
     /// its light does not reach and over the whole of the text's clear space.
     ///
     /// Every sample is summed the same way whatever area asks for it, so a
-    /// part repainted matches the whole painted at once pixel for pixel.
+    /// part repainted matches the whole painted at once pixel for pixel. A
+    /// chunk sums and writes only the rows its columns' light reaches, and
+    /// lays the sky over the rest of it.
     pub fn paint(&mut self, surface: &mut Surface, area: Rect) {
         let (width, height) = self.size;
         let area = on_screen(area, self.size);
@@ -795,32 +814,52 @@ impl Light {
         if pixels.0.is_empty() || pixels.1.is_empty() {
             return;
         }
-        // The samples those pixels blend: the one at or before each pixel,
-        // and the one after.
-        let samples = (
-            pixels.0.start / PIXELS_PER_SAMPLE..pixels.0.end.div_ceil(PIXELS_PER_SAMPLE),
-            pixels.1.start / PIXELS_PER_SAMPLE
-                ..(pixels.1.end / PIXELS_PER_SAMPLE + 1).min(self.grid.1),
-        );
-        let depth = index_of(samples.1.end - samples.1.start);
-        let mut first = samples.0.start;
-        let mut carried = false;
-        while first < samples.0.end {
-            let end = first.saturating_add(CHUNK).min(samples.0.end);
-            for lane in u32::from(carried)..=(end - first) {
-                let column = (first + lane).min(self.grid.0 - 1);
-                self.tone_column(column, samples.1.clone(), index_of(lane));
-            }
+        // The sample columns those pixels blend: the one at or before each
+        // pixel, and the one after.
+        let samples = pixels.0.start / PIXELS_PER_SAMPLE..pixels.0.end.div_ceil(PIXELS_PER_SAMPLE);
+        let mut first = samples.start;
+        // The sample rows the first lane holds, toned as the last chunk's
+        // neighbour.
+        let mut carried = None;
+        while first < samples.end {
+            let remaining = samples.end - first;
+            let end = first
+                + if remaining == CHUNK + 1 {
+                    remaining
+                } else {
+                    remaining.min(CHUNK)
+                };
             let owned = pixel_of(first).max(pixels.0.start)..pixel_of(end).min(pixels.0.end);
+            let lit = self.lit_rows(first..=end, &pixels.1);
+            for dark in [pixels.1.start..lit.start, lit.end..pixels.1.end] {
+                surface.fill_rect(
+                    owned.start,
+                    dark.start,
+                    owned.end - owned.start,
+                    dark.end.saturating_sub(dark.start),
+                    SKY,
+                );
+            }
+            if lit.is_empty() {
+                carried = None;
+                first = end;
+                continue;
+            }
+            // The samples the lit pixels blend: the one at or above each
+            // pixel, and the one below.
+            let rows =
+                lit.start / PIXELS_PER_SAMPLE..(lit.end / PIXELS_PER_SAMPLE + 1).min(self.grid.1);
+            let from = u32::from(carried.as_ref() == Some(&rows));
+            for lane in from..=(end - first) {
+                let column = (first + lane).min(self.grid.0 - 1);
+                self.tone_column(column, rows.clone(), index_of(lane));
+            }
+            let depth = index_of(rows.end - rows.start);
             let used = index_of(end - first) + 1;
-            self.write(
-                surface,
-                (first, owned),
-                (samples.1.start, depth, pixels.1.clone()),
-                used,
-            );
+            self.write(surface, (first, owned), (rows.start, depth, lit), used);
             // The neighbour this chunk blended into is the next chunk's first
-            // column: keep it rather than sum it again.
+            // column: keep it rather than sum it again where the next chunk
+            // asks for the same rows.
             for row in self
                 .toned
                 .as_chunks_mut::<CHUNK_LANES>()
@@ -830,7 +869,7 @@ impl Light {
             {
                 row[0] = row[used - 1];
             }
-            carried = true;
+            carried = Some(rows);
             first = end;
         }
         let clear = area.intersection(&self.exclusion);
@@ -839,10 +878,29 @@ impl Light {
         }
     }
 
+    /// The pixel rows of `rows` the light of sample `columns` reaches, as one
+    /// span within them: every other row of them is the sky. Light reaching
+    /// none of them is an empty span at their end.
+    fn lit_rows(&self, columns: RangeInclusive<u32>, rows: &Range<u32>) -> Range<u32> {
+        let last = self.grid.0 - 1;
+        let (high, low) = columns
+            .map(|column| self.placed[index_of(column.min(last))].lit)
+            .filter(|lit| lit.0 < lit.1)
+            .fold((u32::MAX, 0), |(high, low), lit| {
+                (high.min(lit.0), low.max(lit.1))
+            });
+        let start = high.clamp(rows.start, rows.end);
+        start..low.clamp(start, rows.end)
+    }
+
     /// Sum sample `column`'s light over sample `rows` and tone it into `lane`
     /// of the chunk.
     fn tone_column(&mut self, column: u32, rows: Range<u32>, lane: usize) {
         let depth = index_of(rows.end - rows.start);
+        #[cfg(test)]
+        {
+            self.tally.summed += depth;
+        }
         let Self {
             columns,
             placed,
@@ -879,6 +937,12 @@ impl Light {
     ) {
         if columns.is_empty() || samples == 0 {
             return;
+        }
+        #[cfg(test)]
+        {
+            self.tally.chunks += 1;
+            let wasted = rect(columns.clone(), rows.clone()).intersection(&self.exclusion);
+            self.tally.over_clear += u64::from(wasted.width) * u64::from(wasted.height);
         }
         let sample_row = |row: usize| row * CHUNK_LANES..row * CHUNK_LANES + used;
         for row in rows {

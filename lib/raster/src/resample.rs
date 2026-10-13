@@ -849,10 +849,10 @@ where
         copy_rows(src, columns, rows_plan, window, out);
         return Ok(());
     }
-    accumulator.clear();
-    if !cache.reset(window.width, rows_plan.stride)
-        || !fallible::grow_to(accumulator, samples_per_row(window.width), 0)
-    {
+    // Sized, not cleared: the first tap of every row writes all of it.
+    let samples = samples_per_row(window.width);
+    accumulator.truncate(samples);
+    if !cache.reset(window.width, rows_plan.stride) || !fallible::grow_to(accumulator, samples, 0) {
         return Err(ResampleError::OutOfMemory);
     }
     for (row, chunk) in (0..window.height as usize).zip(out) {
@@ -1309,14 +1309,16 @@ impl RowCache {
     /// for a destination row that reads `taps` source rows but never deeper
     /// than [`ROW_SLOTS`], or `false` when the allocator refuses the rows.
     ///
-    /// Every slot is forgotten and every row cleared, so what an earlier
-    /// resample filtered can never answer for this one.
+    /// Every slot is forgotten, so what an earlier resample filtered can never
+    /// answer for this one, and a forgotten slot's row is filtered whole
+    /// before it is read, so the rows are sized rather than cleared.
     fn reset(&mut self, dest_width: u32, taps: usize) -> bool {
         let slots = taps.clamp(1, ROW_SLOTS);
         self.stride = samples_per_row(dest_width);
-        self.rows.clear();
+        let samples = slots.saturating_mul(self.stride);
+        self.rows.truncate(samples);
         self.held.clear();
-        fallible::grow_to(&mut self.rows, slots.saturating_mul(self.stride), 0)
+        fallible::grow_to(&mut self.rows, samples, 0)
             && fallible::grow_to(&mut self.held, slots, None)
     }
 

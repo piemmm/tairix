@@ -39,7 +39,7 @@ use crate::gradient::Gradient;
 use crate::layout::{Faces, Floor, Layout, Needs};
 use crate::mask::{Combine, Mask, Recipe};
 use crate::pane::{Arrangement, PaneKind, Side};
-use crate::preferences::{CanvasStyle, OpenAt, Preferences};
+use crate::preferences::{CanvasStyle, Grid, OpenAt, Preferences};
 use crate::save::{format_for, natural, save_endings, survey, Loss, SaveFormat, SaveRefusal};
 use crate::selection::{cut_out, Floating};
 use crate::shape::{Bounds, Point as Fx, Shape, Span, FX};
@@ -1345,8 +1345,14 @@ impl View {
     /// zoom past the one the settings name.
     #[must_use]
     pub fn pixel_grid_shown(&self) -> bool {
+        self.pixel_grid_shown_from(self.style.pixel_grid_from)
+    }
+
+    /// Whether the grid between pixels is drawn when it shows from zoom
+    /// `from`, in percent.
+    fn pixel_grid_shown_from(&self, from: u32) -> bool {
         let (across, down) = self.viewport.pixel_span();
-        let from = u64::from(self.style.pixel_grid_from);
+        let from = u64::from(from);
         self.grids.pixels && from != 0 && across.min(down) * 100 >= from
     }
 
@@ -1415,13 +1421,44 @@ impl View {
     /// Draw as the settings now say, and put the panes back to the ones they
     /// name when asked to; what a window started with stays its own.
     pub fn adopt(&mut self, preferences: &Preferences, layout: &Layout, damage: &mut Region) {
-        let style = preferences.canvas_style();
-        if style != self.style {
-            self.style = style;
-            damage.add(layout.canvas());
+        let was = core::mem::replace(&mut self.style, preferences.canvas_style());
+        if was != self.style {
+            self.restyled(&was, layout, damage);
         }
         self.home_panes.clone_from(&preferences.panes);
         self.new_picture = (preferences.new, preferences.format);
+    }
+
+    /// Report what drawing with the style in force rather than `was`
+    /// changes: the surround about the picture, and the picture itself only
+    /// where its checkerboard, or a grid this window shows, is drawn
+    /// differently. Whether a new window shows the grid, and snapping, draw
+    /// nothing.
+    fn restyled(&self, was: &CanvasStyle, layout: &Layout, damage: &mut Region) {
+        let now = &self.style;
+        let picture = self.document.picture().map_or(Rect::EMPTY, |picture| {
+            let (width, height) = picture.size();
+            self.screen(Bounds::picture(width, height), layout)
+        });
+        if now.surround != was.surround {
+            let mut around = Region::new();
+            around.add(layout.canvas());
+            around.subtract(picture);
+            for &band in around.rects() {
+                damage.add(band);
+            }
+        }
+        let drawn = |grid: Grid| Grid {
+            shown: false,
+            snap: false,
+            ..grid
+        };
+        let redrawn = (now.checker_side, now.shades) != (was.checker_side, was.shades)
+            || self.pixel_grid_shown_from(was.pixel_grid_from) != self.pixel_grid_shown()
+            || (self.grid_shown() && drawn(now.grid) != drawn(was.grid));
+        if redrawn {
+            damage.add(picture);
+        }
     }
 
     /// The selection held, which painting is held to.

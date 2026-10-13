@@ -86,13 +86,18 @@ pub enum Slide {
 }
 
 impl Slide {
-    /// Stand it at `value` of `parameter`.
-    fn show(&mut self, parameter: &Parameter, value: i32) {
+    /// Stand it at `value` of `parameter`, answering whether it moved.
+    fn show(&mut self, parameter: &Parameter, value: i32) -> bool {
         match self {
-            Self::Slider(slider) => slider.set_value(parameter.permille_of(value)),
-            Self::Track(track) => {
-                track.set(0, value);
+            Self::Slider(slider) => {
+                let to = parameter.permille_of(value);
+                let moved = slider.value() != to;
+                if moved {
+                    slider.set_value(to);
+                }
+                moved
             }
+            Self::Track(track) => track.set(0, value),
         }
     }
 
@@ -204,35 +209,50 @@ impl Part {
         }
     }
 
-    /// Show `value` in control `cell` without reporting it: a number's field
+    /// Show `value` in control `cell` without reporting it — a number's field
     /// and what it is dragged on, a row's field, a track's handle, a list's
-    /// choice, or a switch, on (non-zero) or off. The owner reports the
-    /// repaint.
-    pub fn show(&mut self, cell: usize, value: i32) {
+    /// choice, or a switch, on (non-zero) or off — answering whether that
+    /// changed what the part draws. The owner reports the repaint.
+    ///
+    /// A control already showing `value` is left as it is, so a field being
+    /// typed in keeps its typing and its caret.
+    pub fn show(&mut self, cell: usize, value: i32) -> bool {
+        let field_shows = |field: &mut NumberField| {
+            let changed = field.value() != value;
+            if changed {
+                field.set_value(value);
+            }
+            changed
+        };
         match self {
             Self::Number {
                 parameter,
                 field,
                 slide,
             } => {
-                field.set_value(value);
-                slide.show(parameter, value);
+                let typed = field_shows(field);
+                slide.show(parameter, value) || typed
             }
-            Self::Fields(row) => {
-                if let Some(entry) = row.get_mut(cell) {
-                    entry.field.set_value(value);
-                }
-            }
-            Self::Track(track) => {
-                track.set(cell, value);
-            }
-            Self::Choice { combo, .. } => {
-                if let Ok(index) = usize::try_from(value) {
+            Self::Fields(row) => row
+                .get_mut(cell)
+                .is_some_and(|entry| field_shows(&mut entry.field)),
+            Self::Track(track) => track.set(cell, value),
+            Self::Choice { combo, .. } => match usize::try_from(value) {
+                Ok(index) if combo.selected() != Some(index) => {
                     combo.set_selected(index);
+                    true
                 }
+                _ => false,
+            },
+            Self::Switch(check) => {
+                let to = SelectionState::of(value != 0);
+                let changed = check.selection() != to;
+                if changed {
+                    check.set_selection(to);
+                }
+                changed
             }
-            Self::Switch(check) => check.set_selection(SelectionState::of(value != 0)),
-            Self::Buttons(_) | Self::Custom { .. } | Self::Note(_) => {}
+            Self::Buttons(_) | Self::Custom { .. } | Self::Note(_) => false,
         }
     }
 
@@ -565,6 +585,22 @@ impl Panel {
             }
         }
         placed
+    }
+
+    /// Report a repaint of each part `changed` marks, as laid out down
+    /// `bounds`.
+    pub fn report_parts(
+        &self,
+        changed: &[bool; MOST_PARTS],
+        bounds: Rect,
+        (faces, scale, theme): (Faces, Scale, &Theme),
+        damage: &mut Region,
+    ) {
+        for (index, _, placed) in self.placed(bounds, faces, scale, theme) {
+            if changed.get(index).copied().unwrap_or(false) {
+                damage.add(placed.rect);
+            }
+        }
     }
 
     /// Where part `index` is laid out down `bounds`, if it is.

@@ -114,6 +114,14 @@ only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
   keypad keys, function keys), caps/num-lock toggling, left/right modifier
   collapsing, and the fail-closed unknown-keycode / non-key / key-repeat cases.
 
+`tests/fuzz_virtio_input.rs` (`cargo xtask fuzz`) plays a hostile device —
+configuration answers of full bitmaps, random ranges and noise at any stated
+size, and event streams over every code the decoders act on, with short and
+failed completions — holding: no input panics; a device either opens or is
+refused; a drain never reports more than it had room for; no touch frame
+carries more contacts than a frame holds, nor one twice; and a surface's
+lifted frame leaves nothing down.
+
 ## Stability
 
 Tier: `experimental` (see the crate `README.md`).

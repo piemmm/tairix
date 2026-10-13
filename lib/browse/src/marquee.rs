@@ -6,13 +6,16 @@
 //! the item area. It selects an entry whose body it touches — a grid tile's
 //! picture and name, not the ground around them. Which tiles it surely touches
 //! is arithmetic over the view's lines and slots, only the tiles along its
-//! edges are tested one by one, and a sweep changes only the entries entering
-//! or leaving the band, so a band costs what changes rather than what it
-//! covers.
+//! edges are tested one by one, each laid out once while it stays on an edge,
+//! and a sweep changes only the entries entering or leaving the band, so a band
+//! costs what changes rather than what it covers.
 
+use alloc::vec::Vec;
 use tairix_controls::scroll::{ScrollOrientation, ScrollView};
 use tairix_controls::{blend_area, fill_area};
+
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_hash::FastHash;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
@@ -39,6 +42,23 @@ pub struct Marquee {
     touched: BandMarks,
     /// What a sweep builds the next marks in, so a step allocates nothing.
     next: BandMarks,
+    /// The bodies of the entries along the band's last edges, by index, so a
+    /// pointer sample lays out only the names it has not laid out already.
+    bodies: Vec<Edge>,
+    /// What a sweep collects the next edges' bodies in.
+    next_bodies: Vec<Edge>,
+    #[cfg(test)]
+    laid_out: usize,
+}
+
+/// One edge entry as a sweep found it: the cell it lay in, a digest of its
+/// name, and the body they gave.
+#[derive(Clone, Copy, Debug)]
+struct Edge {
+    index: usize,
+    cell: Rect,
+    name: u64,
+    body: Option<Rect>,
 }
 
 impl Marquee {
@@ -64,6 +84,10 @@ pub fn begin<S: DirectorySource>(
         base: browser.selection().clone(),
         touched: BandMarks::default(),
         next: BandMarks::default(),
+        bodies: Vec::new(),
+        next_bodies: Vec::new(),
+        #[cfg(test)]
+        laid_out: 0,
     })
 }
 
@@ -89,13 +113,38 @@ pub fn sweep<S: DirectorySource>(
     let core = layout.band_cells_within(band, tile_core(frame.scale, frame.theme));
     let cells = layout.band_cells(band);
     let entries = browser.entries();
-    marquee.next.rebuild(core, &cells, |index| {
-        let body = layout
-            .layout_rect(index)
-            .zip(entries.get(index))
-            .and_then(|(cell, entry)| entry_body(entry, cell, frame.scale, frame.theme));
+    let Marquee {
+        next,
+        bodies,
+        next_bodies,
+        ..
+    } = marquee;
+    next_bodies.clear();
+    next.rebuild(core, &cells, |index| {
+        let (Some(cell), Some(entry)) = (layout.layout_rect(index), entries.get(index)) else {
+            return false;
+        };
+        let name = FastHash::hash_bytes(0, entry.name().as_bytes());
+        let body = match bodies.binary_search_by_key(&index, |found| found.index) {
+            Ok(at) if bodies[at].cell == cell && bodies[at].name == name => bodies[at].body,
+            _ => {
+                #[cfg(test)]
+                {
+                    marquee.laid_out += 1;
+                }
+                entry_body(entry, cell, frame.scale, frame.theme)
+            }
+        };
+        next_bodies.push(Edge {
+            index,
+            cell,
+            name,
+            body,
+        });
         body.is_some_and(|body| !body.intersection(&band).is_empty())
     });
+    next_bodies.sort_unstable_by_key(|found| found.index);
+    core::mem::swap(bodies, next_bodies);
     let changed = browser.move_band(&marquee.base, &marquee.touched, &marquee.next);
     core::mem::swap(&mut marquee.touched, &mut marquee.next);
     changed

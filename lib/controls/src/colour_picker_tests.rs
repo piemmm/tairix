@@ -634,6 +634,53 @@ fn a_marker_moving_on_the_plane_repaints_the_marker_not_the_plane() {
     );
 }
 
+/// The wheel's ring is drawn from its geometry and its triangle from the hue,
+/// so in the wheel view a saturation or value change repaints the two marker
+/// places and an alpha change none of the wheel; only a hue change repaints it
+/// whole.
+#[test]
+fn the_wheel_repaints_whole_only_for_a_hue_change() {
+    let mut picker = picker(SLATE)
+        .with_view(PickerView::Wheel)
+        .with_opacity(true);
+    let layout = layout(&picker, NARROW);
+    let wheel = super::Wheel::in_area(layout.inner(Part::Ring));
+    let mid = wheel.outer.midpoint(wheel.inner);
+    let ring = Point::new(
+        tairix_util::mathf::round_i32(wheel.cx),
+        tairix_util::mathf::round_i32(wheel.cy + mid),
+    );
+    let before = picker.hsv;
+
+    let mut damage = Region::new();
+    let alpha = picker.alpha.wrapping_sub(40);
+    assert!(picker.set_coordinates(before, alpha, None, false, &layout, &mut damage));
+    assert!(
+        !damage.intersects(layout.plane),
+        "an alpha change leaves the wheel alone"
+    );
+
+    let mut damage = Region::new();
+    let mut moved = before;
+    moved.value = tairix_colour::Fraction::from_f64(0.25);
+    assert!(picker.set_coordinates(moved, picker.alpha, None, false, &layout, &mut damage));
+    assert!(
+        damage.intersects(layout.triangle_marker(before)),
+        "where it was"
+    );
+    assert!(
+        damage.intersects(layout.triangle_marker(moved)),
+        "where it is"
+    );
+    assert!(!damage.contains(ring), "the ring held still");
+
+    let mut damage = Region::new();
+    let mut turned = moved;
+    turned.hue = tairix_colour::Hue::from_degrees_f64(f64::from(moved.hue.degrees()) + 90.0);
+    assert!(picker.set_coordinates(turned, picker.alpha, None, false, &layout, &mut damage));
+    assert!(damage.contains(ring), "a hue turn repaints the wheel whole");
+}
+
 #[test]
 fn a_hue_change_repaints_the_whole_plane() {
     let mut picker = picker(SLATE);

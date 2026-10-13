@@ -112,10 +112,15 @@ impl FolderSample {
     /// The cards as drawn, the front one first.
     #[must_use]
     pub fn cards(&self) -> impl DoubleEndedIterator<Item = DrawnCard<'_>> {
-        self.cards.iter().map(move |card| DrawnCard {
-            kind: card.kind(),
-            picture: card.picture().filter(|_| !self.as_kinds),
-        })
+        self.drawn().cards()
+    }
+
+    /// This sample as it draws, borrowed: what its picture is keyed by.
+    pub(crate) fn drawn(&self) -> DrawnSample<'_> {
+        DrawnSample {
+            sample: self,
+            as_kinds: self.as_kinds,
+        }
     }
 
     /// How many cards the sample holds.
@@ -134,15 +139,20 @@ impl FolderSample {
     /// files, which is thumbnail-class work.
     #[must_use]
     pub fn has_pictures(&self) -> bool {
-        self.cards().any(|card| card.picture().is_some())
+        self.drawn().has_pictures()
     }
 
     /// This sample with every picture card drawn as its kind: what the folder
     /// shows while its pictures are produced.
     #[must_use]
     pub fn kinds_only(&self) -> Self {
-        Self {
-            cards: Arc::clone(&self.cards),
+        self.drawn_as_kinds().to_sample()
+    }
+
+    /// [`kinds_only`](Self::kinds_only), borrowed rather than built.
+    pub(crate) fn drawn_as_kinds(&self) -> DrawnSample<'_> {
+        DrawnSample {
+            sample: self,
             as_kinds: true,
         }
     }
@@ -164,7 +174,7 @@ impl FolderSample {
 
 impl PartialEq for FolderSample {
     fn eq(&self, other: &Self) -> bool {
-        self.cards().eq(other.cards())
+        self.drawn() == other.drawn()
     }
 }
 
@@ -172,7 +182,51 @@ impl Eq for FolderSample {}
 
 impl Hash for FolderSample {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_usize(self.len());
+        self.drawn().hash(state);
+    }
+}
+
+/// A sample as it draws, borrowed: its cards, and whether its picture cards
+/// are drawn as their kinds. Two samples drawing the same cards are equal.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DrawnSample<'a> {
+    sample: &'a FolderSample,
+    as_kinds: bool,
+}
+
+impl<'a> DrawnSample<'a> {
+    /// The sample that draws this way, built: its cards shared, not copied.
+    pub(crate) fn to_sample(self) -> FolderSample {
+        FolderSample {
+            cards: Arc::clone(&self.sample.cards),
+            as_kinds: self.as_kinds,
+        }
+    }
+
+    /// Whether a card draws a member's own picture.
+    pub(crate) fn has_pictures(self) -> bool {
+        self.cards().any(|card| card.picture().is_some())
+    }
+
+    fn cards(self) -> impl DoubleEndedIterator<Item = DrawnCard<'a>> {
+        self.sample.cards.iter().map(move |card| DrawnCard {
+            kind: card.kind(),
+            picture: card.picture().filter(|_| !self.as_kinds),
+        })
+    }
+}
+
+impl PartialEq for DrawnSample<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cards().eq(other.cards())
+    }
+}
+
+impl Eq for DrawnSample<'_> {}
+
+impl Hash for DrawnSample<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_usize(self.sample.len());
         for card in self.cards() {
             card.hash(state);
         }

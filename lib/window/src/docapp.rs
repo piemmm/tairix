@@ -25,6 +25,8 @@ use crate::document::SavedDocument;
 mod host;
 #[cfg(all(freestanding, feature = "rt"))]
 pub use host::*;
+#[cfg(any(test, all(freestanding, feature = "rt")))]
+mod title;
 
 /// How far an input reshaped the window.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]

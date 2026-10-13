@@ -68,6 +68,9 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # halo and on-screen footprint in: each is capped by what the overlay may draw,
 # so none of them ever needs the heap on the path every pointer sample takes.
 tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
+# The source list a composited rectangle draws from, inline for the few windows
+# a rectangle reaches, so a frame does not allocate one per rectangle.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 # The structured `Event`/`Sink`/`Level` logging vocabulary the cursor cache's
 # audit sink is typed against: the controller never invents its own
 # logging vocabulary.

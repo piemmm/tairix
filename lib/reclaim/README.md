@@ -33,7 +33,9 @@ that enforces all of it.
   is O(log n); a forced shrink visits only the entries it releases; a
   cache that cannot admit a value still hands the caller a usable one
   (`Served::Uncached`), so caching is never required for correctness.
-  A consumer whose value cannot be built on demand — a compositor's
+  Every lookup takes a key borrowed in any form the key type lends itself as,
+  and `get_or_build_borrowed` builds the owned key only for a miss, so a hit
+  allocates nothing. A consumer whose value cannot be built on demand — a compositor's
   frosted backdrop exists only as the by-product of a composite pass —
   asks with `find`, which counts the lookup without building or enforcing
   the band, and offers the finished value afterwards with `retain`, which

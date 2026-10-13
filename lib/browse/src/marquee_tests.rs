@@ -219,6 +219,51 @@ fn a_band_touching_only_a_tiles_name_selects_it() {
     assert_eq!(selected(&browser), [0]);
 }
 
+/// A band lays out the name of a tile along its edge once, not again on
+/// every pointer sample that leaves it on the edge; a tile new to the edge,
+/// or one whose name changed, is laid out afresh.
+#[test]
+fn a_band_lays_out_an_edge_tiles_name_once_while_it_stays_on_the_edge() {
+    let theme = Theme::dark();
+    let frame = frame(&theme);
+    let mut browser = browser(40, ViewMode::Grid);
+    let cell = rect_of(&browser, frame, 0);
+    let body = body_of(&browser, frame, 0);
+    let core = crate::render::tile_core(frame.scale, frame.theme);
+    let name_row = cell.top() + core.bottom() + 4;
+    let mut marquee =
+        begin(&browser, frame, Point::new(cell.left() + 1, name_row)).expect("in the item area");
+    sweep(
+        &mut browser,
+        frame,
+        &mut marquee,
+        Point::new(body.left() - 1, name_row + 2),
+    );
+    let first = marquee.laid_out;
+    assert!(first > 0, "the edge tiles were laid out");
+    for dy in 3..9 {
+        sweep(
+            &mut browser,
+            frame,
+            &mut marquee,
+            Point::new(body.left() - 1, name_row + dy),
+        );
+    }
+    assert_eq!(marquee.laid_out, first, "no sample laid a name out again");
+    marquee.bodies.iter_mut().for_each(|found| found.name ^= 1);
+    sweep(
+        &mut browser,
+        frame,
+        &mut marquee,
+        Point::new(body.left(), name_row + 2),
+    );
+    assert!(
+        marquee.laid_out > first,
+        "a changed name is laid out afresh"
+    );
+    assert_eq!(selected(&browser), [0]);
+}
+
 #[test]
 fn scrolling_under_a_held_band_grows_it_from_its_anchor() {
     let theme = Theme::dark();

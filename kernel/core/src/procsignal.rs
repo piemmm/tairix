@@ -31,7 +31,7 @@ use tairix_collections::HashMap;
 use tairix_hash::BuildSipHash13;
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{ExitDisposition, SchedError, SchedulerArch, SchedulerPolicy};
-use tairix_kernel_sec::{CapTable, JobGeneration, ProcessId, TaskId};
+use tairix_kernel_sec::{CapTable, JobGeneration, ProcessId, TaskCapabilities, TaskId};
 use tairix_log::Sink;
 use tairix_sync::once::OnceCell;
 use tairix_sync::{IrqSafeSpinLock, RwLock, SpinLock};
@@ -157,6 +157,9 @@ pub(crate) struct ThreadGate {
     /// [`IN_KERNEL`], the owed death's kind, the job-control generation, and
     /// an `Exit`'s status.
     word: AtomicU64,
+    /// The process record the thread last read, kept while it is current:
+    /// see [`Self::credential`].
+    credential: SpinLock<Option<Arc<TaskCapabilities>>>,
 }
 
 /// Set between a kernel body's entry and its boundary, parked or running.
@@ -207,7 +210,25 @@ impl ThreadGate {
             task,
             process,
             word: AtomicU64::new(0),
+            credential: SpinLock::new(None),
         }
+    }
+
+    /// The record authorising this thread, or [`None`] once the table no
+    /// longer does.
+    ///
+    /// Called by the thread itself at each syscall entry. The record it read
+    /// last is reused while the table still holds it, so a syscall touches
+    /// only this thread's gate and its own process's record; `caps` is read
+    /// again only after a mutation, replacement or removal superseded it.
+    pub(crate) fn credential(&self, caps: &RwLock<CapTable>) -> Option<Arc<TaskCapabilities>> {
+        let cached = self.credential.lock().clone();
+        if let Some(record) = cached.filter(|record| record.is_current()) {
+            return Some(record);
+        }
+        let fresh = caps.read().snapshot_of(TaskId(self.task));
+        let _stale = core::mem::replace(&mut *self.credential.lock(), fresh.clone());
+        fresh
     }
 
     /// The job-control generation `word` holds.
@@ -3310,6 +3331,48 @@ mod tests {
         );
         // A refused stop stops nothing.
         assert!(!scheduler.state_of(9999).is_stopped());
+    }
+
+    /// A thread reads its record from its own gate, never the table, until the
+    /// table supersedes it: an empty table still answers from the gate, and
+    /// the first call after a mutation reads whichever table it is given.
+    #[test]
+    fn a_thread_reads_its_record_from_its_gate_until_the_table_supersedes_it() {
+        let sink = crate::test_sink::TestSink::new();
+        let mut mount = tairix_caps::CapabilitySet::empty();
+        mount.insert(tairix_abi::CapabilityId::FS_MOUNT);
+        let caps = RwLock::new(CapTable::new());
+        caps.write()
+            .insert(tairix_kernel_sec::TaskCapabilities::derive(
+                ProcessId(7),
+                tairix_kernel_sec::UserId(0),
+                mount,
+                mount,
+                &sink,
+            ));
+        let empty = RwLock::new(CapTable::new());
+        let gate = ThreadGate::new(7, ProcessId(7));
+        assert!(gate.credential(&empty).is_none(), "nothing read yet");
+
+        let first = gate.credential(&caps).expect("registered");
+        let again = gate.credential(&empty).expect("served from the gate");
+        assert!(Arc::ptr_eq(&first, &again));
+
+        assert!(caps
+            .write()
+            .caps_for_mut(TaskId(7))
+            .expect("registered")
+            .revoke(tairix_abi::CapabilityId::FS_MOUNT, &sink));
+        assert!(
+            gate.credential(&empty).is_none(),
+            "a superseded record is read again"
+        );
+        let fresh = gate.credential(&caps).expect("registered");
+        assert!(!fresh.has(tairix_abi::CapabilityId::FS_MOUNT));
+        assert!(
+            first.has(tairix_abi::CapabilityId::FS_MOUNT),
+            "a snapshot keeps its time"
+        );
     }
 
     /// Register `process` in `caps` as a live process instance, so the

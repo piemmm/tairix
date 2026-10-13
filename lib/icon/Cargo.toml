@@ -70,6 +70,8 @@ tairix-path = { path = "../path", version = "=0.0.0" }
 # solid test transport (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+# The metered allocator a draw of retained icons is held to allocating nothing by.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 # The one contrast measure a badge's symbol is held clear of its plate by.
 tairix-colour = { path = "../colour", version = "=0.0.0", features = ["test-util"] }
 

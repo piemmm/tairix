@@ -52,6 +52,34 @@ pub trait ParkableTask {
     }
 }
 
+/// A shared handle has its task's lifecycle, so a policy whose run queues hold
+/// handles admits the very handle a wake or resume was delivered through.
+impl<T: ParkableTask + ?Sized> ParkableTask for Arc<T> {
+    fn load_state(&self) -> TaskState {
+        (**self).load_state()
+    }
+
+    fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState> {
+        (**self).cas_state(expected, new)
+    }
+
+    fn swap_state(&self, new: TaskState) -> TaskState {
+        (**self).swap_state(new)
+    }
+
+    fn set_wake_pending(&self) {
+        (**self).set_wake_pending();
+    }
+
+    fn take_wake_pending(&self) -> bool {
+        (**self).take_wake_pending()
+    }
+
+    fn in_competition(&self) -> bool {
+        (**self).in_competition()
+    }
+}
+
 /// End a committed park with a wake: a parked task is made ready and
 /// admitted, and one a stop holds is left owed its run for the `resume`.
 ///

@@ -47,6 +47,9 @@ tairix-greeter = { path = "../../../lib/greeter", version = "=0.0.0" }
 # Shared logical geometry (`Rect`/`Scale`): the surface is placed and hit-
 # tested in logical pixels through the one shared scale.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The one account a host-composed surface keeps of what it still owes the
+# screen (`damage::Repaint`), so a round's events are composed once.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The one definition of how composited pixels become scan-out bytes
 # (`ChannelOrder`, `scanout_len`, `sub_screen_damage`), of how a display is
 # put to sleep and woken (`DisplaySleep`), and, in the `Run` binary, the

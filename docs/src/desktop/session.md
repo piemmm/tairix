@@ -1811,7 +1811,7 @@ nobody reads back.
 
 The lock screen is the login screen's own surface, so it animates like it:
 the session hands it the real monotonic clock on every event and steps it
-with `ScreenLock::advance` on every wake, and `ScreenLock::park_deadline_ns`
+with `ScreenLock::advance` once a frame, and `ScreenLock::park_deadline_ns`
 folds whatever the surface asks for into the loop's park through the same
 `park_within` the desktop's reveal uses. A refused unlock therefore shakes
 the question as it does at login. An idle lock screen asks for nothing and
@@ -2109,9 +2109,10 @@ it left dark back on when its lease ends.
 The shell owns the pointer aids (`PointerAids`, `aids`): shaking the pointer to
 grow it, its trail, and the rings a lone press of Ctrl sends to it. The loop
 head brings them to the settings document (`AidPolicy::of`) as it does the
-input policy, and `animate` steps them once a frame with the pointer where the
-seat last put it, before the frame is presented; their next frame is folded
-into the park like every other animated surface's, so at rest they arm
+input policy. Every wake lets them take in where the seat put the pointer, so
+a shake and a trail follow its path more finely than a frame, and `animate`
+draws them once a frame, before the frame is presented; their next frame is
+folded into the park like every other animated surface's, so at rest they arm
 nothing. A lone Ctrl is recognised by the keyboard source and taken after
 every seat wake, where the pointer source answers whether a button went with
 it; the one that wakes the screensaver is dropped with the rest of that
@@ -2368,6 +2369,14 @@ the loop composite and present once a deadline arrives.
   idle for the monitor's Resources page — so holding it would suppress that
   reading, and starting the period would put the next real frame behind a
   frame that changed no pixels.
+- **What the session animates is stepped only on a frame that is due.**
+  `animate` steps the screen fade, the pointer aids, the lock screen, a
+  credential prompt, the screensaver and a dissolving backdrop only when
+  `FramePacer::due`, so a burst of input between frames costs no animation
+  step at all. What each owes next is folded through
+  `FramePacer::step_deadline_ns`, which never parks to before that frame, so
+  an animation left overdue between frames waits for it rather than spinning
+  the loop.
 - **The compositor owns the damage; the pacer owns only the clock.**
   `Compositor::has_damage` answers whether the next present would send a
   pixel, so the two cannot disagree about whether a frame is owed. A clock
@@ -3001,7 +3010,9 @@ zero-length deadline, and folding the park back to indefinite once it is
 admitted; a park already shorter left alone; an idle session and every
 undamaged frame arming nothing and not starting the period; an interaction
 slower than the period never held; an animation's cadence frames never
-deferred; and a clock jumped backwards — or a long background spell —
+deferred; a flood of samples stepping the animations once a period, and an
+animation overdue between frames parked until its frame; and a clock jumped
+backwards — or a long background spell —
 admitting rather than stalling. Beside the frame-cost tests, the pacer is
 driven as the serve loop drives it: sixteen pointer samples pumped through the
 real shell and compositor inside one period, each moving the cursor and so

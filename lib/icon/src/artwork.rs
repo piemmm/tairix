@@ -46,8 +46,10 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cell::Cell;
+use core::hash::{Hash, Hasher};
 
-use alloc::boxed::Box;
 use tairix_abi::appinfo::BUNDLE_SUFFIX;
 use tairix_abi::BundleEntry;
 use tairix_appstore::{decode_manifest, identity_roots, manifest_path};
@@ -62,7 +64,9 @@ use tairix_reclaim::{
 };
 
 use crate::badge::badge_picture;
-use crate::folder::{card_slots, paper_card, print_card, FolderSample, MIN_COMPOSITE_SIDE};
+use crate::folder::{
+    card_slots, paper_card, print_card, DrawnSample, FolderSample, MIN_COMPOSITE_SIDE,
+};
 use crate::glyph::{builtin_icon, IconKind};
 use crate::picture::{Artwork, CastShadow, Fitted, IconPicture};
 use crate::thumbnail::{render_thumbnail, ArtworkDocument, DocumentStamp, Reading, Thumbnail};
@@ -458,6 +462,7 @@ impl<'a> IconRequest<'a> {
 ///
 /// Held as the kind rather than as a built path so a tier that is never
 /// reached never formats one.
+#[derive(Clone, Copy)]
 pub(crate) enum Tier<'a> {
     /// The thing's own icon.
     Own(OwnIcon<'a>),
@@ -469,29 +474,31 @@ pub(crate) enum Tier<'a> {
     Vector(IconKind),
 }
 
-impl Tier<'_> {
-    /// The cache slot this candidate occupies.
-    pub(crate) fn cache_key(self) -> ArtworkKey {
+impl<'a> Tier<'a> {
+    /// Whether this candidate is `key`, compared without building a key.
+    pub(crate) fn names(self, key: &ArtworkKey) -> bool {
+        self.view() == key.view()
+    }
+
+    /// The artwork this candidate names, borrowed from the request.
+    fn view(self) -> ArtView<'a> {
         match self {
-            Self::Own(OwnIcon::Asset(path)) => ArtworkKey::Asset(String::from(path)),
-            Self::Own(OwnIcon::Bundle(dir)) => ArtworkKey::Bundle(String::from(dir)),
-            Self::Own(OwnIcon::Program { name, home }) => ArtworkKey::Program {
-                name: String::from(name),
-                home: home.map(String::from),
-            },
-            Self::Own(OwnIcon::Folder(sample)) => ArtworkKey::Folder(sample.clone()),
-            Self::FolderKinds(sample) => ArtworkKey::Folder(sample.kinds_only()),
+            Self::Own(OwnIcon::Asset(path)) => ArtView::Asset(path),
+            Self::Own(OwnIcon::Bundle(dir)) => ArtView::Bundle(dir),
+            Self::Own(OwnIcon::Program { name, home }) => ArtView::Program { name, home },
+            Self::Own(OwnIcon::Folder(sample)) => ArtView::Folder(sample.drawn()),
+            Self::FolderKinds(sample) => ArtView::Folder(sample.drawn_as_kinds()),
             Self::Own(OwnIcon::Thumbnail {
                 path,
                 stamp,
                 reading,
-            }) => ArtworkKey::Thumbnail(Thumbnail {
-                path: String::from(path),
+            }) => ArtView::Thumbnail {
+                path,
                 stamp,
                 reading,
-            }),
-            Self::Raster(kind) => ArtworkKey::Asset(icon_artwork_path(kind)),
-            Self::Vector(kind) => ArtworkKey::Asset(icon_vector_path(kind)),
+            },
+            Self::Raster(kind) => ArtView::Raster(kind),
+            Self::Vector(kind) => ArtView::Vector(kind),
         }
     }
 }
@@ -577,11 +584,7 @@ impl IconArtwork for NoArtwork {
 ///
 /// The key it is retained under is charged with it: a folder's key holds its
 /// members' paths, which no fixed per-entry figure can bound.
-///
-/// Public only because it names the value type of the cache
-/// [`artwork_cache`] builds and [`ArtworkCache::new`] takes; the outcome
-/// itself is reached through [`ArtworkCache::path_artwork`].
-pub struct CachedArtwork {
+pub(crate) struct CachedArtwork {
     artwork: Option<Artwork>,
     key_bytes: usize,
 }
@@ -668,9 +671,14 @@ pub fn artwork_cache(
 /// two apart in the key type says so rather than relying on it.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ArtworkKey {
-    /// An asset file read directly: a shipped `<asset-id>.png` or
-    /// `<asset-id>.svg`, or an icon path the caller had already resolved.
+    /// An asset file read directly: an icon path the caller had already
+    /// resolved.
     Asset(String),
+    /// A kind's shipped raster master, [`icon_artwork_path`]. Named by the
+    /// kind, so a lookup formats no path.
+    Raster(IconKind),
+    /// A kind's shipped vector master, [`icon_vector_path`].
+    Vector(IconKind),
     /// An application-bundle directory, resolved through its own manifest.
     Bundle(String),
     /// A program *name* and the asking session's home root, resolved to the
@@ -704,16 +712,6 @@ pub enum ArtworkKey {
     Folder(FolderSample),
     /// A picture file drawn as its own content.
     Thumbnail(Thumbnail),
-    /// The soft shadow the picture retained under `of` casts as `cast` says,
-    /// cast in this process from that picture's own coverage.
-    Shadow {
-        /// The cache key — artwork and side — of the picture the shadow is
-        /// cast from, so a lookup moves the picture's key in rather than
-        /// copying it.
-        of: Box<(ArtworkKey, u32)>,
-        /// How it is cast.
-        cast: ShadowCast,
-    },
 }
 
 impl ArtworkKey {
@@ -739,13 +737,181 @@ impl ArtworkKey {
             Self::Program { name, home } => {
                 name.capacity() + home.as_ref().map_or(0, String::capacity)
             }
-            Self::Builtin(_) => 0,
+            Self::Builtin(_) | Self::Raster(_) | Self::Vector(_) => 0,
             Self::Folder(sample) => sample.heap_bytes(),
             Self::Thumbnail(thumbnail) => thumbnail.path.capacity(),
-            Self::Shadow { of, .. } => core::mem::size_of::<(Self, u32)>() + of.0.heap_bytes(),
+        }
+    }
+
+    /// This key borrowed, as a lookup compares it.
+    fn view(&self) -> ArtView<'_> {
+        match self {
+            Self::Asset(path) => ArtView::Asset(path),
+            Self::Raster(kind) => ArtView::Raster(*kind),
+            Self::Vector(kind) => ArtView::Vector(*kind),
+            Self::Bundle(dir) => ArtView::Bundle(dir),
+            Self::Program { name, home } => ArtView::Program {
+                name,
+                home: home.as_deref(),
+            },
+            Self::Builtin(kind) => ArtView::Builtin(*kind),
+            Self::Folder(sample) => ArtView::Folder(sample.drawn()),
+            Self::Thumbnail(thumbnail) => ArtView::Thumbnail {
+                path: &thumbnail.path,
+                stamp: thumbnail.stamp,
+                reading: thumbnail.reading,
+            },
         }
     }
 }
+
+/// An [`ArtworkKey`] borrowed — from a key, or from a request that has not
+/// built one — so a cache lookup hashes and compares it without allocating.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum ArtView<'a> {
+    Asset(&'a str),
+    Raster(IconKind),
+    Vector(IconKind),
+    Bundle(&'a str),
+    Program {
+        name: &'a str,
+        home: Option<&'a str>,
+    },
+    Builtin(IconKind),
+    Folder(DrawnSample<'a>),
+    Thumbnail {
+        path: &'a str,
+        stamp: DocumentStamp,
+        reading: Reading,
+    },
+}
+
+impl ArtView<'_> {
+    /// The key this names, built: what a miss retains its slot under.
+    fn to_key(self) -> ArtworkKey {
+        match self {
+            Self::Asset(path) => ArtworkKey::Asset(String::from(path)),
+            Self::Raster(kind) => ArtworkKey::Raster(kind),
+            Self::Vector(kind) => ArtworkKey::Vector(kind),
+            Self::Bundle(dir) => ArtworkKey::Bundle(String::from(dir)),
+            Self::Program { name, home } => ArtworkKey::Program {
+                name: String::from(name),
+                home: home.map(String::from),
+            },
+            Self::Builtin(kind) => ArtworkKey::Builtin(kind),
+            Self::Folder(drawn) => ArtworkKey::Folder(drawn.to_sample()),
+            Self::Thumbnail {
+                path,
+                stamp,
+                reading,
+            } => ArtworkKey::Thumbnail(Thumbnail {
+                path: String::from(path),
+                stamp,
+                reading,
+            }),
+        }
+    }
+
+    fn is_thumbnail_class(self) -> bool {
+        match self {
+            Self::Thumbnail { .. } => true,
+            Self::Folder(drawn) => drawn.has_pictures(),
+            _ => false,
+        }
+    }
+}
+
+/// The cache slot a decode is retained in: the artwork, the pixel side, and
+/// the shadow it casts, if this slot is that shadow rather than the picture.
+#[derive(Clone, Debug)]
+struct SlotKey {
+    art: ArtworkKey,
+    side: u32,
+    shadow: Option<ShadowCast>,
+}
+
+/// A slot named borrowed: what [`ArtworkCache`] looks its entries up by.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct SlotView<'a> {
+    art: ArtView<'a>,
+    side: u32,
+    shadow: Option<ShadowCast>,
+}
+
+impl SlotView<'_> {
+    fn to_key(self) -> SlotKey {
+        SlotKey {
+            art: self.art.to_key(),
+            side: self.side,
+            shadow: self.shadow,
+        }
+    }
+
+    /// The shadow this picture's slot casts as `cast` says.
+    fn shadow(self, cast: ShadowCast) -> Self {
+        Self {
+            shadow: Some(cast),
+            ..self
+        }
+    }
+}
+
+/// Either form of a slot's name. The cache's keys borrow as this, so a lookup
+/// by a [`SlotView`] finds an entry retained under the [`SlotKey`] it names:
+/// both hash and compare through [`SlotLookup::view`].
+trait SlotLookup {
+    fn view(&self) -> SlotView<'_>;
+}
+
+impl SlotLookup for SlotKey {
+    fn view(&self) -> SlotView<'_> {
+        SlotView {
+            art: self.art.view(),
+            side: self.side,
+            shadow: self.shadow,
+        }
+    }
+}
+
+impl SlotLookup for SlotView<'_> {
+    fn view(&self) -> SlotView<'_> {
+        *self
+    }
+}
+
+impl<'a> Borrow<dyn SlotLookup + 'a> for SlotKey {
+    fn borrow(&self) -> &(dyn SlotLookup + 'a) {
+        self
+    }
+}
+
+impl Hash for dyn SlotLookup + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.view().hash(state);
+    }
+}
+
+impl PartialEq for dyn SlotLookup + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.view() == other.view()
+    }
+}
+
+impl Eq for dyn SlotLookup + '_ {}
+
+impl Hash for SlotKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.view().hash(state);
+    }
+}
+
+impl PartialEq for SlotKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.view() == other.view()
+    }
+}
+
+impl Eq for SlotKey {}
 
 /// The outcome of building one cache slot.
 enum Slot {
@@ -796,7 +962,7 @@ pub enum ArtworkOutcome {
 /// would let a crafted or merely crowded store grow a session without limit;
 /// the budget forecloses that.
 pub struct ArtworkCache {
-    entries: ReclaimCache<(ArtworkKey, u32), CachedArtwork, (), BuildFastHash>,
+    entries: ReclaimCache<SlotKey, CachedArtwork, (), BuildFastHash>,
 }
 
 impl ArtworkCache {
@@ -806,16 +972,10 @@ impl ArtworkCache {
         let _ = self.entries.rebudget(working_set_ui_budget(fb_bytes));
     }
 
-    /// An empty cache over the caller's ready-built reclaimable cache.
-    ///
-    /// The cache is injected rather than defaulted because only the owning
-    /// process knows the output's size, the seat, the live pressure gauge, and
-    /// the audit sink; a cache built without them would retain nothing while
-    /// looking like it worked. [`artwork_cache`] assembles one.
+    /// An empty cache over a ready-built reclaimable cache, which
+    /// [`artwork_cache`] assembles from what only the owning process knows.
     #[must_use]
-    pub const fn new(
-        entries: ReclaimCache<(ArtworkKey, u32), CachedArtwork, (), BuildFastHash>,
-    ) -> Self {
+    const fn new(entries: ReclaimCache<SlotKey, CachedArtwork, (), BuildFastHash>) -> Self {
         Self { entries }
     }
 
@@ -871,9 +1031,13 @@ impl ArtworkCache {
         path: &str,
         side: u32,
     ) -> Option<&Surface> {
-        let key = (ArtworkKey::Asset(String::from(path)), side);
-        let _ = self.build_slot(&key, resolver);
-        self.borrow_slot(&key).map(Artwork::surface)
+        let slot = SlotView {
+            art: ArtView::Asset(path),
+            side,
+            shadow: None,
+        };
+        let _ = self.build_slot(slot, resolver);
+        self.borrow_slot(slot).map(Artwork::surface)
     }
 
     /// The picture for `request` at `side` pixels: the thing's own icon when
@@ -903,7 +1067,7 @@ impl ArtworkCache {
         side: u32,
     ) -> Option<IconPicture<'_>> {
         let served = self.serve(resolver, request, side)?;
-        self.picture(&served.key, served.mask)
+        self.picture(served.slot, served.mask)
     }
 
     /// [`artwork`](Self::artwork), with the soft shadow the picture casts as
@@ -923,34 +1087,25 @@ impl ArtworkCache {
         side: u32,
         cast: Option<ShadowCast>,
     ) -> Option<IconPicture<'_>> {
-        let ServedPicture { key, mask } = self.serve(resolver, request, side)?;
+        let ServedPicture { slot, mask } = self.serve(resolver, request, side)?;
         let Some(cast) = cast else {
-            return self.picture(&key, mask);
+            return self.picture(slot, mask);
         };
-        let shadow = (
-            ArtworkKey::Shadow {
-                of: Box::new(key),
-                cast,
-            },
-            side,
-        );
-        // The picture's key now lives in the shadow's, moved rather than copied.
-        let ArtworkKey::Shadow { of: key, .. } = &shadow.0 else {
-            return None;
-        };
-        if self.entries.find(&(), &shadow).is_none() {
+        let shadow = slot.shadow(cast);
+        if self.entries.find(&(), &shadow as &dyn SlotLookup).is_none() {
             // Only a cast shadow is kept: a picture not retained, or memory that
             // could not be had, is asked about again rather than remembered.
             if let Some((cast_mask, _)) = self
-                .borrow_slot(key)
+                .borrow_slot(slot)
                 .and_then(|picture| cast_shadow(picture.surface(), cast))
             {
-                let cached = CachedArtwork::new(Some(Artwork::new(cast_mask)), &shadow.0);
-                self.entries.retain(&(), shadow.clone(), cached);
+                let key = shadow.to_key();
+                let cached = CachedArtwork::new(Some(Artwork::new(cast_mask)), &key.art);
+                self.entries.retain(&(), key, cached);
             }
         }
-        let picture = self.picture(key, mask)?;
-        Some(match self.borrow_slot(&shadow) {
+        let picture = self.picture(slot, mask)?;
+        Some(match self.borrow_slot(shadow) {
             Some(retained) => picture.with_shadow(CastShadow {
                 mask: retained.surface(),
                 offset: {
@@ -973,17 +1128,21 @@ impl ArtworkCache {
     /// reached at all depends on what this one turns out to be — except a
     /// thumbnail-class tier, whose picture always replaces the tier below once
     /// it lands, so that tier is drawn meanwhile.
-    fn serve(
+    fn serve<'a>(
         &mut self,
         resolver: &mut dyn ArtworkResolver,
-        request: IconRequest<'_>,
+        request: IconRequest<'a>,
         side: u32,
-    ) -> Option<ServedPicture> {
+    ) -> Option<ServedPicture<'a>> {
         for tier in request.tiers() {
-            let key = (tier.cache_key(), side);
-            match self.build_slot(&key, resolver) {
-                Slot::Served => return Some(ServedPicture { key, mask: false }),
-                Slot::Pending if key.0.is_thumbnail_class() => {}
+            let slot = SlotView {
+                art: tier.view(),
+                side,
+                shadow: None,
+            };
+            match self.build_slot(slot, resolver) {
+                Slot::Served => return Some(ServedPicture { slot, mask: false }),
+                Slot::Pending if slot.art.is_thumbnail_class() => {}
                 // Nothing is being retained, so a later tier could only
                 // repeat the same refusal at the cost of another decode. The
                 // glyph below is still reached: it costs no decode at all, and
@@ -998,22 +1157,31 @@ impl ArtworkCache {
         // art is compiled in, and resolving it synchronously puts a picture
         // on screen in the first frame that asks.
         let kind = request.icon_kind();
-        let key = (ArtworkKey::Builtin(kind), side);
-        self.entries.get_or_build(&(), key.clone(), || {
-            Some(CachedArtwork::new(
-                builtin_picture(kind, side).map(Artwork::new),
-                &key.0,
-            ))
-        })?;
+        let slot = SlotView {
+            art: ArtView::Builtin(kind),
+            side,
+            shadow: None,
+        };
+        self.entries.get_or_build_borrowed(
+            &(),
+            &slot as &dyn SlotLookup,
+            || slot.to_key(),
+            || {
+                Some(CachedArtwork::new(
+                    builtin_picture(kind, side).map(Artwork::new),
+                    &ArtworkKey::Builtin(kind),
+                ))
+            },
+        )?;
         Some(ServedPicture {
-            key,
+            slot,
             mask: kind.badge().is_none(),
         })
     }
 
     /// The picture retained where `served` says, as a draw site is handed it.
-    fn picture(&self, key: &(ArtworkKey, u32), mask: bool) -> Option<IconPicture<'_>> {
-        let artwork = self.borrow_slot(key)?;
+    fn picture(&self, slot: SlotView<'_>, mask: bool) -> Option<IconPicture<'_>> {
+        let artwork = self.borrow_slot(slot)?;
         let picture = if mask {
             IconPicture::mask(artwork.surface())
         } else {
@@ -1039,10 +1207,14 @@ impl ArtworkCache {
     ) -> ArtworkOutcome {
         let mut served = None;
         for tier in request.tiers() {
-            let key = (tier.cache_key(), side);
-            match self.build_slot(&key, resolver) {
+            let slot = SlotView {
+                art: tier.view(),
+                side,
+                shadow: None,
+            };
+            match self.build_slot(slot, resolver) {
                 Slot::Served => {
-                    served = Some(key);
+                    served = Some(slot);
                     break;
                 }
                 Slot::Pending => return ArtworkOutcome::Pending,
@@ -1057,8 +1229,8 @@ impl ArtworkCache {
             }
         }
         served
-            .and_then(|key| {
-                self.borrow_slot(&key)
+            .and_then(|slot| {
+                self.borrow_slot(slot)
                     .map(|artwork| artwork.surface().clone())
             })
             .map_or(ArtworkOutcome::Refused, ArtworkOutcome::Ready)
@@ -1079,17 +1251,27 @@ impl ArtworkCache {
         side: u32,
     ) {
         for tier in request.tiers() {
-            let key = (tier.cache_key(), side);
-            match self.entries.peek(&(), &key).map(CachedArtwork::artwork) {
+            let slot = SlotView {
+                art: tier.view(),
+                side,
+                shadow: None,
+            };
+            match self
+                .entries
+                .peek(&(), &slot as &dyn SlotLookup)
+                .map(CachedArtwork::artwork)
+            {
                 // This tier will serve, so no later one is reached.
                 Some(Some(_)) => return,
                 // A retained refusal: the next tier is the one that matters.
                 Some(None) => {}
                 // A thumbnail-class tier draws the tier below until it lands,
                 // so that one is wanted too.
-                None if key.0.is_thumbnail_class() => resolver.prefetch(&key.0, side),
+                None if slot.art.is_thumbnail_class() => {
+                    resolver.prefetch(&slot.art.to_key(), side);
+                }
                 None => {
-                    resolver.prefetch(&key.0, side);
+                    resolver.prefetch(&slot.art.to_key(), side);
                     return;
                 }
             }
@@ -1098,19 +1280,33 @@ impl ArtworkCache {
 
     /// Build `key`'s slot once (a refusal is retained as an empty slot), and
     /// report what came of it.
-    fn build_slot(&mut self, key: &(ArtworkKey, u32), resolver: &mut dyn ArtworkResolver) -> Slot {
+    ///
+    /// A hit builds no key; a miss builds the one the resolver is handed and
+    /// the slot is retained under.
+    fn build_slot(&mut self, slot: SlotView<'_>, resolver: &mut dyn ArtworkResolver) -> Slot {
         let mut pending = false;
-        let built = match self.entries.get_or_build(&(), key.clone(), || {
-            match resolver.resolve(&key.0, key.1) {
-                Resolved::Done(artwork) => Some(CachedArtwork::new(artwork, &key.0)),
-                Resolved::Pending => {
-                    pending = true;
-                    None
-                }
-            }
-        }) {
+        let built_key: Cell<Option<SlotKey>> = Cell::new(None);
+        let served = self.entries.get_or_build_borrowed(
+            &(),
+            &slot as &dyn SlotLookup,
+            || built_key.take().unwrap_or_else(|| slot.to_key()),
+            || {
+                let key = slot.to_key();
+                let cached = match resolver.resolve(&key.art, slot.side) {
+                    Resolved::Done(artwork) => Some(CachedArtwork::new(artwork, &key.art)),
+                    Resolved::Pending => {
+                        pending = true;
+                        None
+                    }
+                };
+                built_key.set(Some(key));
+                cached
+            },
+        );
+        let built = match served {
             Some(Served::Uncached(artwork)) => {
-                resolver.declined(&key.0, key.1);
+                let key = built_key.take().unwrap_or_else(|| slot.to_key());
+                resolver.declined(&key.art, slot.side);
                 Slot::Uncached(artwork.artwork)
             }
             Some(served) if served.artwork().is_some() => Slot::Served,
@@ -1128,15 +1324,17 @@ impl ArtworkCache {
     /// Returning the admitted value directly would tie the borrow to the
     /// `&mut` build call, so the read-back is how a surface leaves as a shared
     /// borrow the caller can hold while drawing.
-    fn borrow_slot(&self, key: &(ArtworkKey, u32)) -> Option<&Artwork> {
-        self.entries.peek(&(), key).and_then(CachedArtwork::artwork)
+    fn borrow_slot(&self, slot: SlotView<'_>) -> Option<&Artwork> {
+        self.entries
+            .peek(&(), &slot as &dyn SlotLookup)
+            .and_then(CachedArtwork::artwork)
     }
 }
 
 /// Where the picture a request resolved to is retained, and whether it is a
 /// glyph mask the drawing control tints.
-struct ServedPicture {
-    key: (ArtworkKey, u32),
+struct ServedPicture<'a> {
+    slot: SlotView<'a>,
     mask: bool,
 }
 
@@ -1165,11 +1363,15 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
             .find_map(|dir| bundle_icon_path(reader, &dir))
             .and_then(|path| render_icon(reader, rasteriser, &path, side))
             .map(Artwork::new),
+        ArtworkKey::Raster(kind) => {
+            render_icon(reader, rasteriser, &icon_artwork_path(*kind), side).map(Artwork::new)
+        }
+        ArtworkKey::Vector(kind) => {
+            render_icon(reader, rasteriser, &icon_vector_path(*kind), side).map(Artwork::new)
+        }
         // Built-in art is first-party and compiled into this binary, so the
-        // cache rasterises it in place and no resolver is ever handed one;
-        // a shadow is cast in place from a picture already retained.
+        // cache rasterises it in place and no resolver is ever handed one.
         ArtworkKey::Builtin(kind) => builtin_picture(*kind, side).map(Artwork::new),
-        ArtworkKey::Shadow { .. } => None,
         ArtworkKey::Folder(sample) => {
             folder_picture(reader, rasteriser, sample, side).map(Artwork::new)
         }

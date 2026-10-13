@@ -1345,8 +1345,10 @@ name = "tairix-controls"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
  "tairix-colour",
  "tairix-font",
+ "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-icon",
  "tairix-inline",
@@ -1992,6 +1994,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-drvrt",
+ "tairix-fuzzseed",
  "tairix-hid",
  "tairix-log",
  "tairix-rt",
@@ -2501,6 +2504,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-controls",
  "tairix-cursor",
  "tairix-display",
  "tairix-font",
@@ -2624,6 +2628,7 @@ dependencies = [
  "tairix-colour",
  "tairix-crc32c",
  "tairix-font",
+ "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-hash",
  "tairix-log",
@@ -7868,6 +7873,7 @@ name = "tairix-virtio-input"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-fuzzseed",
  "tairix-input",
  "tairix-keymap",
  "tairix-virtio",
@@ -8060,6 +8066,7 @@ name = "tairix-wm"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
  "tairix-colour",
  "tairix-controls",
  "tairix-cursor",

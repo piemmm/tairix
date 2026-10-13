@@ -89,8 +89,9 @@ impl TextShadow {
     }
 }
 
-/// Composite `shadow` for `text` drawn by `font` from the pen at `at`, and
-/// answer the pen its ink ends at. The run is already warmed.
+/// Composite `shadow` for the run `pieces` make, drawn by `font` from the pen
+/// at `at` as one mask, and answer the pen its ink ends at. The run is
+/// already warmed.
 ///
 /// A shadow whose memory cannot be had is not drawn: the ink still is, so the
 /// text stays readable wherever its ground allows.
@@ -99,19 +100,24 @@ pub(crate) fn draw_run_shadow(
     client: &mut impl FontClient,
     surface: &mut Surface,
     at: (i32, i32),
-    text: &str,
+    pieces: &[&str],
     shadow: TextShadow,
 ) -> i32 {
     let (x, y) = at;
+    let walk = |client: &mut _, visit: &mut dyn FnMut(i32, &CachedGlyph)| {
+        pieces.iter().fold(x, |pen, piece| {
+            font.walk_on(client, pen, piece, &mut *visit)
+        })
+    };
     let mut ink = Ink::default();
-    let pen = font.walk_on(client, x, text, |left, glyph| ink.include(left, glyph));
+    let pen = walk(client, &mut |left, glyph| ink.include(left, glyph));
     if shadow.color.a == 0 {
         return pen;
     }
     let Some(mut mask) = ShadowMask::for_run(&ink, y, shadow, surface) else {
         return pen;
     };
-    font.walk_on(client, x, text, |left, glyph| mask.add(left, glyph));
+    walk(client, &mut |left, glyph| mask.add(left, glyph));
     mask.soften(shadow);
     mask.draw(surface, shadow);
     pen

@@ -467,6 +467,12 @@ mod text_area_tests;
 mod text_tests;
 #[cfg(test)]
 mod toolbar_tests;
+
+/// Metered, so a test can hold a pointer event or a layout to allocating
+/// nothing.
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 #[cfg(test)]
 mod value_tests;
 #[cfg(test)]

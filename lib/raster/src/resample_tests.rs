@@ -756,6 +756,27 @@ fn a_reused_scratch_resamples_exactly_as_a_fresh_one() {
     }
 }
 
+/// The accumulator and the filtered rows are sized, not cleared, before each
+/// resample, which is sound only because every sample of them is written
+/// before it is read: garbage left in them changes nothing.
+#[test]
+fn garbage_left_in_a_reused_scratch_never_reaches_the_picture() {
+    let source = surface(40, 30, &gradient(40, 30));
+    let mut scratch = ResampleScratch::default();
+    for (width, height) in [(64, 48), (23, 19), (9, 7), (23, 19)] {
+        let fresh = source
+            .resampled(whole(40, 30), width, height)
+            .expect("resamples");
+        scratch.accumulator.fill(i64::MAX);
+        scratch.cache.rows.fill(i32::MIN);
+        let mut held = Surface::new(width, height).expect("a destination");
+        source
+            .resample_into(whole(40, 30), &mut held, &mut scratch)
+            .expect("resamples");
+        assert_eq!(held.pixels(), fresh.pixels(), "{width}x{height}");
+    }
+}
+
 /// A scratch grown to a resample holds on to what it grew, so resampling
 /// that shape again plans and filters in the same buffers.
 #[test]
