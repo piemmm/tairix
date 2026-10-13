@@ -46,7 +46,7 @@ plan's ledger. A `blocked` row names its blocker.
 | H1 | §19 item 1 — the hash-chained journal core and `journald` | done |
 | H2 | §19 item 2 — signed log anchors and per-service `CAP_LOG_WRITE` | planned |
 | H3–H7, H9, H11, H13 | §19 items 3–7, 9, 11 and 13 | done |
-| H8 | §19 item 8 — honest side-channel profiles and the constant-time test; open: the barriers each profile declares `Applied` run on no production path (`plans/OPEN-DEFECTS.md` D953) | in progress |
+| H8 | §19 item 8 — honest side-channel profiles, each `Applied` slot pinned onto every entry and return path, and the constant-time test | done |
 | H10 | §19 item 10 — KPTI and branch-predictor barriers, stack canaries and the shadow stack | planned |
 | H10-REPRO | §19 item 10's supply-chain half — bit-reproducible images and no-post-install-fetch enforcement | planned |
 | H12 | §19 item 12 — Gold (Verus) contracts and the CHERI Tier-2 port | planned |
@@ -861,10 +861,9 @@ each is a line to fix in a gated change:
   `tests/integration/scheduler_stress{,_qemu}`, `docs/src/platform/x86_64.md`,
   `docs/src/architecture/kernel.md`.
 - "Stage 4.D Item 0-tail": `userland/system/drvhost/tests/host_integration.rs`.
-- Blockers that have cleared, still named as blocking: the `Pending` profile
-  reasons in `kernel/arch/{x86_64,aarch64}/src/sidechannel.rs` and
-  `kernel/arch/aarch64/src/memtag.rs` (the Stage 6 boundary, H10 and
-  H13-MTE), and `lib/log/src/chain.rs` (the signing authority, H2).
+- Blockers that have cleared, still named as blocking:
+  `kernel/arch/aarch64/src/memtag.rs` (the Stage 6 boundary, H13-MTE), and
+  `lib/log/src/chain.rs` (the signing authority, H2).
 - A rustdoc link to the deleted `driver_autoload`:
   `kernel/tairix-kernel/src/test_support.rs`.
 - Claims no longer true: `lib/abi/src/syscall.rs` (the dispatch table "not yet

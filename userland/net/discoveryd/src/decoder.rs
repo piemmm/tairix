@@ -9,7 +9,9 @@
 //!
 //! One engine per interface the front says is up, so a record learned on one
 //! link can never answer for another, and a link that goes down takes
-//! everything learned on it. Every question the front asks is asked on every
+//! everything learned on it. Each spends the interface's group budget as the
+//! front holds it, so a query the budget cannot pay for waits, still due,
+//! rather than being counted sent and dropped. Every question the front asks is asked on every
 //! such interface under the front's own id, and each answer crosses back
 //! already typed — a browse's instance label, a resolve's target and port —
 //! so the front reads a field rather than a record. A record that does not
@@ -25,15 +27,18 @@ use tairix_hash::HashSeed;
 use tairix_net::dns::Name;
 use tairix_net::dnssd::{ServiceInstance, ServiceType};
 use tairix_net::mdns::{
-    Answer as EngineAnswer, AnswerChange, MdnsEngine, QuestionId, RData, Record, Sender,
-    MAX_MESSAGE_LEN, MAX_QUESTIONS,
+    Answer as EngineAnswer, AnswerChange, Destination, MdnsEngine, QuestionId, RData, Record,
+    Sender, MAX_MESSAGE_LEN, MAX_QUESTIONS,
 };
+use tairix_net::rate::{BucketLevel, TokenBucket};
 use tairix_net::IpAddr;
 use tairix_rng::{FastRng, RandU64};
 use tairix_sandbox::session::{FrameOut, SessionService, SessionStep};
 use tairix_util::fallible;
 
-use crate::wire::{Form, FromDecoder, ToDecoder, MAX_FROM_DECODER};
+use crate::wire::{
+    Edge, Form, FromDecoder, ToDecoder, GROUP_BURST, GROUP_RATE, GROUP_RESERVE, MAX_FROM_DECODER,
+};
 
 /// The service a decoder worker serves over its pipes.
 #[derive(Default)]
@@ -71,6 +76,17 @@ struct Question {
 struct Link {
     name: [u8; IF_NAME_LEN],
     engine: MdnsEngine,
+    /// The interface's group budget, charged as the front charges it.
+    group: TokenBucket,
+}
+
+impl Link {
+    /// When its engine next has work the budget lets it do.
+    fn deadline(&self) -> Option<u64> {
+        let due = self.engine.next_deadline()?;
+        let affordable = self.group.ready_at(GROUP_RESERVE)?;
+        Some(due.max(affordable).saturating_total_nanos())
+    }
 }
 
 impl Decoder {
@@ -83,12 +99,7 @@ impl Decoder {
     /// Report the engines' folded deadline when it changed, or always when
     /// `answering` a tick.
     fn report(&mut self, frame: &mut [u8], out: &mut dyn FrameOut, answering: bool) -> bool {
-        let deadline = self
-            .links
-            .iter()
-            .filter_map(|link| link.engine.next_deadline())
-            .map(|at| at.saturating_total_nanos())
-            .min();
+        let deadline = self.links.iter().filter_map(Link::deadline).min();
         if !answering && self.reported == deadline {
             return true;
         }
@@ -169,6 +180,7 @@ impl Decoder {
                 interface,
                 source,
                 port,
+                to_group,
                 payload,
             } => {
                 self.now = self.now.max(now);
@@ -177,6 +189,7 @@ impl Decoder {
                     port,
                     // The front relays only what the stack found on-link.
                     on_link: true,
+                    to_group,
                 };
                 self.on_datagram(configured, interface, sender, payload, out)
             }
@@ -185,12 +198,17 @@ impl Decoder {
                 self.now = self.now.max(now);
                 true
             }
-            ToDecoder::Link { now, interface, up } => {
+            ToDecoder::Link {
+                now,
+                interface,
+                edge,
+            } => {
                 self.now = self.now.max(now);
                 let at = self.links.iter().position(|link| link.name == interface);
-                let carried = match (up, at) {
-                    (true, None) => self.link_up(configured, interface, out),
-                    (false, Some(at)) => {
+                let up = matches!(edge, Edge::Up(_));
+                let carried = match (edge, at) {
+                    (Edge::Up(budget), None) => self.link_up(configured, interface, budget, out),
+                    (Edge::Down, Some(at)) => {
                         self.links.swap_remove(at);
                         true
                     }
@@ -247,7 +265,11 @@ impl Decoder {
             ..
         } = configured;
         let mut alive = true;
-        let Link { name, engine } = link;
+        let Link {
+            name,
+            engine,
+            group,
+        } = link;
         let emitted = engine.on_message(
             Duration64::from_nanos(self.now),
             payload,
@@ -258,12 +280,19 @@ impl Decoder {
                 alive &= relay(frame, out, *name, &self.questions, answer);
             },
         );
-        if let Some(emit) = emitted {
+        // An answer sent at once is a defence of a name this host owns,
+        // which the reserve is kept for; one past even that is not sent, so
+        // a flood of probes cannot be turned into a multicast flood.
+        let affordable = |emit: &tairix_net::mdns::Emit| {
+            emit.to != Destination::Group || group.allow(Duration64::from_nanos(self.now))
+        };
+        if let Some(emit) = emitted.filter(affordable) {
             alive &= send(
                 frame,
                 out,
                 &FromDecoder::Transmit {
                     interface,
+                    at: self.now,
                     to: emit.to,
                     payload: &message[..emit.len],
                 },
@@ -328,11 +357,13 @@ impl Decoder {
         true
     }
 
-    /// Start an engine for `interface` and ask it every question.
+    /// Start an engine for `interface`, spending `budget`, and ask it every
+    /// question.
     fn link_up(
         &mut self,
         configured: &mut Configured,
         interface: [u8; IF_NAME_LEN],
+        budget: BucketLevel,
         out: &mut dyn FrameOut,
     ) -> bool {
         if self.links.try_reserve(1).is_err() {
@@ -341,6 +372,7 @@ impl Decoder {
         self.links.push(Link {
             name: interface,
             engine: MdnsEngine::new(configured.cache),
+            group: TokenBucket::with_level(GROUP_BURST, GROUP_RATE, budget),
         });
         let link = self.links.len() - 1;
         (0..self.questions.len()).all(|slot| match self.questions[slot] {
@@ -418,27 +450,35 @@ impl Decoder {
         send(frame, out, &FromDecoder::Replayed { token })
     }
 
-    /// Run every engine's due work at the current instant: expire, refresh,
-    /// and send each question that is due.
+    /// Run every engine's due work at the current instant — expire, refresh,
+    /// and send each question that is due — while its interface's group
+    /// budget, less the reserve, can pay for what that sends. Work it cannot
+    /// pay for stays due until the budget can.
     fn transmit(&mut self, configured: &mut Configured, out: &mut dyn FrameOut) -> bool {
         let now = Duration64::from_nanos(self.now);
-        let Configured {
-            rng,
-            message,
-            frame,
-            ..
-        } = configured;
+        let Configured { message, frame, .. } = configured;
         for link in &mut self.links {
-            let Link { name, engine } = link;
+            let Link {
+                name,
+                engine,
+                group,
+            } = link;
             let mut alive = true;
-            while let Some(emit) = engine.poll(now, &mut || draw(rng), message, &mut |answer| {
-                alive &= relay(frame, out, *name, &self.questions, answer);
-            }) {
+            while group.ready(now, GROUP_RESERVE) {
+                let Some(emit) = engine.poll(now, message, &mut |answer| {
+                    alive &= relay(frame, out, *name, &self.questions, answer);
+                }) else {
+                    break;
+                };
+                if emit.to == Destination::Group {
+                    group.allow(now);
+                }
                 alive &= send(
                     frame,
                     out,
                     &FromDecoder::Transmit {
                         interface: *name,
+                        at: self.now,
                         to: emit.to,
                         payload: &message[..emit.len],
                     },

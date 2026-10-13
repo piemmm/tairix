@@ -31,7 +31,7 @@ use tairix_abi::{
 use tairix_fuzzseed::Prng;
 use tairix_log::{Event, Sink};
 use tairix_net::iface::TempAddrSource;
-use tairix_netstack::{Caller, Netstack, SocketService};
+use tairix_netstack::{Caller, Netstack, ServedCall, SocketService};
 
 /// A fixed temporary-address source: this harness exercises the socket
 /// serve path, not privacy addresses, so the engine never consults it.
@@ -79,15 +79,22 @@ fn caller(net: bool, proc_byte: u8) -> Caller {
     if net {
         summary.insert(CapabilityId::NET);
     }
-    Caller::new(Origin::new(
-        TrustDomain::User,
-        1000,
-        100,
-        u64::from(proc_byte),
-        ProcId::from_raw([proc_byte; 16]),
-        summary,
-        ORIGIN_CONSOLE_NONE,
-    ))
+    Caller::new(
+        Origin::new(
+            TrustDomain::User,
+            1000,
+            100,
+            u64::from(proc_byte),
+            ProcId::from_raw([proc_byte; 16]),
+            summary,
+            ORIGIN_CONSOLE_NONE,
+        ),
+        ServedCall {
+            endpoint: 0,
+            ticket: 0,
+            probe: |_, _, _| true,
+        },
+    )
 }
 
 fn routed_stack() -> Netstack {

@@ -16,12 +16,23 @@
 //! # What a query costs a hostile sender
 //!
 //! Answering is bounded three ways. A record is multicast at most once per
-//! second (RFC 6762 §6), so a flood of identical questions produces one
-//! answer. A unicast reply is charged to a per-peer budget and to a budget
-//! for the interface, so a peer that asks faster than the segment can
-//! usefully carry is answered less, not more. And a query whose source is
-//! not on-link is not answered at all — an mDNS reflector is an amplifier
-//! with a published multiplier.
+//! second, or per quarter second in defence of a name a probe claims (RFC
+//! 6762 §6), so a flood of identical questions produces one answer. A
+//! unicast reply is charged to a per-peer budget and to a budget for the
+//! interface, so a peer that asks faster than the segment can usefully carry
+//! is answered less, not more. And a query whose source is not on-link is
+//! not answered at all — an mDNS reflector is an amplifier with a published
+//! multiplier.
+//!
+//! # What a response may change
+//!
+//! A response counts only from on-link and from port 5353 (RFC 6762 §11).
+//! One claiming a name this host has established sends that name back to
+//! probing rather than renaming it (RFC 6762 §9), since the claim may be a
+//! stale record; only a name its probe finds taken is renamed, at most
+//! [`MAX_RENAMES`] times, a simultaneous probe that loses the RFC 6762 §8.2
+//! tiebreak probing again for the same name, and fifteen conflicts in ten
+//! seconds hold each further probe back five (RFC 6762 §8.1).
 
 use alloc::vec::Vec;
 
@@ -32,14 +43,14 @@ use tairix_inline::{ArrayVec, BitSet256, IntrusiveList, Link, LinkStore};
 
 use crate::addr::IpAddr;
 use crate::dns::{Name, RecordType};
-use crate::rate::PeerBudgets;
+use crate::rate::{PeerBudgets, TokenBucket};
 use crate::timeutil::{from_nanos, nanos, NEVER};
 
-use super::cache::{expires_at, CachedRecord, KeyedRecord, Learned, RecordCache, RecordKey};
+use super::cache::{CachedRecord, KeyedRecord, Learned, RecordCache, RecordKey};
 use super::codec::{Message, MessageWriter, Question, Section};
 use super::{
     rename, NameKind, QuestionType, RData, Record, TypeBitmap, MAX_MESSAGE_QUESTIONS,
-    MAX_PUBLISHED, MAX_QUESTIONS, MAX_RENAMES, PORT, TTL_GOODBYE_SECS,
+    MAX_PUBLISHED, MAX_QUESTIONS, MAX_RENAMES, PER_RECORD_INTERVAL_NS, PORT, TTL_GOODBYE_SECS,
 };
 
 /// One millisecond in the engine's nanosecond time base.
@@ -50,6 +61,16 @@ const PROBE_COUNT: u8 = 3;
 
 /// Interval between probes (RFC 6762 §8.1).
 const PROBE_INTERVAL: u128 = 250 * MS;
+
+/// How soon a probe defence may multicast a record again, where any other
+/// answer waits a second (RFC 6762 §6).
+const PROBE_DEFENCE_INTERVAL: u128 = 250 * MS;
+
+/// Conflicts within [`CONFLICT_WINDOW`] past which each further probe a
+/// conflict forces waits [`CONFLICT_BACKOFF`] (RFC 6762 §8.1).
+const CONFLICT_STORM: usize = 15;
+const CONFLICT_WINDOW: u128 = 10 * NANOS_PER_SEC as u128;
+const CONFLICT_BACKOFF: u128 = 5 * NANOS_PER_SEC as u128;
 
 /// The random delay before the first probe, so hosts powering up together do
 /// not probe in lockstep (RFC 6762 §8.1).
@@ -79,14 +100,31 @@ const RESPONSE_JITTER_SPAN: u128 = 100 * MS;
 /// The longer delay a query promising further known answers earns, so the
 /// rest of the list arrives before the answer is composed (RFC 6762 §7.2).
 const TRUNCATED_QUERY_DELAY_MIN: u128 = 400 * MS;
+
+/// How long after its query a known-answer list may still go on. Responders
+/// hold their answer that long and more for the rest of the list, so one the
+/// group budget delayed a moment still counts; one delayed longer would
+/// arrive after they answered, and is dropped.
+const CONTINUATION_GRACE: u128 = 100 * MS;
+
+/// Known-answer continuation datagrams one engine sends in a burst, and per
+/// second after. A peer chooses how many records our known-answer lists
+/// hold, so without a bound it would choose how many datagrams each query
+/// costs; past it a list is cut short, which only costs the answers its
+/// responders then repeat.
+const CONTINUATION_BURST: u32 = 8;
+const CONTINUATION_RATE: u32 = 2;
 const TRUNCATED_QUERY_DELAY_SPAN: u128 = 100 * MS;
 
-/// A record is multicast at most this often (RFC 6762 §6).
-const PER_RECORD_INTERVAL: u128 = NANOS_PER_SEC as u128;
+const PER_RECORD_INTERVAL: u128 = PER_RECORD_INTERVAL_NS as u128;
 
 /// The delay before a new question's first query, which lets several
 /// questions raised together travel in one datagram (RFC 6762 §5.2).
 const QUERY_FIRST_DELAY_MAX: u128 = 120 * MS;
+
+/// The least time between two queries for one question a refresh asks for,
+/// and the quantum refreshes are gathered to.
+const REFRESH_SPACING: u128 = NANOS_PER_SEC as u128;
 
 /// The first retransmission interval of a continuous query, doubling to
 /// [`QUERY_MAX_INTERVAL`] (RFC 6762 §5.2).
@@ -181,6 +219,9 @@ pub struct Sender {
     /// cached: answering off-link turns a host into a reflector, and mDNS
     /// reflection is a documented amplifier.
     pub on_link: bool,
+    /// Whether it was sent to the group, so every host on the link heard
+    /// it, rather than to this host alone.
+    pub to_group: bool,
 }
 
 /// A datagram the engine wrote into the caller's buffer.
@@ -207,9 +248,6 @@ pub enum ServiceState {
     Deferred,
     /// Withdrawing: the goodbyes are going out (RFC 6762 §10.1).
     Retiring,
-    /// Nothing is published, and nothing will be: the rename budget ran out
-    /// against a peer that kept claiming the name.
-    Withdrawn,
 }
 
 /// Why a publication or a question was refused.
@@ -330,6 +368,9 @@ struct Asked {
     key: RecordKey,
     /// The retransmission interval, doubling to [`QUERY_MAX_INTERVAL`].
     interval: u128,
+    /// When it was last asked, by us or by another host whose query stood
+    /// for ours.
+    last_query: Option<u128>,
     key_link: Link,
 }
 
@@ -353,13 +394,17 @@ impl LinkStore for KeyView<'_> {
 type Due = ArrayVec<usize, MAX_MESSAGE_QUESTIONS>;
 
 /// The known answers a query had no room for, which follow it in messages of
-/// their own while the instant it was sent at lasts (RFC 6762 §7.2).
+/// their own within [`CONTINUATION_GRACE`] of it (RFC 6762 §7.2).
 #[derive(Debug)]
 struct Continuation {
+    /// When the query went, which the whole list follows within
+    /// [`CONTINUATION_GRACE`].
     at: u128,
     /// The questions whose lists remain, the first resuming at `resume`.
     questions: Due,
     resume: usize,
+    /// The record `resume` held, so a slot reused since is not walked from.
+    resume_exact: u64,
 }
 
 /// Every question this host asks, indexed so an arriving record, a received
@@ -508,7 +553,35 @@ impl Questions {
                 .due
                 .try_insert(slot, now.saturating_add(asked.interval));
             asked.interval = asked.interval.saturating_mul(2).min(QUERY_MAX_INTERVAL);
+            asked.last_query = Some(now);
         }
+    }
+
+    /// A record `id` holds is due a refreshing re-query at `now` (RFC 6762
+    /// §5.2). It is asked at the first whole second at least
+    /// [`REFRESH_SPACING`] after it was last asked, so however many records'
+    /// refresh points fall in one second they cost one query, and a question
+    /// is never re-asked faster than that.
+    fn refresh(&mut self, id: QuestionId, now: u128) {
+        let Some(slot) = self
+            .by_id
+            .get(&id)
+            .and_then(|&slot| usize::try_from(slot).ok())
+        else {
+            return;
+        };
+        let Some(Some(asked)) = self.slots.get(slot) else {
+            return;
+        };
+        let earliest = asked
+            .last_query
+            .map_or(now, |sent| sent.saturating_add(REFRESH_SPACING))
+            .max(now);
+        let at = earliest
+            .div_ceil(REFRESH_SPACING)
+            .saturating_mul(REFRESH_SPACING);
+        let at = self.due.get(slot).map_or(at, |due| due.min(at));
+        let _ = self.due.try_insert(slot, at);
     }
 
     /// The questions due at `now`, as many as one query carries, or `None`
@@ -546,9 +619,9 @@ fn tell_retired(answers: &mut dyn FnMut(&Answer<'_>), question: QuestionId, reco
 struct Pending {
     due: u128,
     records: BitSet256,
-    /// Whether the remainder of a probe defence is among them, which keeps
-    /// the defence's exemption from the one-per-second rule.
-    waived: bool,
+    /// Those of them a probe defence selected, which wait only
+    /// [`PROBE_DEFENCE_INTERVAL`] since last sent rather than a second.
+    waived: BitSet256,
 }
 
 impl Pending {
@@ -556,20 +629,45 @@ impl Pending {
         Self {
             due: NEVER,
             records: BitSet256::new(),
-            waived: false,
+            waived: BitSet256::new(),
         }
     }
 
-    /// Send `records` as soon as the engine is next polled.
-    fn hasten(&mut self, records: &BitSet256, now_ns: u128, waived: bool) {
+    /// Send `records` once the engine is polled at `at` or later, those of
+    /// them in `waived` as a probe defence.
+    fn schedule(&mut self, records: &BitSet256, at: u128, waived: &BitSet256) {
+        if records.is_empty() {
+            return;
+        }
         self.records = self.records.union(records);
-        self.due = self.due.min(now_ns);
-        self.waived |= waived;
+        self.waived = self.waived.union(&records.intersection(waived));
+        self.due = self.due.min(at);
+    }
+
+    /// Take `bit` out, going idle with the last.
+    fn remove(&mut self, bit: u16) {
+        self.records.remove(bit);
+        self.waived.remove(bit);
+        if self.records.is_empty() {
+            *self = Self::idle();
+        }
     }
 
     fn is_idle(&self) -> bool {
         self.due == NEVER
     }
+}
+
+/// What building a response did with the records selected for it.
+struct Built {
+    /// The response's length, when it carries any record.
+    len: Option<usize>,
+    /// Records it had no room for, to go out next.
+    unsent: BitSet256,
+    /// Probe defences sent too recently to send again yet.
+    deferred: BitSet256,
+    /// The first instant one of them may go.
+    deferred_to: u128,
 }
 
 /// The shape one response takes, which the four RFC 6762 cases differ in:
@@ -590,8 +688,42 @@ struct ResponsePlan<'a> {
     /// Whether the datagram goes to the group, which is what makes the
     /// RFC 6762 §6 one-per-second rule apply.
     multicast: bool,
-    /// Whether that rule is waived, which only a probe defence does.
-    waive_rate_limit: bool,
+    /// The records a probe defence selected, for which that rule is eased
+    /// to [`PROBE_DEFENCE_INTERVAL`].
+    waived: BitSet256,
+}
+
+impl<'a> ResponsePlan<'a> {
+    /// The answer to the group, the one-per-second rule eased for `waived`.
+    const fn multicast(waived: BitSet256) -> Self {
+        Self {
+            id: 0,
+            echo: None,
+            ttl_cap: None,
+            strip_flush: false,
+            multicast: true,
+            waived,
+        }
+    }
+
+    /// A reply to one `QU` or direct querier.
+    const fn unicast() -> Self {
+        Self {
+            multicast: false,
+            ..Self::multicast(BitSet256::new())
+        }
+    }
+
+    /// A reply to a legacy resolver, which echoes its id and question.
+    const fn legacy(id: u16, echo: Option<&'a Question>) -> Self {
+        Self {
+            id,
+            echo,
+            ttl_cap: Some(LEGACY_TTL_CAP),
+            strip_flush: true,
+            ..Self::unicast()
+        }
+    }
 }
 
 /// The per-interface multicast DNS engine.
@@ -603,8 +735,12 @@ pub struct MdnsEngine {
     questions: Questions,
     pending: Pending,
     known: Option<Continuation>,
-    replies: PeerBudgets<MAX_TRACKED_PEERS>,
+    replies: PeerBudgets<IpAddr, MAX_TRACKED_PEERS>,
+    /// What continuing known-answer lists may cost.
+    continuations: TokenBucket,
     events: ArrayVec<MdnsEvent, MAX_EVENTS>,
+    /// When the latest conflicts were heard, oldest first.
+    conflicts: ArrayVec<u128, CONFLICT_STORM>,
     next_id: u32,
 }
 
@@ -627,7 +763,9 @@ impl MdnsEngine {
                 LINK_REPLY_BURST,
                 LINK_REPLY_RATE,
             ),
+            continuations: TokenBucket::new(CONTINUATION_BURST, CONTINUATION_RATE),
             events: ArrayVec::new(),
+            conflicts: ArrayVec::new(),
             next_id: 0,
         }
     }
@@ -636,6 +774,14 @@ impl MdnsEngine {
     #[must_use]
     pub fn cache(&self) -> &RecordCache {
         &self.cache
+    }
+
+    /// Panic unless the cache is consistent
+    /// ([`RecordCache::assert_consistent`]): the oracle the fuzz harness
+    /// holds the engine to.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn assert_consistent(&self) {
+        self.cache.assert_consistent();
     }
 
     /// The questions compared since the last call.
@@ -761,7 +907,6 @@ impl MdnsEngine {
         };
         // A name that was never established has nothing to take back.
         if matches!(group.state, ServiceState::Probing | ServiceState::Deferred) {
-            group.state = ServiceState::Withdrawn;
             self.forget(id);
             return;
         }
@@ -800,6 +945,7 @@ impl MdnsEngine {
             record_type,
             key,
             interval: QUERY_INITIAL_INTERVAL,
+            last_query: None,
             key_link: Link::UNLINKED,
         })?;
         let first = nanos(now).saturating_add(jitter(rng, 0, QUERY_FIRST_DELAY_MAX));
@@ -833,7 +979,7 @@ impl MdnsEngine {
             earliest = earliest.min(known.at);
         }
         for group in &self.groups {
-            if group.remaining > 0 && !matches!(group.state, ServiceState::Withdrawn) {
+            if group.remaining > 0 {
                 earliest = earliest.min(group.next_at);
             }
         }
@@ -854,7 +1000,6 @@ impl MdnsEngine {
     pub fn poll(
         &mut self,
         now: Duration64,
-        rng: &mut dyn FnMut() -> u32,
         out: &mut [u8],
         answers: &mut dyn FnMut(&Answer<'_>),
     ) -> Option<Emit> {
@@ -869,7 +1014,7 @@ impl MdnsEngine {
                 return Some(emit);
             }
         }
-        if let Some(emit) = self.advance_groups(now_ns, rng, out) {
+        if let Some(emit) = self.advance_groups(now_ns, out) {
             return Some(emit);
         }
         self.send_query(now_ns, out)
@@ -896,15 +1041,23 @@ impl MdnsEngine {
         if !sender.on_link {
             return None;
         }
+        // Port 0 names no socket a reply could reach.
+        if sender.port == 0 {
+            return None;
+        }
         let message = Message::parse(bytes)?;
         if message.is_empty() {
             return None;
         }
         if message.response {
-            self.on_response(now, &message, sender.addr, answers);
+            // A responder sends from 5353 (RFC 6762 §11); a response from
+            // any other port is a resolver's or a forger's, never an answer.
+            if sender.port == PORT {
+                self.on_response(now, &message, sender, answers);
+            }
             return None;
         }
-        self.on_query(now, &message, sender.addr, sender.port, rng, out)
+        self.on_query(now, &message, sender, rng, out)
     }
 
     /// Drop everything learned on this link, which is what a link going down
@@ -925,7 +1078,7 @@ impl MdnsEngine {
         &mut self,
         now: Duration64,
         message: &Message<'_>,
-        from: IpAddr,
+        sender: Sender,
         answers: &mut dyn FnMut(&Answer<'_>),
     ) {
         for (section, record) in message.records() {
@@ -938,46 +1091,45 @@ impl MdnsEngine {
             }
             let keyed = self.cache.keyed(&record);
             let watcher = self.questions.watcher(keyed);
-            let learned = self
-                .cache
-                .learn(now, keyed, from, watcher, &mut |question, gone| {
-                    tell_retired(answers, question, gone);
-                });
+            let learned =
+                self.cache
+                    .learn(now, keyed, sender.addr, watcher, &mut |question, gone| {
+                        tell_retired(answers, question, gone);
+                    });
             let change = match learned {
-                Learned::Ignored => continue,
                 // A goodbye's record stays held for its final second, and
                 // leaves through the expiry that ends it.
-                Learned::Retired => None,
+                Learned::Ignored | Learned::Corroborated | Learned::Retired => None,
                 Learned::Added => Some(AnswerChange::Added),
                 Learned::Refreshed => Some(AnswerChange::Refreshed),
             };
+            // Told as the cache holds it: its lifetime capped, and its source
+            // the one it is attributed to.
             if let (Some(change), Some(question)) = (change, watcher) {
-                let held = CachedRecord {
-                    record,
-                    source: from,
-                    received: now,
-                    expires: from_nanos(expires_at(nanos(now), record.ttl)),
-                };
-                answers(&Answer {
-                    question,
-                    change,
-                    record: &held,
-                });
+                if let Some(held) = self.cache.held(keyed) {
+                    answers(&Answer {
+                        question,
+                        change,
+                        record: &held,
+                    });
+                }
             }
-            // RFC 6762 §7.4: a record another responder has just sent needs
-            // not be sent again by us.
-            self.suppress_pending(&record);
+            // RFC 6762 §7.4: a record another responder has just sent the
+            // group needs not be sent again by us. One sent to us alone
+            // reached nobody our answer is for.
+            if sender.to_group {
+                self.suppress_pending(&record);
+            }
         }
     }
 
     /// Whether `record` claims a unique name of ours with data we did not
     /// publish — the RFC 6762 §9 conflict.
     fn conflicts_with_ours(&self, record: &Record) -> bool {
-        let owns = self.groups.iter().any(|group| {
-            group.unique
-                && group.name == record.name
-                && !matches!(group.state, ServiceState::Withdrawn)
-        });
+        let owns = self
+            .groups
+            .iter()
+            .any(|group| group.unique && group.name == record.name);
         if !owns {
             return false;
         }
@@ -1002,20 +1154,36 @@ impl MdnsEngine {
     /// again, or give up when the budget is spent.
     fn on_conflict(&mut self, now: Duration64, record: &Record) {
         let now_ns = nanos(now);
-        let Some(index) = self.groups.iter().position(|group| {
-            group.unique
-                && group.name == record.name
-                && !matches!(group.state, ServiceState::Withdrawn)
-        }) else {
+        let Some(index) = self
+            .groups
+            .iter()
+            .position(|group| group.unique && group.name == record.name)
+        else {
             return;
         };
-        let (id, kind, old) = {
+        let (id, kind, old, state) = {
             let group = &self.groups[index];
-            (group.id, group.kind, group.name)
+            (group.id, group.kind, group.name, group.state)
         };
+        match state {
+            // A name being given up is not worth fighting for.
+            ServiceState::Retiring => return,
+            // An established name is probed again before it is given up
+            // (RFC 6762 §9): the claim may be a record gone stale, and a
+            // rival still holding the name will answer the probe.
+            ServiceState::Announcing | ServiceState::Live => {
+                let at = self.after_conflict(now_ns);
+                let group = &mut self.groups[index];
+                group.state = ServiceState::Probing;
+                group.remaining = PROBE_COUNT;
+                group.next_at = at;
+                group.interval = ANNOUNCE_INTERVAL;
+                self.drop_pending_of(id);
+                return;
+            }
+            ServiceState::Probing | ServiceState::Deferred => {}
+        }
         if self.groups[index].renames >= MAX_RENAMES {
-            self.groups[index].state = ServiceState::Withdrawn;
-            self.groups[index].remaining = 0;
             self.forget(id);
             let _ = self
                 .events
@@ -1023,21 +1191,20 @@ impl MdnsEngine {
             return;
         }
         let Ok(next) = rename(&old, kind) else {
-            self.groups[index].state = ServiceState::Withdrawn;
-            self.groups[index].remaining = 0;
             self.forget(id);
             let _ = self
                 .events
                 .try_push(MdnsEvent::ConflictBudgetExhausted { id });
             return;
         };
+        let at = self.after_conflict(now_ns);
         {
             let group = &mut self.groups[index];
             group.name = next;
             group.renames += 1;
             group.state = ServiceState::Probing;
             group.remaining = PROBE_COUNT;
-            group.next_at = now_ns;
+            group.next_at = at;
             group.interval = ANNOUNCE_INTERVAL;
         }
         for published in self.published.iter_mut().filter(|p| p.group == id) {
@@ -1048,6 +1215,26 @@ impl MdnsEngine {
         let _ = self.events.try_push(MdnsEvent::Renamed { id });
     }
 
+    /// Count a conflict heard at `now_ns`, returning when the probe it forces
+    /// may start: at once, or [`CONFLICT_BACKOFF`] on once
+    /// [`CONFLICT_STORM`] conflicts have fallen within [`CONFLICT_WINDOW`].
+    fn after_conflict(&mut self, now_ns: u128) -> u128 {
+        let storm = self.conflicts.is_full()
+            && self
+                .conflicts
+                .first()
+                .is_some_and(|&oldest| now_ns.saturating_sub(oldest) < CONFLICT_WINDOW);
+        if self.conflicts.is_full() {
+            self.conflicts.remove(0);
+        }
+        let _ = self.conflicts.try_push(now_ns);
+        if storm {
+            now_ns.saturating_add(CONFLICT_BACKOFF)
+        } else {
+            now_ns
+        }
+    }
+
     // -- queries ------------------------------------------------------------
 
     /// Answer a query: immediately where the protocol says immediately, and
@@ -1056,11 +1243,11 @@ impl MdnsEngine {
         &mut self,
         now: Duration64,
         message: &Message<'_>,
-        from: IpAddr,
-        from_port: u16,
+        sender: Sender,
         rng: &mut dyn FnMut() -> u32,
         out: &mut [u8],
     ) -> Option<Emit> {
+        let (from, from_port) = (sender.addr, sender.port);
         let now_ns = nanos(now);
         // A probe carries the records its sender proposes to claim in the
         // authority section, and a probe for a name we are also probing for
@@ -1071,12 +1258,18 @@ impl MdnsEngine {
         if probe {
             self.tiebreak(now_ns, message);
         }
-        self.suppress_duplicate_questions(now, message);
 
         // RFC 6762 §6.7: a query from a port other than 5353 is a legacy
         // resolver speaking plain DNS. Its reply is unicast, echoes the
         // question and the id, and carries a short TTL.
         let legacy = from_port != PORT;
+
+        // Another querier's question stands for ours only if every responder
+        // heard all of it as we did: sent to the group, by a querier, read
+        // whole.
+        if sender.to_group && !legacy && message.is_whole() {
+            self.suppress_duplicate_questions(now, message);
+        }
 
         // Both of these are folded once per datagram, never once per
         // (question, record) pair: a peer chooses the question count and
@@ -1095,7 +1288,9 @@ impl MdnsEngine {
             .questions()
             .take(if legacy { 1 } else { usize::MAX })
         {
-            let unicast = legacy || question.unicast_response;
+            // A query sent to this host alone is answered as a QU question
+            // is (RFC 6762 §5.5): nobody else heard it.
+            let unicast = legacy || question.unicast_response || !sender.to_group;
             for bit in &answerable {
                 if suppressed.contains(bit) {
                     continue;
@@ -1113,7 +1308,7 @@ impl MdnsEngine {
                     // whether this host keeps its own name must not depend
                     // on one a flood can drain.
                     immediate.insert(bit);
-                } else if unicast {
+                } else if legacy || (unicast && multicast_lately(published, now_ns)) {
                     immediate.insert(bit);
                     echo.get_or_insert(question);
                 } else {
@@ -1128,8 +1323,8 @@ impl MdnsEngine {
             } else {
                 jitter(rng, RESPONSE_JITTER_MIN, RESPONSE_JITTER_SPAN)
             };
-            self.pending.records = self.pending.records.union(&delayed);
-            self.pending.due = self.pending.due.min(now_ns.saturating_add(delay));
+            self.pending
+                .schedule(&delayed, now_ns.saturating_add(delay), &BitSet256::new());
         }
         if immediate.is_empty() {
             return None;
@@ -1137,35 +1332,12 @@ impl MdnsEngine {
 
         let defending = probe && !legacy;
         let plan = if legacy {
-            ResponsePlan {
-                id: message.id,
-                echo: echo.as_ref(),
-                ttl_cap: Some(LEGACY_TTL_CAP),
-                strip_flush: true,
-                multicast: false,
-                waive_rate_limit: false,
-            }
+            ResponsePlan::legacy(message.id, echo.as_ref())
         } else if defending {
-            ResponsePlan {
-                id: 0,
-                echo: None,
-                ttl_cap: None,
-                strip_flush: false,
-                multicast: true,
-                // RFC 6762 §6 exempts a probe response from the
-                // one-per-second rule: a prober that is not answered claims
-                // the name.
-                waive_rate_limit: true,
-            }
+            // A prober left unanswered claims the name (RFC 6762 §6).
+            ResponsePlan::multicast(immediate)
         } else {
-            ResponsePlan {
-                id: 0,
-                echo: None,
-                ttl_cap: None,
-                strip_flush: false,
-                multicast: false,
-                waive_rate_limit: false,
-            }
+            ResponsePlan::unicast()
         };
         if !plan.multicast && !self.replies.allow(now, from) {
             return None;
@@ -1178,12 +1350,14 @@ impl MdnsEngine {
                 port: if legacy { from_port } else { PORT },
             }
         };
-        let (len, unsent) = self.build_response(now_ns, out, &immediate, &plan)?;
-        if plan.multicast && !unsent.is_empty() {
-            self.pending.hasten(&unsent, now_ns, plan.waive_rate_limit);
+        let built = self.build_response(now_ns, out, &immediate, &plan)?;
+        if plan.multicast {
+            self.pending.schedule(&built.unsent, now_ns, &plan.waived);
+            self.pending
+                .schedule(&built.deferred, built.deferred_to, &plan.waived);
         }
         Some(Emit {
-            len,
+            len: built.len?,
             to: destination,
         })
     }
@@ -1362,20 +1536,13 @@ impl MdnsEngine {
         if selected.is_empty() {
             return None;
         }
-        let plan = ResponsePlan {
-            id: 0,
-            echo: None,
-            ttl_cap: None,
-            strip_flush: false,
-            multicast: true,
-            waive_rate_limit: waived,
-        };
-        let (len, unsent) = self.build_response(now_ns, out, &selected, &plan)?;
-        if !unsent.is_empty() {
-            self.pending.hasten(&unsent, now_ns, waived);
-        }
+        let plan = ResponsePlan::multicast(waived);
+        let built = self.build_response(now_ns, out, &selected, &plan)?;
+        self.pending.schedule(&built.unsent, now_ns, &waived);
+        self.pending
+            .schedule(&built.deferred, built.deferred_to, &waived);
         Some(Emit {
-            len,
+            len: built.len?,
             to: Destination::Group,
         })
     }
@@ -1383,21 +1550,18 @@ impl MdnsEngine {
     /// Advance the probe, announce, and goodbye schedules, emitting at most
     /// one datagram. A round whose datagram `out` has no room for is spent
     /// all the same, and the walk moves on to the next group.
-    fn advance_groups(
-        &mut self,
-        now_ns: u128,
-        rng: &mut dyn FnMut() -> u32,
-        out: &mut [u8],
-    ) -> Option<Emit> {
-        for index in 0..self.groups.len() {
-            let group = &self.groups[index];
+    fn advance_groups(&mut self, now_ns: u128, out: &mut [u8]) -> Option<Emit> {
+        let mut index = 0;
+        while let Some(group) = self.groups.get(index) {
             if group.next_at > now_ns || group.remaining == 0 {
+                index += 1;
                 continue;
             }
-            match group.state {
+            let built = match group.state {
                 ServiceState::Deferred => {
                     self.groups[index].state = ServiceState::Probing;
                     self.groups[index].next_at = now_ns;
+                    None
                 }
                 ServiceState::Probing => {
                     let built = self.build_probe(index, out);
@@ -1413,27 +1577,28 @@ impl MdnsEngine {
                     } else {
                         group.next_at = now_ns.saturating_add(PROBE_INTERVAL);
                     }
-                    let _ = rng;
-                    if let Some(len) = built {
-                        return Some(Emit {
-                            len,
-                            to: Destination::Group,
-                        });
-                    }
+                    built
                 }
                 ServiceState::Announcing | ServiceState::Retiring => {
                     let retiring = matches!(group.state, ServiceState::Retiring);
                     let built = self.build_announcement(index, now_ns, out, retiring);
                     let group = &mut self.groups[index];
                     group.remaining -= 1;
-                    if group.remaining == 0 {
-                        if retiring {
-                            group.state = ServiceState::Withdrawn;
-                            let id = group.id;
-                            self.forget(id);
-                        } else {
-                            group.state = ServiceState::Live;
+                    if group.remaining == 0 && retiring {
+                        // Its last goodbye: the group goes, and the next one
+                        // takes its place in the walk.
+                        let id = group.id;
+                        self.forget(id);
+                        if let Some(len) = built {
+                            return Some(Emit {
+                                len,
+                                to: Destination::Group,
+                            });
                         }
+                        continue;
+                    }
+                    if group.remaining == 0 {
+                        group.state = ServiceState::Live;
                     } else {
                         let step = if retiring {
                             GOODBYE_INTERVAL
@@ -1443,15 +1608,17 @@ impl MdnsEngine {
                         group.next_at = now_ns.saturating_add(step);
                         group.interval = group.interval.saturating_mul(2);
                     }
-                    if let Some(len) = built {
-                        return Some(Emit {
-                            len,
-                            to: Destination::Group,
-                        });
-                    }
+                    built
                 }
-                ServiceState::Live | ServiceState::Withdrawn => {}
+                ServiceState::Live => None,
+            };
+            if let Some(len) = built {
+                return Some(Emit {
+                    len,
+                    to: Destination::Group,
+                });
             }
+            index += 1;
         }
         None
     }
@@ -1507,7 +1674,9 @@ impl MdnsEngine {
             return None;
         }
         let sent = carried.len();
-        self.known = self.push_known(now_ns, &mut writer, &carried, None);
+        self.known = self
+            .push_known(now_ns, &mut writer, &carried, None)
+            .filter(|_| self.continuations.allow(from_nanos(now_ns)));
         if self.known.is_some() {
             writer.set_truncated();
         }
@@ -1515,15 +1684,23 @@ impl MdnsEngine {
     }
 
     /// The next message of known answers a query had no room for, or `None`
-    /// once none remain. The list is dropped if time has moved since the
-    /// query: the responders waiting on it have stopped.
+    /// once none remain. The list is dropped once [`CONTINUATION_GRACE`] has
+    /// passed since the query, or the record it resumes at is gone.
     fn send_known(&mut self, now_ns: u128, out: &mut [u8]) -> Option<Emit> {
         let known = self.known.take()?;
-        if known.at != now_ns {
+        if now_ns.saturating_sub(known.at) > CONTINUATION_GRACE
+            || self.cache.exact_at(known.resume) != Some(known.resume_exact)
+        {
             return None;
         }
         let mut writer = MessageWriter::new(out, 0, false)?;
-        self.known = self.push_known(now_ns, &mut writer, &known.questions, Some(known.resume));
+        self.known = self
+            .push_known(now_ns, &mut writer, &known.questions, Some(known.resume))
+            .filter(|_| self.continuations.allow(from_nanos(now_ns)))
+            .map(|rest| Continuation {
+                at: known.at,
+                ..rest
+            });
         if writer.is_empty() {
             return None;
         }
@@ -1582,6 +1759,7 @@ impl MdnsEngine {
                     at: now_ns,
                     questions: rest,
                     resume: at,
+                    resume_exact: self.cache.exact_at(at)?,
                 });
             }
         }
@@ -1641,19 +1819,21 @@ impl MdnsEngine {
         any.then(|| writer.finish())
     }
 
-    /// Build a response carrying the selected published records, returning
-    /// its length and the selected records it had no room for.
+    /// Build a response carrying the selected published records, saying what
+    /// it carried and what it left for later.
     ///
     /// A unicast reply that runs out of room says so with the truncation bit;
     /// a multicast response never sets it (RFC 6762 §18.5), and what did not
-    /// fit is the caller's to send next.
+    /// fit is the caller's to send next. A multicast record sent too recently
+    /// is left out: a probe defence's to go once it may, any other's for
+    /// good, since its last sending answered this asker too.
     fn build_response(
         &mut self,
         now_ns: u128,
         out: &mut [u8],
         selected: &BitSet256,
         plan: &ResponsePlan<'_>,
-    ) -> Option<(usize, BitSet256)> {
+    ) -> Option<Built> {
         let mut writer = MessageWriter::new(out, plan.id, true)?;
         if let Some(question) = plan.echo {
             if !writer.push_question(question) {
@@ -1662,6 +1842,8 @@ impl MdnsEngine {
         }
         let mut any = false;
         let mut unsent = BitSet256::new();
+        let mut deferred = BitSet256::new();
+        let mut deferred_to = NEVER;
         for bit in selected {
             if !unsent.is_empty() {
                 unsent.insert(bit);
@@ -1671,10 +1853,20 @@ impl MdnsEngine {
             let Some(published) = self.published.get(index) else {
                 continue;
             };
-            let too_soon = published
+            let defence = plan.waived.contains(bit);
+            let interval = if defence {
+                PROBE_DEFENCE_INTERVAL
+            } else {
+                PER_RECORD_INTERVAL
+            };
+            let ready = published
                 .last_sent
-                .is_some_and(|sent| sent.saturating_add(PER_RECORD_INTERVAL) > now_ns);
-            if plan.multicast && !plan.waive_rate_limit && too_soon {
+                .map_or(0, |sent| sent.saturating_add(interval));
+            if plan.multicast && ready > now_ns {
+                if defence {
+                    deferred.insert(bit);
+                    deferred_to = deferred_to.min(ready);
+                }
                 continue;
             }
             let mut record = published.record;
@@ -1699,7 +1891,12 @@ impl MdnsEngine {
             }
             any = true;
         }
-        any.then(|| (writer.finish(), unsent))
+        Some(Built {
+            len: any.then(|| writer.finish()),
+            unsent,
+            deferred,
+            deferred_to,
+        })
     }
 
     // -- budgets and housekeeping -------------------------------------------
@@ -1713,13 +1910,14 @@ impl MdnsEngine {
         } = self;
         cache.advance(
             now,
-            &mut |question| questions.pull_forward(question, now_ns),
+            &mut |question| questions.refresh(question, now_ns),
             &mut |question, gone| tell_retired(answers, question, gone),
         );
     }
 
     /// Drop a record from the pending answer because another responder has
-    /// just sent it (RFC 6762 §7.4).
+    /// just sent it with a lifetime no shorter than ours would give (RFC
+    /// 6762 §7.4).
     fn suppress_pending(&mut self, record: &Record) {
         if self.pending.is_idle() {
             return;
@@ -1729,12 +1927,9 @@ impl MdnsEngine {
             let Some(published) = self.published.get(usize::from(bit)) else {
                 continue;
             };
-            if published.record.same_record(record) {
-                self.pending.records.remove(bit);
+            if published.record.same_record(record) && record.ttl >= published.record.ttl {
+                self.pending.remove(bit);
             }
-        }
-        if self.pending.records.is_empty() {
-            self.pending = Pending::idle();
         }
     }
 
@@ -1746,22 +1941,21 @@ impl MdnsEngine {
                 continue;
             }
             if let Ok(bit) = u16::try_from(index) {
-                self.pending.records.remove(bit);
+                self.pending.remove(bit);
             }
-        }
-        if self.pending.records.is_empty() {
-            self.pending = Pending::idle();
         }
     }
 
-    /// Drop a withdrawn publication's records.
+    /// Drop a withdrawn publication: its group, and its records.
     ///
     /// The published set is indexed by position, so removing entries would
     /// invalidate the pending bitmap; it is rebuilt here rather than left to
     /// name a record that has moved.
     fn forget(&mut self, id: PublishId) {
+        self.groups.retain(|group| group.id != id);
         self.drop_pending_of(id);
         let mut moved = BitSet256::new();
+        let mut moved_waived = BitSet256::new();
         let mut write = 0usize;
         for read in 0..self.published.len() {
             if self.published[read].group == id {
@@ -1771,12 +1965,16 @@ impl MdnsEngine {
                 if self.pending.records.contains(from) {
                     moved.insert(to);
                 }
+                if self.pending.waived.contains(from) {
+                    moved_waived.insert(to);
+                }
             }
             self.published.swap(write, read);
             write += 1;
         }
         self.published.truncate(write);
         self.pending.records = moved;
+        self.pending.waived = moved_waived;
         if self.pending.records.is_empty() {
             self.pending = Pending::idle();
         }
@@ -1793,6 +1991,17 @@ fn jitter(rng: &mut dyn FnMut() -> u32, min: u128, span: u128) -> u128 {
         return min;
     }
     min.saturating_add(u128::from(rng()) % span)
+}
+
+/// Whether `published` was multicast within a quarter of its TTL. Only then
+/// may a question asking for a unicast answer have one: otherwise the
+/// segment's caches, and any conflict detection passively listening, are
+/// owed the record as well (RFC 6762 §5.4).
+fn multicast_lately(published: &Published, now_ns: u128) -> bool {
+    let quarter = u128::from(published.record.ttl) * u128::from(NANOS_PER_SEC) / 4;
+    published
+        .last_sent
+        .is_some_and(|sent| now_ns.saturating_sub(sent) < quarter)
 }
 
 /// Seconds of lifetime left, rounded down, saturating at zero.

@@ -499,4 +499,15 @@ fn only_the_discovery_account_rings_a_doorbell() {
         TrustDomain::Kernel,
         DISCOVERYD_UID
     )));
+    let bell = encode_doorbell(0);
+    let service = origin(TrustDomain::User, DISCOVERYD_UID).to_le_bytes();
+    assert_eq!(
+        genuine_doorbell(&service, &bell),
+        Some(0),
+        "session 0 rings"
+    );
+    let forger = origin(TrustDomain::User, 1000).to_le_bytes();
+    assert_eq!(genuine_doorbell(&forger, &bell), None);
+    assert_eq!(genuine_doorbell(&service[1..], &bell), None);
+    assert_eq!(genuine_doorbell(&service, &bell[..11]), None);
 }

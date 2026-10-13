@@ -843,8 +843,8 @@ by `kernel/mem`. On x86_64 (Stage 3a (a)) the discovery surface lives
 in `kernel/arch/x86_64`:
 
 - `multiboot2` parses the BIOS-derived memory-map tag (Multiboot2
-  type 6) and the EFI memory-map tag (type 17) a GRUB-EFI boot hands
-  in; `pvh` parses the E820-style `hvm_start_info` memory-map table a
+  type 6) and the EFI memory-map tag (type 17) a loader started from
+  UEFI firmware hands in; `pvh` parses the E820-style `hvm_start_info` memory-map table a
   QEMU PVH direct boot hands in. All three parsers are zero-copy and
   `no_alloc`.
 - `bootmemory` bridges those typed entries into

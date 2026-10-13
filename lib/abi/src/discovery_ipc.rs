@@ -204,7 +204,7 @@ const _: () = assert!(SERVICE_NAME_MAX < SERVICE_FIELD_LEN);
 const _: () = assert!(OFF_ADDRESS + 16 == REQUEST_HEADER_LEN);
 
 /// The transport a service type runs over (RFC 6763 §4.1.2).
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum Transport {
     /// `_tcp`.
@@ -343,9 +343,10 @@ pub enum Query<'a> {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DiscoveryRequest<'a> {
     /// Open a session, whose doorbell rings on `deliver_port`. Answered with
-    /// the session id ([`decode_id_reply`]).
+    /// the session id ([`decode_id_reply`]), or [`Errno::PermissionDenied`]
+    /// when the kernel does not attest the port as the calling process's.
     Open {
-        /// A port the caller has bound privately and drains.
+        /// A port the calling process owns and drains.
         deliver_port: u64,
     },
     /// End a session and every request in it.
@@ -353,7 +354,12 @@ pub enum DiscoveryRequest<'a> {
         /// The session.
         session: u32,
     },
-    /// Start a request. Answered with the request id ([`decode_id_reply`]).
+    /// Start a request. Answered with the request id ([`decode_id_reply`]),
+    /// or refused: [`Errno::PermissionDenied`] without the authority it needs,
+    /// [`Errno::LimitExceeded`] at a bound — a third request in one session
+    /// asking what two already ask among them — and [`Errno::Busy`] while the
+    /// account has spent its budget for questions the segment is not yet
+    /// asked, or for joining ones it is.
     Start {
         /// The session.
         session: u32,
@@ -687,6 +693,19 @@ pub fn encode_doorbell(session: u32) -> [u8; DOORBELL_LEN] {
     frame
 }
 
+/// The session a message posted to a delivery port rings for, when its
+/// kernel-attested `sender` (an origin's wire bytes) is the discovery service
+/// and `frame` is a well-formed doorbell; `None` for anything else, which a
+/// client drops unread.
+#[must_use]
+pub fn genuine_doorbell(sender: &[u8], frame: &[u8]) -> Option<u32> {
+    let origin = Origin::from_bytes(sender).ok()?;
+    if !from_discovery_service(&origin) {
+        return None;
+    }
+    decode_doorbell(frame).ok()
+}
+
 /// Decode a doorbell, returning the session it rings for.
 ///
 /// # Errors
@@ -713,7 +732,8 @@ pub fn decode_doorbell(bytes: &[u8]) -> Result<u32, Errno> {
 pub enum Change {
     /// It is now held.
     Added = 1,
-    /// It was asserted again, renewing its lifetime.
+    /// It was asserted again, renewing its lifetime. Told at most once a
+    /// second for one answer, however often it is asserted.
     Refreshed = 2,
     /// It is no longer held: it expired, was withdrawn, or its link went
     /// down.

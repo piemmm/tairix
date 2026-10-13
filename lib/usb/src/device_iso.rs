@@ -132,8 +132,8 @@ pub(super) struct Streaming {
 
 impl Streaming {
     /// Whether the node claimed `interface`.
-    pub(super) const fn claimed(&self, interface: u8) -> bool {
-        self.claimed.contains(interface as u16)
+    pub(super) fn claimed(&self, interface: u8) -> bool {
+        self.claimed.contains(u16::from(interface))
     }
 
     /// The interfaces the node claimed.

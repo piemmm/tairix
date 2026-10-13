@@ -24,7 +24,8 @@ Each source is read whole or refused, and each read is held to the map's node
 bound, so a segment of hostile size cannot grow it without limit. A refused
 source is an answer, not a failure: the window states what it cannot show and
 why, and draws the rest. Every read runs on a worker thread, so the window
-answers within a frame whatever the stack is doing.
+answers within a frame whatever the stack is doing; where the system grants
+no thread, the read — a handful of calls — runs on the window's own.
 
 The neighbour cache and the routes change with no event to wake on, so while a
 window is open the map is read again on a one-shot deadline five seconds after
@@ -41,7 +42,8 @@ title reaches the screen with the data, never ahead of it.
 
 The map keeps one discovery session open, ringing a doorbell port that is a
 member of the window's own wait-set, so it collects only when the service says
-its answers moved. The pure `Discovery` engine enumerates the segment's service
+its answers moved. A message on that port counts only when the kernel attests
+the service sent it and it names the map's own session. The pure `Discovery` engine enumerates the segment's service
 types, browses each, resolves each instance, looks up each host under
 `.local` an instance resolves to — a unicast name is not the link's to answer
 — and asks for the names of the link-local addresses on the map, every kind
@@ -52,9 +54,11 @@ list, so a type that goes takes every browse, resolve and lookup below it with
 it, and a request whose updates the service dropped is asked again — started
 before the old one stops, so the service replays what it holds rather than
 asking the segment again, unless the map is at its account's bound, when the
-old one stops first to make the room. One lost again as soon as it was asked
-again waits for the next read, so a request too large to replay whole costs a
-retry a read rather than a storm.
+old one stops first to make the room. One lost again within its wait is held
+back until the wait passes — one read's interval, doubling with each loss in a
+row up to sixty-four, and forgotten once a replacement outlives it — so a
+request too large to replay whole is retried on a clock, never as fast as its
+losses or doorbells arrive.
 
 A refusal bears on what it refused, and the map says which. An ask the map
 may not make (`CAP_NET_DISCOVER_ALL` withheld) or the service will not
@@ -76,7 +80,10 @@ segment calls it, else with its address; both names are kept as facts. Reverse
 DNS runs on a worker of its own, one lookup at a time, so a slow resolver never
 holds up a refresh; each routable address is looked up once per run. A
 discovery session that fails, or a DNS transport refused, is stated on the map
-and asked again at the next read.
+and asked again at the next read. Discovery and naming make many calls, so
+each needs a thread of its own: where the system grants none, that part is off
+and the map says so, rather than making those calls from the window's
+thread.
 
 ## What each host is
 

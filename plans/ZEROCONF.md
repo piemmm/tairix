@@ -450,19 +450,32 @@ re-derive:
   `Name::encode`'s host-name rules refuse) and `Name::labels` reads them
   back — the pair Z2's instance/type/domain split needs.
 - **The cache index is keyed and the bounds are fixed.** Records chain
-  under keyed hashes of (owner name, type) for a lookup, of the whole record
-  for finding it again, and of (source, owner name, type) for a cache-flush,
-  so a peer can neither choose names that collapse into one chain nor stack
-  records under one name to lengthen the walk to a record: a find compares
-  one record, a flush costs what it retires, and a known-answer list ends at
-  its first stale record. `MAX_RECORDS` (4096)
-  and `MAX_RECORDS_PER_SOURCE` (256) are §24.4 bounds sized for a populated
+  under keyed hashes of (owner name, type) for a lookup and a cache-flush,
+  and of the whole record for finding it again, so a peer can neither
+  choose names that collapse into one chain nor stack records under one
+  name to lengthen the walk to a record: a find compares one record, a
+  flush costs what it retires, and a known-answer list ends at its first
+  record past half its lifetime, which the cache moves behind the rest as
+  it passes it. `MAX_RECORDS` (4096), `MAX_RECORDS_PER_KEY` (256) and
+  `MAX_RECORDS_PER_SOURCE` (256) are §24.4 bounds sized for a populated
   segment; a full slot table is under four mebibytes per interface, grown on
   demand, and independent of segment population. Records and questions sit
   in `IndexedHeap`s at their next deadline, so a sweep reaches only what is
-  due and every deadline reported is exact. A source at its own ceiling
-  evicts its own oldest record; only a globally full table evicts by
-  recency.
+  due and every deadline reported is exact. Each bound is held by its own
+  eviction: a name at its bound evicts its own oldest record; a record no
+  question watches — however it came to be one — counts against its source,
+  which at its bound evicts its own oldest such; and a full table evicts
+  the least recently used record no question watches before any watched
+  one, so forged addresses only make unsolicited records displace each
+  other. `RecordCache::assert_consistent` cross-checks every index for the
+  fuzz harness.
+- **A record is its asserting source's.** Only that source renews it on its
+  own say or withdraws it; another can extend its life and, in the second a
+  goodbye leaves it, rescue it and take it over (RFC 6762 §10.1). The
+  cache-flush bit retires every other record at the name and type received
+  over a second ago, whoever asserted it (§10.2), except a pointer at a
+  service type's name, which is shared. A TTL with its top bit set reads as
+  zero (RFC 2181 §8), and no record is held past `TTL_HELD_MAX_SECS`.
 - **Questions are found, never scanned.** `MAX_QUESTIONS` (4096) per
   interface, each asked under the caller's `QuestionId` and chained under the
   cache's key, so a record, a question another host asked, and a refresh
@@ -472,10 +485,17 @@ re-derive:
   received message with more questions is read as its first that many. A
   name read follows at most `dns::MAX_POINTER_HOPS` compression pointers,
   and the writer never points deeper than that. Known answers a query has no
-  room for follow it at once (RFC 6762 §7.2); a multicast response never
-  sets the truncation bit, sending what does not fit next; and a QM question
-  another host multicasts counts as ours only if it is untruncated and every
-  known answer it carries is one we would offer ourselves (§7.3).
+  room for follow it (RFC 6762 §7.2) within a continuation budget of eight
+  datagrams a burst and two a second, and within 100 ms of the query, past
+  which its responders have answered; a multicast response never sets the
+  truncation bit, sending what does not fit next. A QM question another host
+  asks counts as ours (§7.3) only when it went to the group from 5353, was
+  read whole and untruncated, and every known answer it carries is one we
+  would offer ourselves; another responder's answer suppresses ours (§7.4)
+  only when it went to the group with no shorter a TTL. A refresh point
+  carries a spread of up to 2 % of the record's lifetime from its keyed
+  hash, and a refresh re-asks no sooner than a second after its question
+  last went, gathered to the whole second.
 - **Remaining: a responder's use of continued known answers.** A responder
   delays its answer to a truncated query as §7.2 asks but does not yet drop
   from it what the querier's continuation messages list: the pending answer
@@ -488,14 +508,25 @@ re-derive:
   would decide every tiebreak in our favour.
 - **Defending our own name is never charged to a budget.** Unicast replies
   are budgeted per peer and per interface, but a probe for a name we own is
-  answered at once and multicast, outside both budgets and outside the
-  one-per-second rule. Otherwise draining the budget would be a lever for
-  taking a name.
-- **Renaming is bounded and then fails closed** to *not published*, with a
-  `ConflictBudgetExhausted` event — the §7 posture, implemented.
+  answered at once and multicast, outside both budgets; it repeats a record
+  no faster than every quarter second, deferring rather than dropping one
+  asked for sooner (RFC 6762 §6). Otherwise draining the budget would be a
+  lever for taking a name.
+- **A unicast answer goes only where the segment is current.** A `QU`
+  question or a query sent to this host alone (§5.5) is answered straight
+  back only while the record was multicast within a quarter of its TTL, and
+  is multicast otherwise (§5.4); a legacy resolver is always answered by
+  unicast.
+- **A conflict on an established name re-probes it; renaming is bounded and
+  then fails closed** to *not published*, with a `ConflictBudgetExhausted`
+  event — the §7 posture, implemented. Only a name its probe finds taken is
+  renamed — a lost §8.2 tiebreak probes again for the same name — a name
+  being withdrawn is not fought for, and fifteen conflicts
+  in ten seconds hold each further probe back five (§8.1). A response from a
+  port other than 5353, or a query from port 0, is dropped unread.
 - **Whether a sender is on-link is the stack's verdict, not the engine's.**
-  `on_message` takes a `Sender { addr, port, on_link }`, and `on_link` is
-  what `netstack` stamped on the delivery from its live routes
+  `on_message` takes a `Sender { addr, port, on_link, to_group }`; `on_link`
+  is what `netstack` stamped on the delivery from its live routes
   (`Stack::is_on_link`: link-local, or covered by a route with no gateway).
   The engine keeps no copy of any interface's prefixes to go stale; a sender
   that is not on-link is neither answered nor cached.
@@ -665,11 +696,27 @@ What it now guarantees:
 - **Questions are shared and replayed.** Each distinct question is asked once
   on every up link however many requests share it; a request joining one
   already asked is brought up to date by a replay from the decoder's cache.
+  One replay per question is in flight at a time, joiners sharing the one
+  wanted next; a join needing a fresh replay is charged to the account's
+  replay budget (burst 32 at 8/s, all accounts 256 at 64/s) and refused
+  `Busy` once it is spent. A session holds at most two requests asking one
+  question (`SESSION_COPIES`), so a replacement can start before the request
+  it replaces stops.
+- **Fan-out touches only who is told.** A question's requests are kept in
+  runs — live, owed the replay in flight, owed the next, muted once their
+  queue lost answers — so an edge is offered to the live run and a replayed
+  answer to the run owed it. A renewal within `PER_RECORD_INTERVAL_NS` of the
+  last one told for that answer is absorbed.
 - **Question ids are slots, reused only after the decoder's word.** The
   decoder acknowledges every `Stop` (`Stopped`); the id is freed then and not
   before, and frames cross in order, so no answer to the old question can
   follow and ids never run out. A stopping question still counts against
   `MAX_QUESTIONS`.
+- **Every acknowledgement is owed in order, against a deadline.** The front
+  queues each `Stopped`, `Linked`, and `Replayed` it is owed with the instant
+  it sent the frame; one out of order, of something never sent, or withheld
+  for 30 s condemns the decoder, and a replaced decoder owes nothing and frees
+  every id it was stopping.
 - **The front holds the decoder to its word.** It keeps keyed fingerprints of
   what each question holds per link: an answer is added once, renewed or
   retired only while held, never past `MAX_RECORDS` on one link across every
@@ -679,30 +726,49 @@ What it now guarantees:
   or a stop never told — condemn the decoder.
 - **Nothing crosses a link edge.** The decoder acknowledges every link edge
   (`Linked`); an answer about a link is believed, and a datagram built for it
-  sent, only once every edge told has been acknowledged.
+  sent, only once every edge told has been acknowledged. A link going down
+  tells each request that held something there one `Flush` per edge, found
+  without allocating.
 - **Transmit is bounded and link-pinned.** `SocketRequest::Send` names its
   egress interface. The front sends to the group within a per-interface budget
-  (a burst of 32 at 8 per second), or directly to a peer it relayed from on
-  that interface in the last second, once per datagram relayed and at most four
-  owed at once.
+  (`GROUP_BURST` 32 at `GROUP_RATE` 8 per second), or directly to a peer it
+  relayed from on that interface in the last second, once per datagram relayed
+  and at most four owed at once.
+- **The decoder spends the budget the front charges.** The link-up edge
+  carries the budget's `BucketLevel`, and each `Transmit` the instant it was
+  charged at, so the decoder's bucket and the front's agree exactly: a query
+  the budget cannot pay for stays due rather than being dropped while the
+  engine counts it sent, scheduled sends leave `GROUP_RESERVE` (4) for an
+  immediate defence of an owned name, and a datagram past the budget or from
+  an instant the front has not reached condemns the decoder. Fresh questions
+  are charged per account (burst 64 at 16/s, all accounts 256 at 64/s) and
+  refused `Busy` when spent.
 - **Clients are bounded (§8), generously.** 32 sessions and 1024 requests
   per account (requests across all of its sessions, so opening sessions
   cannot multiply them), 256 KiB of queued answers per session, 1 MiB per
   account and 16 MiB in all (then one `Lost` notice), 4096 sessions in all;
-  one doorbell outstanding per session, authenticated by the service's uid.
+  one doorbell outstanding per session, authenticated by the service's uid and
+  rung only on a port the kernel attests the opening process owns
+  (`call_peer_port`). A doorbell a full port refuses is owed, never lost, and
+  the port watched for room only while one is owed there.
   An account is charged for its subscriptions and the questions it left still
-  stopping, and held to half of `MAX_QUESTIONS`, asserted at build time.
+  stopping, and held to half of `MAX_QUESTIONS`, asserted at build time; one
+  charged its `ACCOUNT_FLOOR` (a sixteenth) raises a fresh question only while
+  more than `FLOOR_RESERVE` (four floors) slots are free, so heavy accounts
+  together fill at most three quarters of the table.
   Authority is checked before room, so a refusal for room never hides an
-  unauthorised request from the audit. Sessions, requests, and questions are
-  found by id, and an exited owner's sessions by the owner, never by a
-  scan.
+  unauthorised request from the audit. Sessions, requests, questions, and
+  grants are found by key, an exited owner's sessions by the owner, and owed
+  doorbells and losses by their own lists, never by a scan; only a link edge
+  and a replaced decoder visit every question.
 - **Every answer names its interface; caches never merge.**
 - **`.local` never leaves the link, and absence is not an error.** A build
   without discovery answers a link name with nothing.
 - **Proven by test:** host tests for the ABI codecs, the grant store, the
   front, the decoder, the question table, the sessions, the planner, the
   client, the resolver routing, and `dns-sd`; `fuzz_decode` and
-  `fuzz_discoveryd` over the new frames; `fuzz_net_sockabi` over link edges,
+  `fuzz_discoveryd` over the new frames, and the latter over random calls from
+  many clients against a real decoder killed mid-sweep; `fuzz_net_sockabi` over link edges,
   flaky ports, and reclaim; and the live `tairix-test-discovery-qemu-aarch64`
   vertical, where `dns-sd` browses, resolves, and looks up a host-side
   responder's service through the whole path and the responder requires that

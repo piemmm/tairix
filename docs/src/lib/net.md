@@ -573,60 +573,92 @@ at.
 `RecordCache` is the per-interface cache. Every arriving record is found,
 renewed, retired, or placed in constant time whatever a peer stacks under
 one name: records are chained under keyed hashes of their owner name and
-type (for a lookup), of the whole record (for finding it again), and of the
-announcing source with the name and type (for a cache-flush, which then
-walks that source's own records there oldest first, retires each once and
-takes it off the walk, and stops at the first received within the last
-second, so it costs what it retires). Every hash is **keyed** with
-the per-boot secret: a peer chooses the names and the rdata, and an unkeyed
-hash would let it choose a set that all land in one chain and restore the
-scan the index exists to prevent. Every record sits in an `IndexedHeap`
-(`lib/collections`) at its next deadline, so a sweep reaches only the
-records whose expiry or refresh point has come, however many are held.
-Which question watches a record is the engine's to say when the record is
-folded in; the cache keeps that question's id with the record, so every edge
-it reports names the question directly.
-`MAX_RECORDS` (4096) and `MAX_RECORDS_PER_SOURCE` (256) are fixed *security*
-bounds, not capacities that grow with the segment — resident state is the
-per-interface ceiling times the interface count, independent of how many
-hosts are shouting. The per-source bound is what makes the global one fair:
-a peer at its own ceiling evicts its **own** oldest record, so shouting
-costs the shouter its cache and nobody else theirs. Caches are never
+type (for a lookup and a cache-flush) and of the whole record (for finding
+it again). A cache-flush walks the records at its name and type not yet cut
+short, oldest first, retires each once and takes it off the walk, and stops
+at the first received within the last second, so it costs what it retires.
+Every hash is **keyed** with the per-boot secret: a peer chooses the names
+and the rdata, and an unkeyed hash would let it choose a set that all land
+in one chain and restore the scan the index exists to prevent. Every record
+sits in an `IndexedHeap` (`lib/collections`) at its next deadline and in a
+second at the instant it passes half its lifetime, so a sweep reaches only
+the records whose expiry, refresh point or half-life has come, however many
+are held. Which question watches a record is the engine's to say when the
+record is folded in and when a question starts or stops; the cache keeps
+that question's id with the record, so every edge it reports names the
+question directly.
+
+`MAX_RECORDS` (4096), `MAX_RECORDS_PER_KEY` (256) and
+`MAX_RECORDS_PER_SOURCE` (256) are fixed *security* bounds, not capacities
+that grow with the segment — resident state is the per-interface ceiling
+times the interface count, independent of how many hosts are shouting. Each
+is held by its own eviction, so a record that reaches two pays both. A name
+and type at its bound evicts its own oldest record, so piling records under
+one name costs no other name anything. A record no question watches counts
+against its source however it came to be one — learned unsolicited, left so
+when its question stopped, or rescued from its owner's goodbye — and a
+source at its bound evicts its **own** oldest such, so shouting costs the
+shouter. A full table evicts the least recently used record no question
+watches before any a question does, so however many addresses a peer
+forges, unsolicited records only displace each other. Caches are never
 merged across interfaces, so a record learned on a hostile network can
-never answer a question scoped to the wired LAN. A goodbye (TTL 0) is
-honoured only from the source that asserted the record, and the cache-flush
-bit retires only that source's other records at the same name and type —
-sparing anything received in the last second, because an announcement of
-several records arrives as several messages.
+never answer a question scoped to the wired LAN.
+
+A record belongs to the source that asserted it. Only that source renews it
+on its own say or withdraws it with a goodbye (TTL 0); another source
+asserting the same record can only extend its life, and one asserting it in
+the second a goodbye leaves it rescues it and becomes its owner (RFC 6762
+§10.1). The cache-flush bit retires every other record at the name and type
+received over a second ago, whoever asserted it (RFC 6762 §10.2) — the
+second spares the rest of an announcement arriving as several messages —
+except on a pointer at a service type's name, which every instance's
+responder shares and none may flush. A TTL with its top bit set reads as
+zero (RFC 2181 §8), and no record is held longer than `TTL_HELD_MAX_SECS`,
+the longest lifetime a responder gives one, so a peer cannot plant a record
+for decades.
 
 `MdnsEngine` is the responder and querier. A unique name is probed for
-three times 250 ms apart before it is announced (RFC 6762 §8.1), a
+three times 250 ms apart before it is announced (RFC 6762 §8.1), and a
 simultaneous probe is settled by the RFC 6762 §8.2 comparison rather than a
-race, and a peer that later claims the name renames this host under the
-RFC 6762 §9 convention — `printer-2.local`, `Hall Printer (2)._ipp…` —
-incrementing rather than stacking suffixes. That renaming is **bounded**:
-RFC 6762 §9 has no natural end, so a peer that keeps claiming whatever name
-we move to would otherwise walk a host through the integers forever. After
-`MAX_RENAMES` the publication fails closed to *not published* and says so.
+race. A response from a port other than 5353 is never an answer (RFC 6762
+§11) and changes nothing. One claiming a name this host has established
+sends that name back to probing rather than renaming it, since the claim
+may be a stale record a probe would expose (RFC 6762 §9); a name its probe
+finds taken is renamed under the RFC 6762 §9 convention — `printer-2.local`,
+`Hall Printer (2)._ipp…` — incrementing rather than stacking suffixes, and
+fifteen conflicts in ten seconds hold each further probe back five seconds
+(RFC 6762 §8.1). That renaming is **bounded**: RFC 6762 §9 has no natural
+end, so a peer that keeps claiming whatever name we move to would otherwise
+walk a host through the integers forever. After `MAX_RENAMES` the
+publication fails closed to *not published* and says so. A name being
+withdrawn is not fought for.
 
 Answering a query is bounded three ways. A record is multicast at most once
 per second (RFC 6762 §6), so a flood of identical questions produces one
-answer. A unicast reply — a `QU` question or a legacy resolver's, which is
-answered on the resolver's own port with the question echoed and a 10-second
-TTL cap (RFC 6762 §6.7) — is charged through `rate::PeerBudgets`: the
-peer's own budget first, then the budget the interface shares. A peer over
-its own budget is refused before the shared one is touched, so one flooder
-cannot spend the interface's replies; a peer rotating its source address
-meets the shared budget. And a message whose sender is **not on-link** is
-not read at all: every datagram arrives as a `Sender` carrying the network
-stack's on-link verdict (`Stack::is_on_link` — link-local, or reached
-through a route with no gateway), and anything else is refused before a
-byte is parsed, because reflected mDNS is an amplifier with a published
-multiplier. The engine keeps no copy of the interface's prefixes to go
-stale when they change. Defending our own name is the one thing never charged
-to a budget — whether this host keeps its name must not depend on something
-a flood can drain — so a probe for a name we own is answered at once, and
-multicast, so the whole segment sees the claim.
+answer. A unicast reply — to a `QU` question, to a query sent to this host
+alone (RFC 6762 §5.5), or to a legacy resolver, which is answered on its own
+port with the question echoed and a 10-second TTL cap (RFC 6762 §6.7) — is
+charged through `rate::PeerBudgets`: the peer's own budget first, then the
+budget the interface shares. A peer over its own budget is refused before
+the shared one is touched, so one flooder cannot spend the interface's
+replies; a peer rotating its source address meets the shared budget. A
+record not multicast within a quarter of its TTL is multicast instead of
+unicast, legacy resolvers apart, so the segment's caches and its passive
+conflict detection stay current (RFC 6762 §5.4). And a message whose sender
+is **not on-link** is not read at all: every datagram arrives as a `Sender`
+carrying the network stack's on-link verdict (`Stack::is_on_link` —
+link-local, or reached through a route with no gateway) and whether it was
+sent to the group, and anything off-link is refused before a byte is
+parsed, because reflected mDNS is an amplifier with a published multiplier.
+The engine keeps no copy of the interface's prefixes to go stale when they
+change. Defending our own name is the one thing never charged to a budget —
+whether this host keeps its name must not depend on something a flood can
+drain — so a probe for a name we own is answered at once, and multicast, so
+the whole segment sees the claim; a defence repeats a record no faster than
+every quarter second, and one asked for sooner is deferred to that instant
+rather than dropped. Another responder's answer suppresses ours (§7.4) only
+when it went to the group and carries the record with at least the TTL we
+would give: one sent to us alone reached nobody our answer is for.
 
 A continuous question is asked under the caller's own `QuestionId`, which
 every answer edge carries, so a caller keeps no map from the engine's ids to
@@ -639,28 +671,41 @@ it by the id its records carry. Due questions travel together, at most
 across successive queries in one `poll` loop.
 
 A query offers what it already holds as known answers (RFC 6762 §7.1). A
-lookup comes freshest first — most recently received, and a record a goodbye
-or a flush cut short last — so each question's list ends at its first record
-past half its lifetime. Known answers a query has no room for follow it at
-once in messages of their own (§7.2): the query and every message but the
-last carry the truncation bit, and the rest is dropped if time moves before
-it is sent, since the responders waiting on it have stopped. A multicast
-response never carries the bit (§18.5): what does not fit goes out in the
-next datagram. A QM question another host multicasts counts as ours (§7.3)
-only if every known answer it carries is one we would offer ourselves, and
-never when it is truncated, so a peer cannot keep a question of ours from
-ever being answered by asking it knowing an answer we do not.
+lookup comes freshest first — most recently received, then those past half
+their lifetime, and a record a goodbye or a flush cut short last — so each
+question's list ends at its first record past half its lifetime. Known
+answers a query has no room for follow it in messages of their own (§7.2):
+the query and every message but the last carry the truncation bit. Those
+continuations are budgeted — eight in a burst, two a second after — since a
+peer chooses how many records our lists hold; past the budget a list is cut
+short, which costs only the answers its responders then repeat. What the
+link's budget holds back more than 100 ms past the query is dropped, its
+responders having answered by then, as is the rest of a list whose next
+record went in the meantime. A multicast response never carries
+the bit (§18.5): what does not fit goes out in the next datagram. A QM
+question another host asks counts as ours (§7.3) only when every responder
+heard all of it as we did — sent to the group, from port 5353, read whole,
+not truncated — and every known answer it carries is one we would offer
+ourselves, so a peer cannot keep a question of ours from ever being
+answered by asking it knowing an answer we do not.
 
 The engine is tickless: `next_deadline` folds probe, announce, response
 delay, query backoff, cache expiry, and the RFC 6762 §5.2 cache-refresh
-points (80/85/90/95 % of TTL, and only for records a live question covers,
-so a passively cached record costs no timers) into the one instant the
-caller arms a one-shot for. Questions sit in an `IndexedHeap` at their next
-query instant, so the instant is exact, and moving, stopping, or sending a
-question costs the heap's height rather than a pass over the others: a
-query's due questions are walked in time proportional to how many are due.
-Host-tested and fuzzed (`fuzz_net_mdns`), including floods past a source's
-bound at the very names the questions ask.
+points into the one instant the caller arms a one-shot for. A refresh point
+falls at 80/85/90/95 % of a record's TTL plus a spread of up to 2 % taken
+from its keyed hash, so neither queriers nor one querier's records re-ask
+together, and only for records a live question covers, so a passively
+cached record costs no timers; a refresh re-asks no sooner than a second
+after its question was last asked, gathered to the whole second, so the
+records of one answer refresh in one query. Questions sit in an
+`IndexedHeap` at their next query instant, so the instant is exact, and
+moving, stopping, or sending a question costs the heap's height rather than
+a pass over the others: a query's due questions are walked in time
+proportional to how many are due. Host-tested and fuzzed (`fuzz_net_mdns`):
+random datagrams, valid messages and mutations of them, the engine checked
+against its own invariants after every step, and the cache flooded past
+every bound by distinct records from loud and quiet sources with its every
+index cross-checked.
 
 ### `dnssd` — service instance naming and `TXT` attributes
 

@@ -31,6 +31,12 @@ the same event-driven wait-set loop. Each socket request is dispatched by
 - keys every socket to the creating principal's unforgeable `ProcId`, so a
   handle is meaningless — and reported absent (`NotFound`) — to any other
   principal even if observed;
+- delivers a socket's events, opened or accepted, only to a port the kernel
+  attests the calling process owns
+  ([`call_peer_port`](../architecture/syscalls.md)), refusing any other with
+  `PermissionDenied`: the stack posts with its own identity, which clients
+  believe, so a foreign port would be a mailbox the stack spams on another's
+  behalf;
 - binds each family's ports **uniquely** across every socket (no silent
   reuse) — a socket has one family and never receives the other's traffic,
   so an IPv4 and an IPv6 socket may hold the same port; a `port` of `0`
@@ -187,7 +193,7 @@ drawn from the platform RNG — `lib/crypto`, never hand-rolled). Each completed
 handshake becomes a **pending** child stream socket keyed to the same
 principal; the stack delivers an `Accepted` readiness event to the listener's
 delivery port. The server responds with `Accept`, which claims the oldest
-pending connection, binds it to a caller-supplied delivery port, hands back a
+pending connection, binds it to a delivery port the caller owns, hands back a
 new child `SocketId`, and delivers any bytes the peer already sent. `Accept`
 with no connection ready replies the retryable `WouldBlock`. Until a
 connection is accepted its received bytes buffer in the bounded TCB, so the
@@ -278,11 +284,14 @@ A `SocketDatagram` is the 52-byte-header-plus-payload frame the stack
 `ipc_send`s to a datagram socket's delivery port: the receiving `SocketId`,
 the logical interface it arrived on (a bond, not the member that carried
 it), the peer `SocketAddr` it came from, whether that peer is on the
-arrival interface's own link, and the payload. The on-link verdict is the
-stack's: the peer is link-local, or reached through one of that interface's
-routes with no gateway. A link-scoped protocol such as multicast DNS takes
-it from here rather than keeping its own copy of the interface's prefixes,
-which would go stale when they change.
+arrival interface's own link, whether it was addressed to a group the
+socket joined rather than to this host alone, and the payload. The on-link
+verdict is the stack's: the peer is link-local, or reached through one of
+that interface's routes with no gateway. A link-scoped protocol such as
+multicast DNS takes it from here rather than keeping its own copy of the
+interface's prefixes, which would go stale when they change. The group flag
+says whether every member heard the datagram too, which decides whether
+multicast DNS may let another host's query or answer stand for its own.
 
 A socket holding group memberships is also told where they are live: a
 `SocketLinkEvent` (magic `"NSKL"`) names the socket, a logical interface, and

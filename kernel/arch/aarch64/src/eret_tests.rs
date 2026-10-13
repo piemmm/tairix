@@ -27,7 +27,7 @@ use std::vec::Vec;
 /// Collapse each line's internal whitespace to single spaces so an
 /// assertion names an instruction without also pinning the source's column
 /// alignment. The exception path's other source pins share it.
-pub(super) fn instruction_lines(src: &str) -> Vec<String> {
+pub(crate) fn instruction_lines(src: &str) -> Vec<String> {
     src.lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect()

@@ -52,6 +52,7 @@ pub mod manifest;
 pub mod memory;
 pub mod net;
 pub mod net_ipc;
+pub mod nospec;
 pub mod notice;
 pub mod notify_ipc;
 pub mod origin;

@@ -883,10 +883,12 @@ impl CapabilityId {
 
     /// Position of this capability inside a 256-bit capability set.
     ///
-    /// Always less than 256 by construction.
+    /// Always less than 256 by construction, and clamped without a branch
+    /// so a mispredicted check on a caller's id cannot index past a bitmap
+    /// speculatively ([`crate::nospec`]).
     #[must_use]
-    pub const fn index(self) -> usize {
-        self.0 as usize
+    pub fn index(self) -> usize {
+        crate::nospec::index_within(usize::from(self.0), usize::from(CAPABILITY_ID_MAX) + 1)
     }
 }
 

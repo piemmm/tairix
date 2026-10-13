@@ -184,6 +184,16 @@ impl PartialEq for ServiceType {
 
 impl Eq for ServiceType {}
 
+/// Consistent with the case-blind equality: the name hashes folded.
+impl core::hash::Hash for ServiceType {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.transport.hash(state);
+        for byte in self.name() {
+            state.write_u8(byte.to_ascii_lowercase());
+        }
+    }
+}
+
 /// Renders `_ipp._tcp`. Every octet is alphanumeric or a hyphen, so unlike
 /// an instance name this is safe to draw as it stands.
 impl fmt::Display for ServiceType {

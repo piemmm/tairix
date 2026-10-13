@@ -706,22 +706,21 @@ on every port, `kernel/arch/api/src/conformance.rs::run_all`). Every
 non-applied slot carries a non-empty justification (`validate`) and the
 stricter `is_release_ready` gate rejects any `Pending`.
 
-- **Side-channel profiles (`SideChannelMitigation`).** x86_64 applies
-  `lfence` (syscall entry/exit) + `verw` (MDS buffer clear) and tracks
-  KPTI + IBPB as `Pending` (Stage 6 page tables / CPUID-feature probe —
-  the IBRS/STIBP/SSBD family rides the same CPUID-gated landing). aarch64
-  applies `csdb` (Spectre-v1) and declares the MDS buffer flush
-  `NotVulnerable` (Intel-only), with KPTI + the MIDR-specific Spectre-v2
-  sequence `Pending`. riscv64 emits a conservative memory `fence` and is
-  release-ready: the in-order cores TAIRiX targets (QEMU `virt`, SiFive
-  U54/U74) do not speculate past a fault or mispredict, so the Meltdown /
-  MDS / Spectre-v2 controls are justified no-ops — `fence.i`/`sfence.vma`
-  *speculation* sequencing is not needed on in-order silicon and is
-  revisited only if an out-of-order RISC-V core is added. wasm32 is
-  release-ready: every microarchitectural control is host-owned
-  (site isolation, timer clamping, COOP/COEP) and memory is isolated per
-  Web Worker. Each barrier instruction is `cfg`-gated to bare metal under
-  a `// SAFETY:` block.
+- **Side-channel profiles (`SideChannelMitigation`).** The profile
+  declares; the mechanisms live in each port's entry and return code, and
+  each port's `sidechannel_tests` pins every `Applied` slot onto every path
+  in its sources. x86_64 scrubs the saved registers in every entry stub,
+  fences its two privilege-dependent GS swaps, clears the buffers with
+  `verw` before every `sysretq`/`iretq` to ring 3, and traps straight-line
+  speculation with an `int3` behind each; KPTI and IBPB are `Pending`.
+  aarch64 scrubs `x2`–`x28` in the trap trampoline and fences every `eret`
+  with `dsb nsh; isb`; the buffer clear is `NotVulnerable` (Intel-only), and
+  KPTI and the MIDR-specific Spectre-v2 sequence are `Pending`. riscv64 is
+  release-ready: its in-order cores (QEMU `virt`, SiFive U54/U74) run
+  nothing speculatively, so every slot is a justified no-op. wasm32 is
+  release-ready: every microarchitectural control is host-owned (site
+  isolation, timer clamping, COOP/COEP) and memory is isolated per Web
+  Worker.
 - **Memory-tagging profiles (`MemoryTagging`).** aarch64 implements the
   real Arm MTE `stg` store sequence (`#[target_feature(enable = "mte")]`,
   16-byte / 4-bit granule) behind a default-off `mte_enabled` gate and
@@ -740,11 +739,11 @@ stricter `is_release_ready` gate rejects any `Pending`.
   + `-p tairix-kernel-mem` green); profiles are honest. Docs:
   `docs/src/security/side_channels.md`, `docs/src/security/memory_tagging.md`,
   platform pages, `PLAN.md` §19 items 8 & 13, this file.
-- **Carried forward (Stage-6-blocked, "[DO IMMEDIATELY ON UNBLOCK]"):**
-  KPTI + IBPB/IBRS/STIBP/SSBD on x86_64; KPTI + the MIDR Spectre-v2
-  sequence on aarch64; auto-enabling Arm MTE on `FEAT_MTE` silicon. All
-  three depend on the Stage 6 user/kernel page-table boundary, not on this
-  stage; the software slab tag-check remains the UAF floor until then.
+- **Carried forward:** KPTI + IBPB/IBRS/STIBP/SSBD on x86_64
+  (`plans/ARCHSUPPORT.md` A8); KPTI + the MIDR Spectre-v2 sequence on
+  aarch64; auto-enabling Arm MTE on `FEAT_MTE` silicon. The Stage 6
+  user/kernel boundary they waited on has landed; the software slab
+  tag-check remains the UAF floor until MTE is enabled.
 
 ### Stage W10 — Heterogeneous `core_class` discovery (aarch64) ✅ LANDED
 

@@ -2,18 +2,23 @@
 //! serve loop drives it.
 
 use super::Decoder;
-use crate::wire::{Form, FromDecoder, ToDecoder, CACHE_KEY_LEN, MAX_TO_DECODER, RNG_KEY_LEN};
+use crate::wire::{
+    Edge, Form, FromDecoder, ToDecoder, CACHE_KEY_LEN, GROUP_BURST, GROUP_RATE, GROUP_RESERVE,
+    MAX_TO_DECODER, RNG_KEY_LEN,
+};
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::discovery_ipc::{Answer, Change, Entry};
 use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_net::dns::{Name, RecordType};
 use tairix_net::mdns::{Destination, MessageWriter, RData, Record, Section, Service};
+use tairix_net::rate::BucketLevel;
 use tairix_net::{IpAddr, Ipv4Addr};
 use tairix_sandbox::proto::ProtoError;
 use tairix_sandbox::session::{FrameOut, SessionService, SessionStep};
 
 const SEC: u64 = 1_000_000_000;
+const MS: u64 = 1_000_000;
 
 /// Collects every frame the decoder emits.
 #[derive(Default)]
@@ -167,15 +172,24 @@ fn datagram(now: u64, interface: &[u8], payload: &[u8]) -> Vec<u8> {
         interface: iface(interface),
         source: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)),
         port: 5353,
+        to_group: true,
         payload,
     })
 }
 
 fn link(now: u64, interface: &[u8], up: bool) -> Vec<u8> {
+    let edge = if up {
+        Edge::Up(BucketLevel {
+            scaled: u64::from(GROUP_BURST) * SEC,
+            at: now,
+        })
+    } else {
+        Edge::Down
+    };
     frame(&ToDecoder::Link {
         now,
         interface: iface(interface),
-        up,
+        edge,
     })
 }
 
@@ -552,4 +566,76 @@ fn hostile_payloads_are_dropped_and_leave_nothing_cached() {
         );
     }
     assert!(decoder.links[0].engine.cache().is_empty());
+}
+
+/// A decoder running `eth0` with `scaled` of its group budget left at `now`.
+fn linked_holding(now: u64, scaled: u64) -> (Decoder, Collected) {
+    let mut decoder = configured();
+    let mut out = Collected::default();
+    let up = frame(&ToDecoder::Link {
+        now,
+        interface: iface(b"eth0"),
+        edge: Edge::Up(BucketLevel { scaled, at: now }),
+    });
+    assert_eq!(handled(&mut decoder, &up, &mut out), SessionStep::Continue);
+    out.take();
+    (decoder, out)
+}
+
+/// A query the group budget cannot pay for stays due, and the decoder asks to
+/// be woken when the budget can; it is never counted sent and dropped.
+#[test]
+fn a_query_the_budget_cannot_pay_for_waits_due_until_it_can() {
+    let reserve = u64::from(GROUP_RESERVE) * SEC;
+    let (mut decoder, mut out) = linked_holding(0, reserve);
+    handled(
+        &mut decoder,
+        &ask(0, 7, Form::Instance, &ipp_type()),
+        &mut out,
+    );
+    handled(&mut decoder, &frame(&ToDecoder::Tick { now: MS }), &mut out);
+    let affordable = SEC.div_ceil(u64::from(GROUP_RATE));
+    let said = out.take();
+    assert!(
+        !said.iter().any(|said| matches!(said, Said::Transmit(..))),
+        "the reserve is not spent on a query"
+    );
+    assert_eq!(said.last(), Some(&Said::Deadline(Some(affordable))));
+    handled(
+        &mut decoder,
+        &frame(&ToDecoder::Tick { now: affordable }),
+        &mut out,
+    );
+    assert!(out
+        .take()
+        .contains(&Said::Transmit(iface(b"eth0"), Destination::Group)));
+}
+
+/// However many questions are due, the decoder's scheduled sends stop at the
+/// reserve, each charged at the instant it names.
+#[test]
+fn scheduled_sends_stop_at_the_reserve() {
+    let (mut decoder, mut out) = linked_holding(0, u64::from(GROUP_BURST) * SEC);
+    for n in 0..1024 {
+        let name = Name::encode(&alloc::format!("host{n}.local")).unwrap();
+        handled(&mut decoder, &ask(0, n, Form::AddressV4, &name), &mut out);
+    }
+    out.take();
+    handled(
+        &mut decoder,
+        &frame(&ToDecoder::Tick { now: SEC }),
+        &mut out,
+    );
+    let sent = out
+        .frames
+        .iter()
+        .filter_map(|frame| match FromDecoder::decode(frame) {
+            Ok(FromDecoder::Transmit { at, to, .. }) => Some((at, to)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sent.len(), (GROUP_BURST - GROUP_RESERVE) as usize);
+    assert!(sent
+        .iter()
+        .all(|&(at, to)| at == SEC && to == Destination::Group));
 }

@@ -41,7 +41,7 @@ pub use iface::{
     queue_tx, BondChange, BondMemberHealth, DhcpRngFactory, FrameBatch, Interface, Netstack,
     PublishedLink, ServiceHint, ServiceOutcome, TempAddrFactory,
 };
-pub use service::{serve, Caller};
+pub use service::{serve, Caller, PortProbe, ServedCall};
 pub use socket::{Delivery, Post, SocketReply, SocketService, StreamIo, MAX_GROUPS_PER_SOCKET};
 
 #[cfg(test)]

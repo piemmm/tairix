@@ -45,7 +45,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use tairix_abi::SyscallNumber;
+use tairix_abi::{SyscallNumber, SYSCALLS};
 
 /// Bare name of the application the library row launches — the bundle is
 /// `<system application store>/<name>.app`, composed from the shared
@@ -80,50 +80,36 @@ pub const RECIPIENT_COMM: &str = PICK_APP_NAME;
 ///
 /// Read from the `abi-v1` table the dispatcher audits from, so a renamed
 /// syscall moves the witness with it instead of leaving a string here that
-/// matches nothing and fails the run as a timeout.
-pub const GRANT_SYSCALL: &str = syscall_name(SyscallNumber::FD_GRANT);
+/// matches nothing and fails the run as a timeout. The table is dense, so a
+/// number's row is its index, and an unassigned number fails the build.
+pub const GRANT_SYSCALL: &str = SYSCALLS[SyscallNumber::FD_GRANT.as_u16() as usize].name;
 
 /// Name of the syscall the viewer redeems the delegation with, as the syscall
 /// audit field renders it (see [`GRANT_SYSCALL`]).
-pub const REDEEM_SYSCALL: &str = syscall_name(SyscallNumber::FD_REDEEM);
+pub const REDEEM_SYSCALL: &str = SYSCALLS[SyscallNumber::FD_REDEEM.as_u16() as usize].name;
 
 /// Name of the syscall a relay redeems a delegation with, bound to the grantor
 /// it relays for, as the syscall audit field renders it (see
 /// [`GRANT_SYSCALL`]). The sibling hand-over vertical's session step makes it.
-pub const BOUND_REDEEM_SYSCALL: &str = syscall_name(SyscallNumber::FD_REDEEM_FROM);
-
-/// The audited name of `number`, as the dispatcher's `sc` field renders it.
-///
-/// An unassigned number has no name; the empty string matches no record, so
-/// a gate built on one never latches (fail closed) rather than latching on
-/// the wrong call.
-const fn syscall_name(number: SyscallNumber) -> &'static str {
-    match tairix_abi::spec_for(number) {
-        Some(spec) => spec.name,
-        None => "",
-    }
-}
+pub const BOUND_REDEEM_SYSCALL: &str =
+    SYSCALLS[SyscallNumber::FD_REDEEM_FROM.as_u16() as usize].name;
 
 #[cfg(test)]
 mod tests {
-    use super::{syscall_name, BOUND_REDEEM_SYSCALL, GRANT_SYSCALL, REDEEM_SYSCALL};
-    use tairix_abi::SyscallNumber;
+    use super::{BOUND_REDEEM_SYSCALL, GRANT_SYSCALL, REDEEM_SYSCALL};
+    use tairix_abi::{spec_for, SyscallNumber};
 
-    /// The witness names are the `abi-v1` table's own, so a renamed syscall
-    /// fails this test rather than silently leaving the guest's gate
-    /// unmatchable and the run reported as a timeout.
+    /// Each witness is the name the dispatcher's own lookup audits, so a
+    /// renamed syscall fails this test rather than silently leaving the
+    /// guest's gate unmatchable and the run reported as a timeout.
     #[test]
     fn the_witnesses_name_the_syscalls_the_dispatcher_audits() {
-        assert_eq!(GRANT_SYSCALL, syscall_name(SyscallNumber::FD_GRANT));
-        assert_eq!(REDEEM_SYSCALL, syscall_name(SyscallNumber::FD_REDEEM));
-        assert_eq!(
-            BOUND_REDEEM_SYSCALL,
-            syscall_name(SyscallNumber::FD_REDEEM_FROM)
-        );
-        // An unassigned number renders as the empty string, which matches no
-        // record; all of these are assigned, so no witness is inert.
-        assert!(!GRANT_SYSCALL.is_empty());
-        assert!(!REDEEM_SYSCALL.is_empty());
-        assert!(!BOUND_REDEEM_SYSCALL.is_empty());
+        for (witness, number) in [
+            (GRANT_SYSCALL, SyscallNumber::FD_GRANT),
+            (REDEEM_SYSCALL, SyscallNumber::FD_REDEEM),
+            (BOUND_REDEEM_SYSCALL, SyscallNumber::FD_REDEEM_FROM),
+        ] {
+            assert_eq!(Some(witness), spec_for(number).map(|spec| spec.name));
+        }
     }
 }

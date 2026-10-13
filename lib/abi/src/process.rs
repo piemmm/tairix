@@ -1675,7 +1675,7 @@ impl DescriptorTable {
     pub fn mode(&self, fd: u32) -> StreamMode {
         let index = fd as usize;
         if index < STD_STREAM_COUNT {
-            self.modes[index]
+            self.modes[crate::nospec::index_within(index, STD_STREAM_COUNT)]
         } else {
             StreamMode::Closed
         }
@@ -1693,7 +1693,7 @@ impl DescriptorTable {
     pub fn console(&self, fd: u32) -> u8 {
         let index = fd as usize;
         if index < STD_STREAM_COUNT {
-            self.consoles[index]
+            self.consoles[crate::nospec::index_within(index, STD_STREAM_COUNT)]
         } else {
             0
         }
@@ -1706,6 +1706,7 @@ impl DescriptorTable {
     pub fn set_slot(&mut self, fd: u32, mode: StreamMode, console: u8) {
         let index = fd as usize;
         if index < STD_STREAM_COUNT {
+            let index = crate::nospec::index_within(index, STD_STREAM_COUNT);
             self.modes[index] = mode;
             self.consoles[index] = console;
         }

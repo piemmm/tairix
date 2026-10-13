@@ -1068,6 +1068,16 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn call_peer_port(
+        &self,
+        _c: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _port: u64,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn file_map(&self, _c: &CallerContext<'_>, _fd: u32, _offset: u64, _len: u64) -> SyscallResult {
         self.bump();
         Ok(0)

@@ -1,8 +1,8 @@
 //! Boot-protocol record and protocol-neutral boot-info access.
 //!
 //! The x86_64 trampoline (`boot.s`) is entered by one of two loaders —
-//! GRUB's multiboot2 loader (`_start`) or QEMU's PVH direct-boot ELF
-//! loader (`pvh_start`) — and both hand `entry.rs` a magic plus a
+//! a multiboot2 loader (`_start`) or QEMU's PVH direct-boot ELF loader
+//! (`pvh_start`) — and both hand `entry.rs` a magic plus a
 //! boot-info physical address. `entry.rs` validates the magic and
 //! records the protocol here, exactly once, before `kernel_main` runs.
 //!
@@ -19,7 +19,7 @@ use crate::{acpi, multiboot2, paging, pvh};
 /// Which loader entered the kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootProtocol {
-    /// GRUB (or another multiboot2 bootloader) entered `_start`.
+    /// A multiboot2 loader entered `_start`.
     Multiboot2,
     /// QEMU's `-kernel` PVH ELF loader entered `pvh_start`.
     Pvh,
@@ -89,7 +89,7 @@ pub enum BootDataError {
 /// Protocol-neutral view of the loader-provided boot information.
 #[derive(Debug, Clone, Copy)]
 pub enum BootData<'a> {
-    /// Multiboot2 tag stream (GRUB path).
+    /// Multiboot2 tag stream.
     Multiboot2(multiboot2::BootInfo<'a>),
     /// PVH start-info record plus its memory-map table (QEMU `-kernel`
     /// path).

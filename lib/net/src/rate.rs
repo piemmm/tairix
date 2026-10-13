@@ -30,7 +30,6 @@
 use tairix_abi::time::{Duration64, NANOS_PER_SEC};
 use tairix_inline::ArrayVec;
 
-use crate::addr::IpAddr;
 use crate::timeutil::nanos;
 
 /// The monotonic per-interface counters a throughput rate is derived from.
@@ -273,6 +272,15 @@ pub struct TokenBucket {
 /// One scaled token: the cost of one event.
 const TOKEN: u64 = NANOS_PER_SEC as u64;
 
+/// A bucket's state, so another holder can spend exactly as it would.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BucketLevel {
+    /// The tokens held, each worth [`NANOS_PER_SEC`] of these.
+    pub scaled: u64,
+    /// The monotonic instant they were counted at, in nanoseconds.
+    pub at: u64,
+}
+
 impl TokenBucket {
     /// A bucket allowing bursts of `burst` events, refilled at
     /// `per_second` events per second. Zero values fail closed: a zero
@@ -286,6 +294,62 @@ impl TokenBucket {
             per_second: u64::from(per_second),
             last: 0,
         }
+    }
+
+    /// A bucket of `burst` at `per_second` that holds `level`, clamped to
+    /// what such a bucket can hold.
+    #[must_use]
+    pub fn with_level(burst: u32, per_second: u32, level: BucketLevel) -> Self {
+        let mut bucket = Self::new(burst, per_second);
+        bucket.tokens = level.scaled.min(bucket.capacity);
+        bucket.last = u128::from(level.at);
+        bucket
+    }
+
+    /// What it holds, as of the last event it charged or refused.
+    #[must_use]
+    pub fn level(&self) -> BucketLevel {
+        BucketLevel {
+            scaled: self.tokens,
+            at: u64::try_from(self.last).unwrap_or(u64::MAX),
+        }
+    }
+
+    /// Whether more than `reserve` events' worth is held at `now`, spending
+    /// nothing.
+    #[must_use]
+    pub fn ready(&self, now: Duration64, reserve: u32) -> bool {
+        let elapsed = nanos(now).saturating_sub(self.last);
+        let refill = u64::try_from(elapsed)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(self.per_second);
+        let held = core::cmp::min(self.capacity, self.tokens.saturating_add(refill));
+        held >= Self::need(reserve)
+    }
+
+    /// The first instant [`Self::ready`] holds for `reserve`, or `None` when
+    /// it never will: more than the bucket holds, or nothing refills it.
+    #[must_use]
+    pub fn ready_at(&self, reserve: u32) -> Option<Duration64> {
+        let need = Self::need(reserve);
+        if need > self.capacity {
+            return None;
+        }
+        let short = need.saturating_sub(self.tokens);
+        let wait = match short {
+            0 => 0,
+            _ if self.per_second == 0 => return None,
+            _ => short.div_ceil(self.per_second),
+        };
+        let at = self.last.saturating_add(u128::from(wait));
+        Some(Duration64::from_nanos(
+            u64::try_from(at).unwrap_or(u64::MAX),
+        ))
+    }
+
+    /// The scaled tokens holding more than `reserve` events takes.
+    fn need(reserve: u32) -> u64 {
+        (u64::from(reserve) + 1).saturating_mul(TOKEN)
     }
 
     /// Take one event's worth of budget at time `now`; `false` means the
@@ -309,8 +373,8 @@ impl TokenBucket {
     }
 }
 
-/// Token buckets for the peers seen most recently, beneath one bucket they
-/// all share.
+/// Token buckets for the peers seen most recently — senders by address,
+/// accounts by uid — beneath one bucket they all share.
 ///
 /// Each peer is held to its own rate, and the shared bucket bounds what all
 /// of them together may draw — the backstop against a sender that rotates
@@ -324,21 +388,21 @@ impl TokenBucket {
 /// Eviction can only hand a returning peer a fresh budget, never cost it one,
 /// and the shared bucket bounds what a fresh budget is worth.
 #[derive(Clone, Debug)]
-pub struct PeerBudgets<const N: usize> {
-    peers: ArrayVec<TrackedPeer, N>,
+pub struct PeerBudgets<K, const N: usize> {
+    peers: ArrayVec<TrackedPeer<K>, N>,
     shared: TokenBucket,
     peer_burst: u32,
     peer_rate: u32,
 }
 
 #[derive(Clone, Debug)]
-struct TrackedPeer {
-    addr: IpAddr,
+struct TrackedPeer<K> {
+    key: K,
     bucket: TokenBucket,
     last_used: u128,
 }
 
-impl<const N: usize> PeerBudgets<N> {
+impl<K: Copy + Eq, const N: usize> PeerBudgets<K, N> {
     /// Hold each peer to bursts of `peer_burst` events refilled at
     /// `peer_rate` per second, and all peers together to `shared_burst` at
     /// `shared_rate`.
@@ -356,8 +420,8 @@ impl<const N: usize> PeerBudgets<N> {
     }
 
     /// Charge one event from `peer` at `now`; `false` means suppress it.
-    pub fn allow(&mut self, now: Duration64, peer: IpAddr) -> bool {
-        let index = match self.peers.iter().position(|entry| entry.addr == peer) {
+    pub fn allow(&mut self, now: Duration64, peer: K) -> bool {
+        let index = match self.peers.iter().position(|entry| entry.key == peer) {
             Some(index) => index,
             None => self.track(peer),
         };
@@ -367,9 +431,9 @@ impl<const N: usize> PeerBudgets<N> {
     }
 
     /// Start tracking `peer` with a full budget, returning its slot.
-    fn track(&mut self, peer: IpAddr) -> usize {
+    fn track(&mut self, peer: K) -> usize {
         let entry = TrackedPeer {
-            addr: peer,
+            key: peer,
             bucket: TokenBucket::new(self.peer_burst, self.peer_rate),
             last_used: 0,
         };

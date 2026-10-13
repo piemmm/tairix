@@ -2,16 +2,16 @@
 //
 // Two boot protocols enter the same trampoline:
 //
-// * **Multiboot2** (GRUB): QEMU's `-kernel` multiboot1 loader refuses to
-//   load ELF64, whereas GRUB's multiboot2 loader accepts ELF64 and enters
-//   the kernel in 32-bit protected mode at `_start`. This is the
-//   real-bootloader path a future installed x86 system uses.
+// * **Multiboot2**: any multiboot2 loader accepts the ELF64 kernel and
+//   enters it in 32-bit protected mode at `_start` (QEMU's `-kernel`
+//   multiboot1 loader refuses ELF64). It is the hand-off the first-party
+//   boot loader is built around (`plans/BOOTLOADER.md`).
 // * **PVH direct boot** (Xen HVM start-info protocol): QEMU's own ELF
 //   loader honours the `XEN_ELFNOTE_PHYS32_ENTRY` note below and enters
 //   `pvh_start` in 32-bit protected mode with `%ebx` = the physical
 //   address of the `hvm_start_info` record — no firmware or bootloader
-//   in the path. The QEMU integration tests boot this way (it removes
-//   the OVMF/GRUB firmware nondeterminism from the loop entirely).
+//   in the path. The QEMU integration tests boot this way, keeping
+//   firmware nondeterminism out of the loop entirely.
 //
 // Both entries converge on `boot_common` with `%edi` = boot magic and
 // `%esi` = boot-info physical address; the Rust side (`entry.rs`)
@@ -24,7 +24,7 @@
 //     ELF — required by the multiboot2 spec for the loader to find it.
 //  2. `_start` runs in 32-bit protected mode with CR0.PE=1, paging off,
 //     EAX=multiboot2 magic (0x36D76289), EBX=multiboot info pointer,
-//     and a flat 4 GiB code/data segmentation set up by GRUB. `pvh_start`
+//     and a flat 4 GiB code/data segmentation set up by the loader. `pvh_start`
 //     runs under the same CPU state contract (32-bit protected mode,
 //     paging off, flat segments — Xen PVH ABI, xen.git
 //     docs/misc/pvh.pandoc) with EBX=hvm_start_info pointer; it loads
@@ -46,7 +46,7 @@
 //     deliberately broader than the original 32 MiB bootstrap map: it
 //     guarantees that the LAPIC MMIO frame at 0xFEE00000 and the IO-APIC
 //     frame at 0xFEC00000 — both architecturally fixed by Intel — are
-//     reachable, and likewise that any ACPI table OVMF/GRUB placed in
+//     reachable, and likewise that any ACPI table the firmware placed in
 //     high memory below 4 GiB is reachable — every address the boot path
 //     must reach *as* a physical address. It is never widened: RAM is
 //     reached through the direct physical map (invariant 10) instead, which

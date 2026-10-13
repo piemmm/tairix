@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::addr::{Ipv4Addr, Ipv6Addr};
-use crate::mdns::{Service, TxtRecord};
+use crate::mdns::{Service, TxtRecord, MAX_RECORDS_PER_KEY, TTL_HOST_SECS};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// A buffer comfortably larger than anything these tests build.
@@ -33,6 +34,7 @@ fn on_link(last: u8) -> Sender {
         addr: peer(last),
         port: PORT,
         on_link: true,
+        to_group: true,
     }
 }
 
@@ -57,9 +59,8 @@ fn address(last: u8) -> RData {
 
 /// Drive `poll` once and decode whatever it emitted.
 fn poll(engine: &mut MdnsEngine, now: Duration64) -> Option<(Destination, Vec<u8>)> {
-    let mut rng = lowest();
     let mut buf = [0u8; BUF];
-    let emit = engine.poll(now, &mut rng, &mut buf, &mut |_| {})?;
+    let emit = engine.poll(now, &mut buf, &mut |_| {})?;
     Some((emit.to, buf[..emit.len].to_vec()))
 }
 
@@ -119,15 +120,27 @@ fn query(name: &Name, qtype: QuestionType, unicast: bool) -> Vec<u8> {
 
 /// Take a publication all the way from probing to live.
 fn establish(engine: &mut MdnsEngine, id: PublishId) {
-    let mut millis = 0u64;
-    for _ in 0..32 {
+    establish_after(engine, id, 0);
+}
+
+/// [`establish`], driving the engine from `millis` on, returning the instant
+/// it went live.
+fn establish_after(engine: &mut MdnsEngine, id: PublishId, mut millis: u64) -> u64 {
+    for _ in 0..64 {
         if engine.state_of(id) == Some(ServiceState::Live) {
-            return;
+            return millis;
         }
         drain(engine, at(millis));
         millis += 250;
     }
     panic!("the publication never went live");
+}
+
+/// A response asserting `address(9)` at `owner`: a rival's claim.
+fn claim(owner: &Name) -> Vec<u8> {
+    message(0, true, |writer| {
+        assert!(writer.push_record(Section::Answer, &Record::unique(*owner, address(9))));
+    })
 }
 
 // -- the probe, announce, live lifecycle ---------------------------------
@@ -271,8 +284,11 @@ fn a_publication_past_the_bound_is_refused() {
 
 // -- conflicts -----------------------------------------------------------
 
+/// A claim on an established name has it probed again (RFC 6762 §9): the
+/// claim may be a stale record. Only a claim that holds while it is probed
+/// renames it.
 #[test]
-fn a_peer_claiming_our_live_name_renames_us_and_restarts_probing() {
+fn a_peer_claiming_our_live_name_has_it_probed_again_then_renamed() {
     let mut engine = engine();
     let mut rng = lowest();
     let id = engine
@@ -307,12 +323,93 @@ fn a_peer_claiming_our_live_name_renames_us_and_restarts_probing() {
         )
         .is_none());
 
+    assert_eq!(engine.take_event(), None, "not renamed yet");
+    assert_eq!(engine.name_of(id), Some(name("printer.local")));
+    assert_eq!(engine.state_of(id), Some(ServiceState::Probing));
+    let (_, bytes) = poll(&mut engine, at(5000)).expect("probes the name again");
+    assert_eq!(questions(&bytes)[0].name, name("printer.local"));
+
+    engine.on_message(
+        at(5100),
+        &claim(&name("printer.local")),
+        on_link(9),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
     assert_eq!(engine.take_event(), Some(MdnsEvent::Renamed { id }));
     assert_eq!(engine.name_of(id), Some(name("printer-2.local")));
     assert_eq!(engine.state_of(id), Some(ServiceState::Probing));
-
-    let (_, bytes) = poll(&mut engine, at(5000)).expect("probes the new name");
+    let (_, bytes) = poll(&mut engine, at(5100)).expect("probes the new name");
     assert_eq!(questions(&bytes)[0].name, name("printer-2.local"));
+}
+
+/// A name being withdrawn is not fought for.
+#[test]
+fn a_claim_on_a_retiring_name_is_ignored() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    let id = live_host(&mut engine, "printer.local", &[address(5)]);
+    while engine.take_event().is_some() {}
+    engine.withdraw(at(5000), id);
+    let mut buf = [0u8; BUF];
+    engine.on_message(
+        at(5001),
+        &claim(&name("printer.local")),
+        on_link(9),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
+    assert_eq!(engine.take_event(), None);
+    assert_eq!(engine.state_of(id), Some(ServiceState::Retiring));
+}
+
+/// Past fifteen conflicts in ten seconds, each probe a conflict forces waits
+/// five seconds (RFC 6762 §8.1).
+#[test]
+fn a_storm_of_conflicts_spaces_the_probes_it_forces() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    let owners: Vec<String> = (0..16).map(|n| alloc::format!("host{n}.local")).collect();
+    let ids: Vec<PublishId> = owners
+        .iter()
+        .map(|owner| live_host(&mut engine, owner, &[address(5)]))
+        .collect();
+    let mut buf = [0u8; BUF];
+    for (n, owner) in owners.iter().take(15).enumerate() {
+        let now = at(9000 + n as u64);
+        engine.on_message(
+            now,
+            &claim(&name(owner)),
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        );
+        assert!(
+            engine.next_deadline().is_some_and(|next| next <= now),
+            "conflict {n} probes at once"
+        );
+    }
+    let mut now = 9015;
+    for &id in &ids[..15] {
+        now = establish_after(&mut engine, id, now);
+    }
+    assert_eq!(engine.next_deadline(), None, "every name is live again");
+    engine.on_message(
+        at(now),
+        &claim(&name(&owners[15])),
+        on_link(9),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
+    assert_eq!(
+        engine.next_deadline(),
+        Some(at(now + 5000)),
+        "the sixteenth waits"
+    );
 }
 
 #[test]
@@ -365,19 +462,22 @@ fn the_rename_budget_runs_out_and_the_name_fails_closed_to_unpublished() {
 
     let mut buf = [0u8; BUF];
     let mut exhausted = false;
-    for round in 0..=u64::from(MAX_RENAMES) {
-        let claimed = engine.name_of(id).expect("still held");
-        let theirs = message(0, true, |writer| {
-            assert!(writer.push_record(Section::Answer, &Record::unique(claimed, address(9))));
-        });
-        engine.on_message(
-            at(5000 + round * 10),
-            &theirs,
-            on_link(9),
-            &mut rng,
-            &mut buf,
-            &mut |_| {},
-        );
+    let mut now = 5000;
+    for _ in 0..=MAX_RENAMES {
+        // Claimed while live it is probed again; claimed again while probed,
+        // it is renamed — or, once the budget is spent, given up.
+        for _ in 0..2 {
+            let claimed = engine.name_of(id).expect("still held");
+            now += 10;
+            engine.on_message(
+                at(now),
+                &claim(&claimed),
+                on_link(9),
+                &mut rng,
+                &mut buf,
+                &mut |_| {},
+            );
+        }
         while let Some(event) = engine.take_event() {
             if event == (MdnsEvent::ConflictBudgetExhausted { id }) {
                 exhausted = true;
@@ -386,10 +486,10 @@ fn the_rename_budget_runs_out_and_the_name_fails_closed_to_unpublished() {
         if exhausted {
             break;
         }
-        establish(&mut engine, id);
+        now = establish_after(&mut engine, id, now);
     }
     assert!(exhausted, "the budget is bounded, not endless");
-    assert_eq!(engine.state_of(id), Some(ServiceState::Withdrawn));
+    assert_eq!(engine.state_of(id), None, "withdrawn, and forgotten");
 
     // Nothing is published under it any more: a query gets no answer.
     let asked = query(&name("printer-9.local"), QuestionType::Any, true);
@@ -585,6 +685,7 @@ fn a_legacy_resolver_gets_its_question_echoed_and_a_short_ttl() {
         addr: peer(9),
         port: 41234,
         on_link: true,
+        to_group: true,
     };
     let emit = engine
         .on_message(at(5000), &asked, legacy, &mut rng, &mut buf, &mut |_| {})
@@ -748,11 +849,65 @@ fn a_query_from_off_link_is_never_answered() {
         addr: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)),
         port: PORT,
         on_link: false,
+        to_group: true,
     };
     assert!(engine
         .on_message(at(5000), &asked, off_link, &mut rng, &mut buf, &mut |_| {})
         .is_none());
     assert_eq!(engine.next_deadline(), None, "nothing was even scheduled");
+}
+
+/// A responder sends from 5353 (RFC 6762 §11): a response from any other
+/// port never reaches the cache, and nothing answers a query from port 0.
+#[test]
+fn a_response_from_another_port_and_a_query_from_port_zero_are_ignored() {
+    let mut engine = engine();
+    let mut rng = lowest();
+    let theirs = message(0, true, |writer| {
+        assert!(writer.push_record(
+            Section::Answer,
+            &Record::unique(name("printer.local"), address(9)),
+        ));
+    });
+    let mut buf = [0u8; BUF];
+    for port in [0, 53, 41_234] {
+        let from = Sender {
+            addr: peer(9),
+            port,
+            on_link: true,
+            to_group: true,
+        };
+        assert!(engine
+            .on_message(at(10), &theirs, from, &mut rng, &mut buf, &mut |_| {})
+            .is_none());
+    }
+    assert!(engine.cache().is_empty());
+    assert!(engine
+        .on_message(at(20), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {})
+        .is_none());
+    assert_eq!(engine.cache().len(), 1, "from 5353 it is held");
+
+    let id = engine
+        .publish(
+            at(0),
+            name("mine.local"),
+            NameKind::Host,
+            true,
+            &[address(1)],
+            &mut rng,
+        )
+        .expect("publishes");
+    establish(&mut engine, id);
+    let asked = query(&name("mine.local"), QuestionType::Any, true);
+    let from_zero = Sender {
+        addr: peer(7),
+        port: 0,
+        on_link: true,
+        to_group: true,
+    };
+    assert!(engine
+        .on_message(at(9000), &asked, from_zero, &mut rng, &mut buf, &mut |_| {})
+        .is_none());
 }
 
 #[test]
@@ -770,6 +925,7 @@ fn a_response_from_off_link_never_reaches_the_cache() {
         addr: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
         port: PORT,
         on_link: false,
+        to_group: true,
     };
     engine.on_message(at(0), &theirs, off_link, &mut rng, &mut buf, &mut |_| {});
     assert!(engine.cache().is_empty());
@@ -1008,7 +1164,7 @@ fn withdrawing_sends_goodbyes_and_then_publishes_nothing() {
     assert_eq!(to, Destination::Group);
     assert!(answers(&bytes).iter().all(|record| record.ttl == 0));
     let _ = poll(&mut engine, at(5250)).expect("the second goodbye");
-    assert_eq!(engine.state_of(id), Some(ServiceState::Withdrawn));
+    assert_eq!(engine.state_of(id), None, "withdrawn, and forgotten");
 
     let asked = query(&name("printer.local"), QuestionType::Any, true);
     let mut buf = [0u8; BUF];
@@ -1039,7 +1195,7 @@ fn withdrawing_before_the_name_was_claimed_takes_nothing_back() {
         )
         .expect("publishes");
     engine.withdraw(at(10), id);
-    assert_eq!(engine.state_of(id), Some(ServiceState::Withdrawn));
+    assert_eq!(engine.state_of(id), None, "withdrawn, and forgotten");
     assert!(poll(&mut engine, at(10)).is_none(), "nothing to take back");
 }
 
@@ -1073,7 +1229,7 @@ fn withdrawing_one_publication_leaves_the_others_answerable() {
     engine.withdraw(at(5000), printer);
     drain(&mut engine, at(5000));
     drain(&mut engine, at(5250));
-    assert_eq!(engine.state_of(printer), Some(ServiceState::Withdrawn));
+    assert_eq!(engine.state_of(printer), None, "withdrawn, and forgotten");
 
     let asked = query(&name("scanner.local"), QuestionType::Any, true);
     let mut buf = [0u8; BUF];
@@ -1182,6 +1338,172 @@ fn a_question_another_host_has_just_asked_slides_to_the_next_round() {
     assert!(poll(&mut engine, at(1000)).is_some());
 }
 
+/// Another querier's question stands for ours only if every responder heard
+/// all of it as we did: a query cut short of its known answers, one sent to
+/// this host alone, or a legacy resolver's leaves ours to be asked.
+#[test]
+fn only_a_whole_group_query_from_a_querier_stands_for_ours() {
+    let ours = name("_ipp._tcp.local");
+    let ptr = QuestionType::Record(RecordType::Ptr);
+    // More questions than are read: its records — a known answer among
+    // them — go unread, while responders read them all and stay quiet.
+    let crowded: Vec<Name> = core::iter::once(ours)
+        .chain((0..MAX_MESSAGE_QUESTIONS).map(|n| name(&alloc::format!("_s{n}._tcp.local"))))
+        .collect();
+    let crowded = crate::mdns::codec::raw_query(&crowded);
+    let direct = Sender {
+        to_group: false,
+        ..on_link(9)
+    };
+    let legacy = Sender {
+        port: 41_234,
+        ..on_link(9)
+    };
+    for (bytes, from, stands) in [
+        (query(&ours, ptr, false), on_link(9), true),
+        (crowded, on_link(9), false),
+        (query(&ours, ptr, false), direct, false),
+        (query(&ours, ptr, false), legacy, false),
+    ] {
+        let mut engine = engine();
+        let mut rng = lowest();
+        engine
+            .ask(at(0), BROWSE, ours, RecordType::Ptr, &mut rng, &mut |_| {})
+            .expect("asks");
+        let mut buf = [0u8; BUF];
+        engine.on_message(at(0), &bytes, from, &mut rng, &mut buf, &mut |_| {});
+        assert_eq!(poll(&mut engine, at(0)).is_none(), stands, "{from:?}");
+    }
+}
+
+/// A query sent to this host alone is answered as a QU question is (RFC 6762
+/// §5.5): straight back to its asker, the segment having heard the record
+/// lately.
+#[test]
+fn a_query_sent_to_this_host_alone_is_answered_directly() {
+    let mut engine = engine();
+    live_host(&mut engine, "printer.local", &[address(5)]);
+    let asked = query(
+        &name("printer.local"),
+        QuestionType::Record(RecordType::A),
+        false,
+    );
+    let direct = Sender {
+        to_group: false,
+        ..on_link(9)
+    };
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    let emit = engine
+        .on_message(at(9000), &asked, direct, &mut rng, &mut buf, &mut |_| {})
+        .expect("answered at once");
+    assert_eq!(
+        emit.to,
+        Destination::Peer {
+            addr: peer(9),
+            port: PORT
+        }
+    );
+}
+
+/// A record not multicast within a quarter of its TTL is owed to the whole
+/// segment, so a question wanting a unicast answer has it multicast instead
+/// (RFC 6762 §5.4) — whether it set the QU bit or was sent to this host
+/// alone — and the next such question, the segment now current, is answered
+/// straight back.
+#[test]
+fn a_record_not_multicast_lately_answers_a_unicast_question_to_the_group() {
+    let quarter = u64::from(TTL_HOST_SECS) * 1000 / 4;
+    for direct in [false, true] {
+        let mut engine = engine();
+        live_host(&mut engine, "printer.local", &[address(5)]);
+        let quiet = 10_000;
+        assert!(
+            drain(&mut engine, at(quiet)).is_empty(),
+            "nothing left to send"
+        );
+        let asked = query(
+            &name("printer.local"),
+            QuestionType::Record(RecordType::A),
+            !direct,
+        );
+        let from = Sender {
+            to_group: !direct,
+            ..on_link(9)
+        };
+        let mut rng = lowest();
+        let mut buf = [0u8; BUF];
+        let late = quiet + quarter;
+        assert!(
+            engine
+                .on_message(at(late), &asked, from, &mut rng, &mut buf, &mut |_| {})
+                .is_none(),
+            "nothing straight back"
+        );
+        let due = engine.next_deadline().expect("a multicast answer");
+        let (to, bytes) = poll(&mut engine, due).expect("the multicast answer");
+        assert_eq!(to, Destination::Group);
+        assert!(answers(&bytes)
+            .iter()
+            .any(|record| record.data == address(5)));
+
+        let emit = engine
+            .on_message(
+                at(late + 1000),
+                &asked,
+                from,
+                &mut rng,
+                &mut buf,
+                &mut |_| {},
+            )
+            .expect("answered at once");
+        assert_eq!(
+            emit.to,
+            Destination::Peer {
+                addr: peer(9),
+                port: PORT
+            },
+            "direct: {direct}"
+        );
+    }
+}
+
+/// A legacy resolver hears nothing but its own unicast reply, so it is
+/// answered straight back however long since the record was multicast.
+#[test]
+fn a_legacy_resolver_is_answered_straight_back_however_quiet_the_segment() {
+    let mut engine = engine();
+    live_host(&mut engine, "printer.local", &[address(5)]);
+    let late = 10_000 + u64::from(TTL_HOST_SECS) * 1000;
+    let asked = query(
+        &name("printer.local"),
+        QuestionType::Record(RecordType::A),
+        false,
+    );
+    let legacy = Sender {
+        port: 41_234,
+        ..on_link(9)
+    };
+    let mut buf = [0u8; BUF];
+    let emit = engine
+        .on_message(
+            at(late),
+            &asked,
+            legacy,
+            &mut lowest(),
+            &mut buf,
+            &mut |_| {},
+        )
+        .expect("answered at once");
+    assert_eq!(
+        emit.to,
+        Destination::Peer {
+            addr: peer(9),
+            port: 41_234
+        }
+    );
+}
+
 #[test]
 fn a_cached_answer_about_to_expire_pulls_its_question_forward() {
     let mut engine = engine();
@@ -1208,11 +1530,48 @@ fn a_cached_answer_about_to_expire_pulls_its_question_forward() {
     for millis in [0u64, 1_000, 3_000, 7_000, 15_000, 31_000, 63_000] {
         assert!(poll(&mut engine, at(millis)).is_some(), "{millis}");
     }
-    // The record is 80 % spent at 80 s, so the refresh pulls the question
-    // forward from 127 s to there.
-    assert_eq!(engine.next_deadline(), Some(at(80_000)));
-    let (_, bytes) = poll(&mut engine, at(80_000)).expect("the refreshing query");
+    // The record is 80 % spent at 80 s, spread by up to 2 % of its life, so
+    // the refresh pulls the question forward from 127 s to the next whole
+    // second after its point.
+    let point = engine.next_deadline().expect("the refresh point");
+    assert!(point >= at(80_000) && point < at(82_000), "{point:?}");
+    assert!(
+        poll(&mut engine, point).is_none(),
+        "gathered to a whole second"
+    );
+    let second = at(point.saturating_total_nanos().div_ceil(1_000_000_000) * 1000);
+    assert_eq!(engine.next_deadline(), Some(second));
+    let (_, bytes) = poll(&mut engine, second).expect("the refreshing query");
     assert_eq!(questions(&bytes)[0].name, name("_ipp._tcp.local"));
+}
+
+/// However many of a question's records reach a refresh point together, and
+/// however soon after it was asked, it is re-asked once, a second on at the
+/// least.
+#[test]
+fn refresh_points_together_cost_one_query_a_second_apart() {
+    let mut engine = engine();
+    ask_browse(&mut engine, &mut Vec::new());
+    learn_instances(&mut engine, 40, 100, at(0));
+    for millis in [0u64, 1_000, 3_000, 7_000, 15_000, 31_000, 63_000] {
+        drain(&mut engine, at(millis));
+    }
+    let mut queries = 0;
+    let mut last: Option<u64> = None;
+    for millis in (63_010..=100_000).step_by(10) {
+        for (_, bytes) in drain(&mut engine, at(millis)) {
+            if Message::parse(&bytes).is_some_and(|message| message.questions().count() > 0) {
+                assert!(last.is_none_or(|last| millis - last >= 1000), "{millis}");
+                assert_eq!(millis % 1000, 0, "on a whole second");
+                last = Some(millis);
+                queries += 1;
+            }
+        }
+    }
+    assert!(
+        queries <= 8,
+        "{queries} queries for forty records' four points"
+    );
 }
 
 #[test]
@@ -1576,12 +1935,8 @@ fn hear(engine: &mut MdnsEngine, now: Duration64, bytes: &[u8], told: &mut Told)
 }
 
 fn tick(engine: &mut MdnsEngine, now: Duration64, told: &mut Told) {
-    let mut rng = lowest();
     let mut buf = [0u8; BUF];
-    while engine
-        .poll(now, &mut rng, &mut buf, &mut into(told))
-        .is_some()
-    {}
+    while engine.poll(now, &mut buf, &mut into(told)).is_some() {}
 }
 
 fn ask_browse(engine: &mut MdnsEngine, told: &mut Told) -> QuestionId {
@@ -1679,11 +2034,13 @@ fn an_answer_the_bounds_evict_is_retired() {
     let mut told = Told::new();
     ask_browse(&mut engine, &mut told);
     hear(&mut engine, at(0), &announced(&[pointer(4500)]), &mut told);
-    // The same source past its share: its own oldest record, the answer,
+    // Past what one name holds, its own oldest record — the first answer —
     // makes room for the newest.
-    for index in 0..crate::mdns::MAX_RECORDS_PER_SOURCE {
-        let owner = alloc::format!("h{index}.local");
-        let mut filler = Record::unique(name(&owner), address(5));
+    for index in 0..crate::mdns::MAX_RECORDS_PER_KEY {
+        let label = alloc::format!("i{index}");
+        let target = Name::from_labels(&[label.as_bytes(), b"_ipp", b"_tcp", b"local"])
+            .expect("an instance");
+        let mut filler = Record::shared(browse(), RData::Ptr(target));
         filler.ttl = 4500;
         hear(
             &mut engine,
@@ -1692,8 +2049,12 @@ fn an_answer_the_bounds_evict_is_retired() {
             &mut told,
         );
     }
-    assert_eq!(told.len(), 2);
-    assert_eq!(told[1].1, AnswerChange::Retired);
+    let retired: Vec<&Record> = told
+        .iter()
+        .filter(|(_, change, _)| *change == AnswerChange::Retired)
+        .map(|(_, _, record)| record)
+        .collect();
+    assert_eq!(retired, [&pointer(4500)]);
 }
 
 #[test]
@@ -1815,7 +2176,7 @@ fn a_poll_with_no_room_still_moves_every_schedule_on() {
         )
         .expect("asks");
     for _ in 0..8 {
-        assert!(engine.poll(at(0), &mut rng, &mut [], &mut |_| {}).is_none());
+        assert!(engine.poll(at(0), &mut [], &mut |_| {}).is_none());
     }
     assert!(
         engine.next_deadline().is_some_and(|next| next > at(0)),
@@ -1886,18 +2247,58 @@ fn known_answers_too_many_for_one_query_follow_it_at_once() {
     assert_eq!(offered, 200, "every known answer goes out once");
 }
 
+/// The rest of a known-answer list still goes within its grace of the query,
+/// and is dropped after it, or once the record it resumes at is gone.
 #[test]
-fn a_known_answer_list_left_over_is_dropped_once_time_moves() {
+fn a_known_answer_list_left_over_goes_within_its_grace_and_not_after() {
+    for (later, cleared, goes) in [(50, false, true), (150, false, false), (10, true, false)] {
+        let mut engine = engine();
+        ask_browse(&mut engine, &mut Vec::new());
+        learn_instances(&mut engine, 200, 4500, at(0));
+        let (_, query) = poll(&mut engine, at(0)).expect("the query");
+        assert!(Message::parse(&query).expect("valid").truncated);
+        if cleared {
+            engine.on_link_down(&mut |_| {});
+        }
+        assert_eq!(
+            poll(&mut engine, at(later)).is_some(),
+            goes,
+            "{later} ms on, cache cleared: {cleared}"
+        );
+        if !goes {
+            assert!(engine.next_deadline().is_none_or(|next| next > at(later)));
+        }
+    }
+}
+
+/// The grace runs from the query, whose responders hold their answer for the
+/// whole list, not from each message of it.
+#[test]
+fn a_known_answer_list_over_several_messages_goes_within_one_grace() {
     let mut engine = engine();
     ask_browse(&mut engine, &mut Vec::new());
-    learn_instances(&mut engine, 200, 4500, at(0));
-    let (_, query) = poll(&mut engine, at(0)).expect("the query");
-    assert!(Message::parse(&query).expect("valid").truncated);
-    assert!(
-        poll(&mut engine, at(1)).is_none(),
-        "nobody waits on the rest any more"
+    learn_instances(&mut engine, MAX_RECORDS_PER_KEY, 4500, at(0));
+    let mut datagram = [0u8; crate::mdns::MAX_MESSAGE_LEN];
+    let mut truncated = |engine: &mut MdnsEngine, millis| {
+        engine
+            .poll(at(millis), &mut datagram, &mut |_| {})
+            .map(|emit| {
+                Message::parse(&datagram[..emit.len])
+                    .expect("valid")
+                    .truncated
+            })
+    };
+    assert_eq!(truncated(&mut engine, 0), Some(true), "the query");
+    assert_eq!(
+        truncated(&mut engine, 60),
+        Some(true),
+        "within the grace, and more follow"
     );
-    assert!(engine.next_deadline().is_some_and(|next| next > at(1)));
+    assert_eq!(
+        truncated(&mut engine, 120),
+        None,
+        "the rest is dropped past the query's grace"
+    );
 }
 
 #[test]
@@ -1918,9 +2319,7 @@ fn a_buffer_too_small_for_any_question_spends_every_due_round() {
             .expect("asks");
     }
     let mut tiny = [0u8; 16];
-    assert!(engine
-        .poll(at(0), &mut rng, &mut tiny, &mut |_| {})
-        .is_none());
+    assert!(engine.poll(at(0), &mut tiny, &mut |_| {}).is_none());
     assert!(
         engine.next_deadline().is_some_and(|next| next > at(0)),
         "no round is left in the past"
@@ -2019,7 +2418,7 @@ fn a_multicast_response_that_outgrows_a_datagram_goes_out_whole_and_untruncated(
         .is_none());
     let mut sent = Vec::new();
     let mut small = [0u8; 100];
-    while let Some(emit) = engine.poll(at(61_000), &mut rng, &mut small, &mut |_| {}) {
+    while let Some(emit) = engine.poll(at(61_000), &mut small, &mut |_| {}) {
         let bytes = &small[..emit.len];
         assert!(
             !Message::parse(bytes).expect("valid").truncated,
@@ -2033,5 +2432,218 @@ fn a_multicast_response_that_outgrows_a_datagram_goes_out_whole_and_untruncated(
             .iter()
             .all(|address| sent.iter().any(|record| record.data == *address)),
         "every address went out"
+    );
+}
+
+/// A probe for `owner` proposing `address(9)`, as a rival claiming it sends.
+fn probe_for(owner: &str) -> Vec<u8> {
+    message(0, false, |writer| {
+        let mut question = Question::new(name(owner), QuestionType::Any);
+        question.unicast_response = true;
+        assert!(writer.push_question(&question));
+        let mut proposed = Record::unique(name(owner), address(9));
+        proposed.cache_flush = false;
+        assert!(writer.push_record(Section::Authority, &proposed));
+    })
+}
+
+/// A host publication of `owner` at `addresses`, taken live.
+fn live_host(engine: &mut MdnsEngine, owner: &str, addresses: &[RData]) -> PublishId {
+    let id = engine
+        .publish(
+            at(0),
+            name(owner),
+            NameKind::Host,
+            true,
+            addresses,
+            &mut lowest(),
+        )
+        .expect("publishes");
+    establish(engine, id);
+    id
+}
+
+/// A probe defence waits a quarter second since the record was last
+/// multicast, where any other answer waits a second, and is deferred to that
+/// instant rather than dropped (RFC 6762 §6).
+#[test]
+fn a_probe_defence_repeats_no_faster_than_a_quarter_second() {
+    let mut engine = engine();
+    live_host(&mut engine, "printer.local", &[address(5)]);
+    let probe = probe_for("printer.local");
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    assert!(engine
+        .on_message(
+            at(5000),
+            &probe,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {}
+        )
+        .is_some());
+    assert!(
+        engine
+            .on_message(
+                at(5100),
+                &probe,
+                on_link(9),
+                &mut rng,
+                &mut buf,
+                &mut |_| {}
+            )
+            .is_none(),
+        "not again within a quarter second"
+    );
+    assert_eq!(
+        engine.next_deadline(),
+        Some(at(5250)),
+        "deferred, not dropped"
+    );
+    let (to, bytes) = poll(&mut engine, at(5250)).expect("sent once it may");
+    assert_eq!(to, Destination::Group);
+    assert!(answers(&bytes)
+        .iter()
+        .any(|record| record.data == address(5)));
+}
+
+/// A defence's easing of the one-per-second rule is its own records', never
+/// the rest of the answer pending beside them.
+#[test]
+fn a_defences_waiver_does_not_reach_the_rest_of_the_pending_answer() {
+    let mut engine = engine();
+    let printer = [address(5), address(6), address(7), address(8)];
+    live_host(&mut engine, "printer.local", &printer);
+    live_host(&mut engine, "scanner.local", &[address(4)]);
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    let asked = query(
+        &name("scanner.local"),
+        QuestionType::Record(RecordType::A),
+        false,
+    );
+    engine.on_message(
+        at(9000),
+        &asked,
+        on_link(9),
+        &mut rng,
+        &mut buf,
+        &mut |_| {},
+    );
+    let first = engine.next_deadline().expect("an answer is due");
+    poll(&mut engine, first).expect("the scanner is answered");
+    // Past a defence's quarter second, inside everyone else's second.
+    let later = Duration64::from_nanos(first.saturating_total_nanos() + 500_000_000);
+    engine.on_message(later, &asked, on_link(9), &mut rng, &mut buf, &mut |_| {});
+    // A datagram with room for one of the printer's records leaves the
+    // defence's rest pending beside the scanner's second answer.
+    let mut small = [0u8; 60];
+    let defended = engine.on_message(
+        later,
+        &probe_for("printer.local"),
+        on_link(9),
+        &mut rng,
+        &mut small,
+        &mut |_| {},
+    );
+    assert!(defended.is_some());
+    let due = engine.next_deadline().expect("the rest is due");
+    let (_, bytes) = poll(&mut engine, due).expect("the defence goes on");
+    let sent = answers(&bytes);
+    assert!(sent
+        .iter()
+        .any(|record| record.name == name("printer.local")));
+    assert!(
+        !sent
+            .iter()
+            .any(|record| record.name == name("scanner.local")),
+        "the scanner was multicast within the second"
+    );
+}
+
+/// Another responder's copy suppresses our pending answer only when its
+/// lifetime is no shorter than ours would be and the group heard it (RFC
+/// 6762 §7.4): one sent to us alone reached nobody our answer is for.
+#[test]
+fn duplicate_answer_suppression_needs_a_lifetime_no_shorter_than_ours() {
+    for (theirs, to_group, suppressed) in [
+        (10, true, false),
+        (TTL_HOST_SECS, true, true),
+        (TTL_HOST_SECS, false, false),
+    ] {
+        let mut engine = engine();
+        live_host(&mut engine, "printer.local", &[address(5)]);
+        let mut rng = lowest();
+        let mut buf = [0u8; BUF];
+        let asked = query(
+            &name("printer.local"),
+            QuestionType::Record(RecordType::A),
+            false,
+        );
+        engine.on_message(
+            at(9000),
+            &asked,
+            on_link(9),
+            &mut rng,
+            &mut buf,
+            &mut |_| {},
+        );
+        let due = engine.next_deadline().expect("an answer is due");
+        let mut copy = Record::unique(name("printer.local"), address(5));
+        copy.ttl = theirs;
+        let response = message(0, true, |writer| {
+            assert!(writer.push_record(Section::Answer, &copy));
+        });
+        let from = Sender {
+            to_group,
+            ..on_link(7)
+        };
+        engine.on_message(at(9001), &response, from, &mut rng, &mut buf, &mut |_| {});
+        assert_eq!(
+            poll(&mut engine, due).is_none(),
+            suppressed,
+            "ttl {theirs}, to the group: {to_group}"
+        );
+    }
+}
+
+/// However many known answers the cache holds for a question, one query
+/// round sends at most the continuation budget's burst after it, and the last
+/// message it sends says no more follow.
+#[test]
+fn a_known_answer_list_costs_no_more_datagrams_than_its_budget() {
+    let mut engine = engine();
+    ask_browse(&mut engine, &mut Vec::new());
+    let mut rng = lowest();
+    let mut buf = [0u8; BUF];
+    for instance in 0..crate::mdns::MAX_RECORDS_PER_KEY {
+        // Long, distinct labels, so the list takes many datagrams.
+        let label = alloc::format!("{instance:0>60}");
+        let target = Name::from_labels(&[label.as_bytes(), b"_ipp", b"_tcp", b"local"])
+            .expect("an instance");
+        let mut record = Record::shared(browse(), RData::Ptr(target));
+        record.ttl = 4500;
+        let theirs = announced(&[record]);
+        engine.on_message(at(0), &theirs, on_link(9), &mut rng, &mut buf, &mut |_| {});
+    }
+    // Drained as the decoder does, a datagram of the link's size at a time.
+    let round = |engine: &mut MdnsEngine, now| {
+        let mut datagram = [0u8; crate::mdns::MAX_MESSAGE_LEN];
+        let mut sent = Vec::new();
+        while let Some(emit) = engine.poll(now, &mut datagram, &mut |_| {}) {
+            sent.push(datagram[..emit.len].to_vec());
+        }
+        sent
+    };
+    let sent = round(&mut engine, at(0));
+    assert_eq!(sent.len(), 1 + CONTINUATION_BURST as usize);
+    let last = Message::parse(&sent[sent.len() - 1]).expect("valid");
+    assert!(!last.truncated, "the last message promises nothing more");
+    let next = round(&mut engine, at(1000));
+    assert!(
+        next.len() <= 1 + CONTINUATION_RATE as usize,
+        "the next round pays at the rate: {}",
+        next.len()
     );
 }

@@ -10,9 +10,10 @@
 //! One wait-set: the delivery port the stack posts datagrams and link events
 //! to — registered only while the front will take them — the decoder's two
 //! pipe ends, registered as its session wants them, the discovery endpoint,
-//! the exits of its clients, room in any client port a doorbell was refused
-//! by, and a timeout for the one instant the front must next act by. The loop
-//! parks; it never polls.
+//! the exits of its clients, room in each client port a doorbell is owed to
+//! — watched only while one is, and changed only for a port whose count
+//! crossed zero — and a timeout for the one instant the front must next act
+//! by. The loop parks; it never polls.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -23,9 +24,6 @@
 
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use alloc::vec::Vec;
     use core::fmt::Write as _;
 
     use tairix_abi::discovery_ipc::{
@@ -35,11 +33,11 @@ mod program {
     use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId};
     use tairix_abi::net_ipc::{address_parts, NetAddrFamily, IF_NAME_LEN};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{Errno, FieldValue, ProcId};
+    use tairix_abi::{Errno, FieldValue, Origin, ProcId};
     use tairix_caps::CapabilitySet;
     use tairix_discoveryd::decoder::Decoder;
     use tairix_discoveryd::events::{GRANTS_REFUSED, SERVICE_STARTED, SERVICE_UNAVAILABLE};
-    use tairix_discoveryd::front::{Front, Host, Sockets};
+    use tairix_discoveryd::front::{Caller, Front, Host, Sockets};
     use tairix_discoveryd::grants::Grants;
     use tairix_inline::ArrayString;
     use tairix_log::{Event, EventId, Field, Level};
@@ -291,50 +289,26 @@ mod program {
             let _ = tairix_rt::call_reply(DISCOVERY_ENDPOINT, ticket, &status);
             return;
         };
-        let written = front.serve(now, &origin, &request[..len], reply);
+        let caller = ServedCaller { origin, ticket };
+        let written = front.serve(now, &caller, &request[..len], reply);
         let _ = tairix_rt::call_reply(DISCOVERY_ENDPOINT, ticket, &reply[..written]);
     }
 
-    /// Park on room in exactly the client ports a doorbell is owed to.
-    ///
-    /// `rooms` is kept sorted and `owed` is sorted here, so each side is
-    /// found in the other by a binary search, not a scan.
-    fn sync_rooms(set: u64, owed: &mut [u64], rooms: &mut Vec<u64>) {
-        owed.sort_unstable();
-        rooms.retain(|port| {
-            let keep = owed.binary_search(port).is_ok();
-            if !keep {
-                let _ = tairix_rt::waitset_ctl(
-                    set,
-                    WaitSetOp::Del,
-                    WaitSourceKind::PortRoom,
-                    *port,
-                    TOKEN_ROOM,
-                );
-            }
-            keep
-        });
-        let watched = rooms.len();
-        for (at, &port) in owed.iter().enumerate() {
-            let repeated = at > 0 && owed[at - 1] == port;
-            if repeated
-                || rooms[..watched].binary_search(&port).is_ok()
-                || rooms.try_reserve(1).is_err()
-            {
-                continue;
-            }
-            if tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::PortRoom,
-                port,
-                TOKEN_ROOM,
-            ) == 0
-            {
-                rooms.push(port);
-            }
+    /// The call `ticket` in service, which the kernel answers questions about
+    /// only until it is replied to.
+    struct ServedCaller {
+        origin: Origin,
+        ticket: u64,
+    }
+
+    impl Caller for ServedCaller {
+        fn origin(&self) -> &Origin {
+            &self.origin
         }
-        rooms.sort_unstable();
+
+        fn owns_port(&self, port: u64) -> bool {
+            tairix_rt::call_peer_port(DISCOVERY_ENDPOINT, self.ticket, port).is_ok()
+        }
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
@@ -423,8 +397,6 @@ mod program {
         };
         let mut members = SessionMembers::new(set, TOKEN_READ, TOKEN_WRITE);
         let mut port_armed = false;
-        let mut rooms: Vec<u64> = Vec::new();
-        let mut owed: Vec<u64> = Vec::new();
         loop {
             let now = tairix_rt::clock_get();
             if front.on_wake(now).is_err() {
@@ -450,16 +422,26 @@ mod program {
                 }
                 port_armed = draining;
             }
-            owed.clear();
-            for port in front.owed_rings() {
-                // Short of memory, a doorbell left unwatched is retried with
-                // the next one that is.
-                if owed.try_reserve(1).is_err() {
-                    break;
-                }
-                owed.push(port);
-            }
-            sync_rooms(set, &mut owed, &mut rooms);
+            front.sync_room_watches(
+                &mut |port| {
+                    tairix_rt::waitset_ctl(
+                        set,
+                        WaitSetOp::Add,
+                        WaitSourceKind::PortRoom,
+                        port,
+                        TOKEN_ROOM,
+                    ) == 0
+                },
+                &mut |port| {
+                    let _ = tairix_rt::waitset_ctl(
+                        set,
+                        WaitSetOp::Del,
+                        WaitSourceKind::PortRoom,
+                        port,
+                        TOKEN_ROOM,
+                    );
+                },
+            );
 
             let timeout = front
                 .wake_at()

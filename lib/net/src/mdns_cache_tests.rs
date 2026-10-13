@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::addr::{Ipv4Addr, Ipv6Addr};
-use crate::mdns::{RData, TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_SOURCE};
+use crate::mdns::{RData, TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_KEY, MAX_RECORDS_PER_SOURCE};
 use alloc::vec::Vec;
 
 /// The question every watched record in these tests answers.
@@ -188,8 +188,11 @@ fn a_goodbye_from_another_host_cannot_delete_a_neighbours_record() {
     assert_eq!(cache.len(), 1);
 }
 
+/// The cache-flush bit retires every other record at the name and type,
+/// whoever asserted it (RFC 6762 §10.2): a host that moves to a new address
+/// announces from it, and its old record was another address's.
 #[test]
-fn the_cache_flush_bit_retires_that_sources_other_records_only() {
+fn the_cache_flush_bit_retires_every_other_record_at_the_name() {
     let mut cache = cache();
     let old = a_record("printer.local", 5, 120);
     let other_host = a_record("printer.local", 9, 120);
@@ -197,16 +200,24 @@ fn the_cache_flush_bit_retires_that_sources_other_records_only() {
     learn(&mut cache, at(0), &other_host, host(2));
 
     let fresh = a_record("printer.local", 6, 120);
-    learn(&mut cache, at(60), &fresh, host(1));
+    learn(&mut cache, at(60), &fresh, host(3));
     advance(&mut cache, at(62));
 
-    let live = held(&cache, "printer.local", RecordType::A);
-    assert!(live.contains(&fresh), "the announcing record stays");
-    assert!(!live.contains(&old), "the same source's stale record goes");
-    assert!(
-        live.contains(&other_host),
-        "another source's record is not the announcer's to flush"
-    );
+    assert_eq!(held(&cache, "printer.local", RecordType::A), [fresh]);
+}
+
+/// A pointer at a service type's name is every instance's responder's, so a
+/// cache-flush bit on one retires nothing.
+#[test]
+fn a_flush_bit_on_a_shared_type_pointer_retires_nothing() {
+    let mut cache = cache();
+    let first = ptr_record("_ipp._tcp.local", "a._ipp._tcp.local", 4500);
+    learn(&mut cache, at(0), &first, host(1));
+    let mut claim = ptr_record("_ipp._tcp.local", "b._ipp._tcp.local", 4500);
+    claim.cache_flush = true;
+    learn(&mut cache, at(60), &claim, host(2));
+    advance(&mut cache, at(62));
+    assert_eq!(held(&cache, "_ipp._tcp.local", RecordType::Ptr).len(), 2);
 }
 
 #[test]
@@ -269,6 +280,13 @@ fn an_unwatched_record_arms_nothing_before_its_expiry() {
     assert_eq!(cache.next_deadline(), Some(at(100)));
 }
 
+/// Whether `deadline` falls in the RFC 6762 §5.2 window for the refresh
+/// point at `percent` of a 100-second lifetime: the point, spread by up to
+/// two percent.
+fn in_refresh_window(deadline: Option<Duration64>, percent: i64) -> bool {
+    deadline.is_some_and(|at_| at_ >= at(percent) && at_ < at(percent + 2))
+}
+
 #[test]
 fn a_watched_record_is_refreshed_at_eighty_five_ninety_and_ninety_five_percent() {
     let mut cache = cache();
@@ -278,7 +296,7 @@ fn a_watched_record_is_refreshed_at_eighty_five_ninety_and_ninety_five_percent()
         &a_record("printer.local", 5, 100),
         host(1),
     );
-    assert_eq!(cache.next_deadline(), Some(at(80)));
+    assert!(in_refresh_window(cache.next_deadline(), 80));
 
     let mut points = Vec::new();
     for second in 0..=99 {
@@ -291,7 +309,30 @@ fn a_watched_record_is_refreshed_at_eighty_five_ninety_and_ninety_five_percent()
             &mut |_, _| {},
         );
     }
-    assert_eq!(points, alloc::vec![80, 85, 90, 95]);
+    assert_eq!(points.len(), 4);
+    for (&second, percent) in points.iter().zip([80, 85, 90, 95]) {
+        assert!((percent..=percent + 2).contains(&second), "{points:?}");
+    }
+}
+
+/// Each record's spread is its own, so records at one name refresh apart.
+#[test]
+fn records_at_one_name_spread_their_refreshes() {
+    let points: Vec<Duration64> = (1..=16)
+        .map(|last| {
+            let mut alone = cache();
+            let record = a_record("printer.local", last, 100);
+            learn_watched(&mut alone, at(0), &record, host(1));
+            alone.next_deadline().expect("armed")
+        })
+        .collect();
+    assert!(points
+        .iter()
+        .all(|&point| in_refresh_window(Some(point), 80)));
+    let mut distinct = points.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert!(distinct.len() > 8, "{points:?}");
 }
 
 #[test]
@@ -304,9 +345,9 @@ fn refresh_points_a_late_sweep_passes_are_reported_once() {
         host(1),
     );
     let mut refreshes = 0usize;
-    cache.advance(at(91), &mut |_| refreshes += 1, &mut |_, _| {});
+    cache.advance(at(94), &mut |_| refreshes += 1, &mut |_, _| {});
     assert_eq!(refreshes, 1, "one re-query covers every point passed");
-    assert_eq!(cache.next_deadline(), Some(at(95)));
+    assert!(in_refresh_window(cache.next_deadline(), 95));
 }
 
 #[test]
@@ -319,7 +360,7 @@ fn a_question_raised_after_the_record_arms_its_refresh() {
         host(1),
     );
     watch(&mut cache, "printer.local", RecordType::A, Some(WATCHER));
-    assert_eq!(cache.next_deadline(), Some(at(80)));
+    assert!(in_refresh_window(cache.next_deadline(), 80));
 }
 
 #[test]
@@ -375,9 +416,8 @@ fn a_question_that_stops_disarms_its_refresh_points_at_once() {
         &a_record("printer.local", 5, 100),
         host(1),
     );
-    assert_eq!(
-        cache.next_deadline(),
-        Some(at(80)),
+    assert!(
+        in_refresh_window(cache.next_deadline(), 80),
         "the first refresh point"
     );
     watch(&mut cache, "printer.local", RecordType::A, None);
@@ -439,20 +479,16 @@ fn a_record_is_offered_as_a_known_answer_while_half_its_own_lifetime_is_left() {
 #[test]
 fn a_lookup_comes_freshest_first_with_a_cut_lifetime_last() {
     let mut cache = cache();
+    // Shared, so no arrival flushes another.
+    let shared = |last| {
+        let mut record = a_record("printer.local", last, 100);
+        record.cache_flush = false;
+        record
+    };
     for last in 1..=3 {
-        learn(
-            &mut cache,
-            at(i64::from(last)),
-            &a_record("printer.local", last, 100),
-            host(last),
-        );
+        learn(&mut cache, at(i64::from(last)), &shared(last), host(last));
     }
-    learn(
-        &mut cache,
-        at(5),
-        &a_record("printer.local", 1, 100),
-        host(1),
-    );
+    learn(&mut cache, at(5), &shared(1), host(1));
     let order = |cache: &RecordCache| -> Vec<u8> {
         held(cache, "printer.local", RecordType::A)
             .iter()
@@ -507,6 +543,135 @@ fn one_source_past_its_ceiling_evicts_its_own_oldest_record() {
         alloc::vec![neighbour],
         "a neighbour's record is untouched by someone else's flood"
     );
+}
+
+#[test]
+fn a_record_at_a_full_name_from_a_source_at_its_share_pays_both_bounds() {
+    let mut cache = cache();
+    for index in 0..MAX_RECORDS_PER_KEY {
+        let target = alloc::format!("i{index}._ipp._tcp.local");
+        let record = ptr_record("printer.local", &target, 4500);
+        learn(&mut cache, at(0), &record, host(2));
+    }
+    for index in 0..MAX_RECORDS_PER_SOURCE {
+        let owner = alloc::format!("flood{index}.local");
+        learn(&mut cache, at(1), &a_record(&owner, 5, 4500), host(1));
+    }
+    let newest = ptr_record("printer.local", "newest._ipp._tcp.local", 4500);
+    assert_eq!(learn(&mut cache, at(2), &newest, host(1)), Learned::Added);
+    assert_eq!(
+        held(&cache, "printer.local", RecordType::Ptr).len(),
+        MAX_RECORDS_PER_KEY,
+        "the name stays within its bound"
+    );
+    assert_eq!(
+        cache.len_from(host(1)),
+        MAX_RECORDS_PER_SOURCE,
+        "and the source within its share"
+    );
+    assert!(held(&cache, "flood0.local", RecordType::A).is_empty());
+    cache.assert_consistent();
+}
+
+#[test]
+fn records_a_question_stops_watching_count_against_their_source() {
+    let mut cache = cache();
+    for index in 0..MAX_RECORDS_PER_SOURCE {
+        let owner = alloc::format!("flood{index}.local");
+        learn(&mut cache, at(0), &a_record(&owner, 5, 4500), host(1));
+    }
+    for index in 0..4 {
+        let target = alloc::format!("i{index}._ipp._tcp.local");
+        let record = ptr_record("_ipp._tcp.local", &target, 4500);
+        learn_watched(&mut cache, at(1), &record, host(1));
+    }
+    assert_eq!(
+        cache.len_from(host(1)),
+        MAX_RECORDS_PER_SOURCE,
+        "a watched record is no source's share"
+    );
+    watch(&mut cache, "_ipp._tcp.local", RecordType::Ptr, None);
+    assert_eq!(
+        cache.len_from(host(1)),
+        MAX_RECORDS_PER_SOURCE,
+        "the source stays within its share once nobody watches"
+    );
+    assert_eq!(held(&cache, "_ipp._tcp.local", RecordType::Ptr).len(), 4);
+    for index in 0..4 {
+        let owner = alloc::format!("flood{index}.local");
+        assert!(
+            held(&cache, &owner, RecordType::A).is_empty(),
+            "the source's own oldest made room"
+        );
+    }
+    cache.assert_consistent();
+}
+
+/// A record its question stops watching that cannot join its source's chain
+/// leaves the cache whole, rather than half-moved between the lists.
+#[test]
+fn a_record_refused_its_source_chain_on_unwatching_leaves_cleanly() {
+    let mut cache = cache();
+    let kept = a_record("printer.local", 5, 4500);
+    learn(&mut cache, at(0), &kept, host(1));
+    let record = ptr_record("_ipp._tcp.local", "i0._ipp._tcp.local", 4500);
+    learn_watched(&mut cache, at(0), &record, host(1));
+    cache.refuse_sources = true;
+    watch(&mut cache, "_ipp._tcp.local", RecordType::Ptr, None);
+    assert!(
+        held(&cache, "_ipp._tcp.local", RecordType::Ptr).is_empty(),
+        "not kept uncounted"
+    );
+    assert_eq!(held(&cache, "printer.local", RecordType::A), [kept]);
+    cache.assert_consistent();
+}
+
+/// A record another source would rescue, when that source's chain cannot be
+/// made, stays its owner's and goes at its goodbye's second as it would have.
+#[test]
+fn a_rescue_refused_its_source_chain_changes_nothing() {
+    let mut cache = cache();
+    let record = a_record("printer.local", 5, 120);
+    learn(&mut cache, at(0), &record, host(1));
+    let goodbye = a_record("printer.local", 5, 0);
+    learn(&mut cache, at(10), &goodbye, host(1));
+    cache.refuse_sources = true;
+    assert_eq!(
+        learn(&mut cache, at(10), &record, host(2)),
+        Learned::Ignored
+    );
+    cache.assert_consistent();
+    advance(&mut cache, at(12));
+    assert!(held(&cache, "printer.local", RecordType::A).is_empty());
+    cache.assert_consistent();
+}
+
+#[test]
+fn a_rescued_record_counts_against_its_rescuer() {
+    let mut cache = cache();
+    let record = a_record("printer.local", 5, 120);
+    learn(&mut cache, at(0), &record, host(1));
+    for index in 0..MAX_RECORDS_PER_SOURCE {
+        let owner = alloc::format!("flood{index}.local");
+        learn(&mut cache, at(1), &a_record(&owner, 5, 4500), host(2));
+    }
+    let goodbye = a_record("printer.local", 5, 0);
+    assert_eq!(
+        learn(&mut cache, at(10), &goodbye, host(1)),
+        Learned::Retired
+    );
+    assert_eq!(
+        learn(&mut cache, at(10), &record, host(2)),
+        Learned::Refreshed
+    );
+    assert_eq!(cache.len_from(host(1)), 0);
+    assert_eq!(
+        cache.len_from(host(2)),
+        MAX_RECORDS_PER_SOURCE,
+        "the rescuer stays within its share"
+    );
+    assert!(held(&cache, "flood0.local", RecordType::A).is_empty());
+    cache.assert_consistent();
 }
 
 #[test]
@@ -572,6 +737,13 @@ fn a_full_cache_evicts_the_least_recently_used_record() {
     );
 }
 
+/// The resident size the docs give a full table: under four mebibytes of
+/// slots per interface, whatever the segment sends.
+#[test]
+fn a_full_slot_table_stays_under_four_mebibytes() {
+    assert!(core::mem::size_of::<Option<Slot>>() * MAX_RECORDS < 4 << 20);
+}
+
 #[test]
 fn a_record_past_the_txt_bound_never_reaches_the_cache() {
     // The bound is enforced where the octets are validated, so an
@@ -613,21 +785,20 @@ fn a_freed_slot_is_reused_rather_than_growing_the_table() {
 
 // -- what a peer can make a record cost ----------------------------------
 
-/// [`MAX_RECORDS`] distinct `PTR` records at one name, from as many
-/// sources as the per-source bound needs.
+/// As many distinct `PTR` records at one name as it may hold, from one
+/// source.
 fn stacked() -> RecordCache {
     let mut cache = cache();
-    for index in 0..MAX_RECORDS {
+    for index in 0..MAX_RECORDS_PER_KEY {
         let target = alloc::format!("i{index}._http._tcp.local");
-        let source = host(u8::try_from(index / MAX_RECORDS_PER_SOURCE).expect("small"));
         learn(
             &mut cache,
             at(0),
-            &ptr_record("_http._tcp.local", &target, 4500),
-            source,
+            &ptr_record("printer.local", &target, 4500),
+            host(0),
         );
     }
-    assert_eq!(cache.len(), MAX_RECORDS);
+    assert_eq!(cache.len(), MAX_RECORDS_PER_KEY);
     cache
 }
 
@@ -635,13 +806,13 @@ fn stacked() -> RecordCache {
 fn a_record_stacked_under_one_name_is_found_by_one_comparison() {
     let mut cache = stacked();
     cache.take_walked();
-    let again = ptr_record("_http._tcp.local", "i5._http._tcp.local", 4500);
+    let again = ptr_record("printer.local", "i5._http._tcp.local", 4500);
     assert_eq!(
         learn(&mut cache, at(1), &again, host(0)),
         Learned::Refreshed
     );
     assert_eq!(cache.take_walked(), 1);
-    let new = ptr_record("_http._tcp.local", "new._http._tcp.local", 4500);
+    let new = ptr_record("printer.local", "new._http._tcp.local", 4500);
     learn(&mut cache, at(1), &new, host(0));
     assert_eq!(
         cache.take_walked(),
@@ -654,15 +825,15 @@ fn a_record_stacked_under_one_name_is_found_by_one_comparison() {
 fn a_cache_flush_retires_each_record_once_and_walks_nothing_younger() {
     let mut cache = stacked();
     cache.take_walked();
-    let mut claim = ptr_record("_http._tcp.local", "claim._http._tcp.local", 4500);
+    let mut claim = ptr_record("printer.local", "claim._http._tcp.local", 4500);
     claim.cache_flush = true;
     learn(&mut cache, at(2), &claim, host(3));
     assert_eq!(
         cache.take_walked(),
-        MAX_RECORDS_PER_SOURCE,
-        "only the announcing source's records, each retired once"
+        MAX_RECORDS_PER_KEY,
+        "every other record, each retired once"
     );
-    let mut again = ptr_record("_http._tcp.local", "again._http._tcp.local", 4500);
+    let mut again = ptr_record("printer.local", "again._http._tcp.local", 4500);
     again.cache_flush = true;
     learn(&mut cache, at(2), &again, host(3));
     assert_eq!(
@@ -707,23 +878,131 @@ fn a_record_no_question_watches_leaves_without_a_word() {
 #[test]
 fn a_watched_record_evicted_for_room_is_reported_gone() {
     let mut cache = cache();
-    let first = a_record("q0.local", 5, 4500);
+    let first = ptr_record("printer.local", "i0._http._tcp.local", 4500);
     learn_watched(&mut cache, at(0), &first, host(1));
     let mut seen = Vec::new();
-    for index in 1..=MAX_RECORDS_PER_SOURCE {
-        let owner = alloc::format!("q{index}.local");
-        let record = a_record(&owner, 5, 4500);
+    for index in 1..=MAX_RECORDS_PER_KEY {
+        let target = alloc::format!("i{index}._http._tcp.local");
+        let record = ptr_record("printer.local", &target, 4500);
         cache.learn(
             at(i64::try_from(index).expect("small")),
             cache.keyed(&record),
-            host(1),
+            host(u8::try_from(index % 200).expect("small")),
+            Some(WATCHER),
+            &mut gone_into(&mut seen),
+        );
+    }
+    // The name's own oldest record made room for its newest.
+    assert_eq!(seen, alloc::vec![(WATCHER, first)]);
+    assert_eq!(
+        held(&cache, "printer.local", RecordType::Ptr).len(),
+        MAX_RECORDS_PER_KEY
+    );
+}
+
+/// However many unsolicited records a peer sends, from however many forged
+/// addresses, a record a question watches is never what makes room for them.
+#[test]
+fn unsolicited_records_never_displace_a_watched_one() {
+    let mut cache = cache();
+    let watched = a_record("q.local", 5, 4500);
+    learn_watched(&mut cache, at(0), &watched, host(1));
+    let mut seen = Vec::new();
+    for index in 0..MAX_RECORDS + 64 {
+        let owner = alloc::format!("f{index}.local");
+        let record = a_record(&owner, 5, 4500);
+        cache.learn(
+            at(1),
+            cache.keyed(&record),
+            host(u8::try_from(index % 32).expect("small")),
             None,
             &mut gone_into(&mut seen),
         );
     }
-    // The source's own oldest record made room for its newest.
-    assert_eq!(seen, alloc::vec![(WATCHER, first)]);
-    assert!(held(&cache, "q0.local", RecordType::A).is_empty());
+    assert!(seen.is_empty());
+    assert_eq!(held(&cache, "q.local", RecordType::A), [watched]);
+    assert_eq!(cache.len(), MAX_RECORDS);
+}
+
+/// Only a record's own source renews it on its say: another can extend its
+/// life but never shorten it, so resending a neighbour's record with a TTL
+/// of one deletes nothing.
+#[test]
+fn another_sources_copy_extends_a_record_and_never_shortens_it() {
+    let mut cache = cache();
+    let record = a_record("printer.local", 5, 120);
+    learn(&mut cache, at(0), &record, host(1));
+    let short = a_record("printer.local", 5, 1);
+    assert_eq!(
+        learn(&mut cache, at(10), &short, host(2)),
+        Learned::Corroborated
+    );
+    advance(&mut cache, at(12));
+    let cached = matches(&cache, "printer.local", RecordType::A)
+        .next()
+        .expect("held");
+    assert_eq!((cached.source, cached.expires), (host(1), at(120)));
+    assert_eq!(
+        learn(&mut cache, at(60), &record, host(2)),
+        Learned::Refreshed
+    );
+    let cached = matches(&cache, "printer.local", RecordType::A)
+        .next()
+        .expect("held");
+    assert_eq!(
+        (cached.source, cached.expires),
+        (host(1), at(180)),
+        "extended, and still its owner's"
+    );
+}
+
+/// Another responder still asserting a record its owner withdrew rescues it
+/// (RFC 6762 §10.1), and owns it from then on.
+#[test]
+fn a_record_another_source_asserts_in_its_last_second_is_rescued() {
+    let mut cache = cache();
+    let record = a_record("printer.local", 5, 120);
+    learn(&mut cache, at(0), &record, host(1));
+    let goodbye = a_record("printer.local", 5, 0);
+    assert_eq!(
+        learn(&mut cache, at(10), &goodbye, host(1)),
+        Learned::Retired
+    );
+    assert_eq!(
+        learn(&mut cache, at(10), &record, host(2)),
+        Learned::Refreshed
+    );
+    advance(&mut cache, at(12));
+    let cached = matches(&cache, "printer.local", RecordType::A)
+        .next()
+        .expect("rescued");
+    assert_eq!(cached.source, host(2));
+    assert_eq!(
+        learn(&mut cache, at(20), &goodbye, host(1)),
+        Learned::Ignored,
+        "no longer the first source's to withdraw"
+    );
+}
+
+/// A record past half its lifetime goes behind the rest, so the walk a
+/// known-answer list makes stops at the first record not worth offering.
+#[test]
+fn a_record_past_half_its_life_goes_behind_the_rest() {
+    let mut cache = cache();
+    let mut short = a_record("printer.local", 1, 10);
+    short.cache_flush = false;
+    let mut long = a_record("printer.local", 2, 100);
+    long.cache_flush = false;
+    learn(&mut cache, at(0), &long, host(1));
+    learn(&mut cache, at(1), &short, host(2));
+    assert_eq!(held(&cache, "printer.local", RecordType::A), [short, long]);
+    advance(&mut cache, at(7));
+    assert_eq!(held(&cache, "printer.local", RecordType::A), [long, short]);
+    let offered: Vec<Record> = matches(&cache, "printer.local", RecordType::A)
+        .take_while(|cached| cached.worth_offering(at(7)))
+        .map(|cached| cached.record)
+        .collect();
+    assert_eq!(offered, [long]);
 }
 
 #[test]
@@ -740,4 +1019,37 @@ fn clearing_reports_every_watched_record() {
     cache.clear(&mut gone_into(&mut seen));
     assert_eq!(seen.len(), 1, "only the watched record is reported");
     assert!(cache.is_empty());
+}
+
+/// A lifetime past the longest a responder gives is held as that, so a peer
+/// cannot plant a record for decades.
+#[test]
+fn a_record_is_held_no_longer_than_a_responder_ever_asks() {
+    let mut cache = cache();
+    let planted = a_record("printer.local", 1, 3_000_000);
+    assert_eq!(learn(&mut cache, at(0), &planted, host(1)), Learned::Added);
+    let cached = matches(&cache, "printer.local", RecordType::A)
+        .next()
+        .expect("held");
+    assert_eq!(cached.record.ttl, crate::mdns::TTL_HELD_MAX_SECS);
+    assert_eq!(
+        cached.expires,
+        at(i64::from(crate::mdns::TTL_HELD_MAX_SECS))
+    );
+}
+
+/// A question raised after a record was cut short arms no refresh for it: it
+/// is about to go, and a re-query would only ask after it again.
+#[test]
+fn watching_a_record_cut_short_arms_no_refresh() {
+    let mut cache = cache();
+    let record = a_record("printer.local", 5, 120);
+    learn(&mut cache, at(0), &record, host(1));
+    let goodbye = a_record("printer.local", 5, 0);
+    assert_eq!(
+        learn(&mut cache, at(10), &goodbye, host(1)),
+        Learned::Retired
+    );
+    watch(&mut cache, "printer.local", RecordType::A, Some(WATCHER));
+    assert_eq!(cache.next_deadline(), Some(at(11)), "only its expiry");
 }

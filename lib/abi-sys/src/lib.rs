@@ -179,6 +179,7 @@ const NUM_SHM_UNMAP: u64 = SyscallNumber::SHM_UNMAP.as_u16() as u64;
 const NUM_SHM_GRANT: u64 = SyscallNumber::SHM_GRANT.as_u16() as u64;
 const NUM_CALL_GRANT: u64 = SyscallNumber::CALL_GRANT.as_u16() as u64;
 const NUM_CALL_PEER_SEAT: u64 = SyscallNumber::CALL_PEER_SEAT.as_u16() as u64;
+const NUM_CALL_PEER_PORT: u64 = SyscallNumber::CALL_PEER_PORT.as_u16() as u64;
 const NUM_WAITSET_CREATE: u64 = SyscallNumber::WAITSET_CREATE.as_u16() as u64;
 const NUM_WAITSET_CTL: u64 = SyscallNumber::WAITSET_CTL.as_u16() as u64;
 const NUM_WAITSET_WAIT: u64 = SyscallNumber::WAITSET_WAIT.as_u16() as u64;
@@ -2579,6 +2580,28 @@ pub extern "C" fn sys_call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> u
     unsafe { raw_syscall(NUM_CALL_PEER_SEAT, [endpoint, ticket, seat, 0, 0, 0]) }
 }
 
+/// `call_peer_port`: ask whether the in-flight caller of served call
+/// endpoint `endpoint` (ticket `ticket`) owns port `port`
+/// (`SyscallNumber::CALL_PEER_PORT`), so a server posts only into a port its
+/// caller can drain. Returns `TAIRIX_E_OK`, `TAIRIX_E_PERMISSION_DENIED` when
+/// the peer does not own it (an unbound port answers the same) or the caller
+/// is not the endpoint's server, or `TAIRIX_E_NOT_FOUND` for an unknown
+/// endpoint or ticket or an ended peer.
+///
+/// Valid in the `tairix_sys_call_peer_origin` window.
+#[must_use]
+#[export_name = "tairix_sys_call_peer_port"]
+pub extern "C" fn sys_call_peer_port(endpoint: u64, ticket: u64, port: u64) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the kernel
+    // gates the call on endpoint ownership before reading any port.
+    unsafe {
+        ret_i32(raw_syscall(
+            NUM_CALL_PEER_PORT,
+            [endpoint, ticket, port, 0, 0, 0],
+        ))
+    }
+}
+
 /// `shm_create_dma`: carve a shared region a DMA master driving `reach`
 /// address bits may reach under the caller's `Dma` grant `handle`
 /// (`SyscallNumber::SHM_CREATE_DMA`). Returns the base **user virtual
@@ -3733,6 +3756,7 @@ mod tests {
         (NUM_PORT_BIND, "port_bind", 3),
         (NUM_PORT_ADMIT, "port_admit", 2),
         (NUM_PORT_UNBIND, "port_unbind", 1),
+        (NUM_CALL_PEER_PORT, "call_peer_port", 3),
         (NUM_WAITSET_CLOSE, "waitset_close", 1),
         (NUM_PORT_RESOLVE, "port_resolve", 2),
         (NUM_POINTER_INJECT, "pointer_inject", 3),
@@ -4689,6 +4713,15 @@ mod tests {
         assert_eq!(args[1], 9);
         assert_eq!(args[2], 0);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn call_peer_port_marshals_endpoint_ticket_and_port() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_call_peer_port(0xD15_1001, 9, 0x9047_0001), 0);
+        });
+        assert_eq!(number, NUM_CALL_PEER_PORT);
+        assert_eq!(args, [0xD15_1001, 9, 0x9047_0001, 0, 0, 0]);
     }
 
     #[test]

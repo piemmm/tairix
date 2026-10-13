@@ -268,6 +268,8 @@ _el2_establish_and_drop:
     msr     spsr_el2, x0
     msr     elr_el2, x20
     eret
+    dsb     nsh
+    isb
 
 // The boot stack is reserved by the active linker script, which sizes it
 // per image (`BOOT_STACK_BYTES`) and places it last in `.bss` so an

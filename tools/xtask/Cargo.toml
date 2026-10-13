@@ -200,7 +200,7 @@ tairix-itest-harness = { path = "../../tests/integration/harness", version = "=0
 # drifts from the driver it binds: the mailbox
 # service driver (via `tairix-vcmailbox`), the BCM2711 PCIe root-complex bus
 # driver, the VL805 USB host bus driver, the xHCI host-controller driver, and
-# the USB boot-keyboard class driver — each `BIND_KEYS` lives in the driver
+# the USB HID class driver — each `BIND_KEYS` lives in the driver
 # crate's own `lib` target (the device logic is co-located in the driver).
 # These are `drivers/*` crates; xtask is host build glue
 # (`Tooling`, outside the product layering), so depending on them is

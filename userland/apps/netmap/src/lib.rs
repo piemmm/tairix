@@ -30,7 +30,7 @@ pub mod source;
 pub mod view;
 pub mod viewport;
 
-pub use discover::{AdvertisedService, Directory, Discovery};
+pub use discover::{AdvertisedService, Collect, Directory, Discovery, OpenSession};
 pub use infer::{infer, Evidence, Role, Seen, Signals};
 pub use ingest::{assigned_oui, InterfaceObservation, Inventory};
 pub use layout::{layout, RING_STEP};
@@ -42,6 +42,10 @@ pub use model::{
 pub use source::Snapshot;
 pub use view::{node_look, os_emblem, Look, MapView, Reaction, NODE_RADIUS};
 pub use viewport::{Viewport, DEFAULT_ZOOM_PER_MILLE, MAX_ZOOM_PER_MILLE, MIN_ZOOM_PER_MILLE};
+
+/// How often an open map re-reads the network, and the pace a request that
+/// cannot be replayed whole is retried at.
+pub const REFRESH_NS: u64 = 5_000_000_000;
 
 /// The map window's preferred width when it opens, in logical pixels at the
 /// reference density. The `Run` shell and the QEMU vertical's window

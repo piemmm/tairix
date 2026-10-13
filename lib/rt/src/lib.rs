@@ -364,6 +364,9 @@ const NUM_CALL_GRANT: u64 = SyscallNumber::CALL_GRANT.as_u16() as u64;
 /// `call_peer_seat` syscall number (as above).
 const NUM_CALL_PEER_SEAT: u64 = SyscallNumber::CALL_PEER_SEAT.as_u16() as u64;
 
+/// `call_peer_port` syscall number (as above).
+const NUM_CALL_PEER_PORT: u64 = SyscallNumber::CALL_PEER_PORT.as_u16() as u64;
+
 /// `waitset_create` syscall number (as above).
 const NUM_WAITSET_CREATE: u64 = SyscallNumber::WAITSET_CREATE.as_u16() as u64;
 
@@ -4614,6 +4617,32 @@ pub fn call_peer_seat(endpoint: u64, ticket: u64, seat: u64) -> i64 {
     ret as i64
 }
 
+/// Ask whether the in-flight caller of served call endpoint `endpoint`
+/// (ticket `ticket`) owns port `port` (`SyscallNumber::CALL_PEER_PORT`), so a
+/// server posts only into a port its caller can drain.
+///
+/// Valid in the [`call_peer_origin`] window, on an endpoint the caller owns
+/// and may receive from.
+///
+/// # Errors
+///
+/// [`Errno::PermissionDenied`] when the peer does not own the port — an
+/// unbound port answers the same — or the caller is not the endpoint's
+/// server, and [`Errno::NotFound`] for an unknown endpoint or ticket or an
+/// ended peer.
+pub fn call_peer_port(endpoint: u64, ticket: u64, port: u64) -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke — the call carries no
+    // pointers, and the kernel gates it on endpoint ownership before reading
+    // any port.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the status encoding (0, else -errno).
+    let ret = unsafe { raw_syscall(NUM_CALL_PEER_PORT, [endpoint, ticket, port, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    Ok(())
+}
+
 /// Carve a shared region a DMA master driving `reach` address bits may reach
 /// under the caller's `Dma` grant `handle` (`SyscallNumber::SHM_CREATE_DMA`).
 ///
@@ -7540,6 +7569,20 @@ mod tests {
         let _ = capture(neg, || {
             assert_eq!(call_peer_node(0xD15_1001, 9, &mut out), Err(want));
         });
+    }
+
+    #[test]
+    fn call_peer_port_marshals_its_three_ids_and_surfaces_a_refusal() {
+        let (number, args) = capture(0, || {
+            assert_eq!(call_peer_port(0xD15_1001, 9, 0x9047_0001), Ok(()));
+        });
+        assert_eq!(number, NUM_CALL_PEER_PORT);
+        assert_eq!(args, [0xD15_1001, 9, 0x9047_0001, 0, 0, 0]);
+        seam::arm(refusal(Errno::PermissionDenied));
+        assert_eq!(
+            call_peer_port(0xD15_1001, 9, 0x9047_0002),
+            Err(Errno::PermissionDenied)
+        );
     }
 
     #[test]

@@ -56,7 +56,7 @@ impl BitSet256 {
     /// out-of-range identifier should validate it before calling.
     pub fn insert(&mut self, bit: u16) {
         if (bit as usize) < BITSET256_BITS {
-            let (w, b) = split(bit);
+            let (w, b) = split(in_range(bit));
             self.words[w] |= 1u64 << b;
         }
     }
@@ -66,18 +66,18 @@ impl BitSet256 {
     /// Out-of-range bits are ignored; see [`Self::insert`].
     pub fn remove(&mut self, bit: u16) {
         if (bit as usize) < BITSET256_BITS {
-            let (w, b) = split(bit);
+            let (w, b) = split(in_range(bit));
             self.words[w] &= !(1u64 << b);
         }
     }
 
     /// Return `true` if `bit` is in the set.
     #[must_use]
-    pub const fn contains(&self, bit: u16) -> bool {
+    pub fn contains(&self, bit: u16) -> bool {
         if (bit as usize) >= BITSET256_BITS {
             return false;
         }
-        let (w, b) = split(bit);
+        let (w, b) = split(in_range(bit));
         (self.words[w] >> b) & 1 == 1
     }
 
@@ -174,6 +174,16 @@ impl IntoIterator for &BitSet256 {
     }
 }
 
+/// `bit` masked into the set's range behind an optimisation barrier, so a
+/// mispredicted range check on a caller's bit cannot index past the words
+/// speculatively: the barrier keeps the compiler from dropping the mask as
+/// implied by the check.
+fn in_range(bit: u16) -> u16 {
+    const _: () = assert!(BITSET256_BITS.is_power_of_two() && BITSET256_BITS <= 1 << 16);
+    const MASK: u16 = u16::MAX >> (u16::BITS - BITSET256_BITS.trailing_zeros());
+    core::hint::black_box(bit) & MASK
+}
+
 const fn split(bit: u16) -> (usize, u32) {
     let w = (bit as usize) >> 6;
     let b = (bit as u32) & 0x3F;
@@ -255,6 +265,16 @@ mod tests {
         set.insert(oversize + 1);
         assert!(set.is_empty());
         assert!(!set.contains(oversize));
+    }
+
+    #[test]
+    fn the_speculation_mask_keeps_every_bit_inside_the_words() {
+        for bit in [0, 63, 64, 255] {
+            assert_eq!(super::in_range(bit), bit);
+        }
+        for bit in [256, 300, 511, u16::MAX] {
+            assert!(usize::from(super::in_range(bit)) < BITSET256_BITS);
+        }
     }
 
     #[test]

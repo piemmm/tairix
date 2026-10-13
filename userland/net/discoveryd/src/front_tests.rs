@@ -2,13 +2,18 @@
 //! one, a doomed one, one that lies, and — end to end — the real decoder.
 
 use super::{
-    Fatal, Front, Host, Sockets, ASKER_WINDOW_NS, MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE,
-    RELAY_SOURCE_BURST,
+    Caller, Fatal, Front, Host, Sockets, ACK_DEADLINE_NS, ASKER_WINDOW_NS, FRESH_ACCOUNT_BURST,
+    FRESH_ACCOUNT_RATE, MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE, RELAY_SOURCE_BURST,
+    REPLAY_ACCOUNT_BURST, REPLAY_ACCOUNT_RATE,
 };
 use crate::decoder::Decoder;
 use crate::events::{DECODER_STARTED, REQUEST_DENIED};
 use crate::grants::Grants;
-use crate::wire::{FromDecoder, ToDecoder, DATAGRAM_HEADER_LEN, MAX_FROM_DECODER};
+use crate::query::QUESTIONS_PER_REQUEST;
+use crate::questions::FLOOR_RESERVE;
+use crate::wire::{
+    Edge, FromDecoder, ToDecoder, DATAGRAM_HEADER_LEN, GROUP_BURST, GROUP_RATE, MAX_FROM_DECODER,
+};
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec;
@@ -28,6 +33,7 @@ use tairix_abi::{
 use tairix_log::{Event, EventId, Sink};
 use tairix_net::dns::Name;
 use tairix_net::mdns::{Destination, MessageWriter, RData, Record, Section, MAX_QUESTIONS};
+use tairix_net::rate::BucketLevel;
 use tairix_net::{IpAddr, Ipv4Addr};
 use tairix_sandbox::host::EVENT_WORKER_CRASHED;
 use tairix_sandbox::loopback::{LoopbackSession, LoopbackSessionLauncher};
@@ -125,10 +131,16 @@ enum Script {
     Unasked,
     /// A datagram straight back to this peer.
     Reply(IpAddr, u16),
+    /// Never acknowledge a stop or a replay.
+    Withhold,
+    /// End a replay that was never asked for.
+    Forge,
+    /// Send this many group datagrams, at the instant each datagram came.
+    Multicast(u32),
 }
 
-/// A worker that records every frame, acknowledges every link as a decoder
-/// does, and answers ticks with "no deadline".
+/// A worker that records every frame, acknowledges every link, stop and
+/// replay as a decoder does, and answers ticks with "no deadline".
 struct Scripted {
     log: Rc<RefCell<Vec<Vec<u8>>>>,
     script: Script,
@@ -148,11 +160,23 @@ impl SessionService for Scripted {
             Ok(ToDecoder::Tick { .. }) => {
                 let _ = out.frame(&encoded(&FromDecoder::Deadline(None)));
             }
-            Ok(ToDecoder::Link { interface, up, .. }) => {
+            Ok(ToDecoder::Link {
+                interface, edge, ..
+            }) => {
+                let up = matches!(edge, Edge::Up(_));
                 let _ = out.frame(&encoded(&FromDecoder::Linked { interface, up }));
             }
-            Ok(ToDecoder::Datagram { interface, .. }) => match self.script {
-                Script::Nothing => {}
+            Ok(ToDecoder::Stop { question }) if !matches!(self.script, Script::Withhold) => {
+                let _ = out.frame(&encoded(&FromDecoder::Stopped { question }));
+            }
+            Ok(ToDecoder::Replay { token, .. }) if !matches!(self.script, Script::Withhold) => {
+                let _ = out.frame(&encoded(&FromDecoder::Replayed { token }));
+            }
+            Ok(ToDecoder::Datagram { now, interface, .. }) => match self.script {
+                Script::Nothing | Script::Withhold => {}
+                Script::Forge => {
+                    let _ = out.frame(&encoded(&FromDecoder::Replayed { token: 0 }));
+                }
                 Script::Deadline(at) => {
                     let _ = out.frame(&encoded(&FromDecoder::Deadline(at)));
                 }
@@ -171,9 +195,20 @@ impl SessionService for Scripted {
                 Script::Reply(addr, port) => {
                     let _ = out.frame(&encoded(&FromDecoder::Transmit {
                         interface,
+                        at: now,
                         to: Destination::Peer { addr, port },
                         payload: b"reply",
                     }));
+                }
+                Script::Multicast(count) => {
+                    for _ in 0..count {
+                        let _ = out.frame(&encoded(&FromDecoder::Transmit {
+                            interface,
+                            at: now,
+                            to: Destination::Group,
+                            payload: b"query",
+                        }));
+                    }
                 }
             },
             _ => {}
@@ -342,6 +377,7 @@ fn from_on<'a>(name: &[u8], last: u8, on_link: bool, payload: &'a [u8]) -> Socke
             port: 5353,
         },
         source_on_link: on_link,
+        to_group: true,
         payload,
     }
 }
@@ -376,8 +412,12 @@ fn told(log: &Rc<RefCell<Vec<Vec<u8>>>>) -> Vec<&'static str> {
             Ok(ToDecoder::Configure { .. }) => "configure",
             Ok(ToDecoder::Datagram { .. }) => "datagram",
             Ok(ToDecoder::Tick { .. }) => "tick",
-            Ok(ToDecoder::Link { up: true, .. }) => "up",
-            Ok(ToDecoder::Link { up: false, .. }) => "down",
+            Ok(ToDecoder::Link {
+                edge: Edge::Up(_), ..
+            }) => "up",
+            Ok(ToDecoder::Link {
+                edge: Edge::Down, ..
+            }) => "down",
             Ok(ToDecoder::Ask { .. }) => "ask",
             Ok(ToDecoder::Stop { .. }) => "stop",
             Ok(ToDecoder::Replay { .. }) => "replay",
@@ -411,16 +451,49 @@ fn printer_app() -> AppIdentity {
     AppIdentity::new("os.example.printing", PublisherId::from_raw([7; 32])).unwrap()
 }
 
+/// A caller owning exactly the ports listed.
+struct Owning<'a> {
+    origin: &'a Origin,
+    ports: &'a [u64],
+}
+
+impl Caller for Owning<'_> {
+    fn origin(&self) -> &Origin {
+        self.origin
+    }
+
+    fn owns_port(&self, port: u64) -> bool {
+        self.ports.contains(&port)
+    }
+}
+
 fn call<L: SessionLauncher>(
     front: &mut Front<L, RecordingSink, FakeHost>,
     now: u64,
     who: &Origin,
     request: &DiscoveryRequest<'_>,
 ) -> Vec<u8> {
+    call_as(
+        front,
+        now,
+        &Owning {
+            origin: who,
+            ports: &[PORT],
+        },
+        request,
+    )
+}
+
+fn call_as<L: SessionLauncher>(
+    front: &mut Front<L, RecordingSink, FakeHost>,
+    now: u64,
+    caller: &dyn Caller,
+    request: &DiscoveryRequest<'_>,
+) -> Vec<u8> {
     let mut bytes = vec![0u8; 512];
     let len = request.encode(&mut bytes).expect("encodes");
     let mut reply = vec![0u8; DISCOVERY_MAX_REPLY];
-    let len = front.serve(now, who, &bytes[..len], &mut reply);
+    let len = front.serve(now, caller, &bytes[..len], &mut reply);
     reply.truncate(len);
     turn(front, now);
     reply
@@ -653,6 +726,37 @@ fn a_session_needs_cap_net_and_its_owner_is_watched_once() {
     assert_eq!(h.world.0.borrow().watched, [ProcId::from_raw([4; 16])]);
 }
 
+/// A doorbell rings with this service's identity, so it may only name a
+/// port its caller drains; a refusal changes nothing and is audited.
+#[test]
+fn a_doorbell_may_only_name_a_port_its_caller_owns() {
+    let mut h = harness(Script::Nothing);
+    started(&mut h, 0);
+    let who = origin(4, &[CapabilityId::NET], None);
+    let elsewhere = Owning {
+        origin: &who,
+        ports: &[],
+    };
+    assert_eq!(
+        decode_id_reply(&call_as(
+            &mut h.front,
+            0,
+            &elsewhere,
+            &DiscoveryRequest::Open { deliver_port: PORT }
+        )),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(h.sink.count(REQUEST_DENIED), 1);
+    assert!(h.world.0.borrow().watched.is_empty(), "nothing was held");
+    assert!(decode_id_reply(&call(
+        &mut h.front,
+        0,
+        &who,
+        &DiscoveryRequest::Open { deliver_port: PORT }
+    ))
+    .is_ok());
+}
+
 #[test]
 fn a_browse_is_admitted_by_a_grant_or_by_discover_all_and_refused_otherwise() {
     let mut h = harness(Script::Nothing);
@@ -773,6 +877,47 @@ fn a_decoder_that_answers_a_question_never_asked_is_condemned() {
     assert!(!h.front.wants_deliveries());
 }
 
+/// An acknowledgement withheld holds question slots and charges hostage,
+/// so it condemns the decoder once its deadline passes — and not before.
+#[test]
+fn a_withheld_acknowledgement_condemns_the_decoder_at_its_deadline() {
+    let mut h = harness(Script::Withhold);
+    started(&mut h, 0);
+    let who = origin(
+        4,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let (session, request) = browse(&mut h.front, 0, &who).expect("browsing");
+    let stopped = call(
+        &mut h.front,
+        MS,
+        &who,
+        &DiscoveryRequest::Stop { session, request },
+    );
+    assert!(decode_status_reply(&stopped).is_ok());
+    assert!(h
+        .front
+        .wake_at()
+        .is_some_and(|at| at <= MS + ACK_DEADLINE_NS));
+    h.front.on_wake(MS + ACK_DEADLINE_NS - 1).expect("wakes");
+    turn(&mut h.front, MS + ACK_DEADLINE_NS - 1);
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 0);
+    h.front.on_wake(MS + ACK_DEADLINE_NS).expect("wakes");
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 1);
+    assert!(!h.front.wants_deliveries());
+}
+
+/// The end of a replay nobody asked for is a lie.
+#[test]
+fn an_unprompted_replay_end_condemns_the_decoder() {
+    let mut h = harness(Script::Forge);
+    started(&mut h, 0);
+    deliver(&mut h.front, MS, &from(9, true, b"x"));
+    turn(&mut h.front, MS);
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 1);
+}
+
 #[test]
 fn a_decoder_that_sends_a_frame_no_decoder_sends_is_condemned() {
     let mut h = harness(Script::Garbage);
@@ -782,6 +927,64 @@ fn a_decoder_that_sends_a_frame_no_decoder_sends_is_condemned() {
     assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 1);
     assert!(!h.front.wants_deliveries());
     assert!(h.front.wake_at().is_some_and(|at| at > MS));
+}
+
+/// Every group datagram the budget holds is sent.
+#[test]
+fn group_datagrams_within_the_budget_are_sent() {
+    let mut h = harness(Script::Multicast(GROUP_BURST));
+    started(&mut h, 0);
+    deliver(&mut h.front, MS, &from(9, true, b"q"));
+    turn(&mut h.front, MS);
+    assert_eq!(h.world.0.borrow().sent.len(), GROUP_BURST as usize);
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 0);
+}
+
+/// A decoder spends the group budget exactly as the front charges it, so one
+/// datagram past it is no datagram an honest decoder sends.
+#[test]
+fn a_decoder_sending_past_its_group_budget_is_condemned() {
+    let mut h = harness(Script::Multicast(GROUP_BURST + 1));
+    started(&mut h, 0);
+    deliver(&mut h.front, MS, &from(9, true, b"q"));
+    turn(&mut h.front, MS);
+    assert_eq!(h.sink.count(EVENT_WORKER_CRASHED), 1);
+    assert_eq!(h.world.0.borrow().sent.len(), GROUP_BURST as usize);
+}
+
+/// A replacement decoder is handed the budget its predecessor left, so a
+/// restart buys no fresh burst.
+#[test]
+fn a_replacement_decoder_spends_what_its_predecessor_left() {
+    let mut h = harness(Script::Multicast(GROUP_BURST + 1));
+    started(&mut h, 0);
+    deliver(&mut h.front, MS, &from(9, true, b"q"));
+    turn(&mut h.front, MS);
+    let at = h.front.wake_at().expect("a replacement is due");
+    h.front.on_wake(at).expect("keys draw");
+    turn(&mut h.front, at);
+    let handed: Vec<BucketLevel> = seen(&h.log)
+        .iter()
+        .filter_map(|frame| match ToDecoder::decode(frame) {
+            Ok(ToDecoder::Link {
+                edge: Edge::Up(level),
+                ..
+            }) => Some(level),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        handed,
+        [
+            BucketLevel {
+                scaled: u64::from(GROUP_BURST) * SEC,
+                at: 0
+            },
+            BucketLevel { scaled: 0, at: MS }
+        ]
+    );
+    let refilled = tairix_net::rate::TokenBucket::with_level(GROUP_BURST, GROUP_RATE, handed[1]);
+    assert!(!refilled.ready(tairix_abi::time::Duration64::from_nanos(MS), 0));
 }
 
 #[test]
@@ -959,6 +1162,170 @@ fn end_to_end_a_link_that_goes_down_flushes_what_was_learned_on_it() {
     assert_eq!(world.0.borrow().rings.len(), 2);
 }
 
+/// Copies of one record renew it once a second however many arrive, so a
+/// peer repeating itself cannot fan out once per copy.
+#[test]
+fn end_to_end_copies_of_one_record_renew_it_at_most_once_a_second() {
+    let (mut front, _, _) = real();
+    let who = origin(
+        24,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let (session, request) = browse(&mut front, 0, &who).unwrap();
+    let copy = response(&[printer(b"Hall", 4500)]);
+    for n in 1..=40 {
+        deliver(&mut front, n * MS, &from(9, true, &copy));
+        turn(&mut front, n * MS);
+    }
+    assert_eq!(
+        collected(&mut front, &who, session),
+        [(request, "added", b"Hall".to_vec())],
+        "forty copies inside a second are told once"
+    );
+    let later = 2 * SEC;
+    deliver(&mut front, later, &from(9, true, &copy));
+    turn(&mut front, later);
+    assert_eq!(
+        collected(&mut front, &who, session),
+        [(request, "refreshed", b"Hall".to_vec())]
+    );
+}
+
+/// A client starting and stopping a request others share replays the
+/// decoder's cache no faster than its account's budget, and is told so.
+#[test]
+fn a_request_started_and_stopped_in_a_loop_replays_no_faster_than_its_budget() {
+    let (mut front, _, _) = real();
+    let holder = origin(
+        25,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    browse(&mut front, 0, &holder).unwrap();
+    let churner = origin(
+        26,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let session = decode_id_reply(&call(
+        &mut front,
+        0,
+        &churner,
+        &DiscoveryRequest::Open { deliver_port: PORT },
+    ))
+    .unwrap();
+    let churn = |front: &mut RealFront, now: u64, times: usize| {
+        let mut busy = 0;
+        for _ in 0..times {
+            let started = decode_id_reply(&call(
+                front,
+                now,
+                &churner,
+                &DiscoveryRequest::Start {
+                    session,
+                    query: Query::Browse { service: ipp() },
+                },
+            ));
+            match started {
+                Ok(request) => {
+                    call(
+                        front,
+                        now,
+                        &churner,
+                        &DiscoveryRequest::Stop { session, request },
+                    );
+                }
+                Err(err) => {
+                    assert_eq!(err, Errno::Busy);
+                    busy += 1;
+                }
+            }
+            turn(front, now);
+        }
+        busy
+    };
+    let burst = REPLAY_ACCOUNT_BURST as usize;
+    assert_eq!(
+        churn(&mut front, 0, burst + 8),
+        8,
+        "the burst, then refused"
+    );
+    let rate = REPLAY_ACCOUNT_RATE as usize;
+    assert_eq!(
+        churn(&mut front, SEC, rate + 1),
+        1,
+        "a second refills the rate"
+    );
+}
+
+/// A session may hold two requests asking one question — a replacement and
+/// the request it replaces — and is refused a third.
+#[test]
+fn a_session_is_refused_a_third_copy_of_one_request() {
+    let (mut front, _, _) = real();
+    let who = origin(
+        27,
+        &[CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL],
+        None,
+    );
+    let (session, _) = browse(&mut front, 0, &who).unwrap();
+    let start = DiscoveryRequest::Start {
+        session,
+        query: Query::Browse { service: ipp() },
+    };
+    assert!(decode_id_reply(&call(&mut front, 0, &who, &start)).is_ok());
+    assert_eq!(
+        decode_id_reply(&call(&mut front, 0, &who, &start)),
+        Err(Errno::LimitExceeded)
+    );
+}
+
+/// A host lookup asks two questions, and holds an answer to each on the link
+/// that goes down; its request is told the flush once.
+#[test]
+fn end_to_end_a_request_asking_two_questions_is_told_a_link_flush_once() {
+    let (mut front, _, _) = real();
+    let who = origin(23, &[CapabilityId::NET], None);
+    let session = decode_id_reply(&call(
+        &mut front,
+        0,
+        &who,
+        &DiscoveryRequest::Open { deliver_port: PORT },
+    ))
+    .unwrap();
+    let host = Name::encode("printer.local").unwrap();
+    let request = decode_id_reply(&call(
+        &mut front,
+        0,
+        &who,
+        &DiscoveryRequest::Start {
+            session,
+            query: Query::Host {
+                name: host.as_wire(),
+                families: Families::BOTH,
+            },
+        },
+    ))
+    .unwrap();
+    let mut v4 = Record::unique(host, RData::A(Ipv4Addr::new(192, 168, 1, 9)));
+    v4.ttl = 120;
+    let mut v6 = Record::unique(
+        host,
+        RData::Aaaa(tairix_net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 9)),
+    );
+    v6.ttl = 120;
+    deliver(&mut front, MS, &from(9, true, &response(&[v4, v6])));
+    turn(&mut front, MS);
+    let learned = collected(&mut front, &who, session);
+    assert_eq!(learned.len(), 2, "an answer to each question: {learned:?}");
+    link(&mut front, 2 * MS, V4, b"eth0", false);
+    assert_eq!(
+        collected(&mut front, &who, session),
+        [(request, "flush", Vec::new())]
+    );
+}
+
 #[test]
 fn end_to_end_a_second_browse_of_the_same_type_is_replayed_what_is_held() {
     let (mut front, _, _) = real();
@@ -987,17 +1354,39 @@ fn end_to_end_a_second_browse_of_the_same_type_is_replayed_what_is_held() {
     assert_eq!(collected(&mut front, &first, one).len(), 1, "told once");
 }
 
-/// Start a lookup of `hostN.local` in `session`.
+/// How far apart a client's host lookups must start for its fresh-question
+/// budget to keep up: each asks two questions.
+const LOOKUP_PACE: u64 = 2 * SEC / FRESH_ACCOUNT_RATE as u64;
+
+/// Start the `n`th lookup of a client pacing them as its budget allows: of
+/// `hostN.local`, in `session`.
 fn look_up<L: SessionLauncher>(
     front: &mut Front<L, RecordingSink, FakeHost>,
     who: &Origin,
     session: u32,
     n: usize,
 ) -> Result<u32, Errno> {
-    let name = Name::encode(&alloc::format!("host{n}.local")).unwrap();
+    look_up_named(
+        front,
+        n as u64 * LOOKUP_PACE,
+        who,
+        session,
+        &alloc::format!("host{n}"),
+    )
+}
+
+/// Start a lookup of `label.local` in `session` at `now`.
+fn look_up_named<L: SessionLauncher>(
+    front: &mut Front<L, RecordingSink, FakeHost>,
+    now: u64,
+    who: &Origin,
+    session: u32,
+    label: &str,
+) -> Result<u32, Errno> {
+    let name = Name::encode(&alloc::format!("{label}.local")).unwrap();
     decode_id_reply(&call(
         front,
-        0,
+        now,
         who,
         &DiscoveryRequest::Start {
             session,
@@ -1017,6 +1406,112 @@ fn open<L: SessionLauncher>(front: &mut Front<L, RecordingSink, FakeHost>, who: 
         &DiscoveryRequest::Open { deliver_port: PORT },
     ))
     .unwrap()
+}
+
+/// One client churning fresh names spends its own fresh-question budget, not
+/// the group budget every client's first query is paid from: another
+/// client's new question is still asked of the segment at once.
+#[test]
+fn a_client_churning_fresh_names_cannot_starve_anothers_first_query() {
+    let (mut front, _, world) = real();
+    let churner = origin(28, &[CapabilityId::NET], None);
+    let session = open(&mut front, &churner);
+    let host = |n: usize| Name::encode(&alloc::format!("churn{n}.local")).unwrap();
+    let mut refused = 0;
+    for n in 0..200 {
+        let name = host(n);
+        let started = decode_id_reply(&call(
+            &mut front,
+            0,
+            &churner,
+            &DiscoveryRequest::Start {
+                session,
+                query: Query::Host {
+                    name: name.as_wire(),
+                    families: Families::BOTH,
+                },
+            },
+        ));
+        match started {
+            Ok(request) => {
+                call(
+                    &mut front,
+                    0,
+                    &churner,
+                    &DiscoveryRequest::Stop { session, request },
+                );
+            }
+            Err(err) => {
+                assert_eq!(err, Errno::Busy);
+                refused += 1;
+            }
+        }
+    }
+    assert_eq!(
+        refused,
+        200 - FRESH_ACCOUNT_BURST as usize / 2,
+        "its own budget, two questions a lookup"
+    );
+    let other = origin(29, &[CapabilityId::NET], None);
+    let theirs = open(&mut front, &other);
+    let wanted = Name::encode("printer.local").unwrap();
+    let asked = decode_id_reply(&call(
+        &mut front,
+        0,
+        &other,
+        &DiscoveryRequest::Start {
+            session: theirs,
+            query: Query::Host {
+                name: wanted.as_wire(),
+                families: Families::BOTH,
+            },
+        },
+    ));
+    assert!(asked.is_ok(), "another account is not refused");
+    world.0.borrow_mut().sent.clear();
+    let due = front.wake_at().expect("its query is due");
+    assert!(
+        due <= 125 * MS,
+        "within the first-query delay and one refill"
+    );
+    front.on_wake(due).expect("no start due");
+    turn(&mut front, due);
+    let sent = world.0.borrow().sent.clone();
+    assert!(
+        sent.iter().any(|(_, _, payload)| {
+            tairix_net::mdns::Message::parse(payload)
+                .is_some_and(|message| message.questions().any(|question| question.name == wanted))
+        }),
+        "the other client's question went out"
+    );
+}
+
+/// Two accounts asking all they may cannot take every question the decoder
+/// can hold: a third account's new lookup still fits.
+#[test]
+fn two_accounts_asking_all_they_may_leave_room_for_a_third() {
+    let (mut front, _, _) = real();
+    let heavy = [
+        origin(30, &[CapabilityId::NET], None),
+        origin(31, &[CapabilityId::NET], None),
+    ];
+    let sessions = heavy.map(|who| open(&mut front, &who));
+    let mut asked = 0;
+    for step in 0..REQUESTS_PER_ACCOUNT {
+        let now = step as u64 * LOOKUP_PACE;
+        for (which, who) in heavy.iter().enumerate() {
+            let label = alloc::format!("heavy{which}-{step}");
+            match look_up_named(&mut front, now, who, sessions[which], &label) {
+                Ok(_) => asked += QUESTIONS_PER_REQUEST,
+                Err(err) => assert_eq!(err, Errno::LimitExceeded),
+            }
+        }
+    }
+    assert_eq!(asked, MAX_QUESTIONS - FLOOR_RESERVE);
+    let light = origin(32, &[CapabilityId::NET], None);
+    let session = open(&mut front, &light);
+    let now = REQUESTS_PER_ACCOUNT as u64 * LOOKUP_PACE;
+    assert!(look_up_named(&mut front, now, &light, session, "light").is_ok());
 }
 
 #[test]

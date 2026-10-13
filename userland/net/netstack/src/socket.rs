@@ -739,7 +739,7 @@ impl SocketService {
             SocketRequest::Accept {
                 socket,
                 deliver_port,
-            } => self.accept_socket(audit, owner, socket, deliver_port, response),
+            } => self.accept_socket(caller, audit, socket, deliver_port, response),
             SocketRequest::SendEcho {
                 socket,
                 dest,
@@ -800,6 +800,15 @@ impl SocketService {
                 audit,
                 "socket open refused: zero delivery port",
                 Errno::OutOfRange,
+            );
+        }
+        // Posted with this service's identity, a socket's events must never
+        // land in a mailbox its owner cannot drain.
+        if !caller.owns_port(deliver_port) {
+            return refuse(
+                audit,
+                "socket open denied: delivery port not the caller's",
+                Errno::PermissionDenied,
             );
         }
         if self.budget_exhausted(&settings, owner) {
@@ -1176,8 +1185,8 @@ impl SocketService {
     /// waits for the next [`Accepted`](SocketStreamEvent::Accepted) event).
     fn accept_socket(
         &mut self,
+        caller: &Caller,
         audit: &dyn Sink,
-        owner: ProcId,
         socket: SocketId,
         deliver_port: u64,
         response: &mut [u8],
@@ -1189,6 +1198,14 @@ impl SocketService {
                 Errno::OutOfRange,
             );
         }
+        if !caller.owns_port(deliver_port) {
+            return refuse(
+                audit,
+                "socket accept denied: delivery port not the caller's",
+                Errno::PermissionDenied,
+            );
+        }
+        let owner = caller.origin().proc_id();
         let lindex = self.owned_index(owner, socket)?;
         if !matches!(self.sockets[lindex].proto, Proto::Listen(_)) {
             return refuse(
@@ -2345,6 +2362,7 @@ impl SocketService {
                     port: *source_port,
                 },
                 source_on_link: *source_on_link,
+                to_group: dest_multicast,
                 payload,
             };
             let mut buf = alloc::vec![0u8; SocketDatagram::HEADER_LEN + payload.len()];

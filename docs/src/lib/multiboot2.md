@@ -63,5 +63,5 @@ The x86_64 port re-exports the parser under `crate::multiboot2`
 (`kernel/arch/x86_64/src/multiboot2.rs`) and turns the typed tags into the
 kernel's own `BootMemoryMap` and ACPI RSDP pointers (`bootmemory`,
 `bootinfo`). QEMU's PVH direct boot uses a separate path (`pvh`); the
-Multiboot2 path is what a real boot-loader (GRUB, or the first-party TAIRiX
-loader) drives.
+Multiboot2 path is what any multiboot2 boot loader drives — the first-party
+one `plans/BOOTLOADER.md` builds among them.

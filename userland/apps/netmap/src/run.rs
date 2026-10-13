@@ -29,7 +29,7 @@ mod program {
     use core::cell::Cell;
     use core::net::IpAddr;
 
-    use tairix_abi::discovery_ipc::{decode_doorbell, from_discovery_service, DOORBELL_LEN};
+    use tairix_abi::discovery_ipc::DOORBELL_LEN;
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
@@ -37,14 +37,14 @@ mod program {
     use tairix_abi::window_ipc::{
         AppBarClick, ClipboardKind, MenuOutcome, WindowEvent, WindowRegion,
     };
-    use tairix_abi::{Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
+    use tairix_abi::{Errno, ProcId, ORIGIN_WIRE_LEN};
     use tairix_devids::{DbKind, DevIds};
     use tairix_discovery::{DiscoveryError, RtTransport, Session};
     use tairix_geometry::Rect;
     use tairix_input::InputEvent;
     use tairix_netmap::{
-        layout, win_sizing, AdvertisedService, Command, Discovery, Inventory, MapView, NodeMenu,
-        Reaction, Snapshot, WIN_HEIGHT, WIN_WIDTH,
+        layout, win_sizing, AdvertisedService, Collect, Command, Discovery, Inventory, MapView,
+        NodeMenu, OpenSession, Reaction, Snapshot, REFRESH_NS, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_procinfo::IpcTransport;
     use tairix_resolver::RtDnsTransport;
@@ -68,8 +68,6 @@ mod program {
     /// The smallest window the map and its panel are usable in, logical.
     const MIN_WIDTH: u32 = 480;
     const MIN_HEIGHT: u32 = 360;
-    /// How long a shown map waits before re-reading the network.
-    const REFRESH_NS: u64 = 5_000_000_000;
     /// The reader's wake token on the event wait-set.
     const READER_TOKEN: u64 = app::FIRST_APP_TOKEN;
     /// The namer's wake token on the event wait-set.
@@ -119,6 +117,8 @@ mod program {
     struct Reader {
         doorbell: u64,
         discovery: Option<(Session<RtTransport>, Discovery)>,
+        /// The open session, for the doorbell drain to match.
+        open_session: Arc<OpenSession>,
         makers: Option<Result<DevIds<Vec<u8>>, String>>,
     }
 
@@ -140,6 +140,7 @@ mod program {
         fn discover(&mut self, named: &BTreeSet<IpAddr>) -> Result<Discovered, DiscoveryError> {
             if self.discovery.is_none() {
                 let session = Session::open(RtTransport, self.doorbell)?;
+                self.open_session.open(session.id());
                 self.discovery = Some((session, Discovery::new()));
             }
             let Some((session, engine)) = self.discovery.as_mut() else {
@@ -152,9 +153,10 @@ mod program {
             if let Err(err) = collected {
                 // A session the service has lost is opened afresh next time.
                 self.discovery = None;
+                self.open_session.close();
                 return Err(err);
             }
-            engine.reconcile(session, named);
+            engine.reconcile(session, named, tairix_rt::clock_get());
             Ok(Discovered {
                 services: engine.services(),
                 names: engine.names(),
@@ -215,6 +217,7 @@ mod program {
         reader: &'a ReadWorker,
         namer: &'a NameWorker,
         doorbell: Option<&'a PrivatePort>,
+        open_session: &'a OpenSession,
         deadlines: &'a Deadlines,
         desktop_moved: &'a Cell<bool>,
         rung: &'a Cell<bool>,
@@ -247,9 +250,10 @@ mod program {
     }
 
     impl RtEventSource<'_> {
-        /// Drain the doorbell port, noting whether the discovery service rang:
-        /// anything another process posts there is dropped unread, so it can
-        /// make the map collect nothing.
+        /// Drain the doorbell port, noting whether the discovery service rang
+        /// the open session: anything else posted there — another process's
+        /// message, a ring for a session already given up — is dropped
+        /// unread, so it can make the map collect nothing.
         fn drain_doorbell(&self) {
             let Some(doorbell) = self.doorbell else {
                 return;
@@ -257,9 +261,7 @@ mod program {
             let mut frame = [0u8; DOORBELL_LEN];
             let mut sender = [0u8; ORIGIN_WIRE_LEN];
             while let Ok(len) = tairix_rt::ipc_recv(doorbell.id(), &mut frame, &mut sender) {
-                let genuine =
-                    Origin::from_bytes(&sender).is_ok_and(|origin| from_discovery_service(&origin));
-                if genuine && decode_doorbell(&frame[..len]).is_ok() {
+                if self.open_session.rung_by(&sender, &frame[..len]) {
                     self.rung.set(true);
                 }
             }
@@ -674,67 +676,6 @@ mod program {
         }
     }
 
-    /// Where the discovery collects stand.
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    enum Collect {
-        /// The map asks the service nothing: it has no doorbell, or the
-        /// service refused it a session.
-        #[default]
-        Off,
-        /// Nothing has moved since the last collect.
-        Idle,
-        /// The service rang, or the addresses the map shows moved.
-        Due,
-        /// A collect is out; `again` once something moved since it was asked.
-        Asked { again: bool },
-        /// The last collect failed — the service had not started, or lost the
-        /// session — so the next read asks again.
-        Retry,
-    }
-
-    impl Collect {
-        /// Something moved that a collect should see.
-        fn moved(&mut self) {
-            *self = match *self {
-                Self::Idle | Self::Due | Self::Retry => Self::Due,
-                Self::Asked { .. } => Self::Asked { again: true },
-                Self::Off => Self::Off,
-            };
-        }
-
-        /// The outstanding collect answered with `result`.
-        fn answered(&mut self, result: &Result<Discovered, DiscoveryError>) {
-            // A session refused outright is not asked for again, as an ask
-            // refused outright is not.
-            if matches!(
-                result,
-                Err(DiscoveryError::Refused(Errno::PermissionDenied))
-            ) {
-                *self = Self::Off;
-                return;
-            }
-            // A pass that left work is asked again at the next read, not only
-            // when the service next rings.
-            let settled = result
-                .as_ref()
-                .is_ok_and(|discovered| !discovered.unsettled);
-            if let Self::Asked { again } = *self {
-                *self = match (again, settled) {
-                    (true, _) => Self::Due,
-                    (false, true) => Self::Idle,
-                    (false, false) => Self::Retry,
-                };
-            }
-        }
-
-        /// A read landed: a failed collect is asked again.
-        fn read_landed(&mut self) {
-            if *self == Self::Retry {
-                *self = Self::Due;
-            }
-        }
-    }
-
     /// The work the map has asked of its workers and not yet taken back.
     #[derive(Default)]
     struct Outstanding {
@@ -793,9 +734,18 @@ mod program {
     struct Workers<'a> {
         reader: &'a ReadWorker,
         namer: &'a NameWorker,
-        /// Whether the reader has a doorbell, and so asks the discovery
-        /// service anything at all.
-        discovering: bool,
+        /// Where collects start: off unless the reader can make them.
+        collect: Collect,
+        /// Whether the namer has a thread of its own, and so names hosts.
+        naming: bool,
+    }
+
+    /// Which workers run on a thread of their own: one without runs its jobs
+    /// on the event loop, which a blocking job must never stall.
+    #[derive(Clone, Copy)]
+    struct Threaded {
+        reader: bool,
+        namer: bool,
     }
 
     /// The event loop: wait, drain the burst, then present at most once.
@@ -813,11 +763,7 @@ mod program {
         mut events: WindowEvents<RtEventSource<'_>>,
     ) -> i32 {
         let mut outstanding = Outstanding {
-            collect: if workers.discovering {
-                Collect::Due
-            } else {
-                Collect::Off
-            },
+            collect: workers.collect,
             ..Outstanding::default()
         };
         outstanding.ask_read(workers.reader);
@@ -880,7 +826,9 @@ mod program {
                         }
                     }
                     Answer::Discovered(ref discovered) => {
-                        outstanding.collect.answered(discovered);
+                        outstanding
+                            .collect
+                            .answered(discovered.as_ref().map(|found| !found.unsettled));
                     }
                 }
                 app_state.adopt(answer);
@@ -910,7 +858,9 @@ mod program {
             // per refresh rather than on every answer it gives.
             if read_landed {
                 outstanding.collect.read_landed();
-                outstanding.ask_names(workers.namer, &app_state.inventory);
+                if workers.naming {
+                    outstanding.ask_names(workers.namer, &app_state.inventory);
+                }
                 retitle = !app_state.loaded;
                 app_state.loaded = true;
             }
@@ -1000,17 +950,23 @@ mod program {
         }
     }
 
-    /// The reader, whose discovery session rings `doorbell`, and the namer,
-    /// each started on a thread of its own where one can be had and woken
-    /// through the event wait-set.
+    /// The reader, whose discovery session rings `doorbell` and is published
+    /// in `open_session`, and the namer, each started on a thread of its own
+    /// where one can be had and woken through the event wait-set, with which
+    /// of them got one.
     ///
     /// # Errors
     ///
     /// The exit code, once the failure is stated.
-    fn start_workers(set: u64, doorbell: u64) -> Result<(Arc<ReadWorker>, Arc<NameWorker>), i32> {
+    fn start_workers(
+        set: u64,
+        doorbell: u64,
+        open_session: Arc<OpenSession>,
+    ) -> Result<(Arc<ReadWorker>, Arc<NameWorker>, Threaded), i32> {
         let reader = Reader {
             doorbell,
             discovery: None,
+            open_session,
             makers: None,
         };
         let (Ok(reader), Ok(namer)) = (
@@ -1034,15 +990,25 @@ mod program {
             ));
         };
         let (reader, namer) = (Arc::new(reader), Arc::new(namer));
-        for (started, role) in [
-            (Worker::start(&reader).map(drop), "reader"),
-            (Worker::start(&namer).map(drop), "namer"),
+        let mut threaded = Threaded {
+            reader: true,
+            namer: true,
+        };
+        for (started, role, has_thread) in [
+            (
+                Worker::start(&reader).map(drop),
+                "reader",
+                &mut threaded.reader,
+            ),
+            (
+                Worker::start(&namer).map(drop),
+                "namer",
+                &mut threaded.namer,
+            ),
         ] {
             if let Err(reason) = started {
-                app::report(
-                    APP_NAME,
-                    format_args!("no {role} thread ({reason:?}); its jobs run on the event loop"),
-                );
+                *has_thread = false;
+                app::report(APP_NAME, format_args!("no {role} thread ({reason:?})"));
             }
         }
         for (wake, token, role) in [
@@ -1057,7 +1023,7 @@ mod program {
                 ));
             }
         }
-        Ok((reader, namer))
+        Ok((reader, namer, threaded))
     }
 
     fn main() -> i32 {
@@ -1076,13 +1042,26 @@ mod program {
         let event_endpoint = binding.endpoint();
         let set = binding.set();
 
-        let (doorbell, discovery_notice) = doorbell(set);
-        let discovering = doorbell.is_some();
-        let (reader, namer) = match start_workers(set, doorbell.as_ref().map_or(0, PrivatePort::id))
-        {
+        let (doorbell, mut discovery_notice) = doorbell(set);
+        let open_session = Arc::new(OpenSession::default());
+        let (reader, namer, threaded) = match start_workers(
+            set,
+            doorbell.as_ref().map_or(0, PrivatePort::id),
+            open_session.clone(),
+        ) {
             Ok(workers) => workers,
             Err(code) => return code,
         };
+        // A lookup makes many blocking calls, which only a thread of its own
+        // may make, as a collect does; a read of the network stays inline.
+        let collect = Collect::start(doorbell.is_some(), threaded.reader);
+        if doorbell.is_some() && !threaded.reader {
+            discovery_notice = Some(String::from(
+                "Service discovery is off: it needs a thread of its own",
+            ));
+        }
+        let naming_notice = (!threaded.namer)
+            .then(|| String::from("Hosts are not named: naming needs a thread of its own"));
         let _reader_guard = WorkerGuard::new(&reader);
         let _namer_guard = WorkerGuard::new(&namer);
 
@@ -1099,7 +1078,7 @@ mod program {
             loaded: false,
             read_notices: Vec::new(),
             discovery_notice,
-            naming_notice: None,
+            naming_notice,
             menu: None,
             tip: DeclaredTip::new(),
         };
@@ -1119,6 +1098,7 @@ mod program {
             reader: &reader,
             namer: &namer,
             doorbell: doorbell.as_ref(),
+            open_session: &open_session,
             deadlines: &deadlines,
             desktop_moved: &desktop_moved,
             rung: &rung,
@@ -1128,7 +1108,8 @@ mod program {
             &Workers {
                 reader: &reader,
                 namer: &namer,
-                discovering,
+                collect,
+                naming: threaded.namer,
             },
             event_endpoint,
             &deadlines,

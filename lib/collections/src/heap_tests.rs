@@ -43,6 +43,35 @@ fn drain(heap: &mut IndexedHeap<u32>) -> Vec<(usize, u32)> {
     core::iter::from_fn(|| heap.pop()).collect()
 }
 
+/// Panic unless `heap` is a heap whose place table and entries agree: each
+/// entry no less than its parent, each entry's slot recording its place,
+/// no place recorded without an entry, and room for an entry per place.
+fn assert_well_formed<P: Copy + Ord>(heap: &IndexedHeap<P>) {
+    for (at, entry) in heap.heap.iter().enumerate() {
+        assert_eq!(
+            heap.places[entry.slot], at,
+            "slot {} records its place",
+            entry.slot
+        );
+        if at > 0 {
+            assert!(
+                heap.heap[(at - 1) / 2].priority <= entry.priority,
+                "heap order at {at}"
+            );
+        }
+    }
+    let recorded = heap.places.iter().filter(|&&at| at != ABSENT).count();
+    assert_eq!(
+        recorded,
+        heap.heap.len(),
+        "a recorded place without its entry"
+    );
+    assert!(
+        heap.heap.capacity() >= heap.places.len(),
+        "a place without room for its entry"
+    );
+}
+
 #[test]
 fn an_empty_heap_holds_nothing() {
     let mut heap: IndexedHeap<u32> = IndexedHeap::new();
@@ -131,11 +160,50 @@ fn a_slot_past_the_place_table_is_refused_and_changes_nothing() {
     );
     assert_eq!(
         heap.try_insert(usize::MAX - 1, 2),
-        Err(TryReserveError::AllocFailed),
+        Err(TryReserveError::CapacityOverflow),
         "a place table that large has no layout"
     );
     assert_eq!(heap.len(), 1);
     assert_eq!(heap.peek(), Some((1, 1)));
+    assert_well_formed(&heap);
+}
+
+/// The place table's layout is checked with the entries', so a slot whose
+/// places would fit but whose entries would not reserves neither.
+#[test]
+fn a_slot_only_one_table_could_hold_reserves_nothing() {
+    let entry = core::mem::size_of::<Entry<u64>>();
+    assert!(entry > core::mem::size_of::<usize>());
+    let slot = isize::MAX as usize / entry;
+    assert!(Layout::array::<usize>(slot + 1).is_ok());
+    let mut heap: IndexedHeap<u64> = IndexedHeap::new();
+    assert_eq!(heap.try_insert(3, 7), Ok(None));
+    let room = (heap.heap.capacity(), heap.places.capacity());
+    assert_eq!(
+        heap.try_reserve_slot(slot),
+        Err(TryReserveError::CapacityOverflow)
+    );
+    assert_eq!((heap.heap.capacity(), heap.places.capacity()), room);
+    assert_eq!(heap.get(3), Some(7));
+    assert_well_formed(&heap);
+}
+
+/// A slot inserted while still held is moved, not inserted afresh; only the
+/// returned priority tells its holder another held it.
+#[test]
+fn inserting_a_held_slot_moves_it_and_returns_what_it_held() {
+    let mut heap = IndexedHeap::new();
+    assert_eq!(heap.try_insert(4, 9), Ok(None));
+    assert_eq!(heap.try_insert(4, 2), Ok(Some(9)));
+    assert_eq!(heap.len(), 1);
+    assert_eq!(heap.peek(), Some((4, 2)));
+    assert_eq!(heap.remove(4), Some(2));
+    assert_eq!(
+        heap.try_insert(4, 5),
+        Ok(None),
+        "a withdrawn slot inserts afresh"
+    );
+    assert_well_formed(&heap);
 }
 
 #[test]
@@ -219,12 +287,16 @@ fn every_operation_costs_the_height_and_a_walk_costs_what_it_returns() {
     assert!(walked <= 2 * 3 + 1, "walked {walked} for three entries");
 }
 
+/// Steps of the shuffled history; the heap has no `unsafe` for the
+/// interpreter to vet, so it runs a tenth of them.
+const HISTORY_STEPS: usize = if cfg!(miri) { 2_000 } else { 20_000 };
+
 #[test]
 fn a_shuffled_history_agrees_with_a_model_at_every_step() {
     let mut rng = Prng::new(0x1DE8_ED00_C0DE_0002);
     let mut heap = IndexedHeap::new();
     let mut model: BTreeMap<usize, u32> = BTreeMap::new();
-    for _ in 0..20_000 {
+    for _ in 0..HISTORY_STEPS {
         let slot = rng.below(64);
         let priority = u32::try_from(rng.below(128)).unwrap();
         match rng.below(5) {
@@ -256,6 +328,7 @@ fn a_shuffled_history_agrees_with_a_model_at_every_step() {
         if let Some((slot, priority)) = heap.peek() {
             assert_eq!(model.get(&slot), Some(&priority));
         }
+        assert_well_formed(&heap);
     }
     for (&slot, &priority) in &model {
         assert_eq!(heap.get(slot), Some(priority));

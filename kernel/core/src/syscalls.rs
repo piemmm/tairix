@@ -9699,6 +9699,30 @@ where
         }
     }
 
+    fn call_peer_port(
+        &self,
+        caller: &CallerContext<'_>,
+        endpoint: u64,
+        ticket: u64,
+        port: u64,
+    ) -> SyscallResult {
+        let ep = served_endpoint(caller, endpoint)?;
+        let peer = ep.peer_origin(CallTicket(ticket)).ok_or(Errno::NotFound)?;
+        // Read and released before the instance lookup, so the port and
+        // process registries are never held together.
+        let owner = self
+            .ipc
+            .read()
+            .lookup(EndpointId(port))
+            .map(tairix_kernel_ipc::Port::owner);
+        let holds = self.for_instance(peer.proc_id(), |process| Ok(owner == Some(process.0)))?;
+        if holds {
+            Ok(0)
+        } else {
+            Err(Errno::PermissionDenied)
+        }
+    }
+
     fn call_peer_node(
         &self,
         caller: &CallerContext<'_>,
@@ -42805,6 +42829,79 @@ mod tests {
         assert_eq!(
             h.call_peer_seat(&ctx, id, ticket.0, SEAT_PRIMARY),
             Err(Errno::NotFound)
+        );
+        crate::callreg::unregister(EndpointId(id));
+    }
+
+    /// `call_peer_port` answers only the endpoint's server, only about the
+    /// caller in service, and refuses an unbound port and another process's
+    /// alike, so the answer reveals neither.
+    #[test]
+    fn call_peer_port_confirms_only_a_port_the_in_service_peer_owns() {
+        let _registry = crate::callreg::registry_guard();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let server = crate::test_boot::claim_peer_task();
+        let foreign = crate::test_boot::claim_peer_task();
+        let client = crate::test_boot::claim_task();
+        let server_caps = make_caps_record(server, &[], sink);
+        let id = 0xCA11_9047;
+        let (_ep, ticket) = in_service_call(&table, id, &server_caps, client, sink);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(server),
+            caps: &server_caps,
+        };
+        let bind = |task: u64, port: u64| {
+            let caps = make_caps_record(task, &[], sink);
+            let ctx = CallerContext {
+                task_id: SecTaskId(task),
+                caps: &caps,
+            };
+            assert_eq!(h.port_bind(&ctx, port, 64, 4), Ok(0));
+        };
+        let (owned, theirs, unbound) = (0x9047_0001, 0x9047_0002, 0x9047_0003);
+        bind(client, owned);
+        bind(foreign, theirs);
+
+        assert_eq!(h.call_peer_port(&ctx, id, ticket.0, owned), Ok(0));
+        assert_eq!(
+            h.call_peer_port(&ctx, id, ticket.0, theirs),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.call_peer_port(&ctx, id, ticket.0, unbound),
+            Err(Errno::PermissionDenied)
+        );
+        let foreign_caps = make_caps_record(foreign, &[], sink);
+        let foreign_ctx = CallerContext {
+            task_id: SecTaskId(foreign),
+            caps: &foreign_caps,
+        };
+        assert_eq!(
+            h.call_peer_port(&foreign_ctx, id, ticket.0, owned),
+            Err(Errno::PermissionDenied),
+            "only the endpoint's server asks"
+        );
+        assert_eq!(
+            h.call_peer_port(&ctx, id, ticket.0 + 1, owned),
+            Err(Errno::NotFound)
+        );
+        admit_successor(&table, client, sink);
+        assert_eq!(
+            h.call_peer_port(&ctx, id, ticket.0, owned),
+            Err(Errno::NotFound),
+            "an ended poster owns nothing"
         );
         crate::callreg::unregister(EndpointId(id));
     }

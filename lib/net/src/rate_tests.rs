@@ -1,8 +1,8 @@
 //! Unit tests for the windowed-rate meter.
 
 use super::{
-    PeerBudgets, RateCounters, RateMeter, RateSelector, TokenBucket, HISTORY, MAX_WINDOW_NANOS,
-    MIN_SAMPLE_GAP_NANOS,
+    BucketLevel, PeerBudgets, RateCounters, RateMeter, RateSelector, TokenBucket, HISTORY,
+    MAX_WINDOW_NANOS, MIN_SAMPLE_GAP_NANOS,
 };
 use crate::addr::{IpAddr, Ipv4Addr};
 use tairix_abi::time::Duration64;
@@ -249,7 +249,11 @@ fn host(last: u8) -> IpAddr {
 }
 
 /// Draws allowed out of `attempts` from one peer, all at one instant.
-fn allowed<const N: usize>(budgets: &mut PeerBudgets<N>, peer: IpAddr, attempts: u32) -> u32 {
+fn allowed<const N: usize>(
+    budgets: &mut PeerBudgets<IpAddr, N>,
+    peer: IpAddr,
+    attempts: u32,
+) -> u32 {
     let now = Duration64::from_secs(1);
     (0..attempts)
         .map(|_| u32::from(budgets.allow(now, peer)))
@@ -258,7 +262,7 @@ fn allowed<const N: usize>(budgets: &mut PeerBudgets<N>, peer: IpAddr, attempts:
 
 #[test]
 fn each_peer_is_held_to_its_own_burst() {
-    let mut budgets: PeerBudgets<4> = PeerBudgets::new(3, 1, 100, 100);
+    let mut budgets: PeerBudgets<IpAddr, 4> = PeerBudgets::new(3, 1, 100, 100);
     assert_eq!(allowed(&mut budgets, host(1), 10), 3);
     assert_eq!(allowed(&mut budgets, host(2), 10), 3);
 }
@@ -268,14 +272,14 @@ fn a_peer_past_its_budget_does_not_spend_the_shared_one() {
     // The shared bucket holds what one peer's burst and one more allowance
     // need. A flooding peer refused by its own bucket must not drain it, so
     // the next peer is still answered.
-    let mut budgets: PeerBudgets<4> = PeerBudgets::new(4, 1, 5, 1);
+    let mut budgets: PeerBudgets<IpAddr, 4> = PeerBudgets::new(4, 1, 5, 1);
     assert_eq!(allowed(&mut budgets, host(1), 1_000), 4);
     assert_eq!(allowed(&mut budgets, host(2), 1), 1);
 }
 
 #[test]
 fn rotating_source_addresses_meets_the_shared_bound() {
-    let mut budgets: PeerBudgets<4> = PeerBudgets::new(8, 1, 10, 1);
+    let mut budgets: PeerBudgets<IpAddr, 4> = PeerBudgets::new(8, 1, 10, 1);
     let total: u32 = (0..=255u8)
         .map(|last| allowed(&mut budgets, host(last), 2))
         .sum();
@@ -284,7 +288,7 @@ fn rotating_source_addresses_meets_the_shared_bound() {
 
 #[test]
 fn a_full_table_hands_the_quietest_slot_to_a_new_peer() {
-    let mut budgets: PeerBudgets<2> = PeerBudgets::new(2, 1, 100, 100);
+    let mut budgets: PeerBudgets<IpAddr, 2> = PeerBudgets::new(2, 1, 100, 100);
     assert!(budgets.allow(Duration64::from_secs(1), host(1)));
     assert!(budgets.allow(Duration64::from_secs(2), host(2)));
     // A third peer displaces the longest-quiet, and starts with a full
@@ -299,8 +303,81 @@ fn a_full_table_hands_the_quietest_slot_to_a_new_peer() {
 
 #[test]
 fn a_peer_budget_refills_with_time() {
-    let mut budgets: PeerBudgets<2> = PeerBudgets::new(1, 2, 100, 100);
+    let mut budgets: PeerBudgets<IpAddr, 2> = PeerBudgets::new(1, 2, 100, 100);
     assert!(budgets.allow(Duration64::from_secs(1), host(1)));
     assert!(!budgets.allow(Duration64::from_secs(1), host(1)));
     assert!(budgets.allow(Duration64::from_secs(2), host(1)));
+}
+
+/// Any key works: accounts by uid are held to budgets of their own.
+#[test]
+fn budgets_hold_any_key_to_its_own_rate() {
+    let mut budgets: PeerBudgets<u32, 2> = PeerBudgets::new(2, 1, 100, 100);
+    assert!(budgets.allow(at(0), 1000) && budgets.allow(at(0), 1000));
+    assert!(!budgets.allow(at(0), 1000), "1000 spent its burst");
+    assert!(budgets.allow(at(0), 1001), "and 1001 has its own");
+    assert!(
+        budgets.allow(at(1_000_000_000), 1000),
+        "refilled a second on"
+    );
+}
+
+/// Readiness spends nothing, and says when it next holds.
+#[test]
+fn readiness_spends_nothing_and_says_when_it_comes() {
+    let mut bucket = TokenBucket::new(4, 2);
+    assert!(bucket.ready(at(0), 3));
+    assert!(!bucket.ready(at(0), 4), "never more than the burst");
+    assert_eq!(bucket.ready_at(4), None);
+    for _ in 0..4 {
+        assert!(bucket.allow(at(0)));
+    }
+    assert!(!bucket.ready(at(0), 0));
+    assert_eq!(
+        bucket.ready_at(0),
+        Some(at(500_000_000)),
+        "one event at 2/s"
+    );
+    assert_eq!(bucket.ready_at(1), Some(at(1_000_000_000)));
+    assert!(!bucket.ready(at(499_999_999), 0));
+    assert!(bucket.ready(at(500_000_000), 0));
+    assert!(
+        bucket.ready(at(500_000_000), 0),
+        "asking twice spends nothing"
+    );
+    assert!(bucket.allow(at(500_000_000)));
+    assert!(!bucket.allow(at(500_000_000)));
+    let dry = TokenBucket::new(1, 0);
+    assert_eq!(dry.ready_at(0), Some(at(0)));
+    let mut spent = dry.clone();
+    assert!(spent.allow(at(0)));
+    assert_eq!(spent.ready_at(0), None, "nothing refills it");
+}
+
+/// A bucket carried by its level spends exactly as the original would.
+#[test]
+fn a_bucket_carried_by_its_level_spends_exactly_as_the_original() {
+    let mut original = TokenBucket::new(8, 3);
+    for n in 0..5 {
+        original.allow(at(n * 100_000_000));
+    }
+    let mut copy = TokenBucket::with_level(8, 3, original.level());
+    for n in 0..40u64 {
+        let now = at(500_000_000 + n * 37_000_000);
+        assert_eq!(copy.ready(now, 0), original.ready(now, 0));
+        assert_eq!(copy.allow(now), original.allow(now));
+        assert_eq!(copy.level(), original.level());
+    }
+    let full = TokenBucket::with_level(
+        2,
+        1,
+        BucketLevel {
+            scaled: u64::MAX,
+            at: 0,
+        },
+    );
+    assert!(
+        full.ready(at(0), 1) && !full.ready(at(0), 2),
+        "clamped to its burst"
+    );
 }

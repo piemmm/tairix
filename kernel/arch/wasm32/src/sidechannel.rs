@@ -23,11 +23,8 @@
 //!
 //! Every mitigation is therefore a justified
 //! [`Mitigation::NotVulnerable`](tairix_arch_api::Mitigation::NotVulnerable)
-//! no-op (a no-op is
-//! permitted where the silicon, here the sandbox, is provably not
-//! vulnerable from the guest's vantage point). The barrier primitives
-//! are empty: there is no instruction to emit and nothing the guest
-//! could do that the host has not already done.
+//! no-op: from the guest's vantage point the sandbox is not exposed, and
+//! there is nothing to emit that the host has not already done.
 
 use tairix_arch_api::{Mitigation, MitigationProfile, SideChannelMitigation};
 
@@ -39,10 +36,7 @@ const HOST_OWNED: &str = "the wasm32 browser sandbox delegates microarchitectura
                           memory via per-worker linear memory; the guest has no barrier instruction \
                           and no hardware privilege boundary to defend";
 
-/// wasm32 implementation of the Arch HAL side-channel surface.
-///
-/// Zero-sized: every mitigation is host-owned, so the handle carries no
-/// state and the barrier primitives are empty.
+/// wasm32 implementation of the Arch HAL side-channel declaration.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SideChannel;
 
@@ -58,9 +52,9 @@ impl SideChannel {
     pub const fn declared_profile() -> MitigationProfile {
         MitigationProfile {
             address_space_isolation: Mitigation::NotVulnerable(HOST_OWNED),
-            syscall_entry_barrier: Mitigation::NotVulnerable(HOST_OWNED),
-            syscall_exit_barrier: Mitigation::NotVulnerable(HOST_OWNED),
-            context_switch_buffer_flush: Mitigation::NotVulnerable(HOST_OWNED),
+            user_entry_hardening: Mitigation::NotVulnerable(HOST_OWNED),
+            user_return_buffer_clear: Mitigation::NotVulnerable(HOST_OWNED),
+            user_return_speculation_barrier: Mitigation::NotVulnerable(HOST_OWNED),
             context_switch_indirect_branch_barrier: Mitigation::NotVulnerable(HOST_OWNED),
         }
     }
@@ -70,14 +64,6 @@ impl SideChannelMitigation for SideChannel {
     fn profile(&self) -> MitigationProfile {
         Self::declared_profile()
     }
-
-    // The WebAssembly ISA has no speculation-barrier instruction and the
-    // host mediates every privilege transition, so the barrier primitives
-    // are empty by design (not stubs): there is nothing for the guest to
-    // emit.
-    fn syscall_entry_barrier(&self) {}
-    fn syscall_exit_barrier(&self) {}
-    fn context_switch_barrier(&self) {}
 }
 
 #[cfg(test)]
@@ -104,13 +90,5 @@ mod tests {
             );
         }
         assert!(profile.is_release_ready());
-    }
-
-    #[test]
-    fn barriers_are_callable() {
-        let sc = SideChannel::new();
-        sc.syscall_entry_barrier();
-        sc.syscall_exit_barrier();
-        sc.context_switch_barrier();
     }
 }

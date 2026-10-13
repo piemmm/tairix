@@ -1,5 +1,5 @@
 /* Linker script for TAIRiX x86_64 kernels (higher-half), bootable via
- * multiboot2 (GRUB) and PVH direct boot (QEMU `-kernel`).
+ * multiboot2 and PVH direct boot (QEMU `-kernel`).
  *
  * Used by every QEMU integration test binary in `tests/integration/*` that
  * targets `x86_64-tairix-none`. The script is the *only* place the boot

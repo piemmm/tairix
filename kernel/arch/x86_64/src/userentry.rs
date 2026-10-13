@@ -216,8 +216,10 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
     // build the long-mode `iretq`
     // frame in the order the CPU pops it (SDM Vol 3A §6.14.3). The caller's
     // safety contract guarantees the mapped entry/stack and the installed
-    // selectors/TSS. `options(noreturn)` matches the divergence, which is
-    // also what lets the block zero registers it names no operand for.
+    // selectors/TSS. `verw` reads the static selector and clears the
+    // microarchitectural buffers before ring 3 runs. `options(noreturn)`
+    // matches the divergence, which is also what lets the block zero
+    // registers it names no operand for.
     unsafe {
         core::arch::asm!(
             "cli",
@@ -268,11 +270,14 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
             "xor r13d, r13d",
             "xor r14d, r14d",
             "xor r15d, r15d",
+            "verw word ptr [rip + {verw_sel}]",
             "iretq",
+            "int3",
             rsp0 = in(reg) rsp0,
             fxsave = in(reg) fxsave,
             scrub = in(reg) scrub,
             x87_scrub = sym crate::xstate::tairix_arch_x86_64_x87_scrub,
+            verw_sel = sym crate::sidechannel::VERW_SELECTOR,
             xheader = const XSAVE_HEADER_OFFSET,
             image = in(reg) &raw const INIT_IMAGE,
             sp = in(reg) sp,

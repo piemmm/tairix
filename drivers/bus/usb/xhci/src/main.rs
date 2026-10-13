@@ -1,6 +1,7 @@
 //! The `Run` entry-point binary of the USB **host-controller driver** (HCD),
 //! installed as a signed `/System/Drivers/` bundle and autoloaded into user
-//! space by `devmgr` when an `usb,xhci` controller node is discovered
+//! space by `devmgr` when an xHCI controller is discovered — the `usb,xhci`
+//! node a bus driver publishes, or a PCI function of the xHCI class
 //! (`plans/USB.md` U3b).
 //!
 //! This process is the **sole owner** of one xHCI controller: it maps the
@@ -8,13 +9,13 @@
 //! it up, and enumerates the attached device. It then **publishes one
 //! hardware-tree node per USB interface** (carrying the device's
 //! `vid:pid:class` match keys) so `devmgr` autoloads the matching **class**
-//! driver (`drivers/input/usb_kbd`, …), and **serves that class driver's URB
+//! driver (`drivers/input/usb_hid`, …), and **serves that class driver's URB
 //! transfers** over the bus-agnostic URB transport seam. It names no class
 //! driver, no board, and no private bus implementation.
 //!
-//! It holds no class-specific authority: the keyboard driver decodes reports
-//! and injects keystrokes; this HCD only moves bytes between the controller
-//! and the shared buffer.
+//! It holds no class-specific authority: the class driver interprets what its
+//! device sends; this HCD only moves bytes between the controller and the
+//! shared buffer.
 //!
 //! # The asynchronous event loop (`plans/USB.md` §1.1)
 //!

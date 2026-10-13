@@ -2883,6 +2883,22 @@ impl SyscallNumber {
     /// port — and audited like the bind it undoes.
     pub const PORT_UNBIND: Self = Self(143);
 
+    /// Report whether the in-service caller of an endpoint the caller serves
+    /// owns a port — the port counterpart of [`Self::CALL_PEER_SEAT`], asked
+    /// before a server agrees to post into a port its caller names.
+    ///
+    /// Arguments: the endpoint id, the ticket of the call being served, then
+    /// the port id. The caller must own the endpoint and hold its receive
+    /// capability, so a server learns this only about a task it is actively
+    /// serving. Returns `0` when the peer owns the port, or `-errno`:
+    /// [`crate::Errno::PermissionDenied`] when it does not — an unbound port
+    /// and another process's answer alike, so the reply tells no one which
+    /// ports exist — or the caller is not the endpoint's server, and
+    /// [`crate::Errno::NotFound`] for an unknown endpoint or ticket or a peer
+    /// that has ended. No capability beyond the endpoint's receive gate; not
+    /// audited — the decision it feeds is the server's to log.
+    pub const CALL_PEER_PORT: Self = Self(144);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3173,6 +3189,7 @@ mod tests {
         assert_eq!(SyscallNumber::CONSOLE_RELOCATE.as_u16(), 141);
         assert_eq!(SyscallNumber::WAITSET_CLOSE.as_u16(), 142);
         assert_eq!(SyscallNumber::PORT_UNBIND.as_u16(), 143);
+        assert_eq!(SyscallNumber::CALL_PEER_PORT.as_u16(), 144);
     }
 
     #[test]

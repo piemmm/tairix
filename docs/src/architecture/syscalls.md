@@ -196,6 +196,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 141 | `console_relocate` | `user_ptr` (out: framebuffer `HwResource`), `len` | `u64` (bytes) | `CAP_MEM_DMA` | yes |
 | 142 | `waitset_close` | `Handle` (set)                         | `errno`       | —                       | no      |
 | 143 | `port_unbind`  | `IpcEndpoint` (own port)                | `errno`       | —                       | yes     |
+| 144 | `call_peer_port` | `IpcEndpoint`, `Handle` (ticket), `IpcEndpoint` (port) | `errno` | —             | no      |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -1115,6 +1116,16 @@ pid to a successor holding the seat — is `NotFound`. Wrapper
 `tairix_rt::call_peer_seat`; C stub `tairix_sys_call_peer_seat`. Not audited
 per call — it is the per-frame hot path, exactly like the kernel-side present
 gate.
+
+`call_peer_port` (no. 144) is the port twin: in the same window, the server
+asks whether the caller in service owns a port the caller named, before it
+agrees to post into it — a doorbell aimed at another process's mailbox would
+otherwise carry the server's identity there. An unbound port and another
+process's are the one `PermissionDenied`, so the answer reveals neither who
+owns a port nor whether it exists; an unknown ticket or an ended poster is
+`NotFound`. Wrapper `tairix_rt::call_peer_port`; C stub
+`tairix_sys_call_peer_port`. Not audited — the decision it feeds is the
+server's to record.
 
 `shm_grant` (no. 82) is the endpoint-directed delegation of a shared
 memory region (`plans/DISPLAY.md` D7a): the region's owner (holding
@@ -2700,8 +2711,8 @@ them before restoring the user frame:
 
 The interrupts are enabled *once, uniformly, in the arch trap glue* after
 the trampoline has saved the full user register frame and established a
-well-defined kernel context (kernel stack, `swapgs`/per-CPU, the
-side-channel entry barrier). There is **no** per-syscall
+well-defined kernel context (kernel stack, `swapgs`/per-CPU, and on the
+out-of-order ports the saved registers scrubbed). There is **no** per-syscall
 "runs uninterruptible" flag: the axis that must be uninterruptible is the
 *critical section*, not the syscall, and a genuine critical section masks
 locally for a documented reason (a held `lib/sync` lock, the console

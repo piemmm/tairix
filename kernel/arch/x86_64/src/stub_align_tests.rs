@@ -31,6 +31,7 @@ const SOURCES: &[&str] = &[
     include_str!("irq.rs"),
     include_str!("syscall_entry.rs"),
     include_str!("fpu.rs"),
+    include_str!("sidechannel.rs"),
 ];
 
 /// Offset of the saved `CS` below the frame top.
@@ -39,7 +40,7 @@ const CS_BELOW_TOP: i64 = 32;
 const CPU_FRAME: i64 = 40;
 
 /// The string literal on `line`, if it is one, with its trailing `\n`.
-fn literal(line: &str) -> Option<String> {
+pub(crate) fn literal(line: &str) -> Option<String> {
     let text = line.trim().trim_end_matches(',');
     let body = text.strip_prefix('"')?.strip_suffix('"')?;
     let body = body.strip_suffix("\\n").unwrap_or(body);
@@ -65,7 +66,7 @@ fn macro_instructions(name: &str) -> Vec<String> {
 /// The instructions of the naked stub whose definition starts at the line
 /// containing `anchor`, with template macros expanded and each `{name}` in
 /// `consts` replaced by its value.
-fn stub(anchor: &str, consts: &[(&str, usize)]) -> Vec<String> {
+pub(crate) fn stub(anchor: &str, consts: &[(&str, usize)]) -> Vec<String> {
     let source = SOURCES
         .iter()
         .find(|s| s.contains(anchor))

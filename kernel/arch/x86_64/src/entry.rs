@@ -4,7 +4,7 @@
 //! The 32-bit assembly in `boot.s` finishes by `call`ing this symbol with
 //! the boot magic in `%rdi` and the boot-info pointer in `%rsi`
 //! (System V AMD64 ABI, see `boot.s` SAFETY-INVARIANT 7). The magic is
-//! either the multiboot2 bootloader magic (GRUB entered `_start`) or the
+//! either the multiboot2 bootloader magic (a multiboot2 loader entered `_start`) or the
 //! PVH start-info magic (QEMU's `-kernel` ELF loader entered
 //! `pvh_start`).
 //!

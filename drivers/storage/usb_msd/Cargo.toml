@@ -20,7 +20,7 @@ workspace = true
 # through the public URB transport ABI and serves consumers only through the
 # public block-service ABI). The binary is a freestanding pure-Rust program on
 # the native Tier-1 targets and an inert host stub elsewhere
-# (`src/main.rs` / `build.rs`), mirroring `drivers/input/usb_kbd`.
+# (`src/main.rs` / `build.rs`), mirroring `drivers/input/usb_hid`.
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

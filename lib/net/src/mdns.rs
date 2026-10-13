@@ -32,10 +32,11 @@
 //!   names that share one chain nor stack records under one name to lengthen
 //!   the walk to a record, and a name costs a fixed number of compression
 //!   pointers at most.
-//! - The cache bounds ([`MAX_RECORDS`], [`MAX_RECORDS_PER_SOURCE`]) are fixed
-//!   security bounds, not capacities that grow with the segment: total
-//!   resident state is the per-interface ceiling times the interface count,
-//!   independent of how many hosts are shouting.
+//! - The cache bounds ([`MAX_RECORDS`], [`MAX_RECORDS_PER_KEY`],
+//!   [`MAX_RECORDS_PER_SOURCE`]) are fixed security bounds, not capacities
+//!   that grow with the segment: total resident state is the per-interface
+//!   ceiling times the interface count, independent of how many hosts are
+//!   shouting.
 //! - A sender the stack does not find on-link ([`Sender::on_link`]) is never
 //!   answered and never cached. Reflected mDNS is a documented amplifier.
 //! - Renaming after a name conflict is bounded. A peer that keeps claiming
@@ -113,14 +114,22 @@ pub const MAX_TXT_LEN: usize = tairix_abi::discovery_ipc::TXT_MAX;
 /// A fixed security bound, sized for a populated segment: a printer, a
 /// television or a NAS publishes some fifty records, and an inventory of the
 /// segment watches answers from every host on it. Eviction is
-/// least-recently-used within it, and [`MAX_RECORDS_PER_SOURCE`] keeps one
-/// shouting peer from spending more than its share of it.
+/// least-recently-used within it, records no question watches going first,
+/// and [`MAX_RECORDS_PER_KEY`] and [`MAX_RECORDS_PER_SOURCE`] keep one name
+/// or one shouting peer from spending more than its share of it.
 pub const MAX_RECORDS: usize = 4096;
 
-/// The largest number of cached records attributable to any one source
-/// address — room for a sleep proxy answering for several hosts. A peer past
-/// it evicts its **own** oldest record, never a neighbour's.
+/// The largest number of cached records no question watches attributable to
+/// any one source address — room for a sleep proxy answering for several
+/// hosts. A peer past it evicts its **own** oldest such record, never a
+/// neighbour's.
 pub const MAX_RECORDS_PER_SOURCE: usize = 256;
+
+/// The largest number of cached records at one name and type, whoever sent
+/// them — room for the instances of one service type on a busy segment. A
+/// name past it evicts its **own** oldest record, so records piled under one
+/// name can displace nothing held under another.
+pub const MAX_RECORDS_PER_KEY: usize = 256;
 
 /// The largest number of records one interface may publish.
 pub const MAX_PUBLISHED: usize = 64;
@@ -145,11 +154,13 @@ pub const MAX_MESSAGE_LEN: usize = 1232;
 
 /// The most questions one message carries.
 ///
-/// A received message with more is truncated to this many rather than
-/// rejected: the questions past the bound are simply not answered, which
-/// costs a peer nothing it could not have achieved by sending two messages,
-/// and bounds the work one datagram can ask for. A query this host builds
-/// carries no more, so a peer holding the same bound reads all of it.
+/// A received message with more is read as its first this many rather than
+/// rejected, and none of its records: the questions past the bound go
+/// unanswered and its known answers unread, which costs a peer nothing it
+/// could not have achieved by sending two messages, and bounds the work one
+/// datagram can ask for. Such a message suppresses nothing, since what it
+/// held was not all read. A query this host builds carries no more, so a
+/// peer holding the same bound reads all of it.
 pub const MAX_MESSAGE_QUESTIONS: usize = 32;
 
 /// The largest number of records this engine reads from one received
@@ -174,6 +185,15 @@ pub const TTL_OTHER_SECS: u32 = 4500;
 
 /// The TTL a withdrawal carries (RFC 6762 §10.1): expire this now.
 pub const TTL_GOODBYE_SECS: u32 = 0;
+
+/// The longest a received record is held without being heard again: the
+/// longest lifetime a responder gives one (RFC 6762 §10), so a peer cannot
+/// plant a record for decades.
+pub const TTL_HELD_MAX_SECS: u32 = TTL_OTHER_SECS;
+
+/// The most often a responder multicasts any one record (RFC 6762 §6), in
+/// nanoseconds.
+pub const PER_RECORD_INTERVAL_NS: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 
 /// The `IN` class value (RFC 1035 §3.2.4), the only class mDNS uses.
 pub(crate) const CLASS_IN: u16 = 1;

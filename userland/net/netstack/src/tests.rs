@@ -36,7 +36,7 @@ use tairix_net::stack::{EchoProbe, Stack, StackConfig, StackEvent, StackOutput, 
 
 use crate::channel::{FrameService, LocalFrameService};
 use crate::socket::{Delivery, Post, SocketService, PER_SOCKET_OVERHEAD};
-use crate::{serve, Caller, Netstack};
+use crate::{serve, Caller, Netstack, ServedCall};
 
 const MAC_A: MacAddress = MacAddress([0x02, 0xAA, 0, 0, 0, 0x01]);
 const MAC_B: MacAddress = MacAddress([0x02, 0xBB, 0, 0, 0, 0x02]);
@@ -559,21 +559,37 @@ impl Sink for RecordingSink {
     }
 }
 
+/// A port no test caller owns.
+const FOREIGN_PORT: u64 = 0xF0E1_0000;
+
+/// The call a test request arrives on: its caller owns every port but
+/// [`FOREIGN_PORT`].
+fn served() -> ServedCall {
+    ServedCall {
+        endpoint: 0,
+        ticket: 0,
+        probe: |_, _, port| port != FOREIGN_PORT,
+    }
+}
+
 /// The capabilities a test caller's attested origin should summarise.
 fn caller(caps: &[CapabilityId]) -> Caller {
     let mut summary = CapabilitySummary::EMPTY;
     for cap in caps {
         summary.insert(*cap);
     }
-    Caller::new(Origin::new(
-        TrustDomain::User,
-        1000,
-        100,
-        10,
-        ProcId::from_raw([0x10; 16]),
-        summary,
-        tairix_abi::ORIGIN_CONSOLE_NONE,
-    ))
+    Caller::new(
+        Origin::new(
+            TrustDomain::User,
+            1000,
+            100,
+            10,
+            ProcId::from_raw([0x10; 16]),
+            summary,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
+        ),
+        served(),
+    )
 }
 
 fn admin() -> Caller {
@@ -1211,15 +1227,18 @@ fn net_caller(proc_byte: u8) -> Caller {
     let mut summary = CapabilitySummary::EMPTY;
     summary.insert(CapabilityId::NET);
     summary.insert(CapabilityId::NET_BIND_PRIVILEGED);
-    Caller::new(Origin::new(
-        TrustDomain::User,
-        1000,
-        100,
-        u64::from(proc_byte),
-        ProcId::from_raw([proc_byte; 16]),
-        summary,
-        tairix_abi::ORIGIN_CONSOLE_NONE,
-    ))
+    Caller::new(
+        Origin::new(
+            TrustDomain::User,
+            1000,
+            100,
+            u64::from(proc_byte),
+            ProcId::from_raw([proc_byte; 16]),
+            summary,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
+        ),
+        served(),
+    )
 }
 
 /// A deterministic entropy source for ephemeral-port and sequence draws.
@@ -1388,6 +1407,34 @@ fn socket_open_rejects_zero_delivery_port() {
             t(2)
         ),
         Err(Errno::OutOfRange)
+    );
+}
+
+/// Socket events are posted with this service's identity, so a socket may
+/// only deliver to a port its opener drains.
+#[test]
+fn socket_open_refuses_a_delivery_port_the_caller_does_not_own() {
+    let mut svc = socket_service();
+    let mut stack = managed_stack();
+    let sink = RecordingSink::new();
+    let mut ent = seeded_entropy();
+    let mut reply = [0u8; 64];
+    let request = encode_request(&SocketRequest::Socket {
+        family: NetAddrFamily::V4,
+        sock_type: SocketType::Datagram,
+        deliver_port: FOREIGN_PORT,
+    });
+    assert_eq!(
+        svc.serve(
+            &mut stack,
+            &net_caller(1),
+            &sink,
+            &mut ent,
+            &request,
+            &mut reply,
+            t(2)
+        ),
+        Err(Errno::PermissionDenied)
     );
 }
 
@@ -2013,15 +2060,18 @@ fn raw_caller(proc_byte: u8) -> Caller {
     summary.insert(CapabilityId::NET);
     summary.insert(CapabilityId::NET_RAW);
     summary.insert(CapabilityId::NET_BIND_PRIVILEGED);
-    Caller::new(Origin::new(
-        TrustDomain::User,
-        1000,
-        100,
-        u64::from(proc_byte),
-        ProcId::from_raw([proc_byte; 16]),
-        summary,
-        tairix_abi::ORIGIN_CONSOLE_NONE,
-    ))
+    Caller::new(
+        Origin::new(
+            TrustDomain::User,
+            1000,
+            100,
+            u64::from(proc_byte),
+            ProcId::from_raw([proc_byte; 16]),
+            summary,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
+        ),
+        served(),
+    )
 }
 
 #[test]
@@ -6019,6 +6069,57 @@ fn a_listener_and_its_children_are_priced_against_the_owners_share() {
     );
 }
 
+/// An accepted connection's events are posted with this service's identity
+/// too, so it may only deliver to a port its acceptor drains; a refused
+/// accept leaves the connection for one naming such a port.
+#[test]
+fn accept_refuses_a_delivery_port_the_caller_does_not_own() {
+    const PORT: u16 = 8098;
+    let mut region = rings_region();
+    let mut fx = StreamFixture::listening(&mut region, PORT);
+    let mut response = [0u8; 64];
+    let reply = fx
+        .serve(
+            SocketRequest::Socket {
+                family: NetAddrFamily::V4,
+                sock_type: SocketType::Stream,
+                deliver_port: DELIVER_PORT,
+            },
+            &mut response,
+        )
+        .expect("open");
+    let listener = decode_socket_reply(&response[..reply.len]).expect("socket id");
+    fx.serve(
+        SocketRequest::Bind {
+            socket: listener,
+            local: v4_addr(0, 0, 0, 0, PORT),
+        },
+        &mut response,
+    )
+    .expect("bind");
+    fx.serve(SocketRequest::Listen { socket: listener }, &mut response)
+        .expect("listen");
+    let accept = |deliver_port| SocketRequest::Accept {
+        socket: listener,
+        deliver_port,
+    };
+    assert_eq!(
+        fx.serve(accept(FOREIGN_PORT), &mut response).err(),
+        Some(Errno::PermissionDenied),
+        "refused before anything is ready"
+    );
+    fx.pump();
+    assert_eq!(
+        fx.serve(accept(FOREIGN_PORT), &mut response).err(),
+        Some(Errno::PermissionDenied),
+        "and once a connection is"
+    );
+    let reply = fx
+        .serve(accept(0x6000), &mut response)
+        .expect("the refused connection is still pending");
+    assert!(decode_socket_reply(&response[..reply.len]).is_ok());
+}
+
 #[test]
 fn a_share_that_cannot_afford_a_listener_refuses_to_listen() {
     // The SYN-flood backlog is a fixed defence: a share too small to hold it
@@ -6056,15 +6157,18 @@ fn a_share_that_cannot_afford_a_listener_refuses_to_listen() {
 fn net_caller_as(uid: u32, proc_byte: u8) -> Caller {
     let mut summary = CapabilitySummary::EMPTY;
     summary.insert(CapabilityId::NET);
-    Caller::new(Origin::new(
-        TrustDomain::User,
-        uid,
-        101,
-        u64::from(proc_byte),
-        ProcId::from_raw([proc_byte; 16]),
-        summary,
-        tairix_abi::ORIGIN_CONSOLE_NONE,
-    ))
+    Caller::new(
+        Origin::new(
+            TrustDomain::User,
+            uid,
+            101,
+            u64::from(proc_byte),
+            ProcId::from_raw([proc_byte; 16]),
+            summary,
+            tairix_abi::ORIGIN_CONSOLE_NONE,
+        ),
+        served(),
+    )
 }
 
 fn mdns_group_v4() -> SocketAddr {

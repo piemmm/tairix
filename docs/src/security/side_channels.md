@@ -1,86 +1,107 @@
 # Side-channel mitigations (Arch HAL)
 
 Microarchitectural side channels — Meltdown, Spectre v1/v2, MDS, L1TF,
-MMIO stale data — are defeated by primitives that only an architecture
-port can emit: kernel/user address-space separation (KPTI-equivalent),
-speculation barriers on the syscall entry/exit boundary, and a flush of
-microarchitectural buffers plus an indirect-branch-predictor barrier on
-every context switch. `AGENTS.md` §19.1 makes this a closed trait set on
-the Arch HAL. It lives in `kernel/arch/api` next to the scheduler-facing
-slice, so a port acquires no new dependency to implement it.
+MMIO stale data — are defeated by mechanisms only an architecture port can
+emit, each at one privilege boundary: kernel/user address-space separation
+(KPTI-equivalent), speculation hardening on every user→kernel entry, a
+buffer clear and a speculation barrier on every return to user mode, and an
+indirect-branch-predictor barrier on context switch. `AGENTS.md` §19.1
+makes this a closed set on the Arch HAL, in `kernel/arch/api`.
 
 ## The surface
 
-`tairix_arch_api::sidechannel` defines:
+`tairix_arch_api::sidechannel` defines the port's declaration, not the
+mechanisms. A mechanism's position relative to the transition instruction
+is what makes it a defence — a buffer clear must be the last kernel work
+before the return, a straight-line-speculation barrier must follow it — so
+each lives in the port's entry and return code, where no Rust call can
+stand:
 
-- `SideChannelMitigation` — the per-port handle the kernel reaches
-  through. It exposes the three per-transition barrier primitives
-  (`syscall_entry_barrier`, `syscall_exit_barrier`,
-  `context_switch_barrier`) and a declarative `profile`.
-- `MitigationProfile` — the port's honest declaration, one `Mitigation`
-  per §19.1 control: kernel/user `address_space_isolation`, the
-  `syscall_entry_barrier` / `syscall_exit_barrier` speculation barriers,
-  the `context_switch_buffer_flush`, and the
+- `SideChannelMitigation` — the per-port handle; its one method returns the
+  port's `profile`.
+- `MitigationProfile` — one `Mitigation` per control:
+  `address_space_isolation`, `user_entry_hardening`,
+  `user_return_buffer_clear`, `user_return_speculation_barrier`, and
   `context_switch_indirect_branch_barrier`.
 - `Mitigation` — one of three honest positions:
-  - `Applied` — the port emits the mitigation for its target.
-  - `NotVulnerable(reason)` — a no-op, permitted by §19.1 **only** where
-    the silicon is provably not vulnerable, with the justification
-    recorded both here and in the port's source.
-  - `Pending(note)` — the silicon *does* require it, but it cannot be
-    built yet because it depends on a not-yet-landed subsystem (e.g.
-    KPTI needs the Stage 6 user/kernel boundary). `Pending` is honest
-    and tracked, but **not** release-ready.
+  - `Applied` — the port's code carries it on every path it covers.
+  - `NotVulnerable(reason)` — a no-op, permitted **only** where the silicon
+    is provably not exposed, with the justification recorded in the
+    port's source.
+  - `Pending(note)` — the silicon requires it but the port does not build
+    it yet. Honest and tracked, but **not** release-ready.
 
-`MitigationProfile::validate` enforces the honesty rule: every
-non-applied slot must carry a non-empty explanation.
-`MitigationProfile::is_release_ready` is the stricter §19.1 "a target
-that does not pass cannot ship" gate — it rejects any `Pending` slot —
-and is satisfied at release time, after the burn-down closes the gaps.
+`MitigationProfile::validate` refuses an unexplained non-applied slot;
+`MitigationProfile::is_release_ready` additionally refuses any `Pending`.
 
-## The conformance vertical
+## The conformance vertical and the source pins
 
-`tairix_arch_api::sidechannel::conformance::run_all` is the §17.2 / §19.1
-side-channel acceptance suite. It is portable — it names only the trait —
-and every port runs it against its handle from a host unit test, exactly
-like the `kernel/sched` policy conformance suite. It asserts the profile
-is honest (validates, every omission justified) and that the barrier
-primitives are callable and idempotent. Each port additionally pins the
-exact profile its silicon requires, so a port cannot silently downgrade a
-declaration.
-
-The barrier instructions themselves are only meaningful on the
-bare-metal target and are gated to it; they are reviewed under the
-`// SAFETY:` discipline (`AGENTS.md` §2.10) and exercised for syntax by
-the per-target build. The host suite checks the contract; the bare-metal
-build checks the instructions.
+`tairix_arch_api::sidechannel::conformance::run_all` runs on every port
+(from its `passes_arch_hal_conformance_suite` host test) and asserts the
+profile is honest. A declaration is only as good as the code behind it, so
+each port with an `Applied` slot also carries `sidechannel_tests`, which
+pins every applied mechanism onto every entry and return path in the
+port's own sources: a profile that says `Applied` fails while any path
+lacks the code. The entry and return stubs are assembly no host test can
+run, so the pins read the sources the stubs are built from, as the ports'
+other stub pins (`stub_align_tests`, `eret_tests`, `sret_tests`) do.
 
 ## Per-target declarations
 
 | Mitigation | x86_64 | aarch64 | riscv64 | wasm32 |
 | --- | --- | --- | --- | --- |
-| Address-space isolation (KPTI) | Pending (Stage 6) | Pending (Stage 6) | NotVulnerable (in-order) | NotVulnerable (host-owned) |
-| Syscall entry barrier | Applied (`lfence`) | Applied (`csdb`) | Applied (`fence`) | NotVulnerable (no ISA barrier) |
-| Syscall exit barrier | Applied (`lfence`) | Applied (`csdb`) | Applied (`fence`) | NotVulnerable (no ISA barrier) |
-| Context-switch buffer flush | Applied (`verw`) | NotVulnerable (Intel-only) | NotVulnerable (Intel-only) | NotVulnerable (host-owned) |
+| Address-space isolation (KPTI) | Pending | Pending | NotVulnerable (in-order) | NotVulnerable (host-owned) |
+| User-entry hardening | Applied (register scrub, fenced GS swaps) | Applied (register scrub) | NotVulnerable (in-order) | NotVulnerable (host-owned) |
+| Return-to-user buffer clear | Applied (`verw`) | NotVulnerable (Intel-only) | NotVulnerable (Intel-only) | NotVulnerable (host-owned) |
+| Return-to-user speculation barrier | Applied (`int3`) | Applied (`dsb nsh; isb`) | NotVulnerable (in-order) | NotVulnerable (host-owned) |
 | Context-switch IBP barrier | Pending (CPUID/IBPB) | Pending (MIDR/SMCCC) | NotVulnerable (in-order) | NotVulnerable (host-owned) |
 
-- **x86_64** is vulnerable to the full zoo. The `lfence` speculation
-  fence and the `verw` MDS buffer-clear are unconditionally safe and
-  applied today. KPTI awaits the Stage 6 user/kernel page tables, and
-  IBPB (`IA32_PRED_CMD`) awaits the `CPUID` feature probe — writing the
-  MSR blindly would `#GP` — so both are tracked `Pending`.
-- **aarch64** emits the `csdb` Spectre-v1 barrier. The MDS-class buffer
-  flush is a justified no-op (those are Intel-specific buffer-sampling
-  flaws); KPTI and the MIDR-specific Spectre-v2 sequence are `Pending`.
-- **riscv64** emits a conservative `fence` on each boundary. The in-order
-  cores TAIRiX targets (QEMU `virt`, SiFive U54/U74) do not speculate
-  past a fault or a mispredict, so the Meltdown-, MDS-, and Spectre-v2-
-  class controls are justified no-ops; the port is release-ready.
+- **x86_64.** Every entry stub zeroes the general-purpose registers it
+  saved before its first call into Rust, keeping only the System V
+  argument registers it loads; the syscall stub passes its trampoline a
+  pointer to the saved frame rather than the user's `rip` and `rbp`. The
+  two GS swaps that depend on the interrupted privilege are followed by
+  `lfence` (the SWAPGS variant). `verw` against the kernel data selector is
+  the last instruction before every `sysretq` and every `iretq` to ring 3,
+  and an `int3` follows each return. KPTI needs per-process user
+  translation roots mapping only the entry trampolines; IBPB needs the
+  `CPUID.7.0:EDX[26]` probe and a context-switch hook. Kernel-mode branch
+  target injection (IBRS/eIBRS) and speculative store bypass (SSBD) are
+  `plans/ARCHSUPPORT.md` A8.
+- **aarch64.** The trap trampoline zeroes `x2`–`x28` once saved (`x0`/`x1`
+  carry the kind and frame, the forced frame pointers make the handler's
+  prologue replace `x29`, its `bl` replaces `x30`), and `dsb nsh; isb`
+  follows every `eret` — the portable form of `sb`, which `FEAT_SB` adds
+  only from Armv8.5. The buffer clear is a justified no-op; KPTI (for a
+  Meltdown-exposed core) and the MIDR-specific Spectre-v2 sequence are
+  `Pending`.
+- **riscv64.** The cores TAIRiX targets (QEMU `virt`, SiFive U54/U74)
+  execute in order, so no instruction runs speculatively past a fault, a
+  mispredict or a return: every slot is a justified no-op, and the port is
+  release-ready. A memory-ordering `fence` would stop no speculation, so
+  none is emitted in a speculation slot's name.
 - **wasm32** delegates every microarchitectural defence to the
   Chrome-class host (site isolation, timer clamping, COOP/COEP) and
   isolates memory with one linear memory per worker. Every control is a
   justified host-owned no-op; the port is release-ready.
+
+## User-chosen indices
+
+A value a user chooses that the kernel checks against a table and then
+loads from it is a Spectre v1 gadget: the core may run the load before the
+check resolves. Every such index on the syscall path is clamped without a
+branch as well as checked, through `tairix_abi::nospec::index_within` — the
+`array_index_mask_nospec` construction behind two optimisation barriers,
+which keep it a plain arithmetic data dependency, never folded away by the
+compiler and never lowered to a `csel`/`cmov` whose flags an Arm core may
+predict. Its users are the syscall number (`syscalls::spec_for`), a
+capability id (`CapabilityId::index`, which every capability-summary bit
+goes through), and a standard descriptor (`process::DescriptorTable`), whose
+console byte would otherwise feed a second, dependent load. `BitSet256`,
+the capability set's storage, sits below `lib/abi` and masks its
+power-of-two index behind the same kind of barrier. The kernel's other
+user-named tables — ports, open files, capability records — are B-trees,
+which reach no slot by a raw index.
 
 ## Untrusted timer resolution
 
@@ -117,9 +138,8 @@ calibration window (`apic_timer::calibrate`).
 
 ## Remaining §19.1 work
 
-The KPTI and indirect-branch-predictor `Pending` gaps close with the
-Stage 6 process model (the user/kernel boundary and the `CPUID`/MIDR
-feature probes).
+KPTI on x86_64 and aarch64, the indirect-branch-predictor barriers, and
+x86_64's IBRS/STIBP/SSBD (`plans/ARCHSUPPORT.md` A8).
 
 The §19.1 constant-time requirement for `lib/crypto`'s secret-handling
 code is **landed**: `tairix_crypto::ct_eq` compares secret byte strings

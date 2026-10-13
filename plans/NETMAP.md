@@ -291,7 +291,8 @@ minimalism test is met by *not* minting anything.
   per drained burst, and the re-read on a one-shot deadline (`REFRESH_NS`) only
   while a window is open — the neighbour cache and routes have no event to wake
   on. With no worker the read runs inline and the loop collects it without
-  parking.
+  parking; discovery and naming, which make many calls, are off without a
+  thread of their own (`Collect::start`), and a notice says so.
 - The bundle: `AppInfo.toml` (`kind = "application"`, `library =
   "SystemTools"`, `CAP_CONSOLE_WRITE`/`CAP_SHM`/`CAP_FS_ACCESS`/
   `CAP_SYSINFO_GLOBAL`/`CAP_SYSINFO_HW`, and NM2b's `CAP_NET`/
@@ -314,10 +315,12 @@ minimalism test is met by *not* minting anything.
   unwinds every level at once; a `Lost` request is replaced by starting the
   new one before stopping the old, so the shared question stays asked and is
   replayed from the decoder's cache — except at the account's bound, where the
-  old one stops first to make the room. A request lost again as soon as it was
-  replaced is held back a pass (`deferred()`), so one the service cannot
-  replay whole is retried at the read's pace, not as fast as its losses
-  arrive. A refusal bears on what it refused: `PermissionDenied` and
+  old one stops first to make the room. A replacement lost again within its
+  wait is held back (`deferred()`) until the wait passes: `REFRESH_NS`,
+  doubling with each loss in a row up to `MAX_BACKOFF_DOUBLINGS` (six), and
+  forgotten once a replacement outlives it; one still lost at the longest
+  wait marks the pass `truncated()`. So one the service cannot replay whole is
+  retried on a clock, never as fast as its losses or doorbells arrive. A refusal bears on what it refused: `PermissionDenied` and
   `OutOfRange` drop that ask while it stays wanted (`refused()` reports the
   first, and `locked_out()` says the type list itself was refused), anything
   else — the service's bounds, its absence — ends the pass (`stalled()`), and
@@ -331,8 +334,8 @@ minimalism test is met by *not* minting anything.
   answers (DNS preferred over the segment, either over the address). A service
   hangs under the node at its host's address, a neighbour made for a host only
   discovery knows, or its interface until resolved.
-- `run.rs`: a doorbell `PrivatePort` in the event wait-set (origin-checked
-  before it counts); a queued reader worker for reads and collects, a queued
+- `run.rs`: a doorbell `PrivatePort` in the event wait-set (counted only for
+  a `genuine_doorbell` naming the session `OpenSession` publishes); a queued reader worker for reads and collects, a queued
   namer worker for reverse DNS; collect state `Off`/`Idle`/`Due`/`Asked`/
   `Retry`, a failed collect — or a pass that left work, stalled or deferred —
   retried at the next read and a session refused `PermissionDenied` never

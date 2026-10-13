@@ -18,7 +18,7 @@ workspace = true
 # `drivers/*`→`drivers/*` edge. The `Run` binary links the userland
 # runtime `tairix-rt` only on the bare-metal targets it is actually built for;
 # on the host it is an inert stub (`src/main.rs` / `build.rs`), mirroring
-# `drivers/input/usb_kbd`.
+# `drivers/input/usb_hid`.
 
 [dependencies]
 # The frozen `abi-v1` surface (`HwNode`, `HwResource`, `DriverError`, the URB

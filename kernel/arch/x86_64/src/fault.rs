@@ -284,6 +284,7 @@ pub unsafe extern "C" fn page_fault_isr() {
         "movq 152(%rsp), %r9",
         "subq $8, %rsp",
         crate::fp_frame_save!(),
+        crate::scrub_nonargument_gprs!(),
         "call {dispatch}",
         // The dispatcher returned: the fault is resolved. Restore the
         // interrupted state, drop the hardware error code, and retry the
@@ -307,11 +308,12 @@ pub unsafe extern "C" fn page_fault_isr() {
         "popq %rcx",
         "popq %rax",
         "addq $8, %rsp",
-        "iretq",
+        crate::iret_clearing_for_ring3!(),
         dispatch = sym tairix_arch_x86_64_page_fault_dispatch,
         fp_frame = const crate::fpu::FP_FRAME_BYTES,
         fp_mxcsr = const crate::fpu::FP_FRAME_MXCSR,
         kernel_mxcsr = sym crate::fpu::KERNEL_MXCSR,
+        verw_sel = sym crate::sidechannel::VERW_SELECTOR,
         frame_cs = const crate::interrupts::WORD_ISR_FRAME_CS,
         frame_top = const crate::interrupts::WORD_ISR_FRAME_TOP,
         options(att_syntax),
@@ -455,9 +457,12 @@ pub(crate) unsafe fn with_ring3_context<R>(
     call: impl FnOnce(*const UserRegisterFrame) -> R,
 ) -> R {
     // SAFETY: `swapgs` is privileged and runs in ring 0 here; it touches
-    // only the GS-base/`KERNEL_GS_BASE` swap, no memory or flags.
+    // only the GS-base/`KERNEL_GS_BASE` swap, no memory or flags. `lfence`
+    // keeps `call` from running speculatively before the caller's ring-3
+    // test resolves, which a mispredicted test would do against the user's
+    // GS base; the block claims memory so no access is hoisted above it.
     unsafe {
-        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        core::arch::asm!("swapgs", "lfence", options(nostack, preserves_flags));
     }
     // SAFETY: the caller guarantees `saved` addresses the live saved block.
     let frame = unsafe { user_register_frame(saved, rip, user_rsp) };

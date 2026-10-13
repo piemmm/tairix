@@ -2953,7 +2953,7 @@ fn run_mdns_peer(
     let mut buf = [0u8; MAX_FRAME];
     while !stop.load(Ordering::Acquire) {
         flush_engine(&mut stack, socket, qemu_sock, now(start));
-        while let Some(emit) = engine.poll(now(start), &mut draws, &mut message, &mut |_| {}) {
+        while let Some(emit) = engine.poll(now(start), &mut message, &mut |_| {}) {
             send_mdns(socket, qemu_sock, emit.to, &message[..emit.len]);
         }
 
@@ -2969,6 +2969,7 @@ fn run_mdns_peer(
                         addr: datagram.source,
                         port: datagram.source_port,
                         on_link: is_link_local_address(datagram.source),
+                        to_group: true,
                     };
                     if let Some(emit) = engine.on_message(
                         now(start),
@@ -3017,6 +3018,7 @@ mod mdns_tests {
             addr: IpAddr::V6(wire::link_local(iid)),
             port: MDNS_PORT,
             on_link: true,
+            to_group: true,
         }
     }
 
@@ -3035,7 +3037,7 @@ mod mdns_tests {
         let mut witness = publish_fixture(&mut peer, at(0), &mut draws).expect("publishes");
         let mut guest = MdnsEngine::new(STACK_HASH_KEY);
         for step in 0..40 {
-            while let Some(emit) = peer.poll(at(step * 250), &mut draws, &mut buf, &mut |_| {}) {
+            while let Some(emit) = peer.poll(at(step * 250), &mut buf, &mut |_| {}) {
                 let sent = buf[..emit.len].to_vec();
                 let _ = guest.on_message(
                     at(step * 250),
@@ -3075,7 +3077,7 @@ mod mdns_tests {
                 .expect("asks");
         }
         let mut answered_again = false;
-        while let Some(emit) = guest.poll(at(10_500), &mut draws, &mut buf, &mut |_| {}) {
+        while let Some(emit) = guest.poll(at(10_500), &mut buf, &mut |_| {}) {
             let query = buf[..emit.len].to_vec();
             let parsed = Message::parse(&query).expect("the guest's query parses");
             assert!(!parsed.response);

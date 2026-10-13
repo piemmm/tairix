@@ -11,10 +11,12 @@
 //   0x600 Lower EL (AArch32):   Sync / IRQ / FIQ / SError
 //
 // Each entry tags the exception with a numeric *kind* and branches to a
-// common trampoline that saves the interrupted GP and FP/SIMD registers, calls the
-// Rust handler `tairix_aarch64_trap_handler(kind)`, restores, and
-// `eret`s. The original x0/x1 are spilled *before* the kind is loaded so
-// an IRQ returns with the interrupted context intact.
+// common trampoline that saves the interrupted GP and FP/SIMD registers, zeroes
+// the saved GP registers, calls the Rust handler
+// `tairix_aarch64_trap_handler(kind)`, restores, and `eret`s behind a
+// straight-line-speculation barrier (`sidechannel.rs`). The original x0/x1
+// are spilled *before* the kind is loaded so an IRQ returns with the
+// interrupted context intact.
 //
 // SAFETY-INVARIANTS:
 //   1. The table is 2 KiB aligned (`.balign 0x800`) and each entry is
@@ -233,6 +235,38 @@ tairix_aarch64_trap_common:
     msr     FPCR, xzr
 1:
 
+    // No value the interrupted context chose stays live in a register for
+    // a speculatively executed handler gadget to consume. x0 and x1 are
+    // reloaded below, the forced frame pointers make the handler's
+    // prologue replace x29, and the `bl` replaces x30.
+    mov     x2, xzr
+    mov     x3, xzr
+    mov     x4, xzr
+    mov     x5, xzr
+    mov     x6, xzr
+    mov     x7, xzr
+    mov     x8, xzr
+    mov     x9, xzr
+    mov     x10, xzr
+    mov     x11, xzr
+    mov     x12, xzr
+    mov     x13, xzr
+    mov     x14, xzr
+    mov     x15, xzr
+    mov     x16, xzr
+    mov     x17, xzr
+    mov     x18, xzr
+    mov     x19, xzr
+    mov     x20, xzr
+    mov     x21, xzr
+    mov     x22, xzr
+    mov     x23, xzr
+    mov     x24, xzr
+    mov     x25, xzr
+    mov     x26, xzr
+    mov     x27, xzr
+    mov     x28, xzr
+
     // x0 still holds the exception kind; pass the saved-frame base in x1
     // so the handler can read the EL0 syscall registers (x0..x8 at
     // [sp,#0..#64]) and write the syscall result back into the x0 slot
@@ -298,3 +332,6 @@ tairix_aarch64_trap_common:
     ldp     x0, x1, [sp]
     add     sp, sp, #816
     eret
+    // Straight-line speculation past the `eret` stops here.
+    dsb     nsh
+    isb

@@ -211,14 +211,9 @@ pub mod pvh;
 pub mod qemu_exit;
 pub mod reset;
 pub mod serial;
-/// x86_64 implementation of the Arch HAL side-channel mitigation
-/// surface ([`tairix_arch_api::SideChannelMitigation`]).
-///
-/// Gated on `sched-arch` — the feature that pulls in the
-/// `tairix-arch-api` dependency this module's trait lives in — so a
-/// freestanding consumer that does not need the Arch HAL compiles
-/// neither this module nor the dependency.
-#[cfg(feature = "sched-arch")]
+/// x86_64 side-channel mitigations: the Arch HAL declaration
+/// ([`tairix_arch_api::SideChannelMitigation`]) and the templates every
+/// entry stub splices in, so it builds wherever the stubs do.
 pub mod sidechannel;
 pub mod smp;
 pub mod syscall_entry;

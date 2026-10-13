@@ -1,7 +1,8 @@
 //! Multiboot2 information-structure access for the x86_64 boot path.
 //!
-//! A real boot-loader (GRUB, or the first-party TAIRiX loader) enters the
-//! kernel's `_start` with a pointer to a Multiboot2 information structure.
+//! A multiboot2 boot loader — the first-party one `plans/BOOTLOADER.md`
+//! builds among them — enters the kernel's `_start` with a pointer to a
+//! Multiboot2 information structure.
 //! The wire layout of that structure — the header, the 8-byte-aligned tag
 //! stream, and every tag this port understands (basic memory, memory map,
 //! ACPI RSDP, EFI memory map, …) — is defined once in the shared

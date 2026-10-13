@@ -72,13 +72,14 @@ in all of them applies here without exception.
   broader GOP modes) is deliberately out of scope for this plan and stays
   with its own driver plans (`plans/DEVICES.md`, `plans/USB.md`,
   `plans/NETWORK.md`).
-- **Hardening debt is tracked, not hidden.** KPTI and the x86_64
-  speculation barriers (IBRS/IBPB/STIBP/SSBD) are `Pending` in the port's
-  honest §19.1 profile. They waited on the Stage 6 user/kernel page-table
+- **Hardening debt is tracked, not hidden.** KPTI and IBPB are `Pending` in
+  the port's §19.1 profile; IBRS/STIBP/SSBD (kernel-mode branch-target
+  injection, cross-thread predictor sharing, speculative store bypass) have
+  no profile slot yet. They waited on the Stage 6 user/kernel page-table
   boundary, which has landed, and carry "[DO IMMEDIATELY ON UNBLOCK]" in
   `PLAN.md` (§19 item 10). That work is A8 here so this plan cannot be called
-  done while the profile still says `Pending` — but it is tracked separately
-  because it is not an aarch64-parity item (aarch64 carries its own `Pending`
+  done while it is outstanding — but it is tracked separately because it is
+  not an aarch64-parity item (aarch64 carries its own `Pending`
   KPTI/Spectre-v2 rows).
 
 ## 1. Current state (what already exists — do not rebuild)
@@ -262,9 +263,9 @@ on `PowerOff`, mirroring the equivalents on the two ports that have it.
 
 ### A8 — x86_64 hardening unblock
 
-KPTI + IBRS/IBPB/STIBP/SSBD move from `Pending` to `Supported` in the
-port's §19.1 profile, with the side-channel conformance vertical proving
-the barriers. The Stage 6 user/kernel page-table boundary they waited on
+KPTI and IBPB move from `Pending` to `Applied` in the port's §19.1
+profile, and IBRS/STIBP/SSBD gain slots and land `Applied`, each pinned onto
+every path it covers by the port's `sidechannel_tests`. The Stage 6 user/kernel page-table boundary they waited on
 has landed, so the "[DO IMMEDIATELY ON UNBLOCK]" order in `PLAN.md` now
 applies. Tracked here so this plan is not "done" while the profile is
 `Pending`; tracked separately because it is not an aarch64-parity item.

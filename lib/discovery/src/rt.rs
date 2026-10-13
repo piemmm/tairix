@@ -13,11 +13,10 @@
 use alloc::vec::Vec;
 
 use tairix_abi::discovery_ipc::{
-    decode_doorbell, from_discovery_service, Entry, Families, Query, DISCOVERY_ENDPOINT,
-    DOORBELL_LEN,
+    genuine_doorbell, Entry, Families, Query, DISCOVERY_ENDPOINT, DOORBELL_LEN,
 };
 use tairix_abi::waitset::WaitSourceKind;
-use tairix_abi::{Errno, Origin, ORIGIN_WIRE_LEN};
+use tairix_abi::{Errno, ORIGIN_WIRE_LEN};
 
 use tairix_rt::{PrivatePort, WaitSet};
 
@@ -106,9 +105,7 @@ impl RtDiscovery {
         let mut frame = [0u8; DOORBELL_LEN];
         let mut sender = [0u8; ORIGIN_WIRE_LEN];
         while let Ok(len) = tairix_rt::ipc_recv(self.port.id(), &mut frame, &mut sender) {
-            let genuine =
-                Origin::from_bytes(&sender).is_ok_and(|origin| from_discovery_service(&origin));
-            rung |= genuine && decode_doorbell(&frame[..len]) == Ok(self.session.id());
+            rung |= genuine_doorbell(&sender, &frame[..len]) == Some(self.session.id());
         }
         rung
     }

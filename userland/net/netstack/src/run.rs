@@ -71,7 +71,7 @@ mod program {
     use tairix_net::stack::StackEvent;
     use tairix_netstack::{
         events, queue_tx, serve, BondChange, Caller, CryptoCookieSecret, Delivery, FrameBatch,
-        NetChannelClient, NetChannelTransport, Netstack, ServiceHint, SocketService,
+        NetChannelClient, NetChannelTransport, Netstack, ServedCall, ServiceHint, SocketService,
     };
     use tairix_rng::{FastRng, RandU64};
     use tairix_rt::changenotice::ChangeNotice;
@@ -905,7 +905,16 @@ mod program {
     /// request).
     fn attest(endpoint: u64, ticket: u64) -> Option<Caller> {
         match tairix_rt::peer_origin(endpoint, ticket) {
-            Ok(origin) => Some(Caller::new(origin)),
+            Ok(origin) => Some(Caller::new(
+                origin,
+                ServedCall {
+                    endpoint,
+                    ticket,
+                    probe: |endpoint, ticket, port| {
+                        tairix_rt::call_peer_port(endpoint, ticket, port).is_ok()
+                    },
+                },
+            )),
             Err(err) => {
                 reply_error(endpoint, ticket, err);
                 None

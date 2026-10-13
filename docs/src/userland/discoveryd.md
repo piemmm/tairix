@@ -34,15 +34,20 @@ or send a query that draws unicast replies from every responder on it.
 ## Clients
 
 A client opens a **session** on the reserved `DISCOVERY_ENDPOINT`, naming a
-private delivery port, and starts typed requests in it
+delivery port its own process owns, and starts typed requests in it
 (`tairix_abi::discovery_ipc`): browse a service type, resolve an instance, look
-up a host's addresses, name a link-local address, or enumerate every type. Each
-request is answered continuously until it is stopped. Answers queue in the
-session and are taken with a call that never waits; the service rings the port
-once when answers are waiting and not again until the client has collected
-them all, so a slow reader costs one doorbell however many answers queue. A
-doorbell is believed only when its kernel-attested sender is the service's
-account.
+up a host's addresses, name a link-local address, or enumerate every type. The
+kernel attests the port's owner
+([`call_peer_port`](../architecture/syscalls.md)); any other port, bound or
+not, is refused alike, so no caller can aim the service's doorbell at another
+process's mailbox. Each request is answered continuously until it is stopped.
+Answers queue in the session and are taken with a call that never waits; the
+service rings the port once when answers are waiting and not again until the
+client has collected them all, so a slow reader costs one doorbell however many
+answers queue. A doorbell a full port refuses is owed, not lost, and posted
+once the port has room. A client believes a doorbell only when its
+kernel-attested sender is the service's account and it names one of the
+client's own sessions.
 
 The service derives every name it asks the segment from the request's fields,
 so the type a browse is scoped to is a field it reads, never a name the caller
@@ -83,6 +88,11 @@ sized so an inventory of a segment of hundreds of hosts fits one account
 | Queued answers per account, across its sessions | 1 MiB |
 | Queued answers in all | 16 MiB |
 | Sessions in all | 4096 |
+| Requests in one session asking one question | 2 |
+| Fresh questions an account's requests raise | a burst of 64, then 16 a second |
+| The same, every account together | a burst of 256, then 64 a second |
+| Replays an account's joins cost the decoder | a burst of 32, then 8 a second |
+| The same, every account together | a burst of 256, then 64 a second |
 | Distinct questions, every client together | 4096 (`mdns::MAX_QUESTIONS`) |
 
 Past any queue bound a request's updates are dropped and it is told `Lost`
@@ -92,12 +102,17 @@ sixteenth of the whole, so readers that never collect fill the service only
 from sixteen accounts. An account is charged a question slot for each
 subscription its requests hold and each question it left that the decoder has
 not yet said it stopped, and is held to half the questions every client
-shares. A request is admitted only after its authority is checked, so a caller
+shares. An account charged its floor of 256 raises a fresh question only while
+more than 1024 slots remain free, so accounts asking all they may can together
+fill no more than three quarters of the table, and four floors' worth is
+always left for the rest. A request is admitted only after its authority is checked, so a caller
 at its bound asking what it may not ask is refused and audited as
 unauthorised. A drained queue gives back its storage. A session, a request,
-an answer, and a request's place in a question it shares are each found by
-id, and an exited owner's sessions by the owner, so no call or answer costs a
-scan of the tables.
+an answer, a grant, and a request's place in a question it shares are each
+found by key, an exited owner's sessions by the owner, and the doorbells owed
+and the losses a session owes by their own lists, so no call or answer costs a
+scan of the tables. Only a link edge and a replaced decoder, both rare, visit
+every question.
 
 A session ends when its owner exits: the service watches every principal it
 holds a session for through the kernel's peer-exit watch
@@ -111,10 +126,38 @@ requests share it, on every interface whose link is up. A request that joins a
 question already asked is brought up to date by a replay from the decoder's
 cache rather than from a second copy in the front.
 
+A question replays to one group of requests at a time: those joining while a
+replay waits to be sent share it, and those joining while one is in flight
+share the next. A replay walks everything the question holds, so a join that
+needs a fresh one is charged to the account's replay budget and refused with
+`Busy` once it is spent; a request starting and stopping in a loop costs no
+more than that. A fresh question is queried on every link out of the group
+budget every client shares, so it is charged to the account's fresh-question
+budget the same way: one client churning names cannot starve another's first
+query. A session may hold two requests asking one question — a
+replacement started before the request it replaces stops — and no third, since
+each copy costs every answer's fan-out and buys nothing.
+
+A question keeps its requests in runs: those told every edge, those owed the
+replay in flight, those owed the next, and those whose queue lost answers and
+take nothing more. An edge is offered to the first run alone, a replayed answer
+to the second, so a crowd of stalled or replaying requests costs an answer
+nothing. An answer renewed again within a second of the last renewal told —
+copies of one record, which an honest responder never sends faster — is not
+told again.
+
 A question's id is its slot in the front's table. The decoder acknowledges
 every stop, and the id is given to another question only after that word:
 frames cross the pipe in order, so no answer to the old question can follow
 it, and ids are reused rather than run out.
+
+The decoder owes an acknowledgement for every stop, link edge, and replay it
+is sent, in the order they were sent. The front holds what it is owed in that
+order with the instant each was sent: an acknowledgement out of order, of
+something never sent, or withheld for 30 seconds condemns the decoder, so one
+that stops answering cannot keep an id, a link's answers, or a late joiner's
+replay from moving. A replaced decoder owes nothing, and every id it was
+stopping is free at once.
 
 The front keeps keyed fingerprints of what each question holds on each link,
 which is all it needs to hold the decoder to its word: an answer is added once,
@@ -135,23 +178,26 @@ exactly its bytes.
 | Direction | Frame | Carries |
 |---|---|---|
 | front → decoder | `Configure` | the cache key and CSPRNG key; the first frame, sent once |
-| front → decoder | `Datagram` | the instant, the arrival interface, the sender's address and port, the payload unread |
+| front → decoder | `Datagram` | the instant, the arrival interface, the sender's address and port, whether it went to the group, the payload unread |
 | front → decoder | `Tick` | the instant |
-| front → decoder | `Link` | the instant, an interface, and whether its link came up or went down |
+| front → decoder | `Link` | the instant, an interface, and whether its link came up — with its group budget as the front holds it — or went down |
 | front → decoder | `Ask` | the instant, a question id below `MAX_QUESTIONS`, its form, and the name |
 | front → decoder | `Stop` | a question id, which the decoder acknowledges with `Stopped` |
 | front → decoder | `Replay` | a question id and a token naming the requests owed it |
 | decoder → front | `Deadline` | the earliest instant any engine next needs time, or none |
 | decoder → front | `Answer` | one edge in one question's answers, already typed |
 | decoder → front | `Held` / `Replayed` | a replay's answers, then its end |
-| decoder → front | `Transmit` | a datagram an engine built, its interface, and its destination |
+| decoder → front | `Transmit` | a datagram an engine built, its interface, the instant it was charged at, and its destination |
 | decoder → front | `Linked` | the acknowledgement of one link edge |
 | decoder → front | `Stopped` | the acknowledgement of one stop, after which nothing about the question follows |
 
 The decoder acknowledges every link edge. The front believes an answer about a
 link, and sends a datagram built for it, only once every edge it told the
 decoder has been acknowledged, so nothing learned before a link's last edge
-reaches a client after it.
+reaches a client after it. A link that goes down tells each request that held
+something there one `Flush`, however many of its questions held answers on
+it, and finding those requests needs no memory, so a flush is never lost to
+an allocation.
 
 A decoder that receives anything before its configuration, a second
 configuration, or a frame it cannot decode ends its session: the front never
@@ -171,6 +217,16 @@ sends one, so guessing would only hide a bug.
   per datagram relayed from it and at most four owed at once. It names its
   egress interface, so a message built from one link's state never leaves by
   another.
+- **The decoder spends the group budget the front charges.** Each link's
+  engine holds the budget as the front does — handed over with the link-up
+  edge, so a replacement decoder inherits what its predecessor spent — and
+  each datagram for the group names the instant it was charged at, which the
+  front charges it at too. A query the budget cannot pay for stays due until
+  it can, rather than being counted sent and dropped, and the decoder's
+  scheduled sends leave the last four datagrams of the budget to an answer
+  that defends a name this host owns. Since an honest decoder spends exactly
+  as the front charges, a datagram past the budget, or charged at an instant
+  the front has not reached, condemns it.
 - **Back-pressure costs nothing per datagram.** The decoder's queue holds
   64 KiB. A datagram it has no room for is held, and the front stops draining
   its delivery port until the queue drains.
@@ -194,8 +250,9 @@ One wait-set holds the delivery port (registered only while the front takes
 datagrams, and drained at most one mailbox's worth per wake), the decoder's two
 pipe ends, the discovery endpoint, the thread's peer-exit feed, and room on any
 client port a doorbell is owed to, with a timeout for the one instant the front
-must next act by. A dead wait-set ends the service rather than degrading into a
-poll.
+must next act by. A port is watched only while a doorbell is owed there, and the
+watches change only for a port whose count crossed zero since the last turn. A
+dead wait-set ends the service rather than degrading into a poll.
 
 ## Audit records
 
@@ -220,15 +277,28 @@ relay admission, the held datagram, the tick floor, crash replacement under
 fresh keys, condemnation, admission and refusal, grants, replays to late
 joiners, link flaps in flight, bounded queues and the `Lost` notice, peer exit,
 every transmit rule, one session holding hundreds of requests through the real
-decoder, ids freed only by the decoder's word and never run out, per-account
-request bounds, and id wrap that never names a live session or request.
+decoder, ids freed only by the decoder's word and never run out, a withheld or
+unprompted acknowledgement condemning the decoder, a doorbell port the caller
+does not own refused, owed doorbells and the edge-driven watches on their
+ports, a flush told once per request, replays shared and budgeted, a third
+copy of a request refused, copies of a record renewing it once a second, a
+request that lost answers offered nothing more, the runs kept in step through
+random churn, a query the budget cannot pay for waiting due, scheduled sends
+stopping at the reserve, overspending and a replacement inheriting what was
+spent, a client churning fresh names leaving another's first query unharmed,
+per-account request bounds, and id wrap that never names a live session or
+request.
 
 `fuzz_discoveryd` is enrolled in `cargo xtask fuzz`: both codecs canonical under
 random frames and single-bit mutations, the decoder total over hostile and
 well-formed datagrams with time running backwards, and the front against a
 decoder saying anything at all while it holds its no-spin bound, configures each
 decoder first and once, spaces its ticks, contains the decoder, and relays to
-its replacement.
+its replacement. It also drives random calls from several accounts and
+processes against a real decoder — foreign doorbell ports, doorbells that block
+or vanish, segment answers, link edges, and the decoder killed and replaced
+mid-sweep — checking the front's tables after every step, and that nothing
+any client asked for is left once every client has gone.
 
 The live vertical `tairix-test-discovery-qemu-aarch64` boots the production
 aarch64 image with a host-side multicast DNS responder on the wire and runs

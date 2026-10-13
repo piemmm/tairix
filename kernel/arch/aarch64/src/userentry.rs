@@ -230,6 +230,8 @@ unsafe fn enter_el0(entry: u64, sp: u64, x0: u64, tls_base: u64) -> ! {
             "mov x29, xzr",
             "mov x30, xzr",
             "eret",
+            "dsb nsh",
+            "isb",
             sp = in(reg) sp,
             tls = in(reg) tls_base,
             entry = in(reg) entry,

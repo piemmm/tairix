@@ -115,7 +115,8 @@ taken across its spill, and an inline footprint carrying no heap pointer.
 `IndexedHeap` is held to a model through a shuffled history of insertions,
 moves, removals and pops, and to comparison counts rather than a clock: every
 operation over 4096 slots stays within twice the height, and a bounded walk
-within twice what it returns.
+within one more than twice what it returns (each entry, and each child that
+stopped the walk).
 
 `tests/fuzz_collections.rs` drives the map against a plain association list
 over deliberately colliding key streams and `SmallVec` across its spill

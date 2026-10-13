@@ -56,15 +56,12 @@ impl SideChannelMitigation for DoubleSideChannel {
     fn profile(&self) -> MitigationProfile {
         MitigationProfile {
             address_space_isolation: Mitigation::Applied,
-            syscall_entry_barrier: Mitigation::Applied,
-            syscall_exit_barrier: Mitigation::Applied,
-            context_switch_buffer_flush: Mitigation::Applied,
+            user_entry_hardening: Mitigation::Applied,
+            user_return_buffer_clear: Mitigation::Applied,
+            user_return_speculation_barrier: Mitigation::Applied,
             context_switch_indirect_branch_barrier: Mitigation::Applied,
         }
     }
-    fn syscall_entry_barrier(&self) {}
-    fn syscall_exit_barrier(&self) {}
-    fn context_switch_barrier(&self) {}
 }
 
 struct DoubleDiscovery;

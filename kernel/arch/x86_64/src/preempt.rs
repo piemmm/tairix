@@ -412,9 +412,12 @@ pub(crate) unsafe fn preempt_ring3_if_pending(frame: *const InterruptStackFrame,
     // SAFETY: `swapgs` is privileged and runs in ring 0 here; it touches
     // only the GS-base/`KERNEL_GS_BASE` swap, no memory or flags. The two
     // swaps bracket exactly one preempt callback on this task's own ISR
-    // control flow, so they pair.
+    // control flow, so they pair. `lfence` keeps the callback from running
+    // speculatively before the ring-3 test above resolves, which a
+    // mispredicted test would do against the user's GS base; the block
+    // claims memory so the compiler cannot hoist an access above it.
     unsafe {
-        core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+        core::arch::asm!("swapgs", "lfence", options(nostack, preserves_flags));
     }
     cb(cpu_id);
     // SAFETY: as above — the matching swap restoring the user GS the

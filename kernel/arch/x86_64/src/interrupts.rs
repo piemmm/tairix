@@ -459,11 +459,12 @@ pub(crate) const WORD_ISR_FRAME_TOP: usize = ISR_FRAME_TOP + 16;
 ///    16 before it pushes the five-word frame, so after the fifteen GPRs it
 ///    is 16-aligned for the frame and at the `call` — the System V AMD64
 ///    rule — with no pad.
-/// 3. Calls `my_rust_dispatch(*mut SavedRegs)`, which must be
+/// 3. Zeroes every other general-purpose register, then calls
+///    `my_rust_dispatch(*mut SavedRegs)`, which must be
 ///    `unsafe extern "C" fn(*mut SavedRegs)`.
 /// 4. Returning to ring 3, loads the task's extended state if its park left
 ///    it pending (`crate::xstate`); then restores the SSE state and the
-///    GPRs, and `iretq`s.
+///    GPRs, and `iretq`s through [`crate::iret_clearing_for_ring3`].
 ///
 /// The macro is the only sanctioned way to produce a per-vector stub
 /// (no convenience wrappers — no shoe-
@@ -516,6 +517,12 @@ macro_rules! define_isr {
                 "pushq %r15",
                 "movq %rsp, %rdi",
                 $crate::fp_frame_save!(),
+                $crate::scrub_nonargument_gprs!(),
+                "xorl %ecx, %ecx",
+                "xorl %edx, %edx",
+                "xorl %esi, %esi",
+                "xorl %r8d, %r8d",
+                "xorl %r9d, %r9d",
                 "call {dispatch}",
                 $crate::xstate_ring3_exit!(),
                 $crate::fp_frame_restore!(),
@@ -534,11 +541,12 @@ macro_rules! define_isr {
                 "popq %rdx",
                 "popq %rcx",
                 "popq %rax",
-                "iretq",
+                $crate::iret_clearing_for_ring3!(),
                 dispatch = sym $dispatch,
                 fp_frame = const $crate::fpu::FP_FRAME_BYTES,
                 fp_mxcsr = const $crate::fpu::FP_FRAME_MXCSR,
                 kernel_mxcsr = sym $crate::fpu::KERNEL_MXCSR,
+                verw_sel = sym $crate::sidechannel::VERW_SELECTOR,
                 frame_cs = const $crate::interrupts::ISR_FRAME_CS,
                 frame_top = const $crate::interrupts::ISR_FRAME_TOP,
                 options(att_syntax),
@@ -611,6 +619,7 @@ macro_rules! exception_isr_body {
                 // interrupted `MXCSR` the kernel's replaces.
                 "andq $-16, %rsp",
                 "ldmxcsr {kernel_mxcsr}(%rip)",
+                $crate::scrub_nonargument_gprs!(),
                 "call {dispatch}",
                 // The dispatcher diverges; a return is a kernel bug.
                 "ud2",
@@ -708,6 +717,12 @@ pub unsafe extern "C" fn tairix_arch_x86_64_isr_default() {
         "movq %rsp, %rdi",
         "andq $-16, %rsp",
         "ldmxcsr {kernel_mxcsr}(%rip)",
+        crate::scrub_nonargument_gprs!(),
+        "xorl %ecx, %ecx",
+        "xorl %edx, %edx",
+        "xorl %esi, %esi",
+        "xorl %r8d, %r8d",
+        "xorl %r9d, %r9d",
         "call {handler}",
         "ud2",
         handler = sym default_interrupt,
@@ -722,7 +737,7 @@ pub unsafe extern "C" fn tairix_arch_x86_64_isr_default() {
 /// against the stubs' own source.
 #[cfg(test)]
 #[path = "stub_align_tests.rs"]
-mod stub_align_tests;
+pub(crate) mod stub_align_tests;
 
 #[cfg(test)]
 mod tests {

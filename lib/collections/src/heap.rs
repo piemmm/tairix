@@ -18,6 +18,7 @@
 //! allocation before changing any.
 
 use alloc::vec::Vec;
+use core::alloc::Layout;
 
 use crate::TryReserveError;
 
@@ -34,7 +35,11 @@ struct Entry<P> {
 
 /// A min-heap of slots keyed by priority, re-prioritised and removed by slot.
 ///
-/// Ties are broken arbitrarily.
+/// Ties are broken arbitrarily. A slot is its holder's until withdrawn: a
+/// holder hands a slot number on only after [`Self::remove`]ing it, since
+/// [`Self::try_insert`] on a slot still held moves that slot rather than
+/// inserting afresh, and only its return value shows the priority it
+/// replaced.
 #[derive(Debug)]
 pub struct IndexedHeap<P> {
     heap: Vec<Entry<P>>,
@@ -82,25 +87,29 @@ impl<P> IndexedHeap<P> {
     ///
     /// # Errors
     ///
-    /// [`TryReserveError::CapacityOverflow`] for `usize::MAX`, which no heap
-    /// can hold, and [`TryReserveError::AllocFailed`] when the heap or its
-    /// place table cannot grow. Nothing changes in either case.
+    /// [`TryReserveError::CapacityOverflow`] when `slot + 1` places or
+    /// entries have no representable layout, which no retry can change, and
+    /// [`TryReserveError::AllocFailed`] when the heap or its place table
+    /// cannot grow. Neither changes anything a reader can see; room one table
+    /// gained before the other failed is kept for the next attempt.
     pub fn try_reserve_slot(&mut self, slot: usize) -> Result<(), TryReserveError> {
-        if slot == ABSENT {
-            return Err(TryReserveError::CapacityOverflow);
-        }
         if slot < self.places.len() {
             return Ok(());
         }
+        let room = slot
+            .checked_add(1)
+            .filter(|&room| Layout::array::<usize>(room).is_ok())
+            .filter(|&room| Layout::array::<Entry<P>>(room).is_ok())
+            .ok_or(TryReserveError::CapacityOverflow)?;
         // The heap never holds more entries than there are places, so storage
         // for one entry a place keeps every insertion from growing it.
         self.places
-            .try_reserve(slot + 1 - self.places.len())
+            .try_reserve(room - self.places.len())
             .map_err(|_| TryReserveError::AllocFailed)?;
         self.heap
-            .try_reserve(slot + 1 - self.heap.len())
+            .try_reserve(room - self.heap.len())
             .map_err(|_| TryReserveError::AllocFailed)?;
-        self.places.resize(slot + 1, ABSENT);
+        self.places.resize(room, ABSENT);
         Ok(())
     }
 
@@ -151,7 +160,7 @@ impl<P: Copy + Ord> IndexedHeap<P> {
     /// # Errors
     ///
     /// As [`Self::try_reserve_slot`], when `slot` was not held and no room was
-    /// made for it. Nothing changes in that case.
+    /// made for it. Nothing a reader can see changes in that case.
     pub fn try_insert(&mut self, slot: usize, priority: P) -> Result<Option<P>, TryReserveError> {
         if let Some(previous) = self.set(slot, priority) {
             return Ok(Some(previous));

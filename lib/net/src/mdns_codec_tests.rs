@@ -543,3 +543,65 @@ fn a_message_that_asks_and_asserts_nothing_is_empty() {
         .expect("a bare header is valid")
         .is_empty());
 }
+
+/// A TTL with its top bit set reads as zero, and none is ever written
+/// (RFC 2181 §8).
+#[test]
+fn a_ttl_with_the_top_bit_set_is_zero_and_is_never_written() {
+    let mut record = Record::shared(name("_ipp._tcp.local"), RData::Ptr(instance()));
+    record.ttl = u32::MAX;
+    let bytes = build(0, true, |writer| {
+        assert!(writer.push_record(Section::Answer, &record));
+    });
+    let (_, written) = records_of(&bytes)[0];
+    assert_eq!(written.ttl, TTL_MAX, "clamped on the way out");
+    let mut forged = bytes.clone();
+    let at = forged
+        .windows(4)
+        .rposition(|window| window == TTL_MAX.to_be_bytes())
+        .expect("the TTL is on the wire");
+    forged[at] = 0x80;
+    assert_eq!(records_of(&forged)[0].1.ttl, 0, "read as a goodbye");
+}
+
+/// A name of as many labels as fit still finds its shared suffix, and reads
+/// back whole.
+#[test]
+fn a_name_of_many_labels_compresses_against_its_suffix() {
+    // Each "a" label is two octets; with "local" and the root, 124 fill 255.
+    let labels: Vec<&[u8]> = core::iter::repeat_n(b"a".as_slice(), 124)
+        .chain(core::iter::once(b"local".as_slice()))
+        .collect();
+    let deep = Name::from_labels(&labels).expect("a name");
+    let deeper = Name::from_labels(&labels[1..]).expect("a name");
+    let bytes = build(0, true, |writer| {
+        for owner in [deep, deeper] {
+            let record = Record::shared(owner, RData::Ptr(instance()));
+            assert!(writer.push_record(Section::Answer, &record));
+        }
+    });
+    let read: Vec<Name> = records_of(&bytes)
+        .into_iter()
+        .map(|(_, r)| r.name)
+        .collect();
+    assert_eq!(read, [deep, deeper]);
+    assert!(
+        bytes.len() < deep.as_wire().len() + deeper.as_wire().len(),
+        "the second name points into the first"
+    );
+}
+
+/// A message with more questions than are read says so: its records, which
+/// follow the questions it was not read past, are not read either.
+#[test]
+fn a_message_with_too_many_questions_is_not_whole() {
+    let names: Vec<Name> = (0..=MAX_MESSAGE_QUESTIONS)
+        .map(|n| name(&alloc::format!("_s{n}._tcp.local")))
+        .collect();
+    let whole = super::raw_query(&names[..MAX_MESSAGE_QUESTIONS]);
+    assert!(Message::parse(&whole).expect("valid").is_whole());
+    let cut = super::raw_query(&names);
+    let cut = Message::parse(&cut).expect("valid");
+    assert!(!cut.is_whole());
+    assert_eq!(cut.questions().count(), MAX_MESSAGE_QUESTIONS);
+}

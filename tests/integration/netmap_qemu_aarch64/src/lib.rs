@@ -47,7 +47,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use tairix_abi::SyscallNumber;
+use tairix_abi::{SyscallNumber, SYSCALLS};
 
 /// Bare name of the network-map application the library row launches — the
 /// bundle is `<system application store>/<name>.app`, composed from the shared
@@ -60,31 +60,23 @@ pub const NETMAP_COMM: &str = NETMAP_APP_NAME;
 
 /// Name of the syscall a process ends through, as the audit `sc` field renders
 /// it. Read from the `abi-v1` table so a rename moves the witness with it
-/// instead of leaving a string here that matches nothing and times out.
-pub const EXIT_SYSCALL: &str = syscall_name(SyscallNumber::EXIT);
-
-/// The audited name of `number`, as the dispatcher's `sc` field renders it.
-///
-/// An unassigned number has no name; the empty string matches no record, so a
-/// gate built on one never latches (fail closed) rather than on the wrong call.
-const fn syscall_name(number: SyscallNumber) -> &'static str {
-    match tairix_abi::spec_for(number) {
-        Some(spec) => spec.name,
-        None => "",
-    }
-}
+/// instead of leaving a string here that matches nothing and times out. The
+/// table is dense, so a number's row is its index.
+pub const EXIT_SYSCALL: &str = SYSCALLS[SyscallNumber::EXIT.as_u16() as usize].name;
 
 #[cfg(test)]
 mod tests {
-    use super::{syscall_name, EXIT_SYSCALL};
-    use tairix_abi::SyscallNumber;
+    use super::EXIT_SYSCALL;
+    use tairix_abi::{spec_for, SyscallNumber};
 
-    /// The exit witness names the `abi-v1` table's own spelling, so a renamed
-    /// syscall fails this test rather than silently leaving the guest's gate
-    /// unmatchable and the run reported as a timeout.
+    /// The exit witness is the name the dispatcher's own lookup audits, so a
+    /// renamed syscall fails this test rather than silently leaving the
+    /// guest's gate unmatchable and the run reported as a timeout.
     #[test]
     fn the_exit_witness_names_the_syscall_the_dispatcher_audits() {
-        assert_eq!(EXIT_SYSCALL, syscall_name(SyscallNumber::EXIT));
-        assert!(!EXIT_SYSCALL.is_empty(), "exit is an assigned syscall");
+        assert_eq!(
+            Some(EXIT_SYSCALL),
+            spec_for(SyscallNumber::EXIT).map(|spec| spec.name)
+        );
     }
 }

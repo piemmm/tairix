@@ -2653,7 +2653,7 @@ struct DeviceState {
 
 impl DeviceState {
     /// Whether the node governs `interface`: its own, or one it claimed.
-    const fn governs(&self, interface: u8) -> bool {
+    fn governs(&self, interface: u8) -> bool {
         self.identity.interface_number == interface || self.streaming.claimed(interface)
     }
 

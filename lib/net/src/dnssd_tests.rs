@@ -531,3 +531,16 @@ fn builder_debug_does_not_print_the_octets() {
     assert!(!rendered.contains("secret"), "{rendered}");
     assert_eq!(rendered, "TxtBuilder(11 octets)");
 }
+
+/// Two spellings equal under the case-blind comparison hash alike, so a
+/// hashed set finds either.
+#[test]
+fn a_service_type_hashes_as_it_compares() {
+    use core::hash::BuildHasher;
+    let hash = |service: &ServiceType| tairix_hash::BuildFastHash::new().hash_one(service);
+    let upper = service(b"IPP", Transport::Tcp);
+    let lower = service(b"ipp", Transport::Tcp);
+    assert_eq!(upper, lower);
+    assert_eq!(hash(&upper), hash(&lower));
+    assert_ne!(hash(&lower), hash(&service(b"ipp", Transport::Udp)));
+}

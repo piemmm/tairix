@@ -18,19 +18,43 @@ use crate::socket::SocketService;
 /// not bytes on the wire.
 pub struct Caller {
     origin: Origin,
+    call: ServedCall,
+}
+
+/// Whether the caller in service of `ticket` on `endpoint` owns `port`: the
+/// kernel's `call_peer_port`, injected so a host test can answer for it.
+pub type PortProbe = fn(endpoint: u64, ticket: u64, port: u64) -> bool;
+
+/// The call a request arrived on, which the kernel answers about only while
+/// it is in service.
+#[derive(Copy, Clone)]
+pub struct ServedCall {
+    /// The endpoint the call was made on.
+    pub endpoint: u64,
+    /// The call's ticket.
+    pub ticket: u64,
+    /// Asks the kernel about the caller's ports.
+    pub probe: PortProbe,
 }
 
 impl Caller {
-    /// Wrap a kernel-attested [`Origin`] as the serving principal.
+    /// Wrap a kernel-attested [`Origin`] as the serving principal of `call`.
     #[must_use]
-    pub fn new(origin: Origin) -> Self {
-        Self { origin }
+    pub fn new(origin: Origin, call: ServedCall) -> Self {
+        Self { origin, call }
     }
 
     /// The caller's kernel-attested origin.
     #[must_use]
     pub fn origin(&self) -> &Origin {
         &self.origin
+    }
+
+    /// Whether the caller owns `port`, so what is posted there reaches only
+    /// a mailbox it drains itself.
+    #[must_use]
+    pub fn owns_port(&self, port: u64) -> bool {
+        (self.call.probe)(self.call.endpoint, self.call.ticket, port)
     }
 
     /// The caller's effective capability set, as the object-safe

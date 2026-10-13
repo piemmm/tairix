@@ -1,11 +1,12 @@
 //! TAIRiX `xHCI` USB host-controller driver (HCD) — shared library.
 //!
-//! The Pi 4 reaches its USB-A ports through a `VL805` `PCIe` `xHCI`
-//! controller (`plans/PI.md` P10). This crate is the loadable
-//! **host-controller driver**: a user-space `Run` binary (`src/main.rs`) that
-//! binds the discovered `usb,xhci` controller node, owns the one controller,
-//! enumerates the attached device, and serves that device's transfers to an
-//! autoloaded **class** driver (`drivers/input/usb_kbd`, …) over the
+//! This crate is the loadable **host-controller driver**: a user-space `Run`
+//! binary (`src/main.rs`) that binds a discovered xHCI controller — the
+//! `usb,xhci` node a bus driver publishes (the Pi 4's `VL805`, `plans/PI.md`
+//! P10) or a PCI function of the xHCI class on a host the kernel owns — owns
+//! the one controller, enumerates the attached device, and serves that
+//! device's transfers to an autoloaded **class** driver
+//! (`drivers/input/usb_hid`, `drivers/storage/usb_msd`, …) over the
 //! bus-agnostic URB transport seam — never touching a class driver, a board,
 //! or a bus by name (`plans/USB.md`).
 //!

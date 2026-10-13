@@ -229,7 +229,7 @@ impl CapabilityQuery for CapabilitySummary {
 /// rather than the [`PublisherId::NONE`] sentinel. A principal that is not
 /// running a verified bundle has **no** `AppIdentity` at all
 /// ([`Origin::app`] answers [`None`]), never a half-filled one.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct AppIdentity {
     bundle_id: BundleId,
     publisher: PublisherId,

@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes the cache's consistency oracle to the fuzz harness.
+test-support = []
+
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The neighbour cache's index: one map holding both the address lookup and
@@ -30,6 +34,8 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 workspace = true
 
 [dev-dependencies]
+# The crate itself with its test support, for the integration harnesses.
+tairix-net = { path = ".", version = "=0.0.0", features = ["test-support"] }
 # The in-tree fuzz harnesses draw their inputs through the shared
 # seed/budget seam: one place picks the per-run seed, logs it at the start
 # of the test, and bounds the smoke/soak loop. Test scaffolding only;

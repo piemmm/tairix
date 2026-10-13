@@ -3499,6 +3499,26 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::CALL_PEER_PORT,
+        name: "call_peer_port",
+        arg_count: 3,
+        args: [
+            // The endpoint id, the in-service ticket, then the port id.
+            AbiType::IpcEndpoint,
+            AbiType::Handle,
+            AbiType::IpcEndpoint,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // Gated like `call_peer_seat` by the endpoint's receive capability
+        // against its owner, in the handler. Not audited: a query whose
+        // decision is the server's to record.
+        required_capability: None,
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -3567,20 +3587,22 @@ const fn encode_table() -> [u8; ENCODED_TABLE_LEN] {
 ///
 /// Returns `None` if `number` is not assigned in `abi-v1` (either above
 /// the populated range or a reserved gap — there are no gaps today).
+///
+/// `number` is the caller's choice and indexes kernel memory, so the
+/// index is clamped without a branch as well as checked: a mispredicted
+/// check cannot read past the table speculatively (Spectre v1).
 #[must_use]
-pub const fn spec_for(number: SyscallNumber) -> Option<&'static SyscallSpec> {
+pub fn spec_for(number: SyscallNumber) -> Option<&'static SyscallSpec> {
     let raw = number.as_u16() as usize;
-    if raw < SYSCALLS.len() {
-        let spec = &SYSCALLS[raw];
-        // Defence in depth: SYSCALLS[i].number must equal i. The dedicated
-        // unit test below pins this invariant; the runtime check exists so
-        // a future re-shuffle that silently breaks the index cannot escape
-        // a non-test caller either.
-        if spec.number.as_u16() as usize == raw {
-            return Some(spec);
-        }
+    if raw >= SYSCALLS.len() {
+        return None;
     }
-    None
+    let spec = SYSCALLS.get(crate::nospec::index_within(raw, SYSCALLS.len()))?;
+    // Defence in depth: SYSCALLS[i].number must equal i. The dedicated
+    // unit test below pins this invariant; the runtime check exists so a
+    // future re-shuffle that silently breaks the index cannot escape a
+    // non-test caller either.
+    (spec.number.as_u16() as usize == raw).then_some(spec)
 }
 
 /// Borrow the canonical encoding as a byte slice.

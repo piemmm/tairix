@@ -1604,6 +1604,7 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-collections",
+ "tairix-discoveryd",
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
@@ -3332,6 +3333,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-hash",
  "tairix-inline",
+ "tairix-net",
  "tairix-util",
 ]
 

@@ -1239,9 +1239,10 @@ unsafe fn unit_table(rsdp: &acpi::Rsdp, log: &dyn Sink) -> UnitTable<'static> {
 }
 
 /// Probe every PCI segment the firmware describes and keep each as the
-/// kernel's own: every virtio-blk function (match-key-only) and every
-/// virtio-net, sound and input function (each with its resolved
-/// configuration windows and interrupt line) is emitted into `sink`.
+/// kernel's own: every virtio-blk function (match-key-only), and every
+/// virtio-net, sound and input function and xHCI and HD Audio controller
+/// (each with its resolved configuration windows and interrupt line), is
+/// emitted into `sink`.
 ///
 /// Configuration space is reached through ECAM (MMCONFIG) for every segment
 /// the firmware's `MCFG` describes, falling back to PCI **mechanism #1**
@@ -1977,7 +1978,7 @@ fn build_memory_map(data: &BootData<'_>) -> Result<(BootMemoryMap, u64), BootErr
     // Reserve the running kernel image (boot trampoline through the end of
     // .bss, which includes the bump heap) out of the firmware-usable RAM.
     //
-    // The loader (GRUB, or QEMU's PVH ELF loader) places this kernel in
+    // The loader (a multiboot2 loader, or QEMU's PVH ELF loader) places this kernel in
     // memory the boot map reports as usable (`EfiLoaderData`/
     // `EfiConventionalMemory` on the UEFI path, plain RAM on the PVH
     // path). Without this carve-out the frame allocator eventually hands

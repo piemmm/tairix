@@ -2,9 +2,9 @@
 //! request asking it, and what each holds on every link.
 //!
 //! A question's id is its slot, and a slot is reused only once the decoder
-//! has said it stopped asking: frames cross the pipe in order, so no answer
-//! to the question the slot held can follow that word, and an id names one
-//! question at a time. Ids therefore never run out.
+//! has said it stopped asking, or has been replaced: frames cross the pipe in
+//! order, so no answer to the question the slot held can follow that word,
+//! and an id names one question at a time. Ids therefore never run out.
 //!
 //! What a question holds is kept as keyed fingerprints of its answers, which
 //! is all the front needs to hold the decoder to its word: an answer is added
@@ -15,42 +15,84 @@
 //! request that joins a question already asked is brought up to date by a
 //! replay from the decoder rather than from a second copy here.
 //!
+//! A question's requests are kept in runs — told every edge, owed the replay
+//! in flight, owed the next replay, and muted once they take nothing more —
+//! so an edge is offered to the live run alone, a replayed answer to the run
+//! owed it, and requests joining while a replay is owed share it. An answer
+//! renewed again within a second of its last telling is not told again.
+//!
 //! An answer finds its question, a request its question by name, and the
-//! front the next question to ask or stop, without a scan of the table.
+//! front the next question to ask, stop or replay, without a scan of the
+//! table. Only a link edge and a replaced decoder, both rare, visit every
+//! question.
 
-use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::hash::{Hash, Hasher};
+use core::ops::Range;
 
 use tairix_abi::discovery_ipc::{Answer, Change, Entry};
 use tairix_abi::net_ipc::{address_parts, IF_NAME_LEN};
 use tairix_abi::Errno;
-use tairix_collections::{HashMap, HashSet};
+use tairix_collections::HashMap;
 use tairix_hash::{BuildFastHash, HashSeed, SipHash13};
-use tairix_inline::{IntrusiveList, Link, LinkStore};
+use tairix_inline::{ArrayVec, IntrusiveList, Link, LinkStore};
 use tairix_net::dns::Name;
-use tairix_net::mdns::{MAX_QUESTIONS, MAX_RECORDS};
+use tairix_net::mdns::{MAX_QUESTIONS, MAX_RECORDS, PER_RECORD_INTERVAL_NS};
 
 use crate::wire::Form;
 
-/// Where one request's view of a question stands.
+/// The question slots an account is sure of however busy the table: a
+/// sixteenth of what an engine asks at once.
+pub const ACCOUNT_FLOOR: usize = MAX_QUESTIONS / 16;
+
+/// The slots kept for accounts below their floor. One at or past it raises a
+/// fresh question only while more than this many remain free, so accounts
+/// asking all they may can together fill no more than three quarters of the
+/// table, and four floors' worth is always left for the rest.
+pub const FLOOR_RESERVE: usize = 4 * ACCOUNT_FLOOR;
+
+const _: () = assert!(FLOOR_RESERVE < MAX_QUESTIONS);
+
+/// Requests one session may have asking one question: two, so a replacement
+/// can start before the request it replaces stops, and no more, since each
+/// further copy costs every answer's fan-out and buys nothing.
+pub const SESSION_COPIES: usize = 2;
+
+/// What a subscription costs the decoder, for the caller to charge to the
+/// account asking.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Replay {
-    /// It is told every edge as it arrives.
-    Live,
-    /// It joined after the decoder was asked, and is owed what the question
-    /// already holds; the replay has not been sent.
-    Wanted(u32),
-    /// The replay was sent. Until it ends, a live edge is already reflected
-    /// in what it will be told, so it is told nothing else.
-    Sent(u32),
+pub enum Spend {
+    /// A question no request asks yet, queried on every link.
+    Ask,
+    /// A replay of everything a question already asked holds.
+    Replay,
 }
 
-impl Replay {
-    const fn token(self) -> Option<u32> {
+/// Where in its question's subscribers a request sits, which says what it is
+/// told.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Run {
+    /// Told every edge as it arrives.
+    Live,
+    /// Owed the replay in flight. Until it ends, a live edge is already
+    /// reflected in what the replay will tell, so it is told nothing else.
+    Sent,
+    /// Joined after the decoder was asked, and owed the next replay.
+    Wanted,
+    /// Its request lost answers and takes nothing more, so nothing is offered.
+    Muted,
+}
+
+impl Run {
+    /// The runs in order; each one's end is the next one's start.
+    const ORDER: [Self; 4] = [Self::Live, Self::Sent, Self::Wanted, Self::Muted];
+
+    const fn rank(self) -> usize {
         match self {
-            Self::Live => None,
-            Self::Wanted(token) | Self::Sent(token) => Some(token),
+            Self::Live => 0,
+            Self::Sent => 1,
+            Self::Wanted => 2,
+            Self::Muted => 3,
         }
     }
 }
@@ -62,28 +104,138 @@ struct Subscriber {
     request: u32,
     /// The account the request is charged to.
     account: u32,
-    replay: Replay,
 }
 
-/// Whose replay a token is: the question it replays and the request owed it.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct Owed {
-    question: u32,
-    session: u32,
-    request: u32,
+/// Where each subscription sits in its question's subscribers, by
+/// `(question, session)`: that session's requests asking it, with each one's
+/// index. Bounded by [`SESSION_COPIES`], which it also enforces.
+type Places = HashMap<(u32, u32), ArrayVec<(u32, usize), SESSION_COPIES>, BuildFastHash>;
+
+/// Record that `subscriber` of question `question` now sits at `at`.
+fn place(places: &mut Places, question: u32, subscriber: &Subscriber, at: usize) {
+    if let Some(copy) = places
+        .get_mut(&(question, subscriber.session))
+        .and_then(|copies| {
+            copies
+                .iter_mut()
+                .find(|(request, _)| *request == subscriber.request)
+        })
+    {
+        copy.1 = at;
+    }
 }
 
-/// What a question holds on one link.
+/// A question's subscribers, kept in the order of [`Run::ORDER`].
+struct Subscribers {
+    list: Vec<Subscriber>,
+    /// Where the live, sent and wanted runs end; the muted run fills the rest.
+    ends: [usize; 3],
+}
+
+impl Subscribers {
+    const fn new() -> Self {
+        Self {
+            list: Vec::new(),
+            ends: [0; 3],
+        }
+    }
+
+    fn range(&self, run: Run) -> Range<usize> {
+        let rank = run.rank();
+        let start = rank.checked_sub(1).map_or(0, |before| self.ends[before]);
+        let end = self.ends.get(rank).copied().unwrap_or(self.list.len());
+        start..end
+    }
+
+    fn run_of(&self, at: usize) -> Run {
+        Run::ORDER
+            .into_iter()
+            .find(|&run| self.range(run).contains(&at))
+            .unwrap_or(Run::Muted)
+    }
+
+    fn swap(&mut self, places: &mut Places, question: u32, a: usize, b: usize) {
+        if a == b {
+            return;
+        }
+        self.list.swap(a, b);
+        place(places, question, &self.list[a], a);
+        place(places, question, &self.list[b], b);
+    }
+
+    /// Add `subscriber` at the end of `run`, returning where it sits. Room
+    /// for it was reserved.
+    fn insert(
+        &mut self,
+        places: &mut Places,
+        question: u32,
+        subscriber: Subscriber,
+        run: Run,
+    ) -> usize {
+        self.list.push(subscriber);
+        let mut at = self.list.len() - 1;
+        for boundary in (run.rank()..3).rev() {
+            let first_after = self.ends[boundary];
+            self.swap(places, question, at, first_after);
+            at = first_after;
+            self.ends[boundary] += 1;
+        }
+        at
+    }
+
+    /// Move the subscriber at `at` to the start of the later run `to`,
+    /// returning where it now sits. Only places at or after `at` change.
+    fn demote(&mut self, places: &mut Places, question: u32, mut at: usize, to: Run) -> usize {
+        for boundary in self.run_of(at).rank()..to.rank() {
+            let last = self.ends[boundary] - 1;
+            self.swap(places, question, at, last);
+            at = last;
+            self.ends[boundary] -= 1;
+        }
+        at
+    }
+
+    /// Take out the subscriber at `at`.
+    fn remove(&mut self, places: &mut Places, question: u32, at: usize) -> Option<Subscriber> {
+        let at = self.demote(places, question, at, Run::Muted);
+        let last = self.list.len().checked_sub(1)?;
+        self.swap(places, question, at, last);
+        self.list.pop()
+    }
+
+    /// Offer every subscriber of `run` to `each`, muting the ones it says
+    /// take nothing more.
+    fn offer(
+        &mut self,
+        places: &mut Places,
+        question: u32,
+        run: Run,
+        each: &mut dyn FnMut(u32, u32) -> bool,
+    ) {
+        // Backwards, so muting one moves only places already offered.
+        for at in self.range(run).rev() {
+            let subscriber = self.list[at];
+            if !each(subscriber.session, subscriber.request) {
+                self.demote(places, question, at, Run::Muted);
+            }
+        }
+    }
+}
+
+/// What a question holds on one link: each answer's fingerprint, with when it
+/// was last told.
 struct Held {
     interface: [u8; IF_NAME_LEN],
-    answers: HashSet<u64, BuildFastHash>,
+    answers: HashMap<u64, u64, BuildFastHash>,
 }
 
 /// One question a request asks.
 struct Question {
     form: Form,
     name: Name,
-    subscribers: Vec<Subscriber>,
+    subscribers: Subscribers,
+    /// The token of the replay in flight, while one is.
+    sent: Option<u32>,
     held: Vec<Held>,
     /// Whether the current decoder has been asked it.
     asked: bool,
@@ -115,6 +267,9 @@ struct Slot {
     ask_link: Link,
     /// On the list of stops to send, while stopping and not yet sent.
     stop_link: Link,
+    /// On the list of replays to send, while requests want one and none is
+    /// in flight.
+    replay_link: Link,
 }
 
 impl Slot {
@@ -124,6 +279,7 @@ impl Slot {
             name_link: Link::UNLINKED,
             ask_link: Link::UNLINKED,
             stop_link: Link::UNLINKED,
+            replay_link: Link::UNLINKED,
         }
     }
 
@@ -155,15 +311,18 @@ macro_rules! link_view {
 link_view!(NameView, name_link);
 link_view!(AskView, ask_link);
 link_view!(StopView, stop_link);
+link_view!(ReplayView, replay_link);
 
 /// What the front does with one answer from its decoder.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Verdict {
-    /// Tell every request asking this question that is not owed a replay
-    /// ([`Questions::told`]).
+    /// Tell the requests asking this question that are live
+    /// ([`Questions::tell`]).
     Tell(u32),
-    /// Tell this one request: `(session, request)`.
-    TellOne(u32, u32),
+    /// Tell the requests owed this question's replay in flight.
+    TellReplayed(u32),
+    /// Nothing to tell: a renewal told less than a second ago.
+    Absorbed,
     /// Nothing to tell: it crossed a stop, a flush, or a link edge in flight.
     Stale,
     /// No honest decoder sends it.
@@ -183,15 +342,10 @@ pub struct Questions {
     unasked: IntrusiveList,
     /// Stopping questions the current decoder has not been told of.
     stops: IntrusiveList,
-    /// Replays owed, oldest first, as `(question, token)`; an entry whose
-    /// token has gone is skipped.
-    replays: VecDeque<(u32, u32)>,
-    /// Whose replay each live token is.
-    tokens: HashMap<u32, Owed, BuildFastHash>,
-    /// Each subscription's place in its question's subscribers, by
-    /// `(question, session, request)`, so neither leaving nor a replayed
-    /// answer walks a question every request may share.
-    positions: HashMap<(u32, u32, u32), u32, BuildFastHash>,
+    /// Questions owed a replay and with none in flight, oldest first.
+    replays: IntrusiveList,
+    places: Places,
+    /// The token the next replay is sent under.
     next_token: u32,
     /// Answers held on each link, across every question.
     held_on: Vec<([u8; IF_NAME_LEN], usize)>,
@@ -212,14 +366,114 @@ impl Questions {
             by_name: HashMap::with_hasher(BuildFastHash::new()),
             unasked: IntrusiveList::new(),
             stops: IntrusiveList::new(),
-            replays: VecDeque::new(),
-            tokens: HashMap::with_hasher(BuildFastHash::new()),
-            positions: HashMap::with_hasher(BuildFastHash::new()),
+            replays: IntrusiveList::new(),
+            places: HashMap::with_hasher(BuildFastHash::new()),
             next_token: 0,
             held_on: Vec::new(),
             charges: HashMap::with_hasher(BuildFastHash::new()),
             key,
         }
+    }
+
+    /// Panic unless the table's counts, runs and indexes agree with its
+    /// slots: the oracle the fuzz harness holds the table to after every
+    /// step.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn assert_consistent(&self) {
+        use alloc::collections::{BTreeMap, BTreeSet};
+        let mut in_use = 0;
+        let mut subscriptions = 0;
+        let mut charges: BTreeMap<u32, usize> = BTreeMap::new();
+        let free: BTreeSet<u32> = self.free.iter().copied().collect();
+        assert_eq!(free.len(), self.free.len(), "a free id listed twice");
+        for (index, slot) in self.slots.iter().enumerate() {
+            let id = u32::try_from(index).expect("ids fit");
+            match &slot.state {
+                State::Free => assert!(free.contains(&id), "free slot {id} unlisted"),
+                State::Stopping { left_by, .. } => {
+                    in_use += 1;
+                    *charges.entry(*left_by).or_default() += 1;
+                }
+                State::Live(question) => {
+                    in_use += 1;
+                    let runs = &question.subscribers;
+                    assert!(
+                        runs.ends[0] <= runs.ends[1]
+                            && runs.ends[1] <= runs.ends[2]
+                            && runs.ends[2] <= runs.list.len(),
+                        "runs out of order"
+                    );
+                    assert!(
+                        question.sent.is_some() || runs.range(Run::Sent).is_empty(),
+                        "requests owed a replay never sent"
+                    );
+                    assert!(
+                        question.asked || runs.range(Run::Live).len() == runs.ends[2],
+                        "a replay owed on a question never asked"
+                    );
+                    let wants = question.asked
+                        && question.sent.is_none()
+                        && !runs.range(Run::Wanted).is_empty();
+                    assert_eq!(
+                        slot.replay_link.is_linked(),
+                        wants,
+                        "replay list out of step"
+                    );
+                    for (at, subscriber) in runs.list.iter().enumerate() {
+                        subscriptions += 1;
+                        *charges.entry(subscriber.account).or_default() += 1;
+                        assert_eq!(
+                            self.places
+                                .get(&(id, subscriber.session))
+                                .and_then(|copies| {
+                                    copies
+                                        .iter()
+                                        .find(|(request, _)| *request == subscriber.request)
+                                })
+                                .map(|&(_, place)| place),
+                            Some(at),
+                            "a subscription out of place",
+                        );
+                    }
+                }
+            }
+            if !matches!(slot.state, State::Live(_)) {
+                assert!(
+                    !slot.replay_link.is_linked(),
+                    "a replay owed on no question"
+                );
+            }
+            if !matches!(slot.state, State::Free) {
+                assert!(!free.contains(&id), "live slot {id} listed free");
+            }
+        }
+        assert_eq!(self.in_use, in_use);
+        assert!(in_use <= MAX_QUESTIONS);
+        assert_eq!(free.len() + in_use, self.slots.len());
+        assert_eq!(
+            self.places.values().map(ArrayVec::len).sum::<usize>(),
+            subscriptions
+        );
+        assert!(self.places.values().all(|copies| !copies.is_empty()));
+        let recorded: BTreeMap<u32, usize> = self.charges.iter().map(|(&a, &n)| (a, n)).collect();
+        assert_eq!(
+            recorded, charges,
+            "charges disagree with what accounts hold"
+        );
+    }
+
+    /// Panic unless the table holds nothing: no question live or stopping,
+    /// and no subscription, charge, replay or held answer left behind.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn assert_idle(&self) {
+        self.assert_consistent();
+        assert_eq!(self.in_use, 0, "a question outlived every request");
+        assert!(self.by_name.is_empty() && self.unasked.is_empty() && self.stops.is_empty());
+        assert!(self.charges.is_empty() && self.places.is_empty() && self.replays.is_empty());
+        assert!(
+            self.held_on.iter().all(|&(_, total)| total == 0),
+            "answers held for no question"
+        );
     }
 
     /// The slots `account` keeps: its subscriptions and the questions it left
@@ -230,13 +484,20 @@ impl Questions {
     }
 
     /// Add request `(session, request)` of `account` to the question of `form`
-    /// about `name`, asking it if no request yet does, and return its id.
+    /// about `name`, asking it if no request yet does, and return its id. A
+    /// request joining a question already asked is owed a replay, sharing one
+    /// owed already. What it costs the decoder — a fresh question, or a fresh
+    /// replay — is had only when `may` allows it, asked last so a charge is
+    /// only ever made for a subscription that is.
     ///
     /// # Errors
     ///
     /// [`Errno::LimitExceeded`] when a new question would pass the most an
-    /// engine asks at once, and [`Errno::OutOfMemory`] when a table cannot
-    /// grow.
+    /// engine asks at once, or take one of the [`FLOOR_RESERVE`] for an
+    /// account at its [`ACCOUNT_FLOOR`] already, or the session already has
+    /// [`SESSION_COPIES`] requests asking it; [`Errno::AlreadyExists`] when this request asks it
+    /// already; [`Errno::Busy`] when `may` refuses what it costs; and
+    /// [`Errno::OutOfMemory`] when a table cannot grow.
     pub fn subscribe(
         &mut self,
         form: Form,
@@ -244,25 +505,28 @@ impl Questions {
         session: u32,
         request: u32,
         account: u32,
+        may: &mut dyn FnMut(Spend) -> bool,
     ) -> Result<u32, Errno> {
         if !self.charges.contains_key(&account) && self.charges.try_reserve(1).is_err() {
             return Err(Errno::OutOfMemory);
         }
         let hash = self.name_hash(form, &name);
         if let Some(id) = self.find(hash, form, &name) {
-            self.join(id, session, request, account)?;
+            self.join(id, session, request, account, may)?;
             self.charge(account);
             return Ok(id);
         }
-        if self.in_use >= MAX_QUESTIONS {
+        let reserved =
+            self.charged(account) >= ACCOUNT_FLOOR && self.in_use + FLOOR_RESERVE >= MAX_QUESTIONS;
+        if self.in_use >= MAX_QUESTIONS || reserved {
             return Err(Errno::LimitExceeded);
         }
-        let mut subscribers = Vec::new();
+        let mut subscribers = Subscribers::new();
         let reused = self.free.last().copied();
         // A new slot reserves its own place on the free stack, so releasing
         // it later cannot fail and strand its id.
-        let room = subscribers.try_reserve(1).is_ok()
-            && self.positions.try_reserve(1).is_ok()
+        let room = subscribers.list.try_reserve(1).is_ok()
+            && self.places.try_reserve(1).is_ok()
             && self.by_name.try_reserve(1).is_ok()
             && (reused.is_some()
                 || (self.slots.try_reserve(1).is_ok()
@@ -270,24 +534,30 @@ impl Questions {
         if !room {
             return Err(Errno::OutOfMemory);
         }
-        let id = if let Some(id) = reused {
+        let id = match reused {
+            Some(id) => id,
+            None => u32::try_from(self.slots.len()).map_err(|_| Errno::LimitExceeded)?,
+        };
+        if !may(Spend::Ask) {
+            return Err(Errno::Busy);
+        }
+        if reused.is_some() {
             self.free.pop();
-            id
         } else {
             self.slots.push(Slot::free());
-            u32::try_from(self.slots.len() - 1).map_err(|_| Errno::LimitExceeded)?
-        };
+        }
         let index = id as usize;
-        subscribers.push(Subscriber {
+        let subscriber = Subscriber {
             session,
             request,
             account,
-            replay: Replay::Live,
-        });
+        };
+        let at = subscribers.insert(&mut self.places, id, subscriber, Run::Live);
         self.slots[index].state = State::Live(Question {
             form,
             name,
             subscribers,
+            sent: None,
             held: Vec::new(),
             asked: false,
         });
@@ -300,7 +570,9 @@ impl Questions {
             let _ = chain.push_back(&mut NameView(&mut self.slots), index);
         }
         let _ = self.unasked.push_back(&mut AskView(&mut self.slots), index);
-        let _ = self.positions.try_insert((id, session, request), 0);
+        let mut copies = ArrayVec::new();
+        let _ = copies.try_push((request, at));
+        let _ = self.places.try_insert((id, session), copies);
         self.charge(account);
         Ok(id)
     }
@@ -309,31 +581,49 @@ impl Questions {
     /// question when no request is left asking it.
     pub fn unsubscribe(&mut self, id: u32, session: u32, request: u32) {
         let index = id as usize;
-        let Some(State::Live(question)) = self.slots.get_mut(index).map(|slot| &mut slot.state)
-        else {
+        let Self {
+            slots,
+            places,
+            replays,
+            ..
+        } = self;
+        let Some(State::Live(question)) = slots.get_mut(index).map(|slot| &mut slot.state) else {
             return;
         };
-        let Some(place) = self.positions.remove(&(id, session, request)) else {
+        let Some((copy, at)) = places.get(&(id, session)).and_then(|copies| {
+            copies
+                .iter()
+                .enumerate()
+                .find(|(_, held)| held.0 == request)
+                .map(|(copy, held)| (copy, held.1))
+        }) else {
             return;
         };
-        let at = place as usize;
         if !question
             .subscribers
+            .list
             .get(at)
             .is_some_and(|held| held.session == session && held.request == request)
         {
             return;
         }
-        let gone = question.subscribers.swap_remove(at);
-        if let Some(moved) = question.subscribers.get(at) {
-            if let Some(moved_to) = self.positions.get_mut(&(id, moved.session, moved.request)) {
-                *moved_to = place;
+        let Some(gone) = question.subscribers.remove(places, id, at) else {
+            return;
+        };
+        if let Some(copies) = places.get_mut(&(id, session)) {
+            copies.swap_remove(copy);
+            if copies.is_empty() {
+                places.remove(&(id, session));
             }
         }
-        if let Some(token) = gone.replay.token() {
-            self.tokens.remove(&token);
+        let still_wanted = !question.subscribers.range(Run::Wanted).is_empty();
+        if !still_wanted && slots[index].replay_link.is_linked() {
+            let _ = replays.unlink(&mut ReplayView(slots), index);
         }
-        if !question.subscribers.is_empty() {
+        let Some(State::Live(question)) = self.slots.get(index).map(|slot| &slot.state) else {
+            return;
+        };
+        if !question.subscribers.list.is_empty() {
             self.uncharge(gone.account);
             return;
         }
@@ -420,54 +710,73 @@ impl Questions {
 
     /// The next replay the decoder should be asked for, as
     /// `(question, token)`, if any.
-    pub fn next_replay(&mut self) -> Option<(u32, u32)> {
-        while let Some(&(id, token)) = self.replays.front() {
-            if self.tokens.get(&token).map(|owed| owed.question) == Some(id) {
-                return Some((id, token));
-            }
-            self.replays.pop_front();
-        }
-        None
+    #[must_use]
+    pub fn next_replay(&self) -> Option<(u32, u32)> {
+        let index = self.replays.front()?;
+        Some((u32::try_from(index).ok()?, self.next_token))
     }
 
-    /// The replay `token` was sent.
-    pub fn replay_sent(&mut self, token: u32) {
+    /// The replay of `id` was sent under `token`: the requests that wanted it
+    /// are owed it now, and later joiners want the next.
+    pub fn replay_sent(&mut self, id: u32, token: u32) {
+        let index = id as usize;
         if self
-            .replays
-            .front()
-            .is_some_and(|&(_, front)| front == token)
+            .slots
+            .get(index)
+            .is_some_and(|slot| slot.replay_link.is_linked())
         {
-            self.replays.pop_front();
+            let _ = self.replays.unlink(&mut ReplayView(&mut self.slots), index);
         }
-        if let Some(subscriber) = self.subscriber_mut(token) {
-            subscriber.replay = Replay::Sent(token);
+        let Some(State::Live(question)) = self.slots.get_mut(index).map(|slot| &mut slot.state)
+        else {
+            return;
+        };
+        let runs = &mut question.subscribers;
+        runs.ends[1] = runs.ends[2];
+        question.sent = Some(token);
+        self.next_token = token.wrapping_add(1);
+    }
+
+    /// The replay `token` of `id` has ended: from here the requests it was
+    /// owed to are told every edge, and the next replay, if wanted, is due.
+    pub fn replayed(&mut self, id: u32, token: u32) {
+        let index = id as usize;
+        let Some(State::Live(question)) = self.slots.get_mut(index).map(|slot| &mut slot.state)
+        else {
+            return;
+        };
+        if question.sent != Some(token) {
+            return;
+        }
+        question.sent = None;
+        let runs = &mut question.subscribers;
+        runs.ends[0] = runs.ends[1];
+        if !runs.range(Run::Wanted).is_empty() {
+            let _ = self
+                .replays
+                .push_back(&mut ReplayView(&mut self.slots), index);
         }
     }
 
-    /// The replay `token` has ended: from here its request is told every edge.
-    pub fn replayed(&mut self, token: u32) {
-        if let Some(subscriber) = self.subscriber_mut(token) {
-            subscriber.replay = Replay::Live;
+    /// Tell `each` request `verdict` names, as `(session, request)`. One `each`
+    /// says takes nothing more is muted, and offered nothing after.
+    pub fn tell(&mut self, verdict: Verdict, each: &mut dyn FnMut(u32, u32) -> bool) {
+        let (id, run) = match verdict {
+            Verdict::Tell(id) => (id, Run::Live),
+            Verdict::TellReplayed(id) => (id, Run::Sent),
+            Verdict::Absorbed | Verdict::Stale | Verdict::Lie => return,
+        };
+        let Self { slots, places, .. } = self;
+        if let Some(State::Live(question)) = slots.get_mut(id as usize).map(|slot| &mut slot.state)
+        {
+            question.subscribers.offer(places, id, run, each);
         }
-        self.tokens.remove(&token);
     }
 
-    /// The requests [`Verdict::Tell`] names for `id`: every one asking it
-    /// that is not owed a replay.
-    pub fn told(&self, id: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
-        self.slots
-            .get(id as usize)
-            .and_then(Slot::live)
-            .into_iter()
-            .flat_map(|question| question.subscribers.iter())
-            .filter(|subscriber| subscriber.replay == Replay::Live)
-            .map(|subscriber| (subscriber.session, subscriber.request))
-    }
-
-    /// Judge one answer the decoder sent. `linked` says whether the decoder
-    /// has carried out the edge that brought `interface` up and not been told
-    /// it went down since.
-    pub fn on_answer(&mut self, entry: &Entry<'_>, linked: bool) -> Verdict {
+    /// Judge one answer the decoder sent at `now`. `linked` says whether the
+    /// decoder has carried out the edge that brought `interface` up and not
+    /// been told it went down since.
+    pub fn on_answer(&mut self, entry: &Entry<'_>, linked: bool, now: u64) -> Verdict {
         let Entry::Answer {
             request,
             interface,
@@ -501,14 +810,14 @@ impl Questions {
             }
             question.held.push(Held {
                 interface: *interface,
-                answers: HashSet::with_hasher(BuildFastHash::new()),
+                answers: HashMap::with_hasher(BuildFastHash::new()),
             });
             question.held.len() - 1
         };
         let held = &mut question.held[at];
         match change {
             Change::Added => {
-                if held.answers.contains(&print) {
+                if held.answers.contains_key(&print) {
                     // A duplicate addition: an edge that crossed a flush the
                     // front made.
                     return Verdict::Stale;
@@ -520,18 +829,29 @@ impl Questions {
                     Some(total) if *total >= MAX_RECORDS => return Verdict::Lie,
                     Some(total) => total,
                 };
-                if !held.answers.try_insert(print).is_ok_and(|added| added) {
+                if !held
+                    .answers
+                    .try_insert(print, now)
+                    .is_ok_and(|was| was.is_none())
+                {
                     return Verdict::Stale;
                 }
                 *total += 1;
             }
             Change::Refreshed => {
-                if !held.answers.contains(&print) {
+                let Some(told) = held.answers.get_mut(&print) else {
                     return Verdict::Stale;
+                };
+                // An honest responder repeats a record at most this often,
+                // so a renewal sooner is a copy, and saying it again tells a
+                // request nothing.
+                if now < told.saturating_add(PER_RECORD_INTERVAL_NS) {
+                    return Verdict::Absorbed;
                 }
+                *told = now;
             }
             Change::Retired => {
-                if !held.answers.remove(&print) {
+                if held.answers.remove(&print).is_none() {
                     return Verdict::Stale;
                 }
                 if let Some(total) = total {
@@ -545,8 +865,8 @@ impl Questions {
         Verdict::Tell(id)
     }
 
-    /// Judge one replayed answer for the replay `token`: only a request still
-    /// owed it is told, and only what the question holds.
+    /// Judge one answer the replay `token` of the question it names replayed:
+    /// only what the question holds is told, to the requests owed the replay.
     #[must_use]
     pub fn on_held(&self, token: u32, entry: &Entry<'_>) -> Verdict {
         let Entry::Answer {
@@ -567,28 +887,19 @@ impl Questions {
         let holds = question
             .held
             .iter()
-            .any(|held| held.interface == *interface && held.answers.contains(&print));
-        let owed = self
-            .tokens
-            .get(&token)
-            .filter(|owed| owed.question == *request)
-            .and_then(|owed| {
-                let at = *self
-                    .positions
-                    .get(&(owed.question, owed.session, owed.request))?;
-                question.subscribers.get(at as usize)
-            })
-            .filter(|subscriber| subscriber.replay == Replay::Sent(token));
-        match (holds, owed) {
-            (true, Some(subscriber)) => Verdict::TellOne(subscriber.session, subscriber.request),
-            _ => Verdict::Stale,
+            .any(|held| held.interface == *interface && held.answers.contains_key(&print));
+        if holds && question.sent == Some(token) {
+            Verdict::TellReplayed(*request)
+        } else {
+            Verdict::Stale
         }
     }
 
-    /// Forget everything held on `interface`, returning each request that
-    /// held something there, once.
-    pub fn flush_link(&mut self, interface: [u8; IF_NAME_LEN]) -> Vec<(u32, u32)> {
-        let mut flushed = Vec::new();
+    /// The link `interface` went down: every question forgets what it held
+    /// there, naming through `each` every request that held something and
+    /// still takes answers — once per question it asks, so a request asking
+    /// two may be named twice.
+    pub fn flush_link(&mut self, interface: [u8; IF_NAME_LEN], each: &mut dyn FnMut(u32, u32)) {
         if let Some(at) = self.held_on.iter().position(|(name, _)| *name == interface) {
             self.held_on.swap_remove(at);
         }
@@ -604,24 +915,20 @@ impl Questions {
                 continue;
             };
             question.held.swap_remove(at);
-            for subscriber in &question.subscribers {
-                note(&mut flushed, (subscriber.session, subscriber.request));
+            let runs = &question.subscribers;
+            for subscriber in &runs.list[..runs.ends[2]] {
+                each(subscriber.session, subscriber.request);
             }
         }
-        flushed.sort_unstable();
-        flushed.dedup();
-        flushed
     }
 
     /// A new decoder knows nothing: every question is to be asked again,
     /// every replay is void — the new decoder tells every request everything
-    /// afresh — every stop is moot, and everything held is forgotten. Returns
-    /// each request and link that held something, once.
-    pub fn forget_decoder(&mut self) -> Vec<(u32, u32, [u8; IF_NAME_LEN])> {
-        self.tokens.clear();
-        self.replays.clear();
-        self.held_on.clear();
-        let mut flushed = Vec::new();
+    /// afresh — every stop is moot, and everything held is forgotten, link by
+    /// link, each request that held something named through `each` as
+    /// [`Self::flush_link`] names it.
+    pub fn forget_decoder(&mut self, each: &mut dyn FnMut(u32, u32, [u8; IF_NAME_LEN])) {
+        self.replays.clear(&mut ReplayView(&mut self.slots));
         for index in 0..self.slots.len() {
             match &mut self.slots[index].state {
                 State::Free => {}
@@ -634,17 +941,9 @@ impl Questions {
                     self.uncharge(left_by);
                 }
                 State::Live(question) => {
-                    for subscriber in &mut question.subscribers {
-                        subscriber.replay = Replay::Live;
-                    }
-                    for held in question.held.drain(..) {
-                        for subscriber in &question.subscribers {
-                            note(
-                                &mut flushed,
-                                (subscriber.session, subscriber.request, held.interface),
-                            );
-                        }
-                    }
+                    let runs = &mut question.subscribers;
+                    runs.ends = [runs.ends[2]; 3];
+                    question.sent = None;
                     if question.asked {
                         question.asked = false;
                         let _ = self.unasked.push_back(&mut AskView(&mut self.slots), index);
@@ -652,9 +951,13 @@ impl Questions {
                 }
             }
         }
-        flushed.sort_unstable();
-        flushed.dedup();
-        flushed
+        // Every link anything is held on is counted there, so this forgets it
+        // all.
+        while let Some(&(interface, _)) = self.held_on.last() {
+            self.flush_link(interface, &mut |session, request| {
+                each(session, request, interface);
+            });
+        }
     }
 
     /// Whether no question is live or still being stopped.
@@ -663,52 +966,69 @@ impl Questions {
         self.in_use == 0
     }
 
-    /// Add a request to the live question `id`, owing it a replay when the
-    /// decoder has been asked already.
-    fn join(&mut self, id: u32, session: u32, request: u32, account: u32) -> Result<(), Errno> {
-        let Some(State::Live(question)) =
-            self.slots.get_mut(id as usize).map(|slot| &mut slot.state)
-        else {
+    /// Add a request to the live question `id`: told every edge when the
+    /// decoder has not been asked it yet, and otherwise owed a replay.
+    fn join(
+        &mut self,
+        id: u32,
+        session: u32,
+        request: u32,
+        account: u32,
+        may: &mut dyn FnMut(Spend) -> bool,
+    ) -> Result<(), Errno> {
+        let index = id as usize;
+        let Self {
+            slots,
+            places,
+            replays,
+            ..
+        } = self;
+        let Some(State::Live(question)) = slots.get_mut(index).map(|slot| &mut slot.state) else {
             return Err(Errno::NotFound);
         };
+        let held = places.get(&(id, session));
+        if held.is_some_and(|copies| copies.iter().any(|&(asking, _)| asking == request)) {
+            return Err(Errno::AlreadyExists);
+        }
+        let copies = held.map_or(0, ArrayVec::len);
+        if copies >= SESSION_COPIES {
+            return Err(Errno::LimitExceeded);
+        }
         question
             .subscribers
+            .list
             .try_reserve(1)
             .map_err(|_| Errno::OutOfMemory)?;
-        self.positions
-            .try_reserve(1)
-            .map_err(|_| Errno::OutOfMemory)?;
-        let replay = if question.asked {
-            if self.replays.len() >= 2 * self.tokens.len() + 64 {
-                let tokens = &self.tokens;
-                self.replays.retain(|(owner, token)| {
-                    tokens.get(token).map(|owed| owed.question) == Some(*owner)
-                });
-            }
-            if self.replays.try_reserve(1).is_err() || self.tokens.try_reserve(1).is_err() {
-                return Err(Errno::OutOfMemory);
-            }
-            let tokens = &self.tokens;
-            let token = fresh_token(&mut self.next_token, |token| tokens.contains_key(&token));
-            let owed = Owed {
-                question: id,
-                session,
-                request,
-            };
-            let _ = self.tokens.try_insert(token, owed);
-            self.replays.push_back((id, token));
-            Replay::Wanted(token)
+        if copies == 0 {
+            places.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        }
+        let run = if question.asked {
+            Run::Wanted
         } else {
-            Replay::Live
+            Run::Live
         };
-        let at = u32::try_from(question.subscribers.len()).map_err(|_| Errno::LimitExceeded)?;
-        question.subscribers.push(Subscriber {
+        let fresh_replay = run == Run::Wanted && question.subscribers.range(Run::Wanted).is_empty();
+        // Last, so a replay is only ever charged for a join that happens.
+        if fresh_replay && !may(Spend::Replay) {
+            return Err(Errno::Busy);
+        }
+        let subscriber = Subscriber {
             session,
             request,
             account,
-            replay,
-        });
-        let _ = self.positions.try_insert((id, session, request), at);
+        };
+        let at = question.subscribers.insert(places, id, subscriber, run);
+        let due = fresh_replay && question.sent.is_none();
+        if let Some(copies) = places.get_mut(&(id, session)) {
+            let _ = copies.try_push((request, at));
+        } else {
+            let mut copies = ArrayVec::new();
+            let _ = copies.try_push((request, at));
+            let _ = places.try_insert((id, session), copies);
+        }
+        if due {
+            let _ = replays.push_back(&mut ReplayView(slots), index);
+        }
         Ok(())
     }
 
@@ -736,21 +1056,6 @@ impl Questions {
         hash.finish()
     }
 
-    /// The subscriber owed replay `token`.
-    fn subscriber_mut(&mut self, token: u32) -> Option<&mut Subscriber> {
-        let owed = *self.tokens.get(&token)?;
-        let at = *self
-            .positions
-            .get(&(owed.question, owed.session, owed.request))?;
-        let State::Live(question) = &mut self.slots.get_mut(owed.question as usize)?.state else {
-            return None;
-        };
-        question
-            .subscribers
-            .get_mut(at as usize)
-            .filter(|subscriber| subscriber.replay.token() == Some(token))
-    }
-
     /// Take what the question in slot `index` holds off each link's count.
     fn release_held(&mut self, index: usize) {
         let Some(State::Live(question)) = self.slots.get_mut(index).map(|slot| &mut slot.state)
@@ -764,7 +1069,6 @@ impl Questions {
         }
     }
 
-    /// Free slot `index` for another question.
     /// One more slot kept by `account`; room for its entry was made before
     /// anything changed.
     fn charge(&mut self, account: u32) {
@@ -786,6 +1090,7 @@ impl Questions {
         }
     }
 
+    /// Free slot `index` for another question.
     fn release(&mut self, index: usize) {
         self.slots[index].state = State::Free;
         self.in_use = self.in_use.saturating_sub(1);
@@ -809,24 +1114,6 @@ fn held_total(
         held_on.len() - 1
     };
     held_on.get_mut(at).map(|(_, total)| total)
-}
-
-/// The first token from `next` on that `in_use` does not hold, advancing
-/// `next` past it.
-fn fresh_token(next: &mut u32, in_use: impl Fn(u32) -> bool) -> u32 {
-    loop {
-        let token = *next;
-        *next = next.wrapping_add(1);
-        if !in_use(token) {
-            return token;
-        }
-    }
-}
-
-fn note<T>(list: &mut Vec<T>, item: T) {
-    if list.try_reserve(1).is_ok() {
-        list.push(item);
-    }
 }
 
 /// The identity of one answer, keyed so a peer cannot choose two answers that

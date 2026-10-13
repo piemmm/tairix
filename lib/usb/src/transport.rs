@@ -252,8 +252,8 @@ pub struct UrbScope {
 impl UrbScope {
     /// Whether `interface` is one the node governs.
     #[must_use]
-    pub const fn governs(self, interface: u8) -> bool {
-        self.interfaces.contains(interface as u16)
+    pub fn governs(self, interface: u8) -> bool {
+        self.interfaces.contains(u16::from(interface))
     }
 
     /// Whether endpoint address `address` (direction bit 7, number bits 0–3)

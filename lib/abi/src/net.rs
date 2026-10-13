@@ -319,7 +319,9 @@ pub enum SocketRequest<'a> {
         family: NetAddrFamily,
         /// Transport type (datagram this increment).
         sock_type: SocketType,
-        /// The caller's async port endpoint id inbound datagrams are sent to.
+        /// The async port inbound datagrams are sent to, which the kernel
+        /// must attest the calling process owns ([`Errno::PermissionDenied`]
+        /// otherwise).
         deliver_port: u64,
     },
     /// Bind a socket to a local address and port. A `port` of `0` requests a
@@ -416,7 +418,8 @@ pub enum SocketRequest<'a> {
     Accept {
         /// The listening socket handle.
         socket: SocketId,
-        /// The async port the new child socket's stream events go to.
+        /// The async port the new child socket's stream events go to, owned
+        /// by the calling process as for [`SocketRequest::Socket`].
         deliver_port: u64,
     },
     /// Send one ICMP/`ICMPv6` echo request from an [`SocketType::IcmpEcho`]
@@ -939,12 +942,19 @@ pub struct SocketDatagram<'a> {
     /// link-scoped protocol takes the verdict here rather than keeping a copy
     /// of the interface's prefixes that goes stale when they change.
     pub source_on_link: bool,
+    /// Whether it was addressed to a multicast group the socket joined,
+    /// rather than to this host alone — which says whether every member of
+    /// the group heard it too.
+    pub to_group: bool,
     /// The datagram payload.
     pub payload: &'a [u8],
 }
 
 /// [`SocketDatagram`] flag bit: the source is on the arrival interface's link.
 const DATAGRAM_SOURCE_ON_LINK: u8 = 0x01;
+
+/// [`SocketDatagram`] flag bit: it was addressed to a multicast group.
+const DATAGRAM_TO_GROUP: u8 = 0x02;
 
 /// Byte offset of a delivered datagram's flag byte.
 const DATAGRAM_FLAGS_OFFSET: usize = 6;
@@ -980,7 +990,10 @@ impl<'a> SocketDatagram<'a> {
         put_u32(out, 0, SOCKET_DATAGRAM_MAGIC);
         put_u16(out, 4, SOCKET_VERSION_V1);
         if self.source_on_link {
-            out[DATAGRAM_FLAGS_OFFSET] = DATAGRAM_SOURCE_ON_LINK;
+            out[DATAGRAM_FLAGS_OFFSET] |= DATAGRAM_SOURCE_ON_LINK;
+        }
+        if self.to_group {
+            out[DATAGRAM_FLAGS_OFFSET] |= DATAGRAM_TO_GROUP;
         }
         put_u32(out, 8, self.socket);
         out[12] = self.source.family.as_u8();
@@ -1021,7 +1034,10 @@ impl<'a> SocketDatagram<'a> {
             return Err(Errno::AbiVersionUnsupported);
         }
         let flags = bytes[DATAGRAM_FLAGS_OFFSET];
-        if flags & !DATAGRAM_SOURCE_ON_LINK != 0 || bytes[7] != 0 || bytes[13] != 0 {
+        if flags & !(DATAGRAM_SOURCE_ON_LINK | DATAGRAM_TO_GROUP) != 0
+            || bytes[7] != 0
+            || bytes[13] != 0
+        {
             return Err(Errno::BadMagic);
         }
         let mut interface = [0u8; IF_NAME_LEN];
@@ -1047,6 +1063,7 @@ impl<'a> SocketDatagram<'a> {
             interface,
             source: SocketAddr { family, addr, port },
             source_on_link: flags & DATAGRAM_SOURCE_ON_LINK != 0,
+            to_group: flags & DATAGRAM_TO_GROUP != 0,
             payload,
         })
     }
@@ -1739,6 +1756,7 @@ mod tests {
             interface: if_name(b"eth0"),
             source: v4(10, 0, 0, 1, 5353),
             source_on_link: true,
+            to_group: false,
             payload: b"x",
         };
         let mut buf = [0u8; SocketDatagram::MAX_WIRE_LEN];
@@ -2298,6 +2316,7 @@ mod tests {
             interface: iface(b"eth0"),
             source: v4(198, 51, 100, 9, 4000),
             source_on_link: true,
+            to_group: false,
             payload: b"payload bytes",
         };
         let mut out = [0u8; SocketDatagram::MAX_WIRE_LEN];
@@ -2320,6 +2339,7 @@ mod tests {
             interface: iface(b"wlan1"),
             source: v6(9),
             source_on_link: false,
+            to_group: false,
             payload: &[],
         };
         let mut out = [0u8; SocketDatagram::HEADER_LEN];
@@ -2329,25 +2349,27 @@ mod tests {
     }
 
     #[test]
-    fn the_on_link_verdict_is_carried_exactly_and_no_other_flag_is_admitted() {
+    fn the_on_link_and_group_verdicts_are_carried_exactly_and_no_other_flag_is_admitted() {
         let mut dg = SocketDatagram {
             socket: 3,
             interface: iface(b"eth0"),
             source: v4(10, 0, 0, 2, 5353),
             source_on_link: false,
+            to_group: false,
             payload: b"x",
         };
         let mut out = [0u8; SocketDatagram::MAX_WIRE_LEN];
-        for on_link in [false, true] {
+        for (on_link, to_group) in [(false, false), (true, false), (false, true), (true, true)] {
             dg.source_on_link = on_link;
+            dg.to_group = to_group;
             let n = dg.encode(&mut out).expect("encode");
             assert_eq!(
-                SocketDatagram::parse(&out[..n]).map(|d| d.source_on_link),
-                Ok(on_link)
+                SocketDatagram::parse(&out[..n]).map(|d| (d.source_on_link, d.to_group)),
+                Ok((on_link, to_group))
             );
         }
         let n = dg.encode(&mut out).expect("encode");
-        for bit in 1..8 {
+        for bit in 2..8 {
             let mut dirty = out;
             dirty[DATAGRAM_FLAGS_OFFSET] |= 1 << bit;
             assert_eq!(SocketDatagram::parse(&dirty[..n]), Err(Errno::BadMagic));
@@ -2364,6 +2386,7 @@ mod tests {
             interface: iface(b"eth0"),
             source: v4(10, 0, 0, 2, 5353),
             source_on_link: true,
+            to_group: false,
             payload: b"x",
         };
         let mut out = [0u8; SocketDatagram::MAX_WIRE_LEN];

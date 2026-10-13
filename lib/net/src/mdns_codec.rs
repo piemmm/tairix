@@ -10,9 +10,11 @@
 //!
 //! [`Message::parse`] walks the whole datagram once and refuses it outright
 //! on any *structural* fault — a truncated header, a name that runs off the
-//! end or points forward, an rdata length past the message, more questions
-//! or records than the fixed bounds admit. Nothing is surfaced from a
-//! message that fails that walk.
+//! end or points forward, an rdata length past the message, more records
+//! than the fixed bound admits. Nothing is surfaced from a message that
+//! fails that walk. One asking more questions than its bound is read as its
+//! first that many and none of its records, and [`Message::is_whole`] says
+//! so.
 //!
 //! Within a message that passes, a record whose rdata does not match its own
 //! type is **skipped**, exactly as a record of a type this engine has no
@@ -52,6 +54,9 @@ const MAX_POINTER_OFFSET: usize = 0x3FFF;
 /// A size trade with no security content: forgetting a candidate costs
 /// octets on the wire, never correctness.
 const MAX_COMPRESSION_ENTRIES: usize = 48;
+
+/// The most labels a name has: each takes at least two of its octets.
+const MAX_LABELS: usize = MAX_NAME_LEN / 2;
 
 /// Which section of a message a record was found in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,6 +127,8 @@ pub struct Message<'a> {
     answer_count: u16,
     authority_count: u16,
     additional_count: u16,
+    /// The questions its header declares, of which `question_count` are read.
+    declared_questions: u16,
 }
 
 impl<'a> Message<'a> {
@@ -194,7 +201,16 @@ impl<'a> Message<'a> {
             answer_count,
             authority_count,
             additional_count,
+            declared_questions: asked,
         })
+    }
+
+    /// Whether every question and record the message carries was read: one
+    /// past [`MAX_MESSAGE_QUESTIONS`] questions is read as its first that
+    /// many and none of its records, so it says less than it holds.
+    #[must_use]
+    pub const fn is_whole(&self) -> bool {
+        self.declared_questions == self.question_count
     }
 
     /// The questions, in wire order.
@@ -298,6 +314,19 @@ pub struct Records<'a> {
     left: [u16; 3],
 }
 
+/// The largest TTL a record can carry: one with its top bit set is read as
+/// zero (RFC 2181 §8).
+const TTL_MAX: u32 = 0x7FFF_FFFF;
+
+/// A received TTL as it is held: one with the top bit set counts as zero.
+const fn held_ttl(ttl: u32) -> u32 {
+    if ttl > TTL_MAX {
+        0
+    } else {
+        ttl
+    }
+}
+
 impl Iterator for Records<'_> {
     type Item = (Section, Record);
 
@@ -320,7 +349,7 @@ impl Iterator for Records<'_> {
             let (name, after_name) = Name::read(self.bytes, self.pos)?;
             let rtype = read_u16(self.bytes, after_name)?;
             let class = read_u16(self.bytes, after_name + 2)?;
-            let ttl = read_u32(self.bytes, after_name + 4)?;
+            let ttl = held_ttl(read_u32(self.bytes, after_name + 4)?);
             let rdlength = usize::from(read_u16(self.bytes, after_name + 8)?);
             let rdata_at = after_name + 10;
             self.pos = rdata_at + rdlength;
@@ -531,7 +560,7 @@ impl<'a> MessageWriter<'a> {
         let header_ok = self.write_name(&record.name, true)
             && self.write_u16(record.record_type().value())
             && self.write_u16(class)
-            && self.write_u32(record.ttl)
+            && self.write_u32(record.ttl.min(TTL_MAX))
             && self.write_u16(0);
         if !header_ok {
             self.rewind(start);
@@ -606,34 +635,31 @@ impl<'a> MessageWriter<'a> {
     fn write_name(&mut self, name: &Name, compress: bool) -> bool {
         let wire = name.as_wire();
         let start = self.len;
+        let suffixes = suffix_hashes(wire);
         if compress {
             // Longest suffix first: the deepest match saves the most.
-            let mut offset = 0usize;
-            while offset < wire.len() {
-                if wire[offset] == 0 {
-                    break;
+            for &(offset, hash) in &suffixes {
+                let Some(target) = self.lookup(hash, &wire[offset..]) else {
+                    continue;
+                };
+                if !self.write(&wire[..offset]) {
+                    self.rewind(start);
+                    return false;
                 }
-                if let Some(target) = self.lookup(&wire[offset..]) {
-                    if !self.write(&wire[..offset]) {
-                        self.rewind(start);
-                        return false;
-                    }
-                    let pointer = 0xC000u16 | target.offset;
-                    if !self.write_u16(pointer) {
-                        self.rewind(start);
-                        return false;
-                    }
-                    self.remember(start, wire, offset, target.hops + 1);
-                    return true;
+                let pointer = 0xC000u16 | target.offset;
+                if !self.write_u16(pointer) {
+                    self.rewind(start);
+                    return false;
                 }
-                offset += 1 + usize::from(wire[offset]);
+                self.remember(start, &suffixes, offset, target.hops + 1);
+                return true;
             }
         }
         if !self.write(wire) {
             self.rewind(start);
             return false;
         }
-        self.remember(start, wire, wire.len(), 0);
+        self.remember(start, &suffixes, wire.len(), 0);
         true
     }
 
@@ -645,8 +671,7 @@ impl<'a> MessageWriter<'a> {
     /// The stored hash filters first, so the exact comparison — which has to
     /// expand the candidate out of the buffer — runs at most once per real
     /// match.
-    fn lookup(&self, suffix: &[u8]) -> Option<Remembered> {
-        let wanted = hash_name(suffix);
+    fn lookup(&self, wanted: u32, suffix: &[u8]) -> Option<Remembered> {
         let reachable = |entry: &&Remembered| {
             entry.hash == wanted && usize::from(entry.hops) < MAX_POINTER_HOPS
         };
@@ -660,13 +685,15 @@ impl<'a> MessageWriter<'a> {
         })
     }
 
-    /// Record the label boundaries of the name just written that a later
-    /// name may point at: those inside the literal part, whose bytes are in
-    /// the buffer, up to `literal_len` octets of `wire`, each `hops` pointers
-    /// from the name's end.
-    fn remember(&mut self, start: usize, wire: &[u8], literal_len: usize, hops: u8) {
-        let mut offset = 0usize;
-        while offset < literal_len && wire[offset] != 0 {
+    /// Record the label boundaries of the name just written, whose
+    /// `suffixes` are given, that a later name may point at: those inside the
+    /// literal part, whose bytes are in the buffer, up to `literal_len`
+    /// octets of it, each `hops` pointers from the name's end.
+    fn remember(&mut self, start: usize, suffixes: &Suffixes, literal_len: usize, hops: u8) {
+        for &(offset, hash) in suffixes {
+            if offset >= literal_len {
+                return;
+            }
             let at = start + offset;
             if at > MAX_POINTER_OFFSET {
                 return;
@@ -676,13 +703,12 @@ impl<'a> MessageWriter<'a> {
             };
             let entry = Remembered {
                 offset: at,
-                hash: hash_name(&wire[offset..]),
+                hash,
                 hops,
             };
             if self.names.try_push(entry).is_err() {
                 return;
             }
-            offset += 1 + usize::from(wire[offset]);
         }
     }
 
@@ -725,16 +751,53 @@ impl<'a> MessageWriter<'a> {
     }
 }
 
-/// A case-folded hash of a name's wire octets, used only to skip
-/// non-matching compression candidates before the exact comparison, so an
-/// unkeyed hash costs a chosen collision one comparison and nothing more.
-fn hash_name(wire: &[u8]) -> u32 {
-    let mut hash = FastHash::new();
-    for &byte in wire.iter().take(MAX_NAME_LEN) {
-        hash.write_u8(byte.to_ascii_lowercase());
+/// Each label boundary of a name, from the longest suffix, with a case-folded
+/// hash of the name from there to its end.
+type Suffixes = ArrayVec<(usize, u32), MAX_LABELS>;
+
+/// The [`Suffixes`] of the name in `wire`, each hash folding its label into
+/// the next one's, right to left, so a name of many labels costs one pass
+/// rather than one per label. The hashes only skip non-matching compression
+/// candidates before the exact comparison, so an unkeyed hash costs a chosen
+/// collision one comparison and nothing more.
+fn suffix_hashes(wire: &[u8]) -> Suffixes {
+    let mut suffixes = Suffixes::new();
+    let mut offset = 0usize;
+    while let Some(&len) = wire.get(offset).filter(|&&len| len != 0) {
+        if suffixes.try_push((offset, 0)).is_err() {
+            break;
+        }
+        offset += 1 + usize::from(len);
     }
-    let [a, b, c, d, ..] = hash.finish().to_le_bytes();
-    u32::from_le_bytes([a, b, c, d])
+    let mut next = 0u64;
+    for (offset, hash) in suffixes.iter_mut().rev() {
+        let len = usize::from(wire[*offset]);
+        let mut folded = FastHash::new();
+        folded.write_u64(next);
+        for &byte in wire.get(*offset..=*offset + len).unwrap_or(&[]) {
+            folded.write_u8(byte.to_ascii_lowercase());
+        }
+        next = folded.finish();
+        let [a, b, c, d, ..] = next.to_le_bytes();
+        *hash = u32::from_le_bytes([a, b, c, d]);
+    }
+    suffixes
+}
+
+/// A query asking `names` for `PTR` records, however many: what a peer
+/// sends, which this host's own writer would refuse past
+/// [`MAX_MESSAGE_QUESTIONS`].
+#[cfg(test)]
+pub(super) fn raw_query(names: &[Name]) -> alloc::vec::Vec<u8> {
+    let mut bytes = alloc::vec![0u8; HEADER_LEN];
+    let count = u16::try_from(names.len()).expect("a test's question count fits");
+    bytes[4..6].copy_from_slice(&count.to_be_bytes());
+    for name in names {
+        bytes.extend_from_slice(name.as_wire());
+        bytes.extend_from_slice(&RecordType::Ptr.value().to_be_bytes());
+        bytes.extend_from_slice(&CLASS_IN.to_be_bytes());
+    }
+    bytes
 }
 
 #[cfg(test)]

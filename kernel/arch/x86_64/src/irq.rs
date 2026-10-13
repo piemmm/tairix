@@ -255,9 +255,10 @@ pub fn msi_message(vector: u8, destination: u8) -> MsiMessage {
 ///      the next delivery on the same vector can stack.
 ///
 /// The shared trampoline every per-vector stub in `external_irq.s` pushes its
-/// vector and jumps to: save the GPRs and the SSE state, dispatch under the
-/// kernel `MXCSR`, load a pending extended state on the way back to ring 3,
-/// restore, drop the vector word, `iretq`.
+/// vector and jumps to: save the GPRs and the SSE state, zero the registers
+/// it passes no argument in, dispatch under the kernel `MXCSR`, load a
+/// pending extended state on the way back to ring 3, restore, drop the
+/// vector word, and return through [`crate::iret_clearing_for_ring3`].
 ///
 /// On entry the vector word sits on the CPU frame, which leaves `%rsp`
 /// 16-byte aligned, so after the fifteen GPRs a pad word re-aligns it for the
@@ -290,6 +291,11 @@ pub unsafe extern "C" fn tairix_arch_x86_64_external_irq_common() {
         "movq {vector}(%rsp), %rsi",
         "subq $8, %rsp",
         crate::fp_frame_save!(),
+        crate::scrub_nonargument_gprs!(),
+        "xorl %ecx, %ecx",
+        "xorl %edx, %edx",
+        "xorl %r8d, %r8d",
+        "xorl %r9d, %r9d",
         "call {dispatch}",
         crate::xstate_ring3_exit!(),
         crate::fp_frame_restore!(),
@@ -310,12 +316,13 @@ pub unsafe extern "C" fn tairix_arch_x86_64_external_irq_common() {
         "popq %rcx",
         "popq %rax",
         "addq $8, %rsp",
-        "iretq",
+        crate::iret_clearing_for_ring3!(),
         vector = const core::mem::size_of::<SavedRegs>(),
         dispatch = sym tairix_arch_x86_64_external_irq_dispatch,
         fp_frame = const crate::fpu::FP_FRAME_BYTES,
         fp_mxcsr = const crate::fpu::FP_FRAME_MXCSR,
         kernel_mxcsr = sym crate::fpu::KERNEL_MXCSR,
+        verw_sel = sym crate::sidechannel::VERW_SELECTOR,
         frame_cs = const crate::interrupts::WORD_ISR_FRAME_CS,
         frame_top = const crate::interrupts::WORD_ISR_FRAME_TOP,
         options(att_syntax),

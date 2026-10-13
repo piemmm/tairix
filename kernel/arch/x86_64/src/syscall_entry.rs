@@ -711,6 +711,30 @@ pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
 
 // --- Rust trampoline (called from the naked stub) -------------------
 
+/// The registers [`syscall_entry_stub`] saves on the task's kernel stack,
+/// lowest address first: the argument array the dispatcher reads, the
+/// callee-saved registers the stub zeroes for the call, and the return
+/// state `sysretq` consumes.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+#[repr(C)]
+pub(crate) struct SyscallFrame {
+    /// `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`, as [`pack_raw_args`] orders them.
+    pub(crate) args: [u64; SYSCALL_MAX_ARGS],
+    pub(crate) r15: u64,
+    pub(crate) r14: u64,
+    pub(crate) r13: u64,
+    pub(crate) r12: u64,
+    /// The user's frame pointer.
+    pub(crate) rbp: u64,
+    pub(crate) rbx: u64,
+    /// The user `RFLAGS`, which `syscall` left in `r11`.
+    pub(crate) rflags: u64,
+    /// The user `rip`, which `syscall` left in `rcx`.
+    pub(crate) rip: u64,
+    /// The user `rsp`.
+    pub(crate) rsp: u64,
+}
+
 /// Rust trampoline called by the naked assembly entry stub.
 ///
 /// The dispatch callback **must** be installed via
@@ -722,31 +746,20 @@ pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
 ///
 /// # Safety
 ///
-/// * Must only be invoked from `syscall_entry_stub`. Calling it from
-///   arbitrary Rust would read a stack-local `[u64; SYSCALL_MAX_ARGS]`
-///   that does not exist.
-/// * `args_ptr` must point at a `[u64; SYSCALL_MAX_ARGS]` that lives
-///   for the duration of the call.
+/// Must only be invoked from `syscall_entry_stub`, with `frame` the
+/// [`SyscallFrame`] it built on this task's kernel stack, which outlives
+/// the call.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 unsafe extern "C" fn tairix_arch_x86_64_syscall_dispatch(
     number: u64,
-    args_ptr: *const [u64; SYSCALL_MAX_ARGS],
-    user_frame_ptr: u64,
-    user_pc: u64,
+    frame: *const SyscallFrame,
 ) -> u64 {
-    // Report the entering ring-3 pc and frame pointer, so a diagnostic can
-    // attribute a user call stack to this call. Unlike the interrupt stubs
-    // the `syscall` entry saves no GPR block, so the stub hands both values
-    // over in argument registers — `rbp` is untouched by the stub and
-    // `rip` is the `syscall` instruction's own `rcx`, which is already the
-    // fourth System V argument register. System V makes `rbp` callee-saved,
-    // so a Rust prologue here would have overwritten it: the value has to
-    // arrive as an argument rather than be read out of the register.
     // The observer is consulted first: resolving this CPU's dense id costs
-    // a LAPIC id read, which must not be added to every syscall on an image
-    // whose kernel installed no observer.
+    // a LAPIC id read no image without an observer should pay per syscall.
     if let Some(observe) = tairix_arch_api::userentry::user_entry_observer() {
+        // SAFETY: the caller's contract makes `frame` this call's live frame.
+        let (user_pc, user_frame_ptr) = unsafe { ((*frame).rip, (*frame).rbp) };
         observe(
             crate::preempt::cpu_id_for_lapic(crate::apic::local_apic_id()),
             user_pc,
@@ -759,7 +772,8 @@ unsafe extern "C" fn tairix_arch_x86_64_syscall_dispatch(
         // reach ring 3 to issue a syscall.
         crate::panic::refuse("a syscall arrived before the kernel installed its dispatcher");
     };
-    cb(number, args_ptr)
+    // SAFETY: as above; the argument array is the frame's first field.
+    cb(number, unsafe { &raw const (*frame).args })
 }
 
 // --- Naked entry stub ----------------------------------------------
@@ -774,10 +788,9 @@ pub fn syscall_entry_addr() -> u64 {
 }
 
 /// Offset from the stub's `%rsp` above its SSE frame to the frame top: the
-/// pad word, then the nine words below `RSP0` (user `rsp`, `rcx`, `r11`, and
-/// the six arguments).
+/// pad word, then the [`SyscallFrame`] below `RSP0`.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-pub(crate) const SYSCALL_ABOVE_FP_FRAME: usize = 8 + 9 * 8;
+pub(crate) const SYSCALL_ABOVE_FP_FRAME: usize = 8 + core::mem::size_of::<SyscallFrame>();
 
 /// The single `IA32_LSTAR` target for every CPU in the system.
 ///
@@ -786,31 +799,25 @@ pub(crate) const SYSCALL_ABOVE_FP_FRAME: usize = 8 + 9 * 8;
 /// 1. `swapgs` — `%gs` now points at this CPU's [`SyscallTls`].
 /// 2. Transiently stash the user `%rsp` into `gs:USER_RSP_SAVE_OFFSET`
 ///    and load `RSP0` from `gs:KERNEL_RSP0_OFFSET`.
-/// 3. Push the user `%rsp` (read straight back out of `gs:8`) so its
-///    **durable** save lives on *this task's* kernel-stack frame, not
-///    the shared per-CPU `gs:8` slot a concurrent task's syscall would
-///    clobber across a cooperative mid-handler park (`plans/PI.md` X2).
-///    Then push the user `RFLAGS` (`%r11`) and saved RIP (`%rcx`) so
-///    they survive the Rust call (System V allows callees to clobber
-///    both).
-/// 4. Build the [`SYSCALL_MAX_ARGS`]-wide argument array on the
-///    kernel stack from `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`.
-/// 5. Set up the System V args: `%rdi = syscall number (saved rax)`,
-///    `%rsi = &args[0]`, `%rdx = user %rbp`, `%rcx = user RIP` (already
-///    there), then save the task's SSE state under the kernel `MXCSR`
-///    (`crate::fp_frame_save`). One pad word below the nine pushed ones
-///    keeps the frame, and the `call`, 16-byte aligned.
-/// 6. Call [`tairix_arch_x86_64_syscall_dispatch`] with device interrupts
+/// 3. Build the [`SyscallFrame`]: the user `%rsp` (read straight back out
+///    of `gs:8`, so its durable save is *this task's* frame rather than a
+///    per-CPU slot a concurrent task's syscall would clobber across a
+///    cooperative mid-handler park, `plans/PI.md` X2), `%rcx` and `%r11`,
+///    the callee-saved registers, and the argument array.
+/// 4. Pass the syscall number and the frame, zero every other
+///    general-purpose register so no user value is live in Rust, and save
+///    the task's SSE state under the kernel `MXCSR` (`crate::fp_frame_save`).
+///    One pad word keeps the frame, and the `call`, 16-byte aligned.
+/// 5. Call [`tairix_arch_x86_64_syscall_dispatch`] with device interrupts
 ///    deliverable; its return value stays in `%rax`.
-/// 7. With interrupts masked again, load the task's extended state if its
+/// 6. With interrupts masked again, load the task's extended state if its
 ///    park left it pending (`crate::xstate`), then restore its SSE state.
-/// 8. Pop the arg array back into `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`
-///    (restoring the caller's argument registers — the user-side trap
-///    stub declares only `rax`/`rcx`/`r11` clobbered, so handing back
-///    dispatch residue would both miscompile the caller and leak
-///    kernel register contents to ring 3), then pop `%r11` + `%rcx`.
-/// 9. Restore user `%rsp` with a single `popq %rsp` from the frame
-///    slot, `swapgs`, `sysretq`.
+/// 7. Pop the frame back into the registers it came from. The argument
+///    registers are restored rather than dropped: the user-side trap stub
+///    declares only `rax`/`rcx`/`r11` clobbered, so dispatch residue would
+///    both miscompile the caller and leak kernel register contents.
+/// 8. `popq %rsp`, `swapgs`, clear the microarchitectural buffers, and
+///    `sysretq`, with a trap behind it for straight-line speculation.
 ///
 /// # Safety
 ///
@@ -828,49 +835,45 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         // 2. Transiently stash user rsp, load kernel rsp.
         "movq %rsp, %gs:8",
         "movq %gs:0, %rsp",
-        // 3. Durably save the user rsp on this task's kernel frame, then
-        //    preserve user RIP (rcx) and RFLAGS (r11).
+        // 3. The `SyscallFrame`, top field first.
         "pushq %gs:8",
         "pushq %rcx",
         "pushq %r11",
-        // 4. Build args[5..0] on the stack.
+        "pushq %rbx",
+        "pushq %rbp",
+        "pushq %r12",
+        "pushq %r13",
+        "pushq %r14",
+        "pushq %r15",
         "pushq %r9",
         "pushq %r8",
         "pushq %r10",
         "pushq %rdx",
         "pushq %rsi",
         "pushq %rdi",
-        // 5. rdi=number (was rax), rsi=&args[0], rdx=user rbp, rcx=user RIP.
-        //    `rdx` held a syscall argument, which step 4 has already stored
-        //    into the array, so it is free; `rbp` is untouched by this stub
-        //    and still holds the user's, and `rcx` is the `syscall`
-        //    instruction's saved user RIP and already sits in the fourth
-        //    System V argument register.
+        // 4. rdi = number, rsi = &frame; nothing else the user chose stays live.
         "movq %rsp, %rsi",
         "movq %rax, %rdi",
-        "movq %rbp, %rdx",
+        crate::scrub_nonargument_gprs!(),
+        "xorl %ecx, %ecx",
+        "xorl %edx, %edx",
+        "xorl %r8d, %r8d",
+        "xorl %r9d, %r9d",
         "subq $8, %rsp",
         crate::fp_frame_save!(),
-        // 6. Run the syscall body with device interrupts deliverable. The
-        //    CPU cleared IF via IA32_FMASK on entry; we are now in a
-        //    well-defined kernel context (swapgs done, pivoted onto this
-        //    task's kernel stack, user RIP/RFLAGS/rsp frame-resident), so an
-        //    interrupt taken here is taken at CPL=0 and pushes its frame onto
-        //    this same kernel stack, services its source, and `iret`s back
-        //    here — it never switches stacks (no IST for these vectors) and
-        //    never reschedules the non-preemptible kernel (the ISRs gate
-        //    preemption on the saved ring-3 CS; a tick taken in ring 0 only
-        //    latches its reschedule, honoured at return-to-user in
-        //    `completion_outcome`). This stops a long, non-blocking syscall
-        //    body from monopolising the CPU with interrupts masked. Re-mask
-        //    (`cli`) before restoring the user frame so `sysretq` returns to
-        //    ring 3 with the entry residue gone; the user RFLAGS (with its
-        //    own IF) is restored from `%r11` by `sysretq`.
+        // 5. Run the syscall body with device interrupts deliverable, so a
+        //    long body cannot monopolise the CPU. An interrupt taken here is
+        //    taken at CPL=0 on this same kernel stack (no IST for these
+        //    vectors) and never reschedules the non-preemptible kernel: the
+        //    ISRs gate preemption on the saved ring-3 CS, and a tick taken in
+        //    ring 0 only latches its reschedule for return-to-user
+        //    (`completion_outcome`). `sysretq` restores the user's own IF
+        //    from `%r11`.
         "sti",
         "call {dispatch}",
         "cli",
-        // 7. The load clobbers rax and rdx, so the result rides in rsi,
-        //    which step 8 restores from the frame anyway.
+        // 6. The load clobbers rax and rdx, so the result rides in rsi,
+        //    which step 7 restores from the frame anyway.
         "cmpb $0, {frame_top}(%rsp)",
         "je 2f",
         "movq %rax, %rsi",
@@ -880,27 +883,32 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         "2:",
         crate::fp_frame_restore!(),
         "addq $8, %rsp",
-        // 8. Restore the caller's argument registers from the arg array
-        //    (never a bare stack drop: the user-side trap stub promises
-        //    the compiler only rax/rcx/r11 change across `syscall`, and
-        //    the dispatch residue these registers hold here is kernel
-        //    state that must not leak to ring 3), then r11 + rcx.
+        // 7. Restore what step 3 saved.
         "popq %rdi",
         "popq %rsi",
         "popq %rdx",
         "popq %r10",
         "popq %r8",
         "popq %r9",
+        "popq %r15",
+        "popq %r14",
+        "popq %r13",
+        "popq %r12",
+        "popq %rbp",
+        "popq %rbx",
         "popq %r11",
         "popq %rcx",
-        // 9. Restore user rsp from the frame slot and return to user space.
+        // 8. Back to user space.
         "popq %rsp",
         "swapgs",
+        "verw {verw_sel}(%rip)",
         "sysretq",
+        "int3",
         dispatch = sym tairix_arch_x86_64_syscall_dispatch,
         fp_frame = const crate::fpu::FP_FRAME_BYTES,
         fp_mxcsr = const crate::fpu::FP_FRAME_MXCSR,
         kernel_mxcsr = sym crate::fpu::KERNEL_MXCSR,
+        verw_sel = sym crate::sidechannel::VERW_SELECTOR,
         frame_top = const crate::fpu::FP_FRAME_BYTES + SYSCALL_ABOVE_FP_FRAME,
         options(att_syntax),
     )

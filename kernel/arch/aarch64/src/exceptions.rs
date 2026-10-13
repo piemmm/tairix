@@ -910,7 +910,7 @@ fn fatal_exception(kind: u64, syndrome: Option<u64>, address: Option<u64>, frame
 /// `ELR_EL1`/`SPSR_EL1`.
 #[cfg(test)]
 #[path = "eret_tests.rs"]
-mod eret_tests;
+pub(crate) mod eret_tests;
 
 /// What an entry's fatal record reads off the vector table, pinned against
 /// `vectors.s`.

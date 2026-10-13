@@ -15,8 +15,10 @@ use tairix_abi::net::SOCKET_MAX_DATAGRAM;
 use tairix_abi::net_ipc::{
     address_parts, ip_from_parts, validate_if_name, NetAddrFamily, IF_NAME_LEN,
 };
+use tairix_abi::time::NANOS_PER_SEC;
 use tairix_net::dns::RecordType;
 use tairix_net::mdns::{Destination, MAX_MESSAGE_LEN, MAX_QUESTIONS};
+use tairix_net::rate::BucketLevel;
 use tairix_net::IpAddr;
 use tairix_sandbox::wire::{Reader, WireError};
 
@@ -25,6 +27,19 @@ pub const CACHE_KEY_LEN: usize = tairix_hash::HashSeed::LEN;
 
 /// Bytes of the key the decoder's CSPRNG is seeded from.
 pub const RNG_KEY_LEN: usize = tairix_rng::STREAM_KEY_LEN;
+
+/// Datagrams one interface may send to the group in a burst: well above what
+/// continuous querying for every question needs, and far below a flood. The
+/// decoder spends the budget and the front holds it to it.
+pub const GROUP_BURST: u32 = 32;
+
+/// Datagrams one interface may send to the group per second after its burst.
+pub const GROUP_RATE: u32 = 8;
+
+/// The part of the group budget the decoder's scheduled sends leave alone,
+/// so a name this host owns can be defended at once however many questions
+/// are queued.
+pub const GROUP_RESERVE: u32 = 4;
 
 const TAG_CONFIGURE: u8 = 1;
 const TAG_DATAGRAM: u8 = 2;
@@ -49,14 +64,16 @@ const TO_PEER: u8 = 1;
 pub const CONFIGURE_LEN: usize = 1 + CACHE_KEY_LEN + RNG_KEY_LEN;
 
 /// Length of a [`ToDecoder::Datagram`] frame before its payload: tag, time,
-/// interface, address family, address, port.
-pub const DATAGRAM_HEADER_LEN: usize = 1 + 8 + IF_NAME_LEN + 1 + 16 + 2;
+/// interface, address family, address, port, and whether it was sent to the
+/// group.
+pub const DATAGRAM_HEADER_LEN: usize = 1 + 8 + IF_NAME_LEN + 1 + 16 + 2 + 1;
 
 /// Length of a [`ToDecoder::Tick`] frame.
 pub const TICK_LEN: usize = 1 + 8;
 
-/// Length of a [`ToDecoder::Link`] frame.
-pub const LINK_LEN: usize = 1 + 8 + IF_NAME_LEN + 1;
+/// Length of a [`ToDecoder::Link`] frame: tag, time, interface, edge, and the
+/// group budget's tokens and instant.
+pub const LINK_LEN: usize = 1 + 8 + IF_NAME_LEN + 1 + 8 + 8;
 
 /// Length of a [`ToDecoder::Ask`] frame before its name: tag, time, question,
 /// form, name length.
@@ -81,8 +98,8 @@ pub const LINKED_LEN: usize = 1 + IF_NAME_LEN + 1;
 pub const STOPPED_LEN: usize = 1 + 4;
 
 /// Length of a [`FromDecoder::Transmit`] frame before its payload: tag,
-/// interface, destination kind, family, address, port.
-pub const TRANSMIT_HEADER_LEN: usize = 1 + IF_NAME_LEN + 1 + 1 + 16 + 2;
+/// interface, instant, destination kind, family, address, port.
+pub const TRANSMIT_HEADER_LEN: usize = 1 + IF_NAME_LEN + 8 + 1 + 1 + 16 + 2;
 
 /// The longest frame the front sends: a datagram carrying the largest
 /// payload the stack delivers.
@@ -164,6 +181,8 @@ pub enum ToDecoder<'a> {
         source: IpAddr,
         /// The sender's port.
         port: u16,
+        /// Whether it was sent to the group rather than to this host alone.
+        to_group: bool,
         /// The datagram, unread.
         payload: &'a [u8],
     },
@@ -179,8 +198,8 @@ pub enum ToDecoder<'a> {
         now: u64,
         /// The interface.
         interface: [u8; IF_NAME_LEN],
-        /// Whether it is up.
-        up: bool,
+        /// What became of it.
+        edge: Edge,
     },
     /// Ask a question on every interface, now and as each comes up.
     Ask {
@@ -227,6 +246,7 @@ impl<'a> ToDecoder<'a> {
                 interface,
                 source,
                 port,
+                to_group,
                 payload,
             } => {
                 if payload.len() > SOCKET_MAX_DATAGRAM {
@@ -240,7 +260,8 @@ impl<'a> ToDecoder<'a> {
                 frame[9..9 + IF_NAME_LEN].copy_from_slice(&interface);
                 frame[25] = family.as_u8();
                 frame[26..42].copy_from_slice(&addr);
-                frame[42..DATAGRAM_HEADER_LEN].copy_from_slice(&port.to_le_bytes());
+                frame[42..44].copy_from_slice(&port.to_le_bytes());
+                frame[44] = u8::from(to_group);
                 frame[DATAGRAM_HEADER_LEN..].copy_from_slice(payload);
                 Some(len)
             }
@@ -250,12 +271,24 @@ impl<'a> ToDecoder<'a> {
                 frame[1..].copy_from_slice(&now.to_le_bytes());
                 Some(TICK_LEN)
             }
-            Self::Link { now, interface, up } => {
+            Self::Link {
+                now,
+                interface,
+                edge,
+            } => {
                 let frame = out.get_mut(..LINK_LEN)?;
+                frame.fill(0);
                 frame[0] = TAG_LINK;
                 frame[1..9].copy_from_slice(&now.to_le_bytes());
                 frame[9..9 + IF_NAME_LEN].copy_from_slice(&interface);
-                frame[9 + IF_NAME_LEN] = u8::from(up);
+                if let Edge::Up(budget) = edge {
+                    if !is_group_level(budget) {
+                        return None;
+                    }
+                    frame[25] = 1;
+                    frame[26..34].copy_from_slice(&budget.scaled.to_le_bytes());
+                    frame[34..LINK_LEN].copy_from_slice(&budget.at.to_le_bytes());
+                }
                 Some(LINK_LEN)
             }
             Self::Ask {
@@ -319,6 +352,7 @@ impl<'a> ToDecoder<'a> {
                 let interface = interface(&mut reader)?;
                 let source = address(&mut reader)?;
                 let port = u16::from_le_bytes(*fixed(&mut reader)?);
+                let to_group = flag(reader.u8()?)?;
                 let payload = reader.take(frame.len().saturating_sub(DATAGRAM_HEADER_LEN))?;
                 if payload.len() > SOCKET_MAX_DATAGRAM {
                     return Err(WireError::Malformed);
@@ -328,15 +362,30 @@ impl<'a> ToDecoder<'a> {
                     interface,
                     source,
                     port,
+                    to_group,
                     payload,
                 }
             }
             TAG_TICK => Self::Tick { now: reader.u64()? },
-            TAG_LINK => Self::Link {
-                now: reader.u64()?,
-                interface: interface(&mut reader)?,
-                up: flag(reader.u8()?)?,
-            },
+            TAG_LINK => {
+                let now = reader.u64()?;
+                let interface = interface(&mut reader)?;
+                let up = flag(reader.u8()?)?;
+                let budget = BucketLevel {
+                    scaled: reader.u64()?,
+                    at: reader.u64()?,
+                };
+                let edge = match up {
+                    true if is_group_level(budget) => Edge::Up(budget),
+                    false if budget.scaled == 0 && budget.at == 0 => Edge::Down,
+                    _ => return Err(WireError::Malformed),
+                };
+                Self::Link {
+                    now,
+                    interface,
+                    edge,
+                }
+            }
             TAG_ASK => {
                 let now = reader.u64()?;
                 let question = question(&mut reader)?;
@@ -393,6 +442,9 @@ pub enum FromDecoder<'a> {
     Transmit {
         /// The interface to send it from.
         interface: [u8; IF_NAME_LEN],
+        /// The instant the decoder charged it to the interface's group
+        /// budget, which the front charges it at too.
+        at: u64,
         /// Where to.
         to: Destination,
         /// The datagram.
@@ -451,6 +503,7 @@ impl<'a> FromDecoder<'a> {
             }
             Self::Transmit {
                 interface,
+                at,
                 to,
                 payload,
             } => {
@@ -462,14 +515,15 @@ impl<'a> FromDecoder<'a> {
                 frame[..TRANSMIT_HEADER_LEN].fill(0);
                 frame[0] = TAG_TRANSMIT;
                 frame[1..=IF_NAME_LEN].copy_from_slice(&interface);
+                frame[17..25].copy_from_slice(&at.to_le_bytes());
                 if let Destination::Peer { addr, port } = to {
                     let (family, octets) = address_parts(addr);
-                    frame[17] = TO_PEER;
-                    frame[18] = family.as_u8();
-                    frame[19..35].copy_from_slice(&octets);
-                    frame[35..TRANSMIT_HEADER_LEN].copy_from_slice(&port.to_le_bytes());
+                    frame[25] = TO_PEER;
+                    frame[26] = family.as_u8();
+                    frame[27..43].copy_from_slice(&octets);
+                    frame[43..TRANSMIT_HEADER_LEN].copy_from_slice(&port.to_le_bytes());
                 } else {
-                    frame[17] = TO_GROUP;
+                    frame[25] = TO_GROUP;
                 }
                 frame[TRANSMIT_HEADER_LEN..].copy_from_slice(payload);
                 Some(len)
@@ -526,6 +580,7 @@ impl<'a> FromDecoder<'a> {
             },
             TAG_TRANSMIT => {
                 let interface = interface(&mut reader)?;
+                let at = reader.u64()?;
                 let kind = reader.u8()?;
                 let family = reader.u8()?;
                 let octets = *fixed::<16>(&mut reader)?;
@@ -544,6 +599,7 @@ impl<'a> FromDecoder<'a> {
                 }
                 Self::Transmit {
                     interface,
+                    at,
                     to,
                     payload,
                 }
@@ -562,6 +618,21 @@ impl<'a> FromDecoder<'a> {
         }
         Ok(decoded)
     }
+}
+
+/// What became of an interface a [`ToDecoder::Link`] names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Edge {
+    /// It came up, with its group budget as the front holds it, which the
+    /// decoder spends from exactly as the front charges it.
+    Up(BucketLevel),
+    /// It went down.
+    Down,
+}
+
+/// Whether `budget` is one a group budget can hold.
+fn is_group_level(budget: BucketLevel) -> bool {
+    budget.scaled <= u64::from(GROUP_BURST) * u64::from(NANOS_PER_SEC)
 }
 
 /// Whether `id` can name a question: every id is a slot below

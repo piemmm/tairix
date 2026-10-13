@@ -191,7 +191,8 @@ no ambient root, signed code) are designed in from the kernel up.
 | Per-app scratch the service names, that nothing can open (§16.3) | An app reading another app's temporary files — or its own from an earlier run — through a name it could ask for | ✓ | ✓ | ✓ | ✓ |
 | Descriptor delegation attenuates by mode *and* byte extent, never widens (§5.2) | A delegated descriptor conveying more access than its grantor opened, or growing a file without limit | ✓ | ✓ | ✓ | ✓ |
 | Capability gate guards an inode's name, not only its content (§5.3) | Unlinking or renaming a gated directory aside and planting an ungated replacement | ✓ | ✓ | ✓ | ✓ |
-| Speculation barriers on syscall / context switch (§19.1) | Spectre / MDS / L1TF / MMIO stale data | ✓ | ✓ | ✓ | ✓ host |
+| Speculation hardening at every user entry and return: registers scrubbed, buffers cleared, straight-line speculation trapped (§19.1) | A speculative kernel gadget fed user-chosen registers; MDS / MMIO-stale-data sampling of kernel data; speculation past the return | ✓ | ✓ | ✓ in-order | ✓ host |
+| Branch-free clamp of user-chosen table indices (§19.1) | Spectre-v1 bounds-check bypass into kernel memory | ◐ syscall number | ◐ syscall number | ◐ syscall number | ◐ syscall number |
 | Stack + slab guard pages, hardware fault (§4) | Stack/heap overrun into adjacent memory | ✓ | ✓ | ✓ | — |
 | Boot-stack poison guard, read back by the post-mortem (§4, §19.2) | Early-boot stack overrun corrupting `.bss` silently, before the MMU exists to fault on it | ✓ | ✓ | ✓ | — |
 | Root encrypted at its owner's choice, swap always encrypted (§4, §11) | Secret/data recovery at rest; on a plaintext root the files, password hashes, sealed app secrets and the signing and log-attestation keys under `/System/Security/Keys` are protected only by the disk staying in its owner's hands, so whoever reads it offline can forge sealed audit segments | ✓ | ✓ | ✓ | — |

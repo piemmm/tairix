@@ -17,7 +17,12 @@
 //!    delivers a tick owed while its queue was full once the queue drains,
 //!    and sends only to the group or to a peer it relayed from.
 //! 4. Any call bytes from any caller are answered with a reply the client's
-//!    decoders read, and never panic the front.
+//!    decoders read, and never panic the front. Across random calls from
+//!    several accounts and processes against a real decoder — joins, stops,
+//!    collects, closes, exits, foreign doorbell ports, doorbells that block
+//!    or vanish, segment traffic, link edges and decoder exits — its tables
+//!    stay consistent after every step, and once every client has gone
+//!    nothing they asked for is left behind.
 //!
 //! Every structural case runs on every iteration; the random draws choose
 //! content within it.
@@ -26,13 +31,13 @@
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
 //! `cargo xtask fuzz`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::rc::Rc;
 
 use tairix_abi::discovery_ipc::{
-    Answer, Change, CollectReply, DiscoveryRequest, Entry, Query, ServiceTypeField, Transport,
-    DISCOVERY_MAX_REPLY, ID_REPLY_LEN,
+    Answer, Change, CollectReply, DiscoveryRequest, Entry, Families, Query, ServiceTypeField,
+    Transport, DISCOVERY_MAX_REPLY,
 };
 use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketLinkEvent};
 use tairix_abi::net_ipc::{address_parts, IF_NAME_LEN};
@@ -40,11 +45,13 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_abi::{CapabilityId, CapabilitySummary, Errno, Origin, ProcId, TrustDomain};
 use tairix_discoveryd::decoder::Decoder;
-use tairix_discoveryd::front::{Front, Host, Sockets, MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE};
+use tairix_discoveryd::front::{
+    Caller, Front, Host, Sockets, MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE,
+};
 use tairix_discoveryd::grants::Grants;
 use tairix_discoveryd::wire::{
-    Form, FromDecoder, ToDecoder, CACHE_KEY_LEN, DATAGRAM_HEADER_LEN, MAX_FROM_DECODER,
-    MAX_TO_DECODER, RNG_KEY_LEN,
+    Edge, Form, FromDecoder, ToDecoder, CACHE_KEY_LEN, DATAGRAM_HEADER_LEN, GROUP_BURST,
+    MAX_FROM_DECODER, MAX_TO_DECODER, RNG_KEY_LEN,
 };
 use tairix_fuzzseed::Prng;
 use tairix_log::{Event, Sink};
@@ -52,6 +59,8 @@ use tairix_net::dns::Name;
 use tairix_net::mdns::{
     Destination, MessageWriter, RData, Record, Section, GROUP_V4, GROUP_V6, MAX_QUESTIONS,
 };
+use tairix_net::rate::BucketLevel;
+use tairix_sandbox::loopback::LoopbackSession;
 use tairix_sandbox::proto::{ProtoError, FRAME_HEADER_LEN};
 use tairix_sandbox::session::{
     FrameOut, SessionDescriptors, SessionService, SessionStep, SessionTransport,
@@ -64,7 +73,13 @@ const SMOKE_ITERATIONS: u64 = 200;
 const SEC: u64 = 1_000 * MS;
 
 /// The kinds of thing a hostile decoder says, one per round in turn.
-const SAYINGS: usize = 13;
+const SAYINGS: usize = 14;
+
+/// A group budget as full as one can be, at the start of time.
+const FULL: BucketLevel = BucketLevel {
+    scaled: GROUP_BURST as u64 * SEC,
+    at: 0,
+};
 
 /// The family sockets the front listens on.
 const V4: u32 = 1;
@@ -84,6 +99,10 @@ impl Sink for Quiet {
 struct World {
     draws: u8,
     sent: Vec<SocketAddr>,
+    /// How the next doorbell post goes: taken, or this refusal.
+    ring: Option<Errno>,
+    /// Doorbells refused for want of room.
+    blocked: u32,
 }
 
 /// A stand-in host: each draw a fresh byte pattern, so generations differ.
@@ -109,7 +128,11 @@ impl Host for Keys {
     }
 
     fn ring(&mut self, _port: u64, _doorbell: &[u8]) -> Result<(), Errno> {
-        Ok(())
+        let mut world = self.0.borrow_mut();
+        if world.ring == Some(Errno::WouldBlock) {
+            world.blocked += 1;
+        }
+        world.ring.map_or(Ok(()), Err)
     }
 
     fn watch(&mut self, _peer: ProcId) -> Result<(), Errno> {
@@ -198,6 +221,7 @@ fn exercise_codecs(rng: &mut Prng, noise: &[u8]) {
             interface: iface(rng),
             source: peer(rng.next_u8()),
             port: rng.next_u16(),
+            to_group: true,
             payload: noise,
         },
         ToDecoder::Tick {
@@ -206,7 +230,14 @@ fn exercise_codecs(rng: &mut Prng, noise: &[u8]) {
         ToDecoder::Link {
             now: rng.next_u64(),
             interface: iface(rng),
-            up: rng.next_u64() & 1 == 0,
+            edge: if rng.next_u64() & 1 == 0 {
+                Edge::Up(BucketLevel {
+                    scaled: rng.next_u64() % (u64::from(GROUP_BURST) * SEC + 1),
+                    at: rng.next_u64(),
+                })
+            } else {
+                Edge::Down
+            },
         },
         ToDecoder::Ask {
             now: rng.next_u64(),
@@ -269,11 +300,13 @@ fn exercise_decoder_codec(rng: &mut Prng, noise: &[u8]) {
         },
         FromDecoder::Transmit {
             interface: iface(rng),
+            at: rng.next_u64(),
             to: Destination::Group,
             payload,
         },
         FromDecoder::Transmit {
             interface: iface(rng),
+            at: rng.next_u64(),
             to: Destination::Peer {
                 addr: peer(rng.next_u8()),
                 port: rng.next_u16(),
@@ -344,6 +377,7 @@ fn exercise_decoder_order(rng: &mut Prng, noise: &[u8], configure: &[u8]) {
             interface: iface(rng),
             source: peer(rng.next_u8()),
             port: 5353,
+            to_group: true,
             payload: noise,
         }),
     ];
@@ -366,6 +400,7 @@ fn exercise_decoder_order(rng: &mut Prng, noise: &[u8], configure: &[u8]) {
         interface: named(b"eth0"),
         source: peer(rng.next_u8()),
         port: 5353,
+        to_group: true,
         payload: noise,
     });
     assert_eq!(
@@ -387,7 +422,7 @@ fn exercise_decoder_edges(
     let down = encoded(&ToDecoder::Link {
         now,
         interface: named(b"wlan0"),
-        up: false,
+        edge: Edge::Down,
     });
     assert_eq!(decoder.handle(&down, &mut Believed), SessionStep::Continue);
     let stop = encoded(&ToDecoder::Stop { question: 1 });
@@ -406,13 +441,14 @@ fn exercise_decoder_edges(
         encoded(&ToDecoder::Link {
             now: 0,
             interface: named(b"eth0"),
-            up: true,
+            edge: Edge::Up(FULL),
         }),
         encoded(&ToDecoder::Datagram {
             now: 1,
             interface: named(b"eth0"),
             source: peer(rng.next_u8()),
             port: 5353,
+            to_group: true,
             payload: noise,
         }),
     ] {
@@ -436,7 +472,7 @@ fn exercise_decoder(rng: &mut Prng, noise: &[u8]) {
         let up = encoded(&ToDecoder::Link {
             now: 0,
             interface: named(name),
-            up: true,
+            edge: Edge::Up(FULL),
         });
         assert_eq!(decoder.handle(&up, &mut Believed), SessionStep::Continue);
     }
@@ -471,6 +507,7 @@ fn exercise_decoder(rng: &mut Prng, noise: &[u8]) {
                 interface: iface(rng),
                 source: peer(rng.next_u8()),
                 port: [5353, rng.next_u16()][rng.below(2)],
+                to_group: true,
                 payload,
             });
             assert_eq!(
@@ -583,7 +620,7 @@ impl SessionLauncher for Launcher {
 type Under = Front<Launcher, Quiet, Keys>;
 
 /// Tell the front every interface is up on the IPv4 socket.
-fn links_up(front: &mut Under) {
+fn links_up<L: SessionLauncher>(front: &mut Front<L, Quiet, Keys>) {
     for name in INTERFACES {
         front.on_delivery(
             0,
@@ -623,13 +660,14 @@ fn delivery<'a>(rng: &mut Prng, last: u8, payload: &'a [u8]) -> SocketDatagram<'
             port: 5353,
         },
         source_on_link: true,
+        to_group: rng.next_u8() & 1 == 0,
         payload,
     }
 }
 
 /// One turn of the owner's loop at `now`, holding the invariant that keeps
 /// it from spinning.
-fn wake(front: &mut Under, now: u64) {
+fn wake<L: SessionLauncher>(front: &mut Front<L, Quiet, Keys>, now: u64) {
     front.on_wake(now).expect("keys draw");
     if let Some(at) = front.wake_at() {
         assert!(at > now, "a wake at {at} after acting at {now} would spin");
@@ -637,7 +675,7 @@ fn wake(front: &mut Under, now: u64) {
 }
 
 /// Every write turn the front asks for, into a decoder taking everything.
-fn drain(front: &mut Under, now: u64) {
+fn drain<L: SessionLauncher>(front: &mut Front<L, Quiet, Keys>, now: u64) {
     for _ in 0..10_000 {
         if !front.wants_write() {
             return;
@@ -713,10 +751,22 @@ fn say(wires: &Wires, kind: usize, rng: &mut Prng, noise: &[u8], now: u64) -> bo
         10 => (
             framed(&from_decoder(&FromDecoder::Transmit {
                 interface: named(b"eth0"),
+                at: now,
                 to: Destination::Group,
                 payload: b"query",
             })),
             false,
+        ),
+        // A datagram built at an instant the front has not reached: the
+        // decoder knows no time the front did not tell it.
+        13 => (
+            framed(&from_decoder(&FromDecoder::Transmit {
+                interface: named(b"eth0"),
+                at: now + 1,
+                to: Destination::Group,
+                payload: b"query",
+            })),
+            true,
         ),
         // An acknowledgement of a link it was never told of.
         11 => (
@@ -831,12 +881,12 @@ fn check_written(wires: &Wires, world: &Keys) {
                 }
                 ToDecoder::Link {
                     interface,
-                    up: true,
+                    edge: Edge::Up(_),
                     ..
                 } => linked.push(*interface),
                 ToDecoder::Link {
                     interface,
-                    up: false,
+                    edge: Edge::Down,
                     ..
                 } => linked.retain(|name| name != interface),
                 ToDecoder::Datagram { interface, .. } => assert!(
@@ -897,83 +947,464 @@ fn owed_tick(rng: &mut Prng, front: &mut Under, wires: &Wires, now: &mut u64, la
     }
 }
 
-/// Invariant 4.
-fn exercise_calls(rng: &mut Prng, noise: &[u8]) {
-    let world = Keys::default();
-    let mut front = Front::new(
-        tairix_sandbox::loopback::LoopbackSessionLauncher::new(Decoder::new),
-        Quiet,
-        world,
-        Sockets {
-            v4: Some(V4),
-            v6: None,
-        },
-        Grants::default(),
-    )
-    .expect("the buffers commit");
-    front.on_wake(0).expect("keys draw");
-    let mut summary = CapabilitySummary::EMPTY;
-    for cap in [CapabilityId::NET, CapabilityId::NET_DISCOVER_ALL] {
-        if rng.next_u64() & 1 == 0 {
-            summary.insert(cap);
+/// A real decoder answering in process, which the harness can make exit.
+struct Mortal {
+    session: LoopbackSession<Decoder>,
+    dead: Rc<Cell<bool>>,
+}
+
+impl SessionTransport for Mortal {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        if self.dead.get() {
+            return Ok(0);
+        }
+        self.session.read(buf)
+    }
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
+        if self.dead.get() {
+            return Err(Errno::BrokenPipe);
+        }
+        self.session.write(buf)
+    }
+
+    fn descriptors(&self) -> Option<SessionDescriptors> {
+        None
+    }
+
+    fn dispose(self) -> Option<i32> {
+        None
+    }
+}
+
+/// Launches real decoders; setting `dead` ends the live one.
+struct Mortals {
+    dead: Rc<Cell<bool>>,
+}
+
+impl SessionLauncher for Mortals {
+    type Transport = Mortal;
+
+    fn launch(&mut self) -> Result<Mortal, Errno> {
+        self.dead.set(false);
+        Ok(Mortal {
+            session: LoopbackSession::new(Decoder::new()),
+            dead: self.dead.clone(),
+        })
+    }
+}
+
+type Lived = Front<Mortals, Quiet, Keys>;
+
+/// Turns until a decoder answering in process has said all it will.
+fn settle(front: &mut Lived, now: u64) {
+    for _ in 0..64 {
+        drain(front, now);
+        if !front.wants_read() {
+            return;
+        }
+        front.on_decoder_readable(now);
+        if !front.wants_write() {
+            return;
         }
     }
-    let who = Origin::new(
-        TrustDomain::User,
-        1000,
-        100,
-        7,
-        ProcId::from_raw([rng.next_u8(); 16]),
-        summary,
-        tairix_abi::ORIGIN_CONSOLE_NONE,
-    );
-    let service = ServiceTypeField {
-        name: b"ipp",
-        transport: Transport::Tcp,
-    };
-    let mut reply = vec![0u8; DISCOVERY_MAX_REPLY];
-    let mut session = 0;
-    for step in 0..6 {
-        let call = match step {
-            0 => DiscoveryRequest::Open { deliver_port: 9 },
-            1 => DiscoveryRequest::Start {
-                session,
-                query: Query::Browse { service },
+    panic!("the front and its decoder never settled");
+}
+
+/// A caller owning one port.
+struct Asker {
+    origin: Origin,
+    owned: u64,
+}
+
+impl Caller for Asker {
+    fn origin(&self) -> &Origin {
+        &self.origin
+    }
+
+    fn owns_port(&self, port: u64) -> bool {
+        port == self.owned
+    }
+}
+
+const POOL_HOSTS: [&str; 2] = ["printer.local", "nas.local"];
+const POOL_TYPES: [&[u8]; 2] = [b"_ipp", b"_http"];
+
+/// A query from the small pool every client draws from, so requests join.
+fn pooled<'a>(rng: &mut Prng, hosts: &'a [Name; 2]) -> Query<'a> {
+    match rng.below(4) {
+        0 | 1 => Query::Browse {
+            service: ServiceTypeField {
+                name: &POOL_TYPES[rng.below(2)][1..],
+                transport: Transport::Tcp,
             },
-            2 => DiscoveryRequest::Start {
-                session,
-                query: Query::Types,
+        },
+        2 => Query::Types,
+        _ => Query::Host {
+            name: hosts[rng.below(2)].as_wire(),
+            families: Families::BOTH,
+        },
+    }
+}
+
+/// A response answering questions in the clients' pool, goodbyes among them.
+fn pool_response(rng: &mut Prng) -> Vec<u8> {
+    let mut out = vec![0u8; 512];
+    let mut writer = MessageWriter::new(&mut out, 0, true).expect("room for a header");
+    for _ in 0..=rng.below(3) {
+        let service = *rng.pick(&POOL_TYPES);
+        let mut record = match rng.below(3) {
+            0 => Record::unique(
+                Name::encode(rng.pick(&POOL_HOSTS)).expect("fixed names encode"),
+                RData::A(Ipv4Addr::new(192, 168, 1, rng.next_u8())),
+            ),
+            1 => Record::shared(
+                Name::from_labels(&[service, b"_tcp", b"local"]).expect("a type"),
+                RData::Ptr(
+                    Name::from_labels(&[
+                        rng.pick(&[b"Hall".as_slice(), b"Lobby"]),
+                        service,
+                        b"_tcp",
+                        b"local",
+                    ])
+                    .expect("an instance"),
+                ),
+            ),
+            _ => Record::shared(
+                Name::encode("_services._dns-sd._udp.local").expect("the meta-query"),
+                RData::Ptr(Name::from_labels(&[service, b"_tcp", b"local"]).expect("a type")),
+            ),
+        };
+        record.ttl = [0, 1, 120, 4500][rng.below(4)];
+        assert!(writer.push_record(Section::Answer, &record));
+    }
+    let len = writer.finish();
+    out.truncate(len);
+    out
+}
+
+/// What the client sweeps reached, so one reaching nothing fails rather than
+/// passing vacuously.
+#[derive(Default)]
+struct Reached {
+    opened: u32,
+    started: u32,
+    answers: u32,
+    blocked: u32,
+    deaths: u32,
+}
+
+/// Whether `reply` is one the client reads for `call`, and the id it carries.
+fn read_reply(call: &DiscoveryRequest<'_>, reply: &[u8], reached: &mut Reached) -> Option<u32> {
+    let refused =
+        reply.len() == tairix_abi::reply::STATUS_REPLY_LEN && decode_status_reply(reply).is_err();
+    match call {
+        DiscoveryRequest::Open { .. } | DiscoveryRequest::Start { .. } => {
+            let id = tairix_abi::discovery_ipc::decode_id_reply(reply).ok();
+            assert!(id.is_some() || refused, "an id or a refusal");
+            id
+        }
+        DiscoveryRequest::Collect { .. } => {
+            if let Ok(collected) = CollectReply::parse(reply) {
+                for entry in collected.entries() {
+                    if matches!(entry, Entry::Answer { .. }) {
+                        reached.answers += 1;
+                    }
+                }
+            } else {
+                assert!(refused, "entries or a refusal");
+            }
+            None
+        }
+        _ => {
+            assert_eq!(reply.len(), tairix_abi::reply::STATUS_REPLY_LEN, "a status");
+            None
+        }
+    }
+}
+
+/// The clients one invariant-4 sweep drives against a front over a killable
+/// decoder, and what each holds.
+struct Crowd {
+    world: Keys,
+    dead: Rc<Cell<bool>>,
+    front: Lived,
+    clients: Vec<Asker>,
+    opened: Vec<(usize, u32)>,
+    started: Vec<(usize, u32, u32)>,
+    gone: [bool; 5],
+    now: u64,
+    bytes: Vec<u8>,
+    reply: Vec<u8>,
+}
+
+impl Crowd {
+    /// The front with its links up, and five processes over three accounts,
+    /// so accounts span processes.
+    fn new(rng: &mut Prng) -> Self {
+        let world = Keys::default();
+        let dead: Rc<Cell<bool>> = Rc::default();
+        let mut front = Front::new(
+            Mortals { dead: dead.clone() },
+            Quiet,
+            world.clone(),
+            Sockets {
+                v4: Some(V4),
+                v6: None,
             },
-            3 => DiscoveryRequest::Collect {
+            Grants::default(),
+        )
+        .expect("the buffers commit");
+        wake(&mut front, 0);
+        settle(&mut front, 0);
+        links_up(&mut front);
+        settle(&mut front, 0);
+        let clients = (0..5u8)
+            .map(|n| {
+                let mut summary = CapabilitySummary::EMPTY;
+                if rng.below(8) != 0 {
+                    summary.insert(CapabilityId::NET);
+                }
+                if rng.below(4) != 0 {
+                    summary.insert(CapabilityId::NET_DISCOVER_ALL);
+                }
+                Asker {
+                    origin: Origin::new(
+                        TrustDomain::User,
+                        1000 + u32::from(n % 3),
+                        100,
+                        u64::from(n) + 7,
+                        ProcId::from_raw([n + 1; 16]),
+                        summary,
+                        tairix_abi::ORIGIN_CONSOLE_NONE,
+                    ),
+                    owned: 100 + u64::from(n),
+                }
+            })
+            .collect();
+        Self {
+            world,
+            dead,
+            front,
+            clients,
+            opened: Vec::new(),
+            started: Vec::new(),
+            gone: [false; 5],
+            now: 0,
+            bytes: vec![0u8; 512],
+            reply: vec![0u8; DISCOVERY_MAX_REPLY],
+        }
+    }
+
+    /// A session of `who`'s, now and then one it never opened.
+    fn session_for(&self, rng: &mut Prng, who: usize) -> u32 {
+        let mine: Vec<u32> = self
+            .opened
+            .iter()
+            .filter(|&&(client, _)| client == who)
+            .map(|&(_, session)| session)
+            .collect();
+        if mine.is_empty() || rng.below(8) == 0 {
+            rng.next_u32()
+        } else {
+            *rng.pick(&mine)
+        }
+    }
+
+    /// One step: the call `who` makes, or `None` after acting on the front
+    /// directly. Exits and decoder deaths are rare enough that most sweeps
+    /// hear answers between them.
+    fn step<'h>(
+        &mut self,
+        rng: &mut Prng,
+        hosts: &'h [Name; 2],
+        who: usize,
+        session: u32,
+        foreign: bool,
+        reached: &mut Reached,
+    ) -> Option<DiscoveryRequest<'h>> {
+        let now = self.now;
+        match rng.below(20) {
+            0 | 1 => Some(DiscoveryRequest::Open {
+                deliver_port: self.clients[if foreign {
+                    (who + 1) % self.clients.len()
+                } else {
+                    who
+                }]
+                .owned,
+            }),
+            2..=4 => Some(DiscoveryRequest::Start {
+                session,
+                query: pooled(rng, hosts),
+            }),
+            5 => {
+                let theirs: Vec<u32> = self
+                    .started
+                    .iter()
+                    .filter(|&&(client, held, _)| client == who && held == session)
+                    .map(|&(_, _, request)| request)
+                    .collect();
+                let request = if theirs.is_empty() {
+                    rng.next_u32()
+                } else {
+                    *rng.pick(&theirs)
+                };
+                Some(DiscoveryRequest::Stop { session, request })
+            }
+            6..=8 => Some(DiscoveryRequest::Collect {
                 session,
                 capacity: rng.next_u32() % 16_384,
-            },
-            4 => DiscoveryRequest::Stop {
-                session,
-                request: rng.next_u32() % 4,
-            },
-            _ => DiscoveryRequest::Close { session },
-        };
-        let mut bytes = vec![0u8; 512];
-        let len = call.encode(&mut bytes).expect("encodes");
-        let len = front.serve(0, &who, &bytes[..len], &mut reply);
-        let reply = &reply[..len];
-        assert!(
-            decode_status_reply(reply).is_err()
-                || reply.len() == ID_REPLY_LEN
-                || reply.len() == tairix_abi::reply::STATUS_REPLY_LEN
-                || CollectReply::parse(reply).is_ok(),
-            "a reply the client reads"
-        );
-        if step == 0 {
-            if let Ok(id) = tairix_abi::discovery_ipc::decode_id_reply(reply) {
-                session = id;
+            }),
+            9 => Some(DiscoveryRequest::Close { session }),
+            10 => {
+                if !self.gone[who] && rng.below(4) == 0 {
+                    self.gone[who] = true;
+                    self.front
+                        .on_peer_exit(now, self.clients[who].origin.proc_id());
+                    self.opened.retain(|&(client, _)| client != who);
+                    self.started.retain(|&(client, _, _)| client != who);
+                }
+                None
+            }
+            11..=13 => {
+                let payload = pool_response(rng);
+                let last = rng.next_u8() & !1;
+                self.front.on_delivery(
+                    now,
+                    &SocketDelivery::Datagram(delivery(rng, last, &payload)),
+                );
+                None
+            }
+            14 => {
+                self.front.on_delivery(
+                    now,
+                    &SocketDelivery::Link(SocketLinkEvent {
+                        socket: V4,
+                        interface: iface(rng),
+                        up: rng.below(2) == 0,
+                    }),
+                );
+                None
+            }
+            15 => {
+                if self.front.wants_deliveries() && rng.below(4) == 0 {
+                    self.dead.set(true);
+                    settle(&mut self.front, now);
+                    assert!(!self.front.wants_deliveries(), "the exit was noticed");
+                    reached.deaths += 1;
+                }
+                None
+            }
+            _ => {
+                self.now = match self.front.wake_at() {
+                    Some(at) if rng.below(4) != 0 => at.max(now),
+                    _ => now + rng.below(3000) as u64 * MS,
+                };
+                wake(&mut self.front, self.now);
+                self.front.retry_rings();
+                None
             }
         }
     }
-    // And bytes that are no call at all.
-    let len = front.serve(0, &who, noise, &mut reply);
+
+    /// Serve `call` as `who`, and keep what it opened or started.
+    fn serve(
+        &mut self,
+        call: &DiscoveryRequest<'_>,
+        who: usize,
+        foreign: bool,
+        reached: &mut Reached,
+    ) {
+        let Self {
+            front,
+            clients,
+            bytes,
+            reply,
+            now,
+            ..
+        } = self;
+        let len = call.encode(bytes).expect("encodes");
+        let len = front.serve(*now, &clients[who], &bytes[..len], reply);
+        let id = read_reply(call, &reply[..len], reached);
+        match (call, id) {
+            (DiscoveryRequest::Open { .. }, Some(id)) => {
+                assert!(!foreign, "a session opened on another's port");
+                reached.opened += 1;
+                self.opened.push((who, id));
+            }
+            (DiscoveryRequest::Open { .. }, None) if foreign => {
+                assert_eq!(
+                    decode_status_reply(&reply[..len]),
+                    Err(Errno::PermissionDenied)
+                );
+            }
+            (DiscoveryRequest::Start { session, .. }, Some(id)) => {
+                reached.started += 1;
+                self.started.push((who, *session, id));
+            }
+            (DiscoveryRequest::Close { session }, _) => {
+                self.opened.retain(|&held| held != (who, *session));
+                self.started
+                    .retain(|&(client, held, _)| client != who || held != *session);
+            }
+            _ => {}
+        }
+    }
+
+    /// Once every client has gone and a live decoder has said all it will,
+    /// nothing they asked for is left behind.
+    fn assert_left_idle(mut self, reached: &mut Reached) {
+        for (client, asker) in self.clients.iter().enumerate() {
+            if !self.gone[client] {
+                self.front.on_peer_exit(self.now, asker.origin.proc_id());
+            }
+        }
+        if !self.front.wants_deliveries() {
+            self.now = self
+                .now
+                .max(self.front.wake_at().expect("a replacement is due"));
+            wake(&mut self.front, self.now);
+        }
+        settle(&mut self.front, self.now);
+        self.front.sync_room_watches(&mut |_| true, &mut |_| {});
+        self.front.assert_idle();
+        reached.blocked += self.world.0.borrow().blocked;
+    }
+}
+
+/// Invariant 4.
+fn exercise_clients(rng: &mut Prng, noise: &[u8], reached: &mut Reached) {
+    let hosts = POOL_HOSTS.map(|host| Name::encode(host).expect("fixed names encode"));
+    let mut crowd = Crowd::new(rng);
+    for _ in 0..96 {
+        crowd.world.0.borrow_mut().ring = match rng.below(4) {
+            0 => Some(Errno::WouldBlock),
+            1 => Some(Errno::NotFound),
+            _ => None,
+        };
+        let who = rng.below(crowd.clients.len());
+        let session = crowd.session_for(rng, who);
+        let foreign = rng.below(4) == 0;
+        let call = crowd.step(rng, &hosts, who, session, foreign, reached);
+        if let Some(call) = call.filter(|_| !crowd.gone[who]) {
+            crowd.serve(&call, who, foreign, reached);
+        }
+        settle(&mut crowd.front, crowd.now);
+        crowd
+            .front
+            .sync_room_watches(&mut |_| rng.below(4) != 0, &mut |_| {});
+        crowd.front.assert_consistent();
+    }
+    let Crowd {
+        front,
+        clients,
+        reply,
+        now,
+        ..
+    } = &mut crowd;
+    let len = front.serve(*now, &clients[0], noise, reply);
     assert!(len > 0, "even noise is answered, with its refusal");
+    crowd.assert_left_idle(reached);
 }
 
 #[test]
@@ -984,6 +1415,7 @@ fn hostile_frames_and_decoders_never_break_the_front() {
     ));
     let mut noise = [0u8; 700];
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut reached = Reached::default();
     loop {
         for _ in 0..SMOKE_ITERATIONS {
             let size = rng.below(noise.len() + 1);
@@ -992,10 +1424,22 @@ fn hostile_frames_and_decoders_never_break_the_front() {
             exercise_decoder_codec(&mut rng, &noise[..size]);
             exercise_decoder(&mut rng, &noise[..size]);
             exercise_front(&mut rng, &noise[..size]);
-            exercise_calls(&mut rng, &noise[..size]);
+            exercise_clients(&mut rng, &noise[..size], &mut reached);
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }
+    let Reached {
+        opened,
+        started,
+        answers,
+        blocked,
+        deaths,
+    } = reached;
+    assert!(
+        opened > 0 && started > 0 && answers > 0 && blocked > 0 && deaths > 0,
+        "the client sweep reached too little: {opened} opened, {started} started, \
+         {answers} answers, {blocked} doorbells blocked, {deaths} decoder exits"
+    );
 }

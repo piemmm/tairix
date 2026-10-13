@@ -17,10 +17,10 @@
 //! A refusal bears on what it refused. An ask the service will not answer,
 //! or this program may not make, is not made again while it is wanted; one
 //! refused for the service's bounds, or failing for want of the service, ends
-//! the pass, and the next asks again. A request whose replacement was lost
-//! again at once is held back a pass, so a request that cannot be replayed
-//! whole is retried at the read's pace rather than as fast as its losses
-//! arrive.
+//! the pass, and the next asks again. A request whose replacement is lost
+//! again is held back by time, from the read's pace doubling, so one that
+//! cannot be replayed whole is retried ever more rarely, however fast its
+//! losses arrive.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -28,9 +28,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::net::IpAddr;
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use tairix_abi::discovery_ipc::{
     Entry, Families, Query, ServiceTypeField, Transport, REQUESTS_PER_ACCOUNT,
 };
+
+use tairix_abi::discovery_ipc::genuine_doorbell;
 use tairix_abi::Errno;
 use tairix_discovery::{request_of, DiscoveryError, Held, OwnedAnswer, Session};
 use tairix_net::dns::{DisplayLabel, Name, Presentation, WireName};
@@ -167,6 +170,115 @@ impl Ask {
     }
 }
 
+/// The discovery session the map holds, published by the thread that opens
+/// it to the loop that drains its doorbell.
+#[derive(Debug)]
+pub struct OpenSession(AtomicU64);
+
+/// Outside the id space, so every session id, 0 included, is a session.
+const NO_SESSION: u64 = u64::MAX;
+
+impl Default for OpenSession {
+    fn default() -> Self {
+        Self(AtomicU64::new(NO_SESSION))
+    }
+}
+
+impl OpenSession {
+    /// The map now holds session `id`.
+    pub fn open(&self, id: u32) {
+        self.0.store(u64::from(id), Ordering::Relaxed);
+    }
+
+    /// The map holds no session.
+    pub fn close(&self) {
+        self.0.store(NO_SESSION, Ordering::Relaxed);
+    }
+
+    /// Whether `frame`, posted to the doorbell by kernel-attested `sender`,
+    /// is the service ringing the open session.
+    #[must_use]
+    pub fn rung_by(&self, sender: &[u8], frame: &[u8]) -> bool {
+        genuine_doorbell(sender, frame)
+            .is_some_and(|rung| u64::from(rung) == self.0.load(Ordering::Relaxed))
+    }
+}
+
+/// Where the map's discovery collects stand.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Collect {
+    /// The map asks the service nothing: it has no doorbell, no thread to
+    /// collect on, or the service refused it a session.
+    #[default]
+    Off,
+    /// Nothing has moved since the last collect.
+    Idle,
+    /// The service rang, or the addresses the map shows moved.
+    Due,
+    /// A collect is out; `again` once something moved since it was asked.
+    Asked {
+        /// Something moved since the collect was asked.
+        again: bool,
+    },
+    /// The last collect failed — the service had not started, or lost the
+    /// session — so the next read asks again.
+    Retry,
+}
+
+impl Collect {
+    /// Where collects start: due once the map has a doorbell and its reader a
+    /// thread of its own, since a collect makes many blocking calls the event
+    /// loop must never make.
+    #[must_use]
+    pub const fn start(doorbell: bool, reader_thread: bool) -> Self {
+        if doorbell && reader_thread {
+            Self::Due
+        } else {
+            Self::Off
+        }
+    }
+
+    /// Something moved that a collect should see.
+    pub fn moved(&mut self) {
+        *self = match *self {
+            Self::Idle | Self::Due | Self::Retry => Self::Due,
+            Self::Asked { .. } => Self::Asked { again: true },
+            Self::Off => Self::Off,
+        };
+    }
+
+    /// The outstanding collect answered: whether its pass settled, or why it
+    /// failed.
+    pub fn answered(&mut self, result: Result<bool, &DiscoveryError>) {
+        // A session refused outright is not asked for again, as an ask
+        // refused outright is not.
+        if matches!(
+            result,
+            Err(DiscoveryError::Refused(Errno::PermissionDenied))
+        ) {
+            *self = Self::Off;
+            return;
+        }
+        // A pass that left work is asked again at the next read, not only
+        // when the service next rings.
+        let settled = result.unwrap_or(false);
+        if let Self::Asked { again } = *self {
+            *self = match (again, settled) {
+                (true, _) => Self::Due,
+                (false, true) => Self::Idle,
+                (false, false) => Self::Retry,
+            };
+        }
+    }
+
+    /// A read landed: a failed collect is asked again.
+    pub fn read_landed(&mut self) {
+        if *self == Self::Retry {
+            *self = Self::Due;
+        }
+    }
+}
+
 /// The discovery-v1 requests the map keeps open and what each holds.
 #[derive(Debug, Default)]
 pub struct Discovery {
@@ -182,12 +294,30 @@ pub struct Discovery {
     stalled: Option<DiscoveryError>,
     /// Asks the service refused for themselves, not made again while wanted.
     unanswerable: BTreeSet<Ask>,
-    /// Passes reconciled so far.
-    pass: u64,
-    /// The pass each lost request was last replaced in.
-    replaced: BTreeMap<Ask, u64>,
+    /// When each lost request was last replaced, and how often in a row.
+    replaced: BTreeMap<Ask, Backoff>,
     /// A lost request was held back in the last pass.
     deferred: bool,
+}
+
+/// A replaced request's wait before it may be replaced again.
+#[derive(Copy, Clone, Debug)]
+struct Backoff {
+    /// When it was last replaced.
+    at: u64,
+    /// Replacements in a row that were lost again within their wait.
+    streak: u32,
+}
+
+/// The longest wait doubles the read's pace this many times.
+const MAX_BACKOFF_DOUBLINGS: u32 = 6;
+
+impl Backoff {
+    /// When the request may next be replaced.
+    fn until(self) -> u64 {
+        self.at
+            .saturating_add(crate::REFRESH_NS << self.streak.min(MAX_BACKOFF_DOUBLINGS))
+    }
 }
 
 impl Discovery {
@@ -205,14 +335,13 @@ impl Discovery {
         }
     }
 
-    /// Bring the open requests in line with what is held: the segment's
-    /// types, a browse per type, a resolve per instance, a lookup per host,
-    /// and a reverse lookup for each link-local address in `named`. A request
-    /// whose updates were dropped is started again, which answers with what
-    /// is held now.
-    pub fn reconcile(&mut self, directory: &mut dyn Directory, named: &BTreeSet<IpAddr>) {
+    /// Bring the open requests in line with what is held at `now`: the
+    /// segment's types, a browse per type, a resolve per instance, a lookup
+    /// per host, and a reverse lookup for each link-local address in `named`.
+    /// A request whose updates were dropped is started again, which answers
+    /// with what is held now, once its backoff allows.
+    pub fn reconcile(&mut self, directory: &mut dyn Directory, named: &BTreeSet<IpAddr>, now: u64) {
         let wanted = self.wanted(named);
-        self.pass += 1;
         self.truncated = false;
         self.stalled = None;
         self.deferred = false;
@@ -240,14 +369,24 @@ impl Discovery {
             })
             .map(|(ask, &request)| (ask.clone(), request))
             .collect();
-        let open = &self.open;
-        self.replaced.retain(|ask, _| open.contains_key(ask));
+        let (open, held) = (&self.open, &self.held);
+        // A replacement that outlived its wait has proved it fits: the next
+        // loss starts the backoff afresh.
+        self.replaced.retain(|ask, backoff| {
+            open.get(ask).is_some_and(|request| {
+                now < backoff.until() || held.get(request).is_some_and(|(_, held)| held.is_lost())
+            })
+        });
         for (ask, old) in lost {
             if self.stalled.is_some() {
                 break;
             }
-            if self.replaced.get(&ask) == Some(&(self.pass - 1)) {
+            let backoff = self.replaced.get(&ask).copied();
+            if let Some(backoff) = backoff.filter(|backoff| now < backoff.until()) {
                 self.deferred = true;
+                // A request still lost at the longest wait is not being kept
+                // whole, so the map is short of it.
+                self.truncated |= backoff.streak >= MAX_BACKOFF_DOUBLINGS;
                 continue;
             }
             // Started before the old one stops, so the question they share
@@ -271,7 +410,9 @@ impl Discovery {
                         self.held.remove(&old);
                     }
                     self.held.insert(request, (ask.clone(), Held::default()));
-                    self.replaced.insert(ask.clone(), self.pass);
+                    let streak = backoff.map_or(0, |backoff| backoff.streak.saturating_add(1));
+                    self.replaced
+                        .insert(ask.clone(), Backoff { at: now, streak });
                     self.open.insert(ask, request);
                 }
                 Err(refusal) => self.refuse(ask, refusal),

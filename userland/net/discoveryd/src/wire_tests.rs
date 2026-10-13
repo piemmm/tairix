@@ -1,9 +1,9 @@
 //! Unit tests for the front ↔ decoder channel.
 
 use super::{
-    Form, FromDecoder, ToDecoder, ASK_HEADER_LEN, CACHE_KEY_LEN, CONFIGURE_LEN,
-    DATAGRAM_HEADER_LEN, DEADLINE_LEN, LINK_LEN, MAX_FROM_DECODER, MAX_TO_DECODER, REPLAYED_LEN,
-    REPLAY_LEN, RNG_KEY_LEN, STOPPED_LEN, STOP_LEN, TICK_LEN, TRANSMIT_HEADER_LEN,
+    Edge, Form, FromDecoder, ToDecoder, ASK_HEADER_LEN, CACHE_KEY_LEN, CONFIGURE_LEN,
+    DATAGRAM_HEADER_LEN, DEADLINE_LEN, GROUP_BURST, LINK_LEN, MAX_FROM_DECODER, MAX_TO_DECODER,
+    REPLAYED_LEN, REPLAY_LEN, RNG_KEY_LEN, STOPPED_LEN, STOP_LEN, TICK_LEN, TRANSMIT_HEADER_LEN,
 };
 use alloc::vec;
 use alloc::vec::Vec;
@@ -11,7 +11,11 @@ use tairix_abi::discovery_ipc::{Answer, Change, Entry};
 use tairix_abi::net::SOCKET_MAX_DATAGRAM;
 use tairix_abi::net_ipc::IF_NAME_LEN;
 use tairix_net::mdns::{Destination, MAX_MESSAGE_LEN, MAX_QUESTIONS};
+use tairix_net::rate::BucketLevel;
 use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+/// One second in nanoseconds, the scale a bucket's tokens are held at.
+const NANOS: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
 use tairix_sandbox::wire::WireError;
 
 fn iface(name: &[u8]) -> [u8; IF_NAME_LEN] {
@@ -33,6 +37,7 @@ fn datagram(payload: &[u8]) -> Vec<u8> {
         interface: iface(b"eth0"),
         source: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)),
         port: 5353,
+        to_group: true,
         payload,
     })
 }
@@ -52,6 +57,7 @@ fn every_front_frame_round_trips() {
             interface: iface(b"wlan0"),
             source: v6,
             port: 41_234,
+            to_group: true,
             payload: b"mdns bytes",
         },
         ToDecoder::Datagram {
@@ -59,18 +65,27 @@ fn every_front_frame_round_trips() {
             interface: iface(b"eth0"),
             source: IpAddr::V4(Ipv4Addr::new(169, 254, 1, 2)),
             port: 5353,
+            to_group: true,
             payload: &[],
         },
         ToDecoder::Tick { now: 7 },
         ToDecoder::Link {
             now: 8,
             interface: iface(b"eth1"),
-            up: true,
+            edge: Edge::Up(BucketLevel {
+                scaled: u64::from(GROUP_BURST) * NANOS,
+                at: 7,
+            }),
+        },
+        ToDecoder::Link {
+            now: 8,
+            interface: iface(b"eth1"),
+            edge: Edge::Up(BucketLevel { scaled: 0, at: 0 }),
         },
         ToDecoder::Link {
             now: 9,
             interface: iface(b"eth1"),
-            up: false,
+            edge: Edge::Down,
         },
         ToDecoder::Ask {
             now: 10,
@@ -100,7 +115,7 @@ fn every_front_frame_round_trips() {
             ToDecoder::Link {
                 now: 0,
                 interface: iface(b"eth0"),
-                up: true,
+                edge: Edge::Down,
             },
             LINK_LEN,
         ),
@@ -129,6 +144,7 @@ fn the_largest_datagram_fits_and_a_larger_one_is_never_encoded() {
         interface: iface(b"eth0"),
         source: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         port: 5353,
+        to_group: true,
         payload: &larger,
     };
     assert_eq!(frame.encode(&mut out), None);
@@ -215,11 +231,13 @@ fn every_decoder_frame_round_trips() {
         },
         FromDecoder::Transmit {
             interface: iface(b"eth0"),
+            at: 11,
             to: Destination::Group,
             payload: b"query",
         },
         FromDecoder::Transmit {
             interface: iface(b"wlan0"),
+            at: u64::MAX,
             to: Destination::Peer {
                 addr: IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 9)),
                 port: 49_152,
@@ -232,6 +250,7 @@ fn every_decoder_frame_round_trips() {
     assert_eq!(
         from_decoder(&FromDecoder::Transmit {
             interface: iface(b"eth0"),
+            at: 0,
             to: Destination::Group,
             payload: &largest,
         })
@@ -326,18 +345,19 @@ fn an_answer_is_only_ever_an_answer_entry() {
 fn a_transmit_frame_names_one_shape_of_destination() {
     let group = from_decoder(&FromDecoder::Transmit {
         interface: iface(b"eth0"),
+        at: 3,
         to: Destination::Group,
         payload: b"q",
     });
     let mut addressed = group.clone();
-    addressed[19] = 1;
+    addressed[27] = 1;
     assert_eq!(
         FromDecoder::decode(&addressed),
         Err(WireError::Malformed),
         "a group has no address"
     );
     let mut kind = group.clone();
-    kind[17] = 2;
+    kind[25] = 2;
     assert_eq!(FromDecoder::decode(&kind), Err(WireError::Malformed));
     assert_eq!(
         FromDecoder::decode(&group[..TRANSMIT_HEADER_LEN]),
@@ -369,8 +389,38 @@ fn an_ask_names_a_form_and_a_name() {
     let mut link = encoded(&ToDecoder::Link {
         now: 0,
         interface: iface(b"eth0"),
-        up: true,
+        edge: Edge::Down,
     });
-    link[LINK_LEN - 1] = 2;
+    link[25] = 2;
     assert_eq!(ToDecoder::decode(&link), Err(WireError::Malformed));
+}
+
+/// A link going down carries no budget, and one coming up no more than a
+/// group budget holds: anything else is no frame the front sends.
+#[test]
+fn a_link_edge_carries_a_budget_only_coming_up_and_only_one_a_group_holds() {
+    let down = encoded(&ToDecoder::Link {
+        now: 0,
+        interface: iface(b"eth0"),
+        edge: Edge::Down,
+    });
+    for at in 26..LINK_LEN {
+        let mut dirty = down.clone();
+        dirty[at] = 1;
+        assert_eq!(ToDecoder::decode(&dirty), Err(WireError::Malformed));
+    }
+    let over = BucketLevel {
+        scaled: u64::from(GROUP_BURST) * NANOS + 1,
+        at: 0,
+    };
+    let edge = ToDecoder::Link {
+        now: 0,
+        interface: iface(b"eth0"),
+        edge: Edge::Up(over),
+    };
+    assert_eq!(edge.encode(&mut [0u8; LINK_LEN]), None, "never encoded");
+    let mut forged = down;
+    forged[25] = 1;
+    forged[26..34].copy_from_slice(&over.scaled.to_le_bytes());
+    assert_eq!(ToDecoder::decode(&forged), Err(WireError::Malformed));
 }

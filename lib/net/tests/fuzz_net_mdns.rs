@@ -9,8 +9,8 @@
 //! 2. Driving the engine with arbitrary datagrams from arbitrary sources at
 //!    arbitrary times never panics and always yields a coherent
 //!    next-deadline decision.
-//! 3. The cache never grows past its fixed bounds, and no source is ever
-//!    holding more than its own share of it, whatever it sends.
+//! 3. The cache never grows past any of its fixed bounds — in all, at one
+//!    name and type, or from one source — whatever it is sent.
 //! 4. A datagram from off-link changes nothing at all.
 //! 5. Every datagram the engine builds parses back.
 //! 6. The DNS-SD grammar is total on any labels: a name that parses into an
@@ -24,6 +24,14 @@
 //!    is added once, renewed or retired only while held, retired exactly
 //!    once, and a question that was never asked, or has been stopped, is
 //!    told nothing.
+//! 10. Every chain, map, heap and count of the cache agrees with what it
+//!     holds after every step, however the cache was driven — including
+//!     floods from many forged sources that reach every bound it has.
+//! 11. Valid messages mutated — bits flipped, bytes forced to the values a
+//!     parser branches on, counts rewritten, truncated or lengthened — and
+//!     sent from any port, to the group or not, never panic the parser or
+//!     the engine, nor leave the engine disagreeing with itself, and what the
+//!     engine answers with parses.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from
 //! the same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -38,8 +46,8 @@ use tairix_net::dnssd::{
 };
 use tairix_net::mdns::{
     Answer, AnswerChange, Destination, MdnsEngine, NameKind, QuestionId, QuestionType, RData,
-    Record, RecordCache, Sender, Service, TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_SOURCE,
-    MAX_TXT_LEN, PORT,
+    Record, RecordCache, Sender, Service, TxtRecord, MAX_RECORDS, MAX_RECORDS_PER_KEY,
+    MAX_RECORDS_PER_SOURCE, MAX_TXT_LEN, PORT,
 };
 use tairix_net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -59,6 +67,7 @@ fn on_link(addr: IpAddr, port: u16) -> Sender {
         addr,
         port,
         on_link: true,
+        to_group: true,
     }
 }
 
@@ -182,7 +191,7 @@ fn exercise_parse(bytes: &[u8]) {
 }
 
 /// Drive the cache with arbitrary records from arbitrary sources and check
-/// the bounds hold whatever is thrown at it.
+/// it stays consistent and within its bounds whatever is thrown at it.
 fn exercise_cache(rng: &mut Prng) {
     let mut cache = RecordCache::new(HashSeed::UNKEYED);
     let mut sources = Vec::new();
@@ -219,7 +228,117 @@ fn exercise_cache(rng: &mut Prng) {
         if let Some(deadline) = cache.next_deadline() {
             assert!(deadline.secs() >= 0);
         }
+        cache.assert_consistent();
     }
+}
+
+/// Invariants 3 and 10 at the bounds: three times the records the cache
+/// holds, each distinct, from one loud source and many quieter ones, piled
+/// under two names and spread across many, so every bound is reached and its
+/// eviction taken. A record paying two bounds evicts two records, so the
+/// table can end a little short of full; what matters is that it filled.
+fn exercise_cache_bounds(rng: &mut Prng) {
+    let mut cache = RecordCache::new(HashSeed::UNKEYED);
+    let piled = [
+        Name::encode("_ipp._tcp.local").expect("a name"),
+        Name::encode("printer.local").expect("a name"),
+    ];
+    let loud = peer(0);
+    let (mut fullest, mut loudest) = (0, 0);
+    let mut deepest = [0; 2];
+    for step in 0..3 * MAX_RECORDS {
+        let now = Duration64::from_secs(i64::try_from(step / 64).expect("small"));
+        let pile = (rng.below(4) == 0).then(|| rng.below(2));
+        let name = pile.map_or_else(
+            || Name::encode(&format!("h{}.local", rng.below(MAX_RECORDS))).expect("a name"),
+            |at| piled[at],
+        );
+        let target = Name::encode(&format!("s{step}.local")).expect("a name");
+        let mut record = Record::shared(name, RData::Ptr(target));
+        record.ttl = 4500;
+        // A flush on a piled name would empty it before it reached its bound.
+        record.cache_flush = pile.is_none() && rng.below(16) == 0;
+        let source = if rng.below(4) == 0 {
+            loud
+        } else {
+            peer(1 + u8::try_from(rng.below(23)).expect("small"))
+        };
+        let watcher = (rng.below(4) == 0).then(|| QuestionId::new(rng.next_u32() % 64));
+        cache.learn(now, cache.keyed(&record), source, watcher, &mut |_, _| {});
+        assert!(cache.len() <= MAX_RECORDS);
+        assert!(cache.len_from(source) <= MAX_RECORDS_PER_SOURCE);
+        let at_key = cache.len_at(cache.key_of(&name, RecordType::Ptr));
+        assert!(at_key <= MAX_RECORDS_PER_KEY);
+        if let Some(at) = pile {
+            deepest[at] = deepest[at].max(at_key);
+        }
+        fullest = fullest.max(cache.len());
+        loudest = loudest.max(cache.len_from(loud));
+        if step % 256 == 0 {
+            cache.assert_consistent();
+        }
+    }
+    assert_eq!(fullest, MAX_RECORDS, "the global bound was reached");
+    assert_eq!(
+        loudest, MAX_RECORDS_PER_SOURCE,
+        "the loud source reached its share"
+    );
+    assert_eq!(
+        deepest, [MAX_RECORDS_PER_KEY; 2],
+        "each piled name reached its own bound"
+    );
+    cache.assert_consistent();
+}
+
+/// Invariant 11: one valid message, mutated.
+fn exercise_mutated(rng: &mut Prng, engine: &mut MdnsEngine, buf: &mut [u8; BUF]) {
+    let mut bytes = build_message(rng);
+    for _ in 0..=rng.below(6) {
+        match rng.below(6) {
+            0 if !bytes.is_empty() => {
+                let at = rng.below(bytes.len());
+                bytes[at] ^= 1 << rng.below(8);
+            }
+            1 if !bytes.is_empty() => {
+                let at = rng.below(bytes.len());
+                bytes[at] = *rng.pick(&[0x00, 0x01, 0x3F, 0x40, 0x7F, 0xC0, 0xC1, 0xFF]);
+            }
+            2 if bytes.len() >= 12 => {
+                // A header count rewritten, so the body no longer matches it.
+                let at = 4 + 2 * rng.below(4);
+                bytes[at..at + 2].copy_from_slice(&rng.next_u16().to_be_bytes());
+            }
+            3 => bytes.truncate(rng.below(bytes.len() + 1)),
+            4 => {
+                let at = rng.below(bytes.len() + 1);
+                bytes.insert(at, rng.next_u8());
+            }
+            _ if !bytes.is_empty() => {
+                let _ = bytes.remove(rng.below(bytes.len()));
+            }
+            _ => {}
+        }
+    }
+    exercise_parse(&bytes);
+    let any_port = rng.next_u16();
+    let from = Sender {
+        to_group: rng.next_u64() & 1 == 0,
+        ..on_link(
+            peer(rng.next_u8()),
+            *rng.pick(&[PORT, PORT, 0, 53, any_port]),
+        )
+    };
+    let mut rand = || 0u32;
+    let emitted = engine.on_message(
+        Duration64::from_secs(i64::from(rng.next_u32() % 600)),
+        &bytes,
+        from,
+        &mut rand,
+        buf,
+        &mut |_| {},
+    );
+    check_emit(emitted.map(|emit| (emit.to, emit.len)), buf);
+    engine.assert_consistent();
 }
 
 /// What each asked question has been told it holds.
@@ -288,6 +407,7 @@ fn exercise_engine(rng: &mut Prng) {
         if let Some(deadline) = engine.next_deadline() {
             assert!(deadline.secs() >= 0);
         }
+        engine.assert_consistent();
         assert!(engine.cache().len() <= MAX_RECORDS);
         for question in &asked {
             let cache = engine.cache();
@@ -312,6 +432,7 @@ fn exercise_engine(rng: &mut Prng) {
         addr: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
         port: PORT,
         on_link: false,
+        to_group: true,
     };
     let now = Duration64::from_nanos(millis.saturating_mul(1_000_000));
     assert!(engine
@@ -434,7 +555,7 @@ fn engine_step(
             check_emit(emitted.map(|emit| (emit.to, emit.len)), buf);
         }
         2 => {
-            while let Some(emit) = engine.poll(now, rand, buf, &mut sink) {
+            while let Some(emit) = engine.poll(now, buf, &mut sink) {
                 check_emit(Some((emit.to, emit.len)), buf);
             }
         }
@@ -666,6 +787,8 @@ fn random_inputs_never_panic() {
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let mut buf = [0u8; 640];
+    let mut mutated = engine();
+    let mut out = [0u8; BUF];
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     loop {
         for _ in 0..SMOKE_ITERATIONS {
@@ -676,7 +799,9 @@ fn random_inputs_never_panic() {
             exercise_cache(&mut rng);
             exercise_engine(&mut rng);
             exercise_dnssd(&mut rng);
+            exercise_mutated(&mut rng, &mut mutated, &mut out);
         }
+        exercise_cache_bounds(&mut rng);
         if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }

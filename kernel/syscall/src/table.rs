@@ -3008,6 +3008,23 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Whether the in-service caller of `ticket` on `endpoint` owns `port`
+    /// (`call_peer_port`).
+    ///
+    /// The implementation answers only a server about the caller it is
+    /// serving, and gives an unbound port and another process's the one
+    /// refusal, so neither who owns a port nor whether one exists leaks. The
+    /// default implementation fails closed with [`Errno::NotImplemented`].
+    fn call_peer_port(
+        &self,
+        _caller: &CallerContext<'_>,
+        _endpoint: u64,
+        _ticket: u64,
+        _port: u64,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Map `len` bytes of open file `fd`, starting at the page-aligned
     /// file byte `offset`, into the caller's own address space as a
     /// demand-paged, read-only private mapping, returning its base
@@ -4203,6 +4220,12 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             }
             SyscallNumber::WAITSET_CLOSE => self.handlers.waitset_close(caller, args.0[0]),
             SyscallNumber::PORT_UNBIND => self.handlers.port_unbind(caller, args.0[0]),
+            SyscallNumber::CALL_PEER_PORT => {
+                // args[0] is the endpoint id; args[1] the in-service ticket;
+                // args[2] the port whose owner is compared with its peer.
+                self.handlers
+                    .call_peer_port(caller, args.0[0], args.0[1], args.0[2])
+            }
             SyscallNumber::PORT_RESOLVE => {
                 // args[0] is the non-null name `UserPtr`
                 // (dispatcher-checked); args[1] is the name length in
@@ -5932,6 +5955,17 @@ mod tests {
 
         fn port_unbind(&self, _c: &CallerContext<'_>, _endpoint: u64) -> SyscallResult {
             self.record("port_unbind");
+            Ok(0)
+        }
+
+        fn call_peer_port(
+            &self,
+            _c: &CallerContext<'_>,
+            _endpoint: u64,
+            _ticket: u64,
+            _port: u64,
+        ) -> SyscallResult {
+            self.record("call_peer_port");
             Ok(0)
         }
 

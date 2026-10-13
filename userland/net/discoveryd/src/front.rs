@@ -35,6 +35,7 @@
 //! Every instant here is monotonic nanoseconds, the unit the owner's clock and
 //! wait-set speak.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::discovery_ipc::{
@@ -62,11 +63,11 @@ use tairix_util::secret::Wiped;
 use crate::events::{DECODER_STARTED, REQUEST_DENIED};
 use crate::grants::Grants;
 use crate::query::{plan, Needs, QUESTIONS_PER_REQUEST};
-use crate::questions::{Questions, Verdict};
+use crate::questions::{Questions, Spend, Verdict};
 use crate::sessions::{Session, Sessions, Subscribed};
 use crate::wire::{
-    FromDecoder, ToDecoder, ASK_HEADER_LEN, CACHE_KEY_LEN, CONFIGURE_LEN, MAX_FROM_DECODER,
-    MAX_TO_DECODER, RNG_KEY_LEN, TICK_LEN,
+    Edge, FromDecoder, ToDecoder, ASK_HEADER_LEN, CACHE_KEY_LEN, CONFIGURE_LEN, GROUP_BURST,
+    GROUP_RATE, MAX_FROM_DECODER, MAX_TO_DECODER, RNG_KEY_LEN, TICK_LEN,
 };
 
 /// Bytes of frames the front may hold queued for its decoder.
@@ -90,11 +91,31 @@ const RELAY_SOURCE_RATE: u32 = 32;
 const RELAY_SHARED_BURST: u32 = 2048;
 const RELAY_SHARED_RATE: u32 = 1024;
 
-/// Datagrams one interface may send to the group in a burst, and per second
-/// after: well above what continuous querying for every question needs, and
-/// far below a flood.
-const GROUP_BURST: u32 = 32;
-const GROUP_RATE: u32 = 8;
+/// Accounts whose budgets are tracked; a quieter one forgotten can only be
+/// handed a fresh budget.
+const BUDGETED_ACCOUNTS: usize = 64;
+
+/// Fresh questions one account's requests may raise in a burst, and per
+/// second after. Each is queried on every link out of the group budget every
+/// client shares — 32 to a datagram, 8 datagrams a second — so one account
+/// takes at most half a datagram a second of it, and a client churning names
+/// cannot starve another's first query.
+const FRESH_ACCOUNT_BURST: u32 = 64;
+const FRESH_ACCOUNT_RATE: u32 = 16;
+
+/// The same for every account together: a quarter of the group budget.
+const FRESH_SHARED_BURST: u32 = 256;
+const FRESH_SHARED_RATE: u32 = 64;
+
+/// Replays one account's requests may have the decoder make in a burst, and
+/// per second after: each walks everything its question holds, so a client
+/// starting and stopping one request in a loop costs no more than this.
+const REPLAY_ACCOUNT_BURST: u32 = 32;
+const REPLAY_ACCOUNT_RATE: u32 = 8;
+
+/// The same for every account together.
+const REPLAY_SHARED_BURST: u32 = 256;
+const REPLAY_SHARED_RATE: u32 = 64;
 
 /// Peers a reply may be owed to at once.
 const ASKERS: usize = 32;
@@ -105,6 +126,12 @@ const ASKER_WINDOW_NS: u64 = 1_000_000_000;
 
 /// Direct replies one sender can be owed at once.
 const ASKER_CREDITS: u8 = 4;
+
+/// How long the decoder may owe an acknowledgement before it is condemned.
+/// An honest one answers as it reads the frame, so only a withheld answer
+/// runs this long — holding question slots and account charges hostage —
+/// and the bound leaves a decoder starved of the CPU ample time.
+const ACK_DEADLINE_NS: u64 = 30_000_000_000;
 
 // Every frame either side can send fits the queue it crosses, so a refusal
 // is back-pressure and never a frame that can never be sent.
@@ -155,6 +182,16 @@ pub trait Host {
     ///
     /// [`Errno::NotFound`] when it already has, or the kernel's refusal.
     fn watch(&mut self, peer: ProcId) -> Result<(), Errno>;
+}
+
+/// A call in service on the discovery endpoint, as the kernel attests it.
+pub trait Caller {
+    /// Who made the call.
+    fn origin(&self) -> &Origin;
+
+    /// Whether the caller owns `port`, so its doorbell can only ring a
+    /// mailbox it drains itself.
+    fn owns_port(&self, port: u64) -> bool;
 }
 
 /// Why the front cannot go on at all.
@@ -237,6 +274,21 @@ struct Asker {
     until: u64,
 }
 
+/// An acknowledgement the decoder owes. It carries out frames in the order
+/// they were sent and answers each as it does, so it owes them in order too.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Owed {
+    Linked {
+        interface: [u8; IF_NAME_LEN],
+        up: bool,
+    },
+    Stopped(u32),
+    Replayed {
+        question: u32,
+        token: u32,
+    },
+}
+
 /// The front's state.
 pub struct Front<L: SessionLauncher, S: Sink + Clone, H: Host> {
     decoder: SupervisedSession<L, S>,
@@ -244,7 +296,11 @@ pub struct Front<L: SessionLauncher, S: Sink + Clone, H: Host> {
     host: H,
     sockets: Sockets,
     grants: Grants,
-    admission: PeerBudgets<RELAY_TRACKED_SOURCES>,
+    admission: PeerBudgets<IpAddr, RELAY_TRACKED_SOURCES>,
+    /// What each account's requests may cost the decoder in fresh questions.
+    fresh: PeerBudgets<u32, BUDGETED_ACCOUNTS>,
+    /// What each account's requests may cost the decoder in replays.
+    replays: PeerBudgets<u32, BUDGETED_ACCOUNTS>,
     /// The relay's encoding buffer, holding at most one datagram frame.
     frame: Vec<u8>,
     /// Where one frame from the decoder is read into.
@@ -259,6 +315,10 @@ pub struct Front<L: SessionLauncher, S: Sink + Clone, H: Host> {
     questions: Questions,
     sessions: Sessions,
     askers: ArrayVec<Asker, ASKERS>,
+    /// What the decoder owes, oldest first, with when each was sent.
+    owed: VecDeque<(Owed, u64)>,
+    /// Flush passes made, so each request is told once per pass.
+    flush_pass: u64,
 }
 
 impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
@@ -295,6 +355,18 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 RELAY_SHARED_BURST,
                 RELAY_SHARED_RATE,
             ),
+            fresh: PeerBudgets::new(
+                FRESH_ACCOUNT_BURST,
+                FRESH_ACCOUNT_RATE,
+                FRESH_SHARED_BURST,
+                FRESH_SHARED_RATE,
+            ),
+            replays: PeerBudgets::new(
+                REPLAY_ACCOUNT_BURST,
+                REPLAY_ACCOUNT_RATE,
+                REPLAY_SHARED_BURST,
+                REPLAY_SHARED_RATE,
+            ),
             frame,
             inbound,
             held: None,
@@ -305,6 +377,8 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             questions: Questions::new(HashSeed::from_bytes(*key)),
             sessions: Sessions::default(),
             askers: ArrayVec::new(),
+            owed: VecDeque::new(),
+            flush_pass: 0,
         })
     }
 
@@ -317,10 +391,15 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             .deadline
             .filter(|_| self.may_tick())
             .map(|at| at.max(self.last_tick.saturating_add(MIN_TICK_INTERVAL_NS)));
-        match (self.decoder.restart_deadline(), tick) {
-            (Some(restart), Some(tick)) => Some(restart.min(tick)),
-            (restart, tick) => restart.or(tick),
-        }
+        let overdue = self
+            .owed
+            .front()
+            .filter(|_| self.decoder.is_live())
+            .map(|&(_, sent)| sent.saturating_add(ACK_DEADLINE_NS));
+        [self.decoder.restart_deadline(), tick, overdue]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Do whatever `now` has reached: start and key a decoder that is due,
@@ -330,6 +409,15 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
     ///
     /// [`Fatal`] when the keys a due decoder needs cannot be drawn.
     pub fn on_wake(&mut self, now: u64) -> Result<(), Fatal> {
+        if self
+            .owed
+            .front()
+            .is_some_and(|&(_, sent)| now >= sent.saturating_add(ACK_DEADLINE_NS))
+        {
+            self.decoder
+                .condemn(now, "the decoder withheld an acknowledgement");
+            self.forget_decoder();
+        }
         if self.decoder.restart_deadline().is_some_and(|at| now >= at) {
             self.start(now)?;
         }
@@ -377,6 +465,7 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                     interface: datagram.interface,
                     source,
                     port: datagram.source.port,
+                    to_group: datagram.to_group,
                     payload: datagram.payload,
                 };
                 if let Some(len) = relayed.encode(&mut self.frame) {
@@ -390,11 +479,38 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         }
     }
 
-    /// Answer one call on the discovery endpoint from `origin`, writing the
+    /// Panic unless the question and session tables are each consistent,
+    /// and nothing is owed by a decoder that is not live: the oracle the
+    /// fuzz harness holds the front to.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn assert_consistent(&self) {
+        self.questions.assert_consistent();
+        self.sessions.assert_consistent();
+        assert!(self.owed.is_empty() || self.decoder.is_live());
+    }
+
+    /// Panic unless the front holds nothing a client asked for, and its
+    /// decoder owes no acknowledgement: the leak oracle once every client has
+    /// gone, the decoder has said everything, and the owner synced its watches.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn assert_idle(&self) {
+        self.assert_consistent();
+        self.questions.assert_idle();
+        self.sessions.assert_idle();
+        assert!(self.owed.is_empty(), "an acknowledgement owed for nothing");
+    }
+
+    /// Answer one call on the discovery endpoint from `caller`, writing the
     /// reply into `reply` and returning its length.
-    pub fn serve(&mut self, now: u64, origin: &Origin, request: &[u8], reply: &mut [u8]) -> usize {
+    pub fn serve(
+        &mut self,
+        now: u64,
+        caller: &dyn Caller,
+        request: &[u8],
+        reply: &mut [u8],
+    ) -> usize {
         let result = match DiscoveryRequest::decode(request) {
-            Ok(request) => self.dispatch(origin, &request, reply),
+            Ok(request) => self.dispatch(now, caller, &request, reply),
             Err(err) => Err(err),
         };
         self.sync(now);
@@ -418,10 +534,15 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         self.sync(now);
     }
 
-    /// The delivery ports owed a doorbell they had no room for; the owner
-    /// wakes when any has room and calls [`Self::retry_rings`].
-    pub fn owed_rings(&self) -> impl Iterator<Item = u64> + '_ {
-        self.sessions.owed_rings()
+    /// Bring the owner's watches on client ports in line with the doorbells
+    /// owed there, which it retries through [`Self::retry_rings`] once a
+    /// watched port has room; as [`Sessions::sync_rooms`].
+    pub fn sync_room_watches(
+        &mut self,
+        watch: &mut dyn FnMut(u64) -> bool,
+        unwatch: &mut dyn FnMut(u64),
+    ) {
+        self.sessions.sync_rooms(watch, unwatch);
     }
 
     /// Post every doorbell owed.
@@ -671,16 +792,37 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 continue;
             }
             let interface = link.name;
-            if !self.send_control(&ToDecoder::Link { now, interface, up }) {
+            let edge = if up {
+                Edge::Up(link.group.level())
+            } else {
+                Edge::Down
+            };
+            if !self.send_owed(
+                now,
+                &ToDecoder::Link {
+                    now,
+                    interface,
+                    edge,
+                },
+                Owed::Linked { interface, up },
+            ) {
                 return;
             }
             let link = &mut self.links[at];
             link.pending = link.pending.saturating_add(1);
             if down {
                 link.told = Told::Down;
-                for (session, request) in self.questions.flush_link(interface) {
-                    self.tell_flush(session, request, interface);
-                }
+                self.flush_pass += 1;
+                let Self {
+                    questions,
+                    sessions,
+                    host,
+                    flush_pass,
+                    ..
+                } = self;
+                questions.flush_link(interface, &mut |session, request| {
+                    flush_request(sessions, host, session, request, interface, *flush_pass);
+                });
             } else {
                 link.told = Told::Up { flapped: false };
             }
@@ -690,7 +832,7 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         self.links
             .retain(|link| link.up() || link.told_up() || link.pending > 0);
         while let Some(question) = self.questions.next_stop() {
-            if !self.send_control(&ToDecoder::Stop { question }) {
+            if !self.send_owed(now, &ToDecoder::Stop { question }, Owed::Stopped(question)) {
                 return;
             }
             self.questions.stopped(question);
@@ -707,11 +849,49 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             self.questions.asked(question);
         }
         while let Some((question, token)) = self.questions.next_replay() {
-            if !self.send_control(&ToDecoder::Replay { question, token }) {
+            if !self.send_owed(
+                now,
+                &ToDecoder::Replay { question, token },
+                Owed::Replayed { question, token },
+            ) {
                 return;
             }
-            self.questions.replay_sent(token);
+            self.questions.replay_sent(question, token);
         }
+    }
+
+    /// Send a control frame the decoder answers with `owed`, recording the
+    /// debt only once the queue took the frame, and reporting whether it did.
+    fn send_owed(&mut self, now: u64, frame: &ToDecoder<'_>, owed: Owed) -> bool {
+        if self.owed.try_reserve(1).is_err() || !self.send_control(frame) {
+            return false;
+        }
+        self.owed.push_back((owed, now));
+        true
+    }
+
+    /// The question replay `token` replays, when that replay is the oldest
+    /// thing the decoder owes.
+    fn replaying(&self, token: u32) -> Option<u32> {
+        match self.owed.front() {
+            Some(&(
+                Owed::Replayed {
+                    question,
+                    token: owed,
+                },
+                _,
+            )) if owed == token => Some(question),
+            _ => None,
+        }
+    }
+
+    /// The decoder acknowledged `owed`, which must be the oldest it owes.
+    fn acknowledged(&mut self, owed: Owed) -> bool {
+        let next = self.owed.front().map(|&(next, _)| next);
+        if next == Some(owed) {
+            self.owed.pop_front();
+        }
+        next == Some(owed)
     }
 
     /// Send one control frame, reporting whether the decoder's queue took it.
@@ -743,35 +923,45 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 let linked = entry_interface(&entry)
                     .and_then(|name| self.links.iter().find(|link| link.name == name))
                     .is_some_and(Link::settled);
-                let verdict = self.questions.on_answer(&entry, linked);
+                let verdict = self.questions.on_answer(&entry, linked, now);
                 self.tell(verdict, &entry)
             }
             FromDecoder::Held { token, entry } => {
-                if !matches!(
-                    entry,
-                    Entry::Answer {
-                        change: Change::Added,
-                        ..
-                    }
-                ) {
+                // A replay's answers come before its end, while it is the
+                // oldest thing owed, and are about the question it replays.
+                let replaying = self.replaying(token);
+                let Entry::Answer {
+                    request: question,
+                    change: Change::Added,
+                    ..
+                } = entry
+                else {
+                    return false;
+                };
+                if replaying != Some(question) {
                     return false;
                 }
                 let verdict = self.questions.on_held(token, &entry);
                 self.tell(verdict, &entry)
             }
             FromDecoder::Replayed { token } => {
-                self.questions.replayed(token);
+                let Some(question) = self.replaying(token) else {
+                    return false;
+                };
+                self.owed.pop_front();
+                self.questions.replayed(question, token);
                 true
             }
             FromDecoder::Transmit {
                 interface,
+                at,
                 to,
                 payload,
-            } => {
-                self.transmit(now, interface, to, payload);
-                true
-            }
-            FromDecoder::Linked { interface, .. } => {
+            } => self.transmit(now, interface, at, to, payload),
+            FromDecoder::Linked { interface, up } => {
+                if !self.acknowledged(Owed::Linked { interface, up }) {
+                    return false;
+                }
                 let Some(link) = self.links.iter_mut().find(|link| link.name == interface) else {
                     return false;
                 };
@@ -781,33 +971,29 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 link.pending = pending;
                 true
             }
-            FromDecoder::Stopped { question } => self.questions.on_stopped(question),
+            FromDecoder::Stopped { question } => {
+                self.acknowledged(Owed::Stopped(question)) && self.questions.on_stopped(question)
+            }
         }
     }
 
     /// Queue `entry` for the requests `verdict` names, ringing each quiet
     /// session; `false` when the verdict is that the decoder lied.
     fn tell(&mut self, verdict: Verdict, entry: &Entry<'_>) -> bool {
+        if verdict == Verdict::Lie {
+            return false;
+        }
         let Self {
             questions,
             sessions,
             host,
             ..
         } = self;
-        match verdict {
-            Verdict::Tell(question) => {
-                for (session, request) in questions.told(question) {
-                    let rung = sessions.queue(session, request, entry);
-                    ring(sessions, host, session, rung);
-                }
-            }
-            Verdict::TellOne(session, request) => {
-                let rung = sessions.queue(session, request, entry);
-                ring(sessions, host, session, rung);
-            }
-            Verdict::Stale => {}
-            Verdict::Lie => return false,
-        }
+        questions.tell(verdict, &mut |session, request| {
+            let queued = sessions.queue(session, request, entry);
+            ring(sessions, host, session, queued.ring);
+            queued.taking
+        });
         true
     }
 
@@ -821,33 +1007,34 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         }
     }
 
-    fn tell_flush(&mut self, session: u32, request: u32, interface: [u8; IF_NAME_LEN]) {
-        let rung = self.sessions.flush(session, request, interface);
-        ring(&mut self.sessions, &mut self.host, session, rung);
-    }
-
-    /// Send a datagram the decoder built, if its destination is one the
-    /// front may reach: the group, within the interface's budget, or a peer
-    /// it relayed from there recently, once per datagram relayed.
+    /// Send a datagram the decoder built at `at`, if its destination is one
+    /// the front may reach: the group, charged to the interface's budget at
+    /// that instant, or a peer it relayed from there recently, once per
+    /// datagram relayed. `false` when no honest decoder sends it: one from
+    /// the future, or past a budget it spends exactly as the front charges.
     fn transmit(
         &mut self,
         now: u64,
         interface: [u8; IF_NAME_LEN],
+        at: u64,
         to: Destination,
         payload: &[u8],
-    ) {
+    ) -> bool {
+        if at > now {
+            return false;
+        }
         let Some(link) = self.links.iter_mut().find(|link| link.name == interface) else {
-            return;
+            return true;
         };
         // What an engine built before its link's last edge is not sent.
         if !link.settled() {
-            return;
+            return true;
         }
         let (v4, v6) = (link.v4, link.v6);
         match to {
             Destination::Group => {
-                if !link.group.allow(Duration64::from_nanos(now)) {
-                    return;
+                if !link.group.allow(Duration64::from_nanos(at)) {
+                    return false;
                 }
                 if v4 {
                     let _ =
@@ -869,10 +1056,12 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                         && asker.until >= now
                         && asker.credits > 0
                 }) else {
-                    return;
+                    // The engine budgets its own replies, so one the front
+                    // will not send is a refusal, not a lie.
+                    return true;
                 };
                 if !family_up {
-                    return;
+                    return true;
                 }
                 asker.credits -= 1;
                 let (family, octets) = address_parts(addr);
@@ -887,15 +1076,18 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 );
             }
         }
+        true
     }
 
     /// Carry out one client call, returning the reply's length.
     fn dispatch(
         &mut self,
-        origin: &Origin,
+        now: u64,
+        caller: &dyn Caller,
         request: &DiscoveryRequest<'_>,
         reply: &mut [u8],
     ) -> Result<usize, Errno> {
+        let origin = caller.origin();
         if !origin.capabilities().holds_cap(CapabilityId::NET) {
             self.deny(origin, "discovery needs CAP_NET", None);
             return Err(Errno::PermissionDenied);
@@ -903,6 +1095,13 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
         let owner = origin.proc_id();
         match *request {
             DiscoveryRequest::Open { deliver_port } => {
+                // Rung with this service's identity, a doorbell aimed at
+                // another process's port would spam a mailbox its caller
+                // cannot reach.
+                if !caller.owns_port(deliver_port) {
+                    self.deny(origin, "doorbell port not the caller's", None);
+                    return Err(Errno::PermissionDenied);
+                }
                 // A session is only held for a principal whose exit will be
                 // heard.
                 if !self.sessions.holds_any(owner) {
@@ -917,7 +1116,7 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
                 status_ok(reply)
             }
             DiscoveryRequest::Start { session, query } => {
-                let id = self.start_request(origin, session, &query)?;
+                let id = self.start_request(now, origin, session, &query)?;
                 encode_id_reply(Ok(id), reply)
             }
             DiscoveryRequest::Stop { session, request } => {
@@ -939,6 +1138,7 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
     /// Admit and start one request, returning its id.
     fn start_request(
         &mut self,
+        now: u64,
         origin: &Origin,
         session: u32,
         query: &Query<'_>,
@@ -985,11 +1185,26 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
             .sessions
             .add_request(session, owner, Subscribed::new())?;
         let mut subscribed = Subscribed::new();
+        let Self {
+            questions,
+            fresh,
+            replays,
+            ..
+        } = self;
+        let at = Duration64::from_nanos(now);
+        let mut may = |spend| match spend {
+            Spend::Ask => fresh.allow(at, account),
+            Spend::Replay => replays.allow(at, account),
+        };
         for asking in &planned.asks {
-            match self
-                .questions
-                .subscribe(asking.form, asking.name, session, request, account)
-            {
+            match questions.subscribe(
+                asking.form,
+                asking.name,
+                session,
+                request,
+                account,
+                &mut may,
+            ) {
                 Ok(question) => {
                     // Never more than the plan's own bound, which this shares.
                     let _ = subscribed.try_push(question);
@@ -1046,15 +1261,43 @@ impl<L: SessionLauncher, S: Sink + Clone, H: Host> Front<L, S, H> {
     fn forget_decoder(&mut self) {
         self.held = None;
         self.deadline = None;
+        self.owed.clear();
         self.clock = Clock::Idle;
         for link in &mut self.links {
             link.told = Told::Down;
             link.pending = 0;
         }
-        for (session, request, interface) in self.questions.forget_decoder() {
-            self.tell_flush(session, request, interface);
-        }
+        let Self {
+            questions,
+            sessions,
+            host,
+            flush_pass,
+            ..
+        } = self;
+        // The table names requests link by link, so a new link starts a pass.
+        let mut link = None;
+        questions.forget_decoder(&mut |session, request, interface| {
+            if link != Some(interface) {
+                *flush_pass += 1;
+                link = Some(interface);
+            }
+            flush_request(sessions, host, session, request, interface, *flush_pass);
+        });
     }
+}
+
+/// Tell request `request` of `session` that what it held on `interface` is
+/// gone, once in flush pass `pass`, ringing the session as queueing asks.
+fn flush_request<H: Host>(
+    sessions: &mut Sessions,
+    host: &mut H,
+    session: u32,
+    request: u32,
+    interface: [u8; IF_NAME_LEN],
+    pass: u64,
+) {
+    let rung = sessions.flush(session, request, interface, pass);
+    ring(sessions, host, session, rung);
 }
 
 /// Ring `session` on the port `rung` names, when queueing for it asked for a
