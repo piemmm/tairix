@@ -172,6 +172,9 @@ pub enum StackEvent {
         identifier: u16,
         /// Echoed sequence number.
         sequence: u16,
+        /// The IPv4 TTL / IPv6 hop limit the reply arrived with, the evidence
+        /// of how far off the answering host is.
+        hop_limit: u8,
         /// Echoed payload.
         payload: Vec<u8>,
     },
@@ -1550,6 +1553,7 @@ impl Stack {
                     source: IpAddr::V4(header.source),
                     identifier: echo.identifier,
                     sequence: echo.sequence,
+                    hop_limit: header.ttl,
                     payload: echo.payload.to_vec(),
                 }),
             }
@@ -1885,6 +1889,7 @@ impl Stack {
                         source: IpAddr::V6(header.source),
                         identifier: echo.identifier,
                         sequence: echo.sequence,
+                        hop_limit: header.hop_limit,
                         payload: echo.payload.to_vec(),
                     }),
                 }

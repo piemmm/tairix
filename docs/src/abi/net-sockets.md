@@ -260,8 +260,9 @@ whose identifier matches (and, when connected, whose peer matches the
 source); an ICMP error quoting one of the socket's own requests (and, when
 connected, naming its peer as the quoted destination) reaches it the same
 way. Both arrive as a `SocketEcho` frame (magic `"NSKE"`) on the socket's
-delivery port, in one ordered stream. The IP time-to-live is not surfaced
-through this socket, so the `ping` tool prints no `ttl=` field.
+delivery port, in one ordered stream. A reply carries the IPv4 TTL / IPv6
+hop limit it arrived with in the frame's spare header byte, so the `ping`
+tool prints the `ttl=` field; an error outcome carries none.
 
 The client links `tairix_rt::net::icmp_echo_socket` / `connect` /
 `send_echo` and drains replies with `recv_echo` (which, like `recv`, takes
@@ -311,7 +312,8 @@ became of the request (`EchoOutcome`: a reply, a hop limit exceeded, a
 Destination Unreachable code, a Packet Too Big with its MTU, or a Parameter
 Problem with its code and pointer), the source `SocketAddr` (no port — the
 host that answered or the router that reported), the request's sequence
-number, and, for a reply alone, the echoed payload. The client decodes
+number, and, for a reply alone, the hop limit it arrived with (in the spare
+header byte, `None` for an error) and the echoed payload. The client decodes
 either after `ipc_recv`.
 
 ## Fail-closed decoding

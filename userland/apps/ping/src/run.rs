@@ -126,6 +126,7 @@ mod program {
                     outcome: echo.outcome,
                     family: echo.source.family,
                     addr: echo.source.addr,
+                    hop_limit: echo.reply_hop_limit,
                     payload: echo.payload.to_vec(),
                 })
         }

@@ -51,9 +51,8 @@ resolver; un indirizzo senza nome, e ogni esecuzione sotto `-n`, stampa
 l'indirizzo nudo. `-n` significa inoltre che nessuna query `PTR` viene
 messa sulla rete.
 
-Il time-to-live IP non è esposto dall'interfaccia del socket di eco;
-diversamente da alcune implementazioni di `ping`, una riga di risposta
-non porta quindi un campo `ttl=`.
+Ogni riga di risposta porta il TTL IPv4 (o il limite di hop IPv6) con cui
+la risposta è arrivata in un campo `ttl=`, come fa `iputils`.
 
 ## OPTIONS
 

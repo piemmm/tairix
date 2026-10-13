@@ -57,9 +57,9 @@ The tool opens an ICMP/`ICMPv6` echo socket through the versioned
 `CAP_NET` + `CAP_NET_RAW` and audited. The stack owns the echo identifier,
 so a socket only ever receives replies to its own requests; the tool never
 crafts a raw IP packet, never touches a device, and holds no ambient
-authority (`AGENTS.md` §5.4). The IP time-to-live is not exposed through
-the echo-socket interface, so — unlike some `ping` implementations — a
-reply line carries no `ttl=` field.
+authority (`AGENTS.md` §5.4). The stack delivers each reply's IPv4 TTL /
+IPv6 hop limit through the echo-socket interface, so a reply line carries
+the `ttl=` field `iputils` prints.
 
 A request no interface can carry yet waits, up to its timeout, for the
 stack's network notice that an interface came up or gained a usable

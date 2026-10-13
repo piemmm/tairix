@@ -46,8 +46,8 @@ Each reply names the peer as `name (address)` when the address has a
 an address with no name, and every run under `-n`, prints the bare
 address. `-n` also means no `PTR` query is put on the wire at all.
 
-The IP time-to-live is not exposed through the echo-socket interface, so —
-unlike some `ping` implementations — a reply line carries no `ttl=` field.
+Each reply line carries the IPv4 TTL (or IPv6 hop limit) the reply arrived
+with as a `ttl=` field, as `iputils` does.
 
 ## OPTIONS
 

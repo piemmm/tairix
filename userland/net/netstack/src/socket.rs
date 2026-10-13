@@ -77,6 +77,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::num::NonZeroU8;
 
 use tairix_abi::net::{
     encode_bind_reply, encode_send_reply, encode_socket_reply, EchoOutcome, ShutdownHow,
@@ -402,6 +403,20 @@ pub struct Delivery {
     pub deliver_port: u64,
     /// The encoded delivery frame.
     pub datagram: Vec<u8>,
+}
+
+/// What became of one echo request, for delivery to the matching echo
+/// socket. `peer` is the host the request went to (a reply's source, or an
+/// error's quoted destination) and must match a connected socket's peer;
+/// `source` is who answered or reported.
+struct EchoDelivery<'a> {
+    identifier: u16,
+    peer: IpAddr,
+    source: IpAddr,
+    outcome: EchoOutcome,
+    sequence: u16,
+    reply_hop_limit: Option<NonZeroU8>,
+    payload: &'a [u8],
 }
 
 /// Frames to transmit and messages to deliver from driving a connection —
@@ -2221,16 +2236,18 @@ impl SocketService {
                 source,
                 identifier,
                 sequence,
+                hop_limit,
                 payload,
             } => self
-                .deliver_echo(
-                    *identifier,
-                    *source,
-                    *source,
-                    EchoOutcome::Reply,
-                    *sequence,
+                .deliver_echo(&EchoDelivery {
+                    identifier: *identifier,
+                    peer: *source,
+                    source: *source,
+                    outcome: EchoOutcome::Reply,
+                    sequence: *sequence,
+                    reply_hop_limit: NonZeroU8::new(*hop_limit),
                     payload,
-                )
+                })
                 .into_iter()
                 .collect(),
             StackEvent::EchoError {
@@ -2241,14 +2258,15 @@ impl SocketService {
                 kind,
             } => echo_outcome(*kind)
                 .and_then(|outcome| {
-                    self.deliver_echo(
-                        *identifier,
-                        *destination,
-                        *reporter,
+                    self.deliver_echo(&EchoDelivery {
+                        identifier: *identifier,
+                        peer: *destination,
+                        source: *reporter,
                         outcome,
-                        *sequence,
-                        &[],
-                    )
+                        sequence: *sequence,
+                        reply_hop_limit: None,
+                        payload: &[],
+                    })
                 })
                 .into_iter()
                 .collect(),
@@ -2258,25 +2276,14 @@ impl SocketService {
 
     /// Deliver what became of one echo request to the echo socket whose
     /// stack-assigned identifier it carries: at most one socket, because the
-    /// identifier is unique in its family. `peer` is the host the request
-    /// went to (the reply's source, or an error's quoted destination), which a
-    /// connected socket requires to be its own peer; `source` is who
-    /// answered.
-    fn deliver_echo(
-        &self,
-        identifier: u16,
-        peer: IpAddr,
-        source: IpAddr,
-        outcome: EchoOutcome,
-        sequence: u16,
-        payload: &[u8],
-    ) -> Option<Delivery> {
-        let (peer_family, peer_bytes) = address_parts(peer);
-        let (src_family, src_bytes) = address_parts(source);
+    /// identifier is unique in its family.
+    fn deliver_echo(&self, answer: &EchoDelivery<'_>) -> Option<Delivery> {
+        let (peer_family, peer_bytes) = address_parts(answer.peer);
+        let (src_family, src_bytes) = address_parts(answer.source);
         if peer_family != src_family {
             return None;
         }
-        let entry = &self.sockets[self.demux_index(src_family, identifier)?];
+        let entry = &self.sockets[self.demux_index(src_family, answer.identifier)?];
         let Proto::Echo(echo) = &entry.proto else {
             return None;
         };
@@ -2290,16 +2297,17 @@ impl SocketService {
         }
         let echo_msg = SocketEcho {
             socket: entry.id,
-            outcome,
+            outcome: answer.outcome,
             source: SocketAddr {
                 family: src_family,
                 addr: src_bytes,
                 port: 0,
             },
-            sequence,
-            payload,
+            sequence: answer.sequence,
+            reply_hop_limit: answer.reply_hop_limit,
+            payload: answer.payload,
         };
-        let mut buf = alloc::vec![0u8; SocketEcho::HEADER_LEN + payload.len()];
+        let mut buf = alloc::vec![0u8; SocketEcho::HEADER_LEN + answer.payload.len()];
         let len = echo_msg.encode(&mut buf).ok()?;
         buf.truncate(len);
         Some(Delivery {

@@ -50,9 +50,8 @@ l'exécution via le même résolveur ; une adresse sans nom, et toute
 exécution avec `-n`, affiche l'adresse nue. `-n` signifie en outre
 qu'aucune requête `PTR` n'est émise sur le réseau.
 
-La durée de vie IP n'est pas exposée par l'interface de socket d'écho ;
-contrairement à certaines implémentations de `ping`, une ligne de réponse
-ne porte donc pas de champ `ttl=`.
+Chaque ligne de réponse porte le TTL IPv4 (ou la limite de sauts IPv6)
+avec lequel la réponse est arrivée dans un champ `ttl=`, comme `iputils`.
 
 ## OPTIONS
 

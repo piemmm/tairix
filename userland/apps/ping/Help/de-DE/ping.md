@@ -52,9 +52,8 @@ aufgelöst. Eine Adresse ohne Namen, und jeder Lauf unter `-n`, zeigt die
 nackte Adresse; `-n` heißt außerdem, dass gar keine `PTR`-Abfrage auf die
 Leitung geht.
 
-Die IP-Lebensdauer wird über die Echo-Socket-Schnittstelle nicht
-offengelegt; anders als manche `ping`-Implementierungen trägt eine
-Antwortzeile daher kein `ttl=`-Feld.
+Jede Antwortzeile trägt die IPv4-TTL (bzw. das IPv6-Hop-Limit), mit der
+die Antwort eintraf, als `ttl=`-Feld, wie `iputils`.
 
 ## OPTIONS
 

@@ -50,9 +50,8 @@ datryswr; mae cyfeiriad heb enw, a phob rhediad dan `-n`, yn argraffu'r
 cyfeiriad noeth. Mae `-n` hefyd yn golygu na roddir ymholiad `PTR` ar y
 wifren o gwbl.
 
-Nid yw'r amser byw IP yn cael ei ddatgelu gan ryngwyneb y soced atsain;
-yn wahanol i rai gweithrediadau `ping`, nid yw llinell ateb felly'n cario
-maes `ttl=`.
+Mae pob llinell ateb yn cario'r TTL IPv4 (neu'r terfyn naid IPv6) y
+cyrhaeddodd yr ateb ag ef mewn maes `ttl=`, fel y mae `iputils`.
 
 ## OPTIONS
 

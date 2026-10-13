@@ -106,6 +106,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-abi",
+        test: "fuzz_net_echo",
+        description: "lib/abi SocketEcho delivery decoder (echo replies and ICMP errors, the reply hop limit in the frame's spare byte)",
+    },
+    Target {
+        package: "tairix-abi",
         test: "fuzz_desktop_layer",
         description: "lib/abi desktop-layer surface wire surface (the capability-gated requests, the two feed events, the terrain reply)",
     },

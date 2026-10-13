@@ -696,6 +696,7 @@ fn loopback_v4_ping_round_trips_through_the_pump() {
         source: IpAddr::V4(V4_B),
         identifier: 0x77,
         sequence: 1,
+        hop_limit: tairix_net::ipv4::DEFAULT_TTL,
         payload: b"tairix-netstack".to_vec(),
     }));
 
@@ -886,6 +887,7 @@ fn loopback_v6_link_local_ping_round_trips_after_dad() {
         source: IpAddr::V6(dest),
         identifier: 0x42,
         sequence: 7,
+        hop_limit: tairix_net::ipv6::DEFAULT_HOP_LIMIT,
         payload: b"ping6".to_vec(),
     }));
 }
@@ -2189,11 +2191,13 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
     decode_status_reply(&reply[..out.len]).expect("echo accepted");
     assert!(!out.tx.is_empty(), "the echo request produced frames");
 
-    // A matching reply is delivered as a SocketEcho on the bound port.
+    // A matching reply is delivered as a SocketEcho on the bound port,
+    // carrying the TTL it arrived with.
     let event = StackEvent::EchoReply {
         source: IpAddr::V4(V4_B),
         identifier,
         sequence: 1,
+        hop_limit: 57,
         payload: b"ping".to_vec(),
     };
     let deliveries = svc.deliver(&event, name("eth0"));
@@ -2202,6 +2206,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
     let echo = tairix_abi::net::SocketEcho::parse(&deliveries[0].datagram).expect("echo");
     assert_eq!(echo.socket, id);
     assert_eq!(echo.sequence, 1);
+    assert_eq!(echo.reply_hop_limit, core::num::NonZeroU8::new(57));
     assert_eq!(echo.payload, b"ping");
     assert_eq!(echo.source.family, NetAddrFamily::V4);
     assert_eq!(&echo.source.addr[..4], &[10, 0, 2, 2]);
@@ -2211,6 +2216,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
         source: IpAddr::V4(V4_B),
         identifier: identifier ^ 0x1,
         sequence: 1,
+        hop_limit: 64,
         payload: b"ping".to_vec(),
     };
     assert!(svc.deliver(&stray, name("eth0")).is_empty());
@@ -2220,6 +2226,7 @@ fn echo_request_is_originated_and_the_reply_is_delivered() {
         source: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3)),
         identifier,
         sequence: 1,
+        hop_limit: 64,
         payload: b"ping".to_vec(),
     };
     assert!(svc.deliver(&wrong_peer, name("eth0")).is_empty());

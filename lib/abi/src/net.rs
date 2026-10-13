@@ -274,6 +274,10 @@ const SEQUENCE_OFFSET: usize = 14;
 const DELIVER_OFFSET: usize = 36;
 /// Byte offset of the egress-interface field (`Send` only).
 const INTERFACE_OFFSET: usize = 44;
+/// Byte offset of the reply hop-limit field in a [`SocketEcho`] delivery
+/// frame. Zero means none, so an error outcome (which observes no reply) and
+/// a reply whose hop limit is unknown both read as [`None`].
+const ECHO_REPLY_HOP_LIMIT_OFFSET: usize = 13;
 
 /// Wire operation discriminant of [`SocketRequest::Socket`].
 const OP_SOCKET: u16 = 1;
@@ -1270,6 +1274,10 @@ pub struct SocketEcho<'a> {
     pub source: SocketAddr,
     /// The request's sequence number.
     pub sequence: u16,
+    /// The IPv4 TTL / IPv6 hop limit the reply arrived with — the evidence a
+    /// caller bands a host's distance from. [`None`] for an error outcome,
+    /// which observes no reply.
+    pub reply_hop_limit: Option<NonZeroU8>,
     /// The echoed payload; empty unless `outcome` is [`EchoOutcome::Reply`].
     pub payload: &'a [u8],
 }
@@ -1287,12 +1295,17 @@ impl<'a> SocketEcho<'a> {
     ///
     /// * [`Errno::LengthOutOfRange`] — the payload exceeds
     ///   [`SOCKET_MAX_DATAGRAM`], or an error outcome carries one.
+    /// * [`Errno::OutOfRange`] — an error outcome carries a reply hop limit.
     /// * [`Errno::BufferTooSmall`] — `out` cannot hold the message.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, Errno> {
         if self.payload.len() > SOCKET_MAX_DATAGRAM
             || (self.outcome != EchoOutcome::Reply && !self.payload.is_empty())
         {
             return Err(Errno::LengthOutOfRange);
+        }
+        // A hop limit is reply evidence; an error outcome observes none.
+        if self.outcome != EchoOutcome::Reply && self.reply_hop_limit.is_some() {
+            return Err(Errno::OutOfRange);
         }
         let total = Self::HEADER_LEN + self.payload.len();
         if out.len() < total {
@@ -1307,6 +1320,7 @@ impl<'a> SocketEcho<'a> {
         out[7] = self.outcome.code();
         put_u32(out, 8, self.socket);
         out[12] = self.source.family.as_u8();
+        out[ECHO_REPLY_HOP_LIMIT_OFFSET] = self.reply_hop_limit.map_or(0, NonZeroU8::get);
         put_u16(out, 14, self.sequence);
         out[16..32].copy_from_slice(&self.source.addr);
         // Payload length fits u32: bounded by SOCKET_MAX_DATAGRAM above.
@@ -1341,10 +1355,13 @@ impl<'a> SocketEcho<'a> {
         if read_u16(bytes, 4) != SOCKET_VERSION_V1 {
             return Err(Errno::AbiVersionUnsupported);
         }
-        if bytes[13] != 0 {
+        let outcome = EchoOutcome::from_wire(bytes[6], bytes[7], read_u32(bytes, 36))?;
+        let reply_hop_limit = NonZeroU8::new(bytes[ECHO_REPLY_HOP_LIMIT_OFFSET]);
+        // The byte is reply evidence; on an error outcome it is reserved and
+        // a dirty value is a malformed frame.
+        if outcome != EchoOutcome::Reply && reply_hop_limit.is_some() {
             return Err(Errno::BadMagic);
         }
-        let outcome = EchoOutcome::from_wire(bytes[6], bytes[7], read_u32(bytes, 36))?;
         let socket = read_u32(bytes, 8);
         let family = NetAddrFamily::from_u8(bytes[12])?;
         let sequence = read_u16(bytes, 14);
@@ -1370,6 +1387,7 @@ impl<'a> SocketEcho<'a> {
                 port: 0,
             },
             sequence,
+            reply_hop_limit,
             payload,
         })
     }
@@ -2414,16 +2432,49 @@ mod tests {
                 port: 0,
             },
             sequence: 4321,
+            reply_hop_limit: NonZeroU8::new(55),
             payload: b"echoed payload",
         };
         let mut out = [0u8; SocketEcho::MAX_WIRE_LEN];
         let n = echo.encode(&mut out).expect("encode");
+        assert_eq!(
+            out[ECHO_REPLY_HOP_LIMIT_OFFSET], 55,
+            "the reply TTL rides byte 13"
+        );
         assert_eq!(SocketEcho::parse(&out[..n]), Ok(echo));
         // Truncation past the declared payload fails closed.
         assert_eq!(SocketEcho::parse(&out[..n - 1]), Err(Errno::BufferTooSmall));
         let mut bad_magic = out;
         bad_magic[0] ^= 0xFF;
         assert_eq!(SocketEcho::parse(&bad_magic[..n]), Err(Errno::BadMagic));
+    }
+
+    #[test]
+    fn an_error_outcome_carries_no_reply_hop_limit() {
+        let reply = SocketEcho {
+            socket: 2,
+            outcome: EchoOutcome::Reply,
+            source: v4(198, 51, 100, 1, 0),
+            sequence: 8,
+            reply_hop_limit: NonZeroU8::new(64),
+            payload: &[],
+        };
+        let mut out = [0u8; SocketEcho::HEADER_LEN];
+        let n = reply.encode(&mut out).expect("encode");
+        // A dirty byte-13 on an error outcome is a malformed frame.
+        let mut dirty = out;
+        dirty[6] = EchoOutcome::HopLimitExceeded.kind();
+        assert_eq!(SocketEcho::parse(&dirty[..n]), Err(Errno::BadMagic));
+        // And an error outcome may not be built carrying one.
+        assert_eq!(
+            SocketEcho {
+                outcome: EchoOutcome::HopLimitExceeded,
+                payload: &[],
+                ..reply
+            }
+            .encode(&mut out),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]
@@ -2442,6 +2493,7 @@ mod tests {
                 outcome,
                 source: v4(203, 0, 113, 9, 0),
                 sequence: 17,
+                reply_hop_limit: None,
                 payload: &[],
             };
             let mut out = [0u8; SocketEcho::HEADER_LEN + 1];
@@ -2468,6 +2520,7 @@ mod tests {
             outcome: EchoOutcome::Reply,
             source: v4(203, 0, 113, 9, 0),
             sequence: 17,
+            reply_hop_limit: None,
             payload: &[],
         };
         let mut out = [0u8; SocketEcho::HEADER_LEN];
@@ -2502,6 +2555,7 @@ mod tests {
                 outcome,
                 source: v4(192, 0, 2, 1, 0),
                 sequence: 5,
+                reply_hop_limit: None,
                 payload: &[],
             };
             let n = echo.encode(&mut out).expect("encode");
@@ -2531,6 +2585,7 @@ mod tests {
             outcome: EchoOutcome::Reply,
             source: v4(198, 51, 100, 1, 0),
             sequence: 1,
+            reply_hop_limit: None,
             payload: &[],
         };
         let mut out = [0u8; SocketEcho::HEADER_LEN];

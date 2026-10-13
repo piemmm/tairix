@@ -12,6 +12,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::num::NonZeroU8;
 
 use tairix_abi::net::EchoOutcome;
 use tairix_abi::net_ipc::NetAddrFamily;
@@ -32,6 +33,9 @@ pub struct EchoEvent {
     /// The host that answered or the router that reported, its address bytes
     /// (IPv4 uses the first four).
     pub addr: [u8; 16],
+    /// The IPv4 TTL / IPv6 hop limit a reply arrived with; [`None`] for an
+    /// error, which observes no reply.
+    pub hop_limit: Option<NonZeroU8>,
     /// The echoed payload; empty for an error.
     pub payload: Vec<u8>,
 }

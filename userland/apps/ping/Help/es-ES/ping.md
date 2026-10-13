@@ -51,9 +51,8 @@ el mismo resolvedor; una dirección sin nombre, y toda ejecución con `-n`,
 imprime la dirección desnuda. `-n` significa además que no se pone
 ninguna consulta `PTR` en la red.
 
-El tiempo de vida IP no se expone por la interfaz del socket de eco; a
-diferencia de algunas implementaciones de `ping`, una línea de respuesta
-no lleva un campo `ttl=`.
+Cada línea de respuesta lleva el TTL IPv4 (o el límite de saltos IPv6)
+con que llegó la respuesta en un campo `ttl=`, igual que `iputils`.
 
 ## OPTIONS
 

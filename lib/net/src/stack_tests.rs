@@ -747,6 +747,7 @@ fn ipv4_ping_resolves_arp_and_round_trips() {
             source: IpAddr::V4(V4_B),
             identifier: 0x77,
             sequence: 1,
+            hop_limit: crate::ipv4::DEFAULT_TTL,
             payload: b"tairix-stack".to_vec(),
         }]
     );
@@ -797,6 +798,7 @@ fn ipv6_link_local_ping_resolves_nd_and_round_trips() {
             source: IpAddr::V6(link_local(IID_B)),
             identifier: 0x42,
             sequence: 7,
+            hop_limit: crate::ipv6::DEFAULT_HOP_LIMIT,
             payload: b"ping6".to_vec(),
         }]
     );
@@ -1395,6 +1397,7 @@ fn oversize_v6_echo_is_source_fragmented_and_round_trips() {
             source: IpAddr::V6(link_local(IID_B)),
             identifier: 0x33,
             sequence: 7,
+            hop_limit: crate::ipv6::DEFAULT_HOP_LIMIT,
             payload: payload.clone(),
         }),
         "the reassembled 1600-byte echo reply is delivered"

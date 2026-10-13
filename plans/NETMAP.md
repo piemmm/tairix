@@ -30,7 +30,7 @@ ahead of it (§2.4).
 | NM-S1 | Neighbour-cache read seam (ARP + NDP): `lib/net` iterator, the `NetNeighborRecord` ABI + `NET_NEIGHBORS` query, netstack serve, `lib/procinfo` resolver + `state:net/<iface>/neighbors`; engine L2-adjacency ingest | done |
 | NM-S2 | Routing-table + gateway read seam, and router discovery: `NetRouteRecord` ABI + `NET_ROUTES` query, netstack serve, `lib/procinfo` resolver + `state:net/<iface>/routes` (keeps NETWORK §5's promise), the RA-learned IPv6 default routers; engine router/gateway ingest | done |
 | NM-F | Passive device-class and OS inference: the pure inference engine over the inventory's signals (routing role, MAC OUI vendor, advertised service types and TXT model), the committed IEEE MA-L OUI vendor database with its `cargo xtask` generator and drift gate, and the OS emblems a host is marked with | done |
-| NM3 | Active reachability probing, configurable and polite: the pure probe engine (token-bucket rate limit, bounded concurrency, injected socket+clock seam), the ICMP-echo subnet sweep and the TCP-connect well-known-service check, the reply-TTL and open-port evidence they add to NM-F's inference, the audit events, and the settings pane that holds the posture | planned |
+| NM3 | Active reachability probing, configurable and polite: the pure probe engine (token-bucket rate limit, bounded concurrency, injected socket+clock seam), the ICMP-echo subnet sweep and the TCP-connect well-known-service check, the reply-TTL and open-port evidence they add to NM-F's inference, the audit events, and the settings pane that holds the posture | in progress: reply-TTL seam landed, probe engine/inference/settings/audit/fuzz remain |
 | NM-S3 | The traceroute seam: per-send hop-limit control and ICMP-error delivery to the owning socket (`lib/net` quoted-packet demux, netstack routing, `lib/rt` wrappers), plus the `traceroute` command app and its QEMU vertical as the minimal consumer | done |
 | NM4 | Inter-network topology: engine hop-by-hop path discovery to user-entered targets (LAN or WAN) over NM-S3, per-hop reverse DNS, and the "beyond the gateway" map region | planned |
 | NM-S4 | The passive packet-capture seam: a receive-only, capability-gated, bounded link-layer capture socket from netstack, and the driver capture tap upstream of the receive pre-filter so non-IP ethertypes (STP, LLDP, …) reach it; `lib/rt` wrappers; audited | planned |
@@ -567,8 +567,8 @@ and "beyond this network" `Networking`; a node whose class is unknown draws
 The pure probe engine: a token-bucket rate limiter and a bounded-concurrency
 campaign scheduler over an injected echo/stream-socket + clock seam, emitting
 one-shot deadlines (never a spin, §2.23). The rate limit is `lib/net`'s one
-`rate::TokenBucket`, which gains the "when is the next token due" query a
-tickless caller needs to arm its timer. The ICMP-echo subnet sweep (bounded
+`rate::TokenBucket`, whose `ready_at` query gives a tickless caller the
+next-token instant to arm its timer. The ICMP-echo subnet sweep (bounded
 to attached subnets, unicast only) and the TCP-connect check against a
 curated, data-defined well-known-service port set (connect-only; a
 refusal/timeout is a datum, not a retry). The stack refuses only the limited
@@ -576,9 +576,9 @@ broadcast and multicast destinations, so the sweep itself skips each attached
 subnet's network and directed-broadcast addresses. The stack has no
 connect-with-deadline and an unanswered SYN takes minutes to fail, so the
 engine imposes its own connect deadline; a refusal arrives as
-`Closed { Refused }`. The reply-TTL evidence needs the echo reply's hop limit,
-which no `SocketEcho` carries today: NM3 adds it to `StackEvent::EchoReply` and
-the frame's spare byte (`abi-v1` is unfrozen). Liveness and open-service markers flow onto the map's existing
+`Closed { Refused }`. The reply-TTL evidence reads the echo reply's hop limit,
+carried on `StackEvent::EchoReply` and in the `SocketEcho` frame's spare byte
+(landed; `ping` prints it as iputils' `ttl=`). Liveness and open-service markers flow onto the map's existing
 host/neighbour nodes. The settings pane (`passive`/`polite`/`thorough`, rate,
 concurrency) persisted via `tairix_appdata` and read at start (§28 — never
 written from the loop). Every campaign start/stop and refusal audited via

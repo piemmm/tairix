@@ -319,13 +319,10 @@ fn header(config: &Config, target: &Target) -> String {
     }
 }
 
-/// One `<n> bytes from <peer>: icmp_seq=<seq> time=<ms> ms` line, where
-/// `<peer>` is `<name> (<addr>)` when the address reverse-resolved and the
-/// bare address otherwise (iputils' shape, and what `-n` forces).
-///
-/// The IP TTL is not surfaced through the echo-socket abstraction, so —
-/// unlike iputils — the line carries no `ttl=` field (a documented
-/// TAIRiX-specific divergence).
+/// One `<n> bytes from <peer>: icmp_seq=<seq> ttl=<ttl> time=<ms> ms` line,
+/// where `<peer>` is `<name> (<addr>)` when the address reverse-resolved and
+/// the bare address otherwise (iputils' shape, and what `-n` forces). The
+/// `ttl=` field is omitted only when a reply arrived carrying no hop limit.
 fn reply_line(reply: &EchoEvent, rtt_ns: u64, name: Option<&str>) -> String {
     let addr = render_addr(reply.family, &reply.addr);
     let peer = match name {
@@ -334,11 +331,16 @@ fn reply_line(reply: &EchoEvent, rtt_ns: u64, name: Option<&str>) -> String {
     };
     // "bytes from" counts the ICMP message: the 8-byte header plus data.
     let bytes = reply.payload.len() + 8;
+    let ttl = match reply.hop_limit {
+        Some(ttl) => format!("ttl={} ", ttl.get()),
+        None => String::new(),
+    };
     format!(
-        "{} bytes from {}: icmp_seq={} time={} ms\n",
+        "{} bytes from {}: icmp_seq={} {}time={} ms\n",
         bytes,
         peer,
         u32::from(reply.seq),
+        ttl,
         report::reply_time(rtt_ns),
     )
 }
@@ -355,6 +357,7 @@ mod tests {
     use alloc::collections::VecDeque;
     use alloc::vec::Vec;
     use core::cell::RefCell;
+    use core::num::NonZeroU8;
     use tairix_resolver::TargetFailure;
 
     /// An in-memory `PingIo`: it echoes every sent request unless its `seq`
@@ -392,6 +395,8 @@ mod tests {
         entropy: u8,
         /// Every payload handed to `send`, in order.
         sent: Vec<Vec<u8>>,
+        /// The hop limit scripted replies arrive with.
+        reply_ttl: Option<NonZeroU8>,
     }
 
     fn v4_addr(octets: [u8; 4]) -> [u8; 16] {
@@ -422,6 +427,7 @@ mod tests {
                 connect_err: None,
                 entropy: 0,
                 sent: Vec::new(),
+                reply_ttl: NonZeroU8::new(64),
             }
         }
     }
@@ -474,6 +480,7 @@ mod tests {
                     outcome,
                     family: self.family,
                     addr: reporter,
+                    hop_limit: None,
                     payload: Vec::new(),
                 });
             } else if !self.drop.contains(&seq) {
@@ -482,6 +489,7 @@ mod tests {
                     outcome: EchoOutcome::Reply,
                     family: self.family,
                     addr: self.addr,
+                    hop_limit: self.reply_ttl,
                     payload: payload.to_vec(),
                 });
             }
@@ -578,6 +586,23 @@ mod tests {
             1,
             "the peer is looked up once, not once per reply"
         );
+    }
+
+    #[test]
+    fn a_reply_line_carries_the_ttl_it_arrived_with() {
+        let mut io = FakeIo::v4();
+        io.reply_ttl = NonZeroU8::new(57);
+        let (_, text, _) = ping_with(&config(Some(1), false), &mut io);
+        assert!(text.contains("icmp_seq=1 ttl=57 time="), "{text}");
+    }
+
+    #[test]
+    fn a_reply_with_no_hop_limit_omits_the_ttl_field() {
+        let mut io = FakeIo::v4();
+        io.reply_ttl = None;
+        let (_, text, _) = ping_with(&config(Some(1), false), &mut io);
+        assert!(text.contains("icmp_seq=1 time="), "{text}");
+        assert!(!text.contains("ttl="), "{text}");
     }
 
     #[test]
@@ -758,6 +783,7 @@ mod tests {
             outcome: EchoOutcome::Reply,
             family: NetAddrFamily::V4,
             addr: v4_addr([10, 0, 2, 99]),
+            hop_limit: NonZeroU8::new(64),
             payload: vec![0, 1, 2, 3],
         });
         let (summary, _, _) = ping_with(&config(Some(1), false), &mut io);
@@ -773,6 +799,7 @@ mod tests {
             outcome: EchoOutcome::HopLimitExceeded,
             family: NetAddrFamily::V4,
             addr: v4_addr([10, 0, 2, 1]),
+            hop_limit: None,
             payload: Vec::new(),
         });
         let (summary, text, _) = ping_with(&config(Some(1), false), &mut io);
