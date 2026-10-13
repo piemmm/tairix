@@ -226,6 +226,13 @@ one, which is how a volume setting and the bit-exact path coexist.
 `typed_level` reads a level as a person types it — `-6`, `-3.5`, `-12dB` —
 where configuration keeps to `AudioGain::parse`'s one spelling.
 
+A volume control's travel is linear in decibels from the default floor to
+unity: `level_at_permille` is the level a control at a point asks for and
+`permille_of_level` where a level stands. `control_permille` is where an
+endpoint's own control stands — at the bottom while it is muted, since nothing
+is heard, and back at its level once unmuted — the one rule the icon bar's
+volume panel and the Settings Sound pane both draw by.
+
 ## The stream client
 
 The half a program links: open, attach the shared region, start and stop at

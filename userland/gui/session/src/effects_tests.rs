@@ -58,7 +58,7 @@ fn an_unreadable_store_says_so_and_yields_no_choices_to_store_over() {
 /// held of anything else is touched.
 #[test]
 fn storing_replaces_the_sound_settings_and_nothing_else() {
-    let mut host = service().with_store("sound.info.gain = -3dB\nother.key = kept\n");
+    let mut host = service().with_store("sound.gain = -3dB\nother.key = kept\n");
     let mut wanted = choices("sound.bell.enabled = false\n");
     assert!(wanted.choose(SoundEvent::Error, &path("/Users/ada/klaxon.wav")));
     assert_eq!(store_choices(&mut host, &wanted), Ok(wanted.clone()));
@@ -66,7 +66,7 @@ fn storing_replaces_the_sound_settings_and_nothing_else() {
     assert_eq!(held.get("sound.bell.enabled"), Some("false"));
     assert_eq!(held.get("sound.error.file"), Some("/Users/ada/klaxon.wav"));
     assert_eq!(
-        held.get("sound.info.gain"),
+        held.get("sound.gain"),
         None,
         "a choice no longer made is gone"
     );
@@ -193,13 +193,13 @@ fn a_change_is_made_over_the_newest_ask_until_it_lands() {
         number: second,
         choices: both,
         ..
-    }) = effects.apply("sound.info.gain = -6dB\n", 8)
+    }) = effects.apply("sound.gain = -6dB\n", 8)
     else {
         panic!("a store");
     };
     assert_eq!(
         both.pushed(),
-        "sound.info.gain = -6dB\nsound.bell.enabled = false\n",
+        "sound.gain = -6dB\nsound.bell.enabled = false\n",
         "both, in the registry's order"
     );
     effects.stored(first, Ok(off));

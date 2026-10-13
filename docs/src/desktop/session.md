@@ -686,7 +686,7 @@ through the latest-wins publisher. An application's apply may not name the
 reading of the service, never a program's to plant.
 
 **The session keeps its user's sound choices** — whether the desktop makes
-sounds, the theme, each event's switch, level and file — in its own *private*
+sounds, the theme, how loud they are, and each event's switch and file — in its own *private*
 app-data scope (`tairix_soundtheme::UserChoices`), which no other program reads: a file
 is stored there by its path, and a path the user chose is theirs. Only what the
 user set is kept, so the machine's sound document decides the rest. A store

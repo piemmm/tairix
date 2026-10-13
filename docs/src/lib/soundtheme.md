@@ -78,14 +78,15 @@ than it does for artwork.
 |---|---|---|
 | `sound.enabled` | `true` / `false` (or `on` / `off`) | `true` |
 | `sound.theme` | a theme name | `TAIRiX` |
+| `sound.gain` | an attenuation, `-6.5dB` | unity |
 | `sound.<event>.enabled` | `true` / `false` | `true` |
-| `sound.<event>.gain` | an attenuation, `-6.5dB` | unity |
 | `sound.<event>.file` | an absolute path, or empty for none | none |
 
-`<event>` is the event's stable name (`device_attached`, `bell`, …). A gain is
-an `AudioGain`, so it can only turn an event down: unity plays the asset
-bit-exact. A file is a `SettingPath`; whoever opens it reads untrusted bytes
-under its own identity.
+`<event>` is the event's stable name (`device_attached`, `bell`, …). The gain
+is one level for every sound, not one an event carries: an event that is too
+loud plays another file or none. It is an `AudioGain`, so it can only turn
+sounds down: unity plays each asset bit-exact. A file is a `SettingPath`;
+whoever opens it reads untrusted bytes under its own identity.
 
 The same registry is read at two layers, the machine's document beneath and
 the user's own over it while their session holds the seat. A stored document
@@ -107,10 +108,11 @@ the strict reading the cue authority applies to a push.
 document still decides every setting they did not. Each value is kept in its
 canonical spelling. `load` reads a stored document, naming every setting it
 leaves out; `apply` lays a pane's document over the choices or refuses it
-whole; `choose` and `use_theme` set and clear an event's file; `pushed` is the
-document handed to the cue authority, every choice but the files; `over` is the
-settings in effect above a machine document; and `document` is the whole of it,
-files and all, as the session stores it.
+whole; `choose` and `use_theme` set and clear an event's file, and since either
+is asking to hear the event, turn it on; `pushed` is the document handed to the
+cue authority, every choice but the files; `over` is the settings in effect
+above a machine document; and `document` is the whole of it, files and all, as
+the session stores it.
 
 ## Resolution
 

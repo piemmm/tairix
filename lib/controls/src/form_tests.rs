@@ -9,7 +9,8 @@
 //! built-in themes with the heavier-contrast path. The flag-set slot is
 //! covered for the same contract: its measured width and the shrink below it,
 //! the one flag a press or a key names, the row's authority reaching every
-//! flag, and every contrast policy.
+//! flag, and every contrast policy. So is the lone checkbox slot: its width,
+//! the mark a press or a key asks for, and the row's authority.
 
 use alloc::format;
 use alloc::string::String;
@@ -53,6 +54,10 @@ fn choices(items: &[&str]) -> Vec<String> {
 
 fn toggle_row(label: &str, on: bool) -> FieldRow {
     FieldRow::new(label, FieldControl::Toggle(Toggle::new("", on)))
+}
+
+fn checkbox_row(label: &str, selection: SelectionState) -> FieldRow {
+    FieldRow::new(label, FieldControl::Checkbox(Checkbox::new("", selection)))
 }
 
 /// The layout `group` is drawn with in `bounds` when no other group shares
@@ -356,6 +361,72 @@ fn an_allowed_row_reports_the_flip_its_toggle_asks_for() {
     assert_eq!(
         press_at(&mut row, layout, &theme, centre),
         Some(FieldAction::Set { on: true })
+    );
+}
+
+/// A checkbox slot is as wide as its box, since the row's label names it, and
+/// asks for the mark it does not hold: checked from clear, clear from checked.
+#[test]
+fn a_checkbox_slot_is_its_box_and_asks_for_the_other_mark() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let bounds = Rect::new(0, 0, W, H);
+    for (selection, asked) in [
+        (SelectionState::Unselected, true),
+        (SelectionState::Selected, false),
+    ] {
+        let mut row = checkbox_row("Mute", selection);
+        let column = row.slot_width(scale, &theme).expect("a checkbox measures");
+        assert_eq!(
+            column,
+            Checkbox::new("", selection).measured_width(scale, &theme)
+        );
+        let layout = FieldLayout::new(bounds, column);
+        let at = centre(row.control_rect(layout, scale, &theme).expect("a control"));
+        assert_eq!(
+            press_at(&mut row, layout, &theme, at),
+            Some(FieldAction::Set { on: asked })
+        );
+        row.set_focused(true);
+        let mut damage = sink();
+        assert_eq!(
+            row.on_key(
+                keystroke(Key::Char(' ')),
+                layout,
+                scale,
+                &theme,
+                &mut damage
+            ),
+            Some(FieldAction::Set { on: asked })
+        );
+    }
+}
+
+#[test]
+fn a_denied_checkbox_row_refuses_the_pointer_and_the_keyboard() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut row = checkbox_row("Mute", SelectionState::Unselected);
+    row.set_state(denied());
+    let FieldControl::Checkbox(checkbox) = row.control() else {
+        panic!("a checkbox slot");
+    };
+    assert_eq!(checkbox.state().authority, AuthorityState::Denied);
+    let column = row.slot_width(scale, &theme).expect("a checkbox measures");
+    let layout = FieldLayout::new(Rect::new(0, 0, W, H), column);
+    let at = centre(row.control_rect(layout, scale, &theme).expect("a control"));
+    assert_eq!(press_at(&mut row, layout, &theme, at), None);
+    row.set_focused(true);
+    let mut damage = sink();
+    assert_eq!(
+        row.on_key(
+            keystroke(Key::Char(' ')),
+            layout,
+            scale,
+            &theme,
+            &mut damage
+        ),
+        None
     );
 }
 
@@ -1425,6 +1496,7 @@ fn every_appearance_draws_the_family() {
                 ),
                 FieldRow::new("Uptime", FieldControl::Reading(String::from("4 days"))),
                 flags_row("Access", rwx(true, false, true)),
+                checkbox_row("Mute", SelectionState::Selected),
                 FieldRow::new(
                     "Choose",
                     FieldControl::Button(Button::new(
@@ -1665,16 +1737,7 @@ fn the_motion_that_leaves_a_slot_takes_its_controls_hover_with_it() {
 
 /// The permission-style flag set every flag test starts from.
 fn rwx(read: bool, write: bool, execute: bool) -> FlagSet {
-    let flag = |label: &str, on: bool| {
-        Checkbox::new(
-            label,
-            if on {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            },
-        )
-    };
+    let flag = |label: &str, on: bool| Checkbox::new(label, SelectionState::of(on));
     FlagSet::new(vec![
         flag("Read", read),
         flag("Write", write),
@@ -2306,4 +2369,35 @@ fn restating_a_description_keeps_the_press_the_row_holds() {
         matches!(dragged, Some(FieldAction::SetValue { .. })),
         "the drag was dropped with the old words: {dragged:?}"
     );
+}
+
+/// A plate exactly as tall as it measures draws every one of its rows at any
+/// width, a wrapping footnote and all: the band the rows stop above is the
+/// footnote the plate measures and paints, not one wrapped narrower.
+#[test]
+fn a_footnoted_plate_as_tall_as_it_measures_draws_every_row_at_every_width() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let group = FieldGroup::new(
+        "SOUND EFFECTS",
+        vec![
+            toggle_row("Play sound effects", true),
+            FieldRow::new("Volume", FieldControl::Slider(Slider::new(500))),
+        ],
+    )
+    .with_footnote(
+        "Start-up, sign-in and sign-out sounds are set by this machine's administrator: \
+         they play while no one's choices are in force.",
+    );
+    for width in 160..=640 {
+        let height = own_height(&group, width, scale, &theme);
+        let bounds = Rect::new(0, 0, width, height);
+        let layout = own_layout(&group, bounds, scale, &theme);
+        assert!(
+            group
+                .row_rect(group.len() - 1, layout, scale, &theme)
+                .is_some(),
+            "the last row was omitted at {width}px"
+        );
+    }
 }

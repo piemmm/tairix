@@ -330,6 +330,10 @@ fn forms() -> Vec<DemoItem> {
             ),
             FieldRow::new("Interface scale", FieldControl::Slider(Slider::new(500))),
             FieldRow::new(
+                "Mute",
+                FieldControl::Checkbox(Checkbox::new("", SelectionState::Unselected)),
+            ),
+            FieldRow::new(
                 "Host name",
                 FieldControl::Text(TextField::new().with_text("tairix")),
             ),

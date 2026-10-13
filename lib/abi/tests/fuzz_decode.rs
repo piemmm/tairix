@@ -2382,7 +2382,7 @@ fn structured_cue_inputs_with_corrupted_fields_never_panic() {
                 .map(|answer| encoded(CueRequest::Cue { event, answer }))
         })
         .chain([encoded(CueRequest::Policy {
-            document: "sound.enabled = false\nsound.bell.gain = 0.5\n",
+            document: "sound.enabled = false\nsound.gain = -6dB\n",
             files,
         })]);
     for mut base in requests {

@@ -952,9 +952,9 @@ fn a_sound_overrunning_its_deadline_is_stopped_and_its_waiter_answered() {
 }
 
 #[test]
-fn an_events_own_gain_is_the_streams() {
+fn the_settings_gain_is_the_streams() {
     let (store, mixer, audit) = (shipped(), Fake::new(BIG_RING), Audit::default());
-    store.put(MACHINE_SETTINGS, b"sound.info.gain = -6dB\n".to_vec());
+    store.put(MACHINE_SETTINGS, b"sound.gain = -6dB\n".to_vec());
     let mut authority = authority(&store, &mixer, &audit);
     assert_eq!(
         ask(
@@ -1138,7 +1138,8 @@ fn a_push_naming_a_file_or_a_machine_moment_is_refused_whole() {
     for (document, files) in [
         ("sound.bell.file = /Users/ada/bell.wav\n", [0; 13]),
         ("sound.login.enabled = false\n", [0; 13]),
-        ("sound.info.gain = 6dB\n", [0; 13]),
+        ("sound.gain = 6dB\n", [0; 13]),
+        ("sound.info.gain = -6dB\n", [0; 13]),
         ("", with_file(SoundEvent::Login, 5)),
     ] {
         assert_eq!(
@@ -1178,7 +1179,7 @@ fn a_handed_file_plays_in_place_of_the_theme_and_leaves_with_the_session() {
             &mut authority,
             &anchor,
             seat,
-            "sound.error.gain = -6dB\n",
+            "sound.gain = -6dB\n",
             with_file(SoundEvent::Error, 7)
         ),
         Ok(())
@@ -1286,14 +1287,14 @@ fn the_machines_document_changing_beneath_the_choices_is_seen_through_them() {
             &mut authority,
             &desktop(ALICE, A),
             seat,
-            "sound.bell.gain = -6dB\n",
+            "sound.gain = -6dB\n",
             [0; 13]
         ),
         Ok(())
     );
     store.put(
         MACHINE_SETTINGS,
-        b"sound.info.enabled = false\nsound.bell.gain = -3dB\n".to_vec(),
+        b"sound.info.enabled = false\nsound.gain = -3dB\n".to_vec(),
     );
     assert_eq!(
         ask_at(
@@ -1445,7 +1446,7 @@ fn a_session_pushing_again_keeps_what_was_known_of_its_unchanged_files() {
             &mut authority,
             &anchor,
             seat,
-            "sound.error.gain = -6dB\n",
+            "sound.gain = -6dB\n",
             hand_over(10)
         ),
         Ok(())

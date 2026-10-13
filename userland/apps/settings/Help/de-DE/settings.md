@@ -38,12 +38,20 @@ die Programmbibliothek oder namentlich aus einer Shell. Es benötigt eine
 laufende grafische Sitzung: ohne sie ist der Fensterkanal unerreichbar, und es
 meldet die Ablehnung auf dem Standardfehlerstrom und beendet sich.
 
-Ton zeigt jede Ausgabe und Eingabe mit ihrer Standardwahl, ihrem Pegel und
-ihrer Stummschaltung, und was aufnimmt: Ihre eigenen Aufnahmen mit Namen und
-wie viele die anderen machen. Die Regler ändern das Gerät sofort, und nur
-solange Ihre Sitzung den Raum hält, den es bedient; ein Gerät im Raum einer
-anderen Sitzung wird angezeigt, lässt sich hier aber nicht ändern. Ihr Desktop
-merkt sich, was Sie einstellen.
+Ton hat zwei Bereiche. *Output & Input* wählt das Gerät, über das der Ton
+spielt, und das, von dem aufgenommen wird, und stellt Lautstärke und
+Stummschaltung dieses Geräts ein: Stummschalten dreht die Lautstärke ganz
+herunter, bis Sie es aufheben, und dann steht sie wieder, wo sie war. Er zeigt
+auch, was aufnimmt: Ihre eigenen Aufnahmen mit Namen und wie viele die anderen
+machen. Das ändert das Gerät sofort, und nur solange Ihre Sitzung den Raum
+hält, den das Gerät bedient; ein Gerät im Raum einer anderen Sitzung wird
+angezeigt, lässt sich hier aber nicht ändern. Ihr Desktop merkt sich, was Sie
+einstellen. *Sound Effects* schaltet die eigenen Klänge des Desktops ein oder
+aus, legt ihr Thema und ihre Lautstärke fest und bestimmt für jedes Ereignis —
+eine Benachrichtigung, einen Fehler, die Terminalglocke —, ob es den Klang
+seines Themas, eine von Ihnen gewählte Datei oder nichts abspielt. Die Klänge
+beim Starten, An- und Abmelden gehören dem Rechner und werden von seinem
+Administrator festgelegt.
 
 ## EXIT STATUS
 

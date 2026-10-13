@@ -30,7 +30,7 @@ pub enum Resolution<'a> {
     Play {
         /// Where the sound is read from.
         source: CueSource<'a>,
-        /// The event's own level.
+        /// The level the settings turn every sound down to.
         gain: AudioGain,
     },
     /// Make no sound, for this reason.
@@ -48,11 +48,10 @@ pub fn resolve(
     own: bool,
     mut holds: impl FnMut(&str, SoundAsset) -> bool,
 ) -> Resolution<'_> {
-    let chosen = settings.event(event);
-    if !settings.enabled() || !chosen.enabled {
+    if !settings.enabled() || !settings.event(event).enabled {
         return Resolution::Silent(Silence::Disabled);
     }
-    let gain = chosen.gain;
+    let gain = settings.gain();
     if own {
         return Resolution::Play {
             source: CueSource::Own,

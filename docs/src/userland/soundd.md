@@ -137,7 +137,7 @@ pressure costs a re-decode.
 A cue opens its stream on the default sink at the asset's own format and rate,
 with a ring of the whole sound up to the ring bound; a longer sound is refilled
 as the device frees room and drained once queued. A shipped sound is 48 kHz at
-unity gain, so it reaches the device bit-exact; an event's own gain is the
+unity gain, so it reaches the device bit-exact; the settings' one gain is the
 stream's. A stream that is told the room moved, the device went, or its ring
 broke ends the cue; one that has not played out by its length plus a second is
 stopped (`CUE_CUT`). A cue asked to be answered once played out

@@ -492,13 +492,24 @@ fn the_forms_group_seats_every_row_it_demonstrates() {
     let DemoWidget::FieldGroup(group) = &gallery.current_panel()[0].widget else {
         panic!("the Forms tab shows a field group");
     };
-    assert!(
-        group
-            .rows()
-            .iter()
-            .any(|row| matches!(row.control(), tairix_controls::FieldControl::Flags(_))),
-        "the flag-set slot is demonstrated"
-    );
+    for (demonstrated, slot) in [
+        (
+            group
+                .rows()
+                .iter()
+                .any(|row| matches!(row.control(), tairix_controls::FieldControl::Flags(_))),
+            "flag-set",
+        ),
+        (
+            group
+                .rows()
+                .iter()
+                .any(|row| matches!(row.control(), tairix_controls::FieldControl::Checkbox(_))),
+            "checkbox",
+        ),
+    ] {
+        assert!(demonstrated, "the {slot} slot is demonstrated");
+    }
     let column = group.slot_column(rect.width, Scale::ONE, theme);
     let needed = group.measured_height(rect.width, column, Scale::ONE, theme);
     assert!(

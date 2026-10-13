@@ -13,6 +13,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
@@ -23,7 +24,7 @@ use crate::menu::{plate_rect, Menu, MenuAction, MenuItem, PlatePlacement, PlateS
 use crate::paint::{
     paint_bead, paint_chevron, paint_plate, paint_run, plate_border, pointer_activation,
     resolve_bead, resolve_frame, role_font, surface_rect, text_plate_height, to_i32, withheld,
-    ChevronDir, PlateStyle,
+    ChevronDir, Measured, PlateStyle,
 };
 use crate::state::{ControlRole, ControlState, PointerState, RenderInvariant, SelectionState};
 
@@ -67,6 +68,9 @@ pub struct ComboBox {
     /// Whether a primary press landed on the field and has not yet been
     /// released; the press *look* lives in `state.pointer`.
     armed: RenderInvariant<bool>,
+    /// The widest of the choices and the placeholder, in the face it was
+    /// measured in: the slot column a form resolves on every event asks for it.
+    widest: Measured<BitmapFont>,
 }
 
 impl ComboBox {
@@ -84,6 +88,7 @@ impl ComboBox {
             state: ControlState::idle(),
             pointer: RenderInvariant::new(Point::ORIGIN),
             armed: RenderInvariant::new(false),
+            widest: Measured::default(),
         }
     }
 
@@ -98,6 +103,7 @@ impl ComboBox {
     #[must_use]
     pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = placeholder.into();
+        self.widest = Measured::default();
         self
     }
 
@@ -181,11 +187,7 @@ impl ComboBox {
         self.selected = Some(index);
         for (i, item) in self.menu.items_mut().iter_mut().enumerate() {
             let mut s = item.state();
-            s.selection = if i == index {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            };
+            s.selection = SelectionState::of(i == index);
             item.set_state(s);
         }
         self.menu.adopt_current(Some(index));
@@ -302,14 +304,15 @@ impl ComboBox {
     #[must_use]
     pub fn measured_width(&self, scale: Scale, theme: &Theme) -> u32 {
         let font = role_font(theme, scale, TextRole::Body);
-        let widest = self
-            .choices
-            .iter()
-            .map(String::as_str)
-            .chain(core::iter::once(self.placeholder.as_str()))
-            .map(|text| font.text_width(text))
-            .max()
-            .unwrap_or(0);
+        let widest = self.widest.get_or(font, || {
+            self.choices
+                .iter()
+                .map(String::as_str)
+                .chain(core::iter::once(self.placeholder.as_str()))
+                .map(|text| font.text_width(text))
+                .max()
+                .unwrap_or(0)
+        });
         let height = text_plate_height(theme, scale, TextRole::Body);
         let inner_h = height.saturating_sub(plate_border(theme, scale).saturating_mul(2));
         Self::chrome_width(scale, theme, inner_h).saturating_add(widest)

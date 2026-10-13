@@ -171,9 +171,12 @@ command (`plans/NEW-MENUS.md` §1.6).
 A settings surface is a column of captioned groups of label/description/control
 rows, and that shape is the `form` family's, not each application's. A
 `FieldRow` is one setting: a leading label, an optional secondary description,
-and a trailing slot holding one real `Toggle`, `FlagSet`, `ComboBox`, `Slider`,
-`TextField`, `Button`, a read-only `Reading`, or a stated `Unmeasured` absence
-of one. A `FieldGroup` is the captioned plate those rows sit on, with an
+and a trailing slot holding one real `Toggle`, `Checkbox`, `FlagSet`,
+`ComboBox`, `Slider`, `TextField`, `Button`, a read-only `Reading`, or a
+stated `Unmeasured` absence of one. A `Toggle` switches a feature on or off; a
+`Checkbox` marks a state on the setting beside it — a mute beneath a volume —
+and reports the same `FieldAction::Set { on }`. A `FieldGroup` is the captioned
+plate those rows sit on, with an
 optional footnote beneath. Both compose the row chrome `ListRow` and `TableRow`
 draw — the leading pressure and selection rails, the activity seam, the
 trailing Signal Bead band, the focus ring — from the one shared recipe in the
@@ -244,7 +247,9 @@ control answers that width itself — `Button::measured_width`,
 `Checkbox::measured_width`, `FlagSet::measured_width` — so the column comes
 from the controls' own layout rather than a second copy of it. A combo box
 measures its *widest* choice, not the selected one, so choosing a different
-value never resizes the field or moves the column. The group turns that back
+value never resizes the field or moves the column, and remembers that width
+for the face it measured it in, since a form resolves its column on every
+event. The group turns that back
 into a size: `FieldGroup::natural_width` is the narrowest plate that seats
 every measured control whole under the half-span ceiling, so an owner sizing a
 window from its content opens it with every control readable.

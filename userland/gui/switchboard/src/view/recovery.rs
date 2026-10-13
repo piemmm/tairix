@@ -742,12 +742,9 @@ fn page_tabs(selected: FaultPage) -> Tabs {
 /// A master card's state: its recovery posture, and whether it is the
 /// selected fault.
 fn card_state(item: &RecoveryItem, selected: bool) -> ControlState {
-    let state = ControlState::idle().with_recovery(item.recovery);
-    if selected {
-        state.with_selection(SelectionState::Selected)
-    } else {
-        state
-    }
+    ControlState::idle()
+        .with_recovery(item.recovery)
+        .with_selection(SelectionState::of(selected))
 }
 
 /// One fault's master card: what faulted, what happened, and how long ago.

@@ -689,19 +689,32 @@ Effects**, the desktop's own sounds.
 
 ### Output & Input
 
-The devices pane is composed of plates discovered from the audio service: one
-per sink and source — its default choice, its level and its mute — and a
-Recording plate naming the user's own live captures and counting everyone
-else's (the machine's `AudioCapture` count less the user's own). Its controls
-are the one write path that is not a document: each acts on `audio-v1`
-directly (`SetDefault`, `SetLevel`, `SetMute`), because the audio service, not
-the desktop session, owns a device's controls, and it admits them for the
-session holding the room the device serves. Settings holds no capability for
-them; a device another session's room holds is drawn disabled under an
-Authority Mark.
+The devices pane is three plates built from what the audio service answers.
+**Output** and **Input** are one plate each however many devices there are:
+*Device* chooses which one the direction uses — every sink or source by name,
+devices that share a name told apart by a count — and *Volume* and *Mute* set
+that device. Choosing a device makes it its direction's default, so the plate
+then shows that device's own controls. *Mute* is a checkbox: checked, the
+volume stands at the bottom of its travel and is disabled, since nothing is
+heard; cleared, it is back at the level the device was left at, which the
+service kept — the rule the icon bar's volume panel draws by too
+(`tairix_audio::volume::control_permille`). **Recording** names the user's own
+live captures and counts everyone else's (the machine's `AudioCapture` count
+less the user's own), or says that nothing is recording.
 
-A level moves the device live as its slider is dragged and settles where it
-rests. The round trips run on a worker over `tairix_audio::stream::ControlQueue`,
+Its controls are the one write path that is not a document: each acts on
+`audio-v1` directly (`SetDefault`, `SetLevel`, `SetMute`), because the audio
+service, not the desktop session, owns a device's controls, and it admits them
+for the session holding the room the device serves. Settings holds no
+capability for them; a device another session's room holds is drawn disabled
+under an Authority Mark.
+
+A change shows at once. A mute or a level brings the rows it touches in line
+in place and reports only those, and choosing another device builds the plate
+again, since it now shows another device's controls; the reading that follows
+confirms or corrects either. A level moves the device live as its slider is
+dragged, its figure following the drag, and settles where it rests. The round
+trips run on a worker over `tairix_audio::stream::ControlQueue`,
 one in flight and the latest control of each kind for each device winning
 meanwhile, so a drag costs one request at a time. A reading that lands
 mid-drag is held until the drag settles rather than rebuilding the slider
@@ -713,25 +726,32 @@ the desktop session follows the same notices and keeps the user's choices.
 
 The effects pane is the user's own sound choices, which their desktop session
 keeps and hands the cue authority while it holds the seat (`plans/SOUND.md`
-SND23). A first plate holds the master switch, the theme — the installed
-themes, and the one in effect though no store holds it — and a statement that
-the start-up, sign-in and sign-out sounds are the machine's, since they sound
-while no one's choices are in force. Then one plate per sound a user decides:
-its switch, its level, which file plays — the theme's, a chosen file by its
-name alone, or one that cannot be read — *Choose…*, and *Use Theme Sound*.
+SND23), on two plates. **Sound Effects** holds what applies to every sound: the
+switch, the theme — the installed themes, and the one in effect though no store
+holds it — and one *Volume*; its footnote says the start-up, sign-in and
+sign-out sounds are the machine's, since they sound while no one's choices are
+in force. While the switch is off every other row is disabled. **Event
+Sounds** is one row per sound a user decides, each a single chooser of what it
+plays: *Theme sound*, the file chosen for it by its name alone while there is
+one, *None*, or *Choose File…*. Choosing the theme's sound or a file is asking
+to hear the event, so it turns the event on. *Choose File…* opens the session's
+own picker and is a command rather than a value, so the chooser goes straight
+back to what the event plays until the session has the file. A chosen file
+that cannot be read is named with the reason the theme's sound plays instead.
 
 Its write path is the desktop session's: each change is a
 [pinboard](./pinboard.md) sound request rendering only the settings it
 changes, and a file is chosen in the session's own trusted picker, so no path
-ever reaches this application. A level asks once, where it settles. The round
+ever reaches this application. The volume asks once, where it settles. The round
 trips run on a worker, one at a time (`EffectsAsks`): every setting changed
 meanwhile waits with its newest value and goes in the next request together,
-so a level stepped faster than the session answers costs one store a round
+so a volume stepped faster than the session answers costs one store a round
 trip and the value asked last is the one that lands, while picks and returns
-to the theme's sound keep their order. Once one is answered the pane reads the
-choices again, so it shows what the session holds rather than what was asked;
-a reading that lands mid-drag waits for the drag to settle, as the devices
-pane's does.
+to the theme's sound keep their order. A change shows at once, as the session
+will hold it, in the rows it touches — every row, for the switch — and once it
+is answered the pane reads the choices again, so it shows what the session
+holds rather than what was asked; a reading that lands mid-drag waits for the
+drag to settle, as the devices pane's does.
 
 ## On a running machine
 

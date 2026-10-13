@@ -44,7 +44,6 @@ use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::{BundleId, Errno};
 use tairix_appconf::Registry;
 use tairix_audio::stream::DeviceControl;
-use tairix_audio::volume::level_at_permille;
 use tairix_colour::Rgb;
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
@@ -2208,6 +2207,10 @@ pub struct Form {
     /// A chooser's picture a choice elsewhere repainted, as its group and
     /// position, for the damage of the round that made it.
     retiled: Option<(usize, usize)>,
+    /// The row whose control changed something its pane shows at once,
+    /// before the reading that confirms it lands, for the round that made it
+    /// to restate.
+    restating: Option<Owner>,
     /// Which group holds the keyboard cursor.
     focus: usize,
     /// Where the pointer last moved to in the form's layout, which is where a
@@ -2246,6 +2249,7 @@ impl Form {
             lock_refusal: documents.lock_refusal,
             preview_refusal: documents.preview_refusal,
             retiled: None,
+            restating: None,
             focus: 0,
             pointer: None,
             reshaped: false,
@@ -3110,6 +3114,9 @@ impl Form {
     ///
     /// A choice that moved a picture it does not own — the backdrop's colour,
     /// which *No picture* is drawn in — reports that picture's tile too.
+    ///
+    /// A control whose change its pane shows at once has the rows it touches
+    /// restated here, where the layout they are reported against is known.
     fn concluded(
         &mut self,
         acted: Option<(usize, FieldGroupAction)>,
@@ -3121,6 +3128,9 @@ impl Form {
             damage.add(*rect);
         }
         let outcome = self.acted(acted);
+        if let Some(changed) = self.restating.take() {
+            self.restate(changed, place, damage);
+        }
         if let Some(tile) = self
             .retiled
             .take()
@@ -3132,6 +3142,80 @@ impl Form {
             FormOutcome::Idle if redrew => FormOutcome::Changed,
             outcome => outcome,
         }
+    }
+
+    /// Bring every row a change to `changed`'s control touches in line with
+    /// the pane's reading, reporting each row that moved into `damage`.
+    ///
+    /// A row that cannot be brought in line in place has the pane built
+    /// again, and one that now measures differently has it laid out again,
+    /// so nothing is drawn against a stale layout.
+    fn restate(&mut self, changed: Owner, place: FormPlace<'_>, damage: &mut Region) {
+        let before = self.layouts(place);
+        let Some(moved) = self.restate_rows(changed) else {
+            self.rebuild();
+            return;
+        };
+        if moved.is_empty() {
+            return;
+        }
+        let after = self.layouts(place);
+        let unmoved = before.len() == after.len()
+            && before.iter().zip(&after).all(|((was, held), (is, now))| {
+                was == is && held.bounds == now.bounds && held.column == now.column
+            });
+        if !unmoved {
+            self.reshaped = true;
+            return;
+        }
+        for (group, row) in moved {
+            let rect = after
+                .iter()
+                .find_map(|(at, layout)| (*at == group).then_some(*layout))
+                .and_then(|layout| {
+                    self.groups
+                        .get(group)?
+                        .row_rect(row, layout, place.scale, place.theme)
+                });
+            if let Some(rect) = rect {
+                damage.add(rect);
+            }
+        }
+    }
+
+    /// Bring the rows a change to `changed`'s control touches in line with
+    /// the pane's reading in place, answering where each one that moved is,
+    /// or `None` where one cannot be.
+    fn restate_rows(&mut self, changed: Owner) -> Option<Vec<(usize, usize)>> {
+        let Self {
+            groups,
+            owners,
+            sound,
+            effects,
+            ..
+        } = self;
+        let mut moved = Vec::new();
+        for (at, (group, rows)) in groups.iter_mut().zip(owners.iter()).enumerate() {
+            for (index, (held, owner)) in group.rows_mut().iter_mut().zip(rows).enumerate() {
+                let built = match (changed, *owner) {
+                    (Owner::Sound(changed), Owner::Sound(row)) if sound::touches(changed, row) => {
+                        sound.as_ref().and_then(|reading| sound::row(row, reading))
+                    }
+                    (Owner::Effects(changed), Owner::Effects(row))
+                        if effects::touches(changed, row) =>
+                    {
+                        effects.as_ref().map(|reading| effects::row(row, reading))
+                    }
+                    _ => continue,
+                };
+                match built.map(|built| adopt_row(held, &built)) {
+                    Some(Adopted::Same) => {}
+                    Some(Adopted::Moved) => moved.push((at, index)),
+                    Some(Adopted::Reshaped) | None => return None,
+                }
+            }
+        }
+        Some(moved)
     }
 
     /// Adopt what a group reported.
@@ -3148,18 +3232,10 @@ impl Form {
             return FormOutcome::Changed;
         };
         if let Owner::Sound(row) = owner {
-            return sound_outcome(row, action.action);
+            return self.sound_acted(row, &action.action);
         }
         if let Owner::Effects(row) = owner {
-            let settled = !matches!(action.action, FieldAction::SetValue { .. });
-            let ask = self
-                .effects
-                .as_ref()
-                .and_then(|reading| effects::effects_ask(row, &action.action, reading));
-            if ask.is_none() && settled {
-                return FormOutcome::Changed;
-            }
-            return FormOutcome::Effects { ask, settled };
+            return self.effects_acted(row, &action.action);
         }
         match action.action {
             FieldAction::Selected { index } => self.chose(owner, index),
@@ -3199,6 +3275,58 @@ impl Form {
             // nothing else.
             _ => FormOutcome::Changed,
         }
+    }
+
+    /// What a sound row's `action` asks of the audio service, shown at once:
+    /// another device chosen brings that device's controls, so the pane is
+    /// built again, and a level or a mute moves the rows it touches.
+    fn sound_acted(&mut self, row: SoundRow, action: &FieldAction) -> FormOutcome {
+        let Some(reading) = self.sound.as_mut() else {
+            return FormOutcome::Changed;
+        };
+        let Some(outcome) = sound::ask(row, action, reading) else {
+            return FormOutcome::Changed;
+        };
+        if let FormOutcome::Sound {
+            device_id, control, ..
+        } = outcome
+        {
+            if sound::apply(reading, device_id, control) {
+                match control {
+                    DeviceControl::Default => self.rebuild(),
+                    DeviceControl::Level(_) | DeviceControl::Mute(_) => {
+                        self.restating = Some(Owner::Sound(row));
+                    }
+                }
+            }
+        }
+        outcome
+    }
+
+    /// What an effects row's `action` asks of the desktop session, shown at
+    /// once: a level as it is dragged, a choice as it is made, and a chooser
+    /// that asked for a pick put back on what its event plays until the
+    /// session has the file.
+    fn effects_acted(&mut self, row: EffectsRow, action: &FieldAction) -> FormOutcome {
+        let Some(reading) = self.effects.as_mut() else {
+            return FormOutcome::Changed;
+        };
+        let settled = !matches!(action, FieldAction::SetValue { .. });
+        let ask = effects::effects_ask(row, action, reading);
+        let shown = match (&ask, action) {
+            (Some(ask), _) => effects::apply(reading, ask) || matches!(ask, EffectsAsk::Pick(_)),
+            (None, FieldAction::SetValue { permille }) if row == EffectsRow::Gain => {
+                effects::show_level(reading, *permille)
+            }
+            (None, _) => false,
+        };
+        if shown {
+            self.restating = Some(Owner::Effects(row));
+        }
+        if ask.is_none() && settled {
+            return FormOutcome::Changed;
+        }
+        FormOutcome::Effects { ask, settled }
     }
 
     /// Adopt the choice at `index` for `owner`.
@@ -3514,6 +3642,7 @@ impl Form {
                             Some(combo.popup_rect(slot, viewport, scale, theme))
                         }
                         FieldControl::Toggle(_)
+                        | FieldControl::Checkbox(_)
                         | FieldControl::Flags(_)
                         | FieldControl::Slider(_)
                         | FieldControl::Text(_)
@@ -3619,6 +3748,12 @@ impl Form {
     #[cfg(test)]
     pub(crate) fn groups(&self) -> &[FieldGroup] {
         &self.groups
+    }
+
+    /// The groups, for a test that moves a control as the reader would.
+    #[cfg(test)]
+    pub(crate) fn groups_mut_for_test(&mut self) -> &mut [FieldGroup] {
+        &mut self.groups
     }
 
     /// Where each group is laid out in `place`, for a test that holds the
@@ -3758,10 +3893,35 @@ impl Form {
         row: usize,
         action: tairix_controls::FieldAction,
     ) -> FormOutcome {
-        self.acted(Some((
+        let outcome = self.acted(Some((
             group,
             tairix_controls::FieldGroupAction { row, action },
-        )))
+        )));
+        if let Some(changed) = self.restating.take() {
+            if self.restate_rows(changed).is_none() {
+                self.rebuild();
+            }
+        }
+        outcome
+    }
+
+    /// Hand row `row` of group `group` the report `action` as its control
+    /// would, drawn in `place`, answering what the round concluded and the
+    /// pixels it reported.
+    #[cfg(test)]
+    pub(crate) fn act_in_place_for_test(
+        &mut self,
+        (group, row): (usize, usize),
+        action: tairix_controls::FieldAction,
+        place: FormPlace<'_>,
+    ) -> (FormOutcome, Region) {
+        let mut damage = tairix_controls::damage::sink();
+        let outcome = self.concluded(
+            Some((group, tairix_controls::FieldGroupAction { row, action })),
+            &tairix_controls::damage::sink(),
+            (place, &mut damage),
+        );
+        (outcome, damage)
     }
 }
 
@@ -3784,26 +3944,66 @@ impl Form {
     }
 }
 
-/// What a sound row's `action` asks of the audio service. A level moves live
-/// as it is dragged; a default once chosen is not unchosen by its row, since
-/// a direction always has one.
-pub(crate) fn sound_outcome(row: SoundRow, action: FieldAction) -> FormOutcome {
-    let (device_id, control, settled) = match (row, action) {
-        (SoundRow::Level(id), FieldAction::SetValue { permille }) => {
-            (id, DeviceControl::Level(level_at_permille(permille)), false)
+/// What bringing a row in line with a freshly built one came to.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Adopted {
+    /// It already showed what the built one does.
+    Same,
+    /// Its value, description or disposition moved.
+    Moved,
+    /// Its label, control or choices differ, so it cannot be.
+    Reshaped,
+}
+
+/// Bring `held` in line with `built` without replacing it, so the reader's
+/// focus, pointer look and any press or drag in progress survive.
+fn adopt_row(held: &mut FieldRow, built: &FieldRow) -> Adopted {
+    if held.label() != built.label() {
+        return Adopted::Reshaped;
+    }
+    let mut moved = match (held.control_mut(), built.control()) {
+        (FieldControl::Toggle(held), FieldControl::Toggle(built)) => {
+            let differs = held.is_on() != built.is_on();
+            held.set_on(built.is_on());
+            differs
         }
-        (SoundRow::Level(id), FieldAction::Settled { permille }) => {
-            (id, DeviceControl::Level(level_at_permille(permille)), true)
+        (FieldControl::Checkbox(held), FieldControl::Checkbox(built)) => {
+            let differs = held.selection() != built.selection();
+            held.set_selection(built.selection());
+            differs
         }
-        (SoundRow::Mute(id), FieldAction::Set { on }) => (id, DeviceControl::Mute(on), true),
-        (SoundRow::Default(id), FieldAction::Set { on: true }) => {
-            (id, DeviceControl::Default, true)
+        (FieldControl::Combo(held), FieldControl::Combo(built)) => {
+            if held.choices() != built.choices() {
+                return Adopted::Reshaped;
+            }
+            match built.selected() {
+                Some(index) => {
+                    let differs = held.selected() != Some(index);
+                    held.set_selected(index);
+                    differs
+                }
+                None if held.selected().is_none() => false,
+                None => return Adopted::Reshaped,
+            }
         }
-        _ => return FormOutcome::Changed,
+        (FieldControl::Slider(held), FieldControl::Slider(built)) => {
+            let differs = held.value() != built.value();
+            held.set_value(built.value());
+            differs
+        }
+        _ => return Adopted::Reshaped,
     };
-    FormOutcome::Sound {
-        device_id,
-        control,
-        settled,
+    moved |= held.set_description(built.description().map(String::from));
+    let (mut state, wanted) = (held.state(), built.state());
+    if (state.enabled, state.authority) != (wanted.enabled, wanted.authority) {
+        state.enabled = wanted.enabled;
+        state.authority = wanted.authority;
+        held.set_state(state);
+        moved = true;
+    }
+    if moved {
+        Adopted::Moved
+    } else {
+        Adopted::Same
     }
 }

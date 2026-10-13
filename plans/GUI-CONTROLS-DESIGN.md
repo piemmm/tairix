@@ -2037,6 +2037,11 @@ a `FieldGroup` is the captioned plate its rows sit on.
   answers its **natural width** — the narrowest plate that seats every measured
   control whole under the ceiling — so an owner sizing a window from its
   content opens it with every control readable.
+- **A switch is a feature; a mark is a state.** A `Toggle` slot switches a
+  feature on or off. A `Checkbox` slot marks a state on the setting beside it —
+  a mute beneath a volume — and is never drawn as a switch, because a switch
+  reads as the volume itself turning on and off. Both report
+  `Set { on }`; the slot is the box alone, since the row's label names it.
 - **A few independent flags are one slot, not several settings.** A
   `FlagSet` holds a small set of labelled checkboxes (§11.5) on one line — the
   read, write and execute bits of one permission class. Each flag *is* a

@@ -677,3 +677,20 @@ fn a_choice_too_long_for_the_field_is_elided_with_the_mark() {
         "the placeholder"
     );
 }
+
+/// The width a form's slot column asks for on every event is measured once
+/// for a face and remembered: the same as measured afresh, measured again in
+/// another face, and forgotten by a builder that changes the words.
+#[test]
+fn a_remembered_width_is_the_one_measured_afresh() {
+    let theme = Theme::dark();
+    let held = combo();
+    let first = held.measured_width(Scale::ONE, &theme);
+    assert_eq!(held.measured_width(Scale::ONE, &theme), first);
+    assert_eq!(combo().measured_width(Scale::ONE, &theme), first);
+    let double = Scale::from_percent(200).expect("valid scale");
+    assert!(held.measured_width(double, &theme) > first, "another face");
+    assert_eq!(held.measured_width(Scale::ONE, &theme), first);
+    let wider = held.with_placeholder("A placeholder far wider than any choice");
+    assert!(wider.measured_width(Scale::ONE, &theme) > first);
+}

@@ -5,16 +5,18 @@
 //! Both signals are the session's own pixels, drawn from what the audio
 //! service reports, so no program can hide that the machine is recording.
 //! The panel's level moves the device live as it is dragged; the session
-//! coalesces those moves and remembers the level where the drag settles.
+//! coalesces those moves and remembers the level where the drag settles. A
+//! muted output's level stands at the bottom and holds still until it is
+//! unmuted, which restores it.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::audio::AudioGain;
-use tairix_audio::volume::{level_at_permille, permille_of_level};
+use tairix_audio::volume::{control_permille, level_at_permille};
 use tairix_controls::{
-    paint_surface_plate, plate_border, AuthorityState, ChromeLayer, ControlState, SelectorAction,
-    Slider, SliderAction, Toggle,
+    paint_surface_plate, plate_border, AuthorityState, Checkbox, ChromeLayer, ControlState,
+    SelectionState, SelectorAction, Slider, SliderAction,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
@@ -126,7 +128,7 @@ pub struct SoundPanelLayout {
     pub name: Rect,
     /// The level slider.
     pub slider: Rect,
-    /// The mute toggle.
+    /// The mute checkbox.
     pub mute: Rect,
 }
 
@@ -175,7 +177,7 @@ pub struct SoundPanel {
     open: bool,
     output: Option<OutputState>,
     slider: Slider,
-    mute: Toggle,
+    mute: Checkbox,
     /// A drag in progress owns the slider, so a report arriving mid-drag
     /// cannot pull it from under the pointer.
     dragging: bool,
@@ -195,7 +197,7 @@ impl SoundPanel {
             open: false,
             output: None,
             slider: Slider::new(0),
-            mute: Toggle::new("Mute", false),
+            mute: Checkbox::new("Mute", SelectionState::Unselected),
             dragging: false,
         }
     }
@@ -232,24 +234,43 @@ impl SoundPanel {
         if self.output == output {
             return false;
         }
-        match &output {
-            Some(shown) => {
-                if !self.dragging {
-                    self.slider.set_value(permille_of_level(shown.level));
-                }
-                self.mute.set_on(shown.muted);
-                let state = if shown.may_change {
-                    ControlState::idle()
-                } else {
-                    ControlState::idle().with_authority(AuthorityState::Denied)
-                };
-                self.slider.set_state(state.with_enabled(shown.may_change));
-                self.mute.set_state(state.with_enabled(shown.may_change));
-            }
-            None => self.close(),
+        if output.is_none() {
+            self.close();
         }
         self.output = output;
+        self.restate();
         true
+    }
+
+    /// Show what the output holds: its mute's mark, its level — at the bottom
+    /// and still while muted — and whether this session may change either.
+    /// A drag in progress keeps the slider's value, and every control keeps
+    /// its focus and pointer look.
+    fn restate(&mut self) {
+        let Some(shown) = self.output.as_ref() else {
+            return;
+        };
+        if !self.dragging {
+            self.slider
+                .set_value(control_permille(shown.level, shown.muted));
+        }
+        self.mute.set_selection(SelectionState::of(shown.muted));
+        let authority = if shown.may_change {
+            AuthorityState::Allowed
+        } else {
+            AuthorityState::Denied
+        };
+        let disposed = |mut state: ControlState, enabled: bool| {
+            state.enabled = enabled;
+            state.authority = authority;
+            state
+        };
+        self.slider.set_state(disposed(
+            self.slider.state(),
+            shown.may_change && !shown.muted,
+        ));
+        self.mute
+            .set_state(disposed(self.mute.state(), shown.may_change));
     }
 
     /// Feed a pointer event, in screen coordinates, to the open panel.
@@ -349,6 +370,7 @@ impl SoundPanel {
         if let Some(shown) = self.output.as_mut() {
             shown.muted = muted;
         }
+        self.restate();
         PanelOutcome::Act(SoundAction::Mute { device_id, muted })
     }
 

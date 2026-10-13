@@ -4,6 +4,8 @@
 use alloc::string::String;
 
 use tairix_abi::audio::AudioGain;
+use tairix_audio::volume::permille_of_level;
+use tairix_controls::SelectionState;
 use tairix_geometry::{Point, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::Theme;
@@ -222,6 +224,64 @@ fn the_panel_closes_on_escape_outside_or_its_signal_and_when_the_output_goes() {
         "an output that went away takes its panel"
     );
     assert!(bar.sound_layout(Scale::ONE).is_none());
+}
+
+/// A mute marks its box and silences the level at once, and the session's
+/// report of the same state keeps both so; lifting it restores the level.
+#[test]
+fn a_mute_marks_its_box_and_stills_the_level_until_it_is_lifted() {
+    let mut bar = bar();
+    let _ = bar.set_sound(speakers(-1_200, false, true));
+    let mut input = TaskbarInput::new();
+    open(&mut input, &mut bar);
+    let layout = bar.sound_layout(Scale::ONE).expect("an open panel");
+    let toggle_mute = |input: &mut TaskbarInput, bar: &mut Taskbar| {
+        let pressed = press(input, bar, centre(layout.mute));
+        let released = release(input, bar);
+        [pressed, released]
+            .into_iter()
+            .find(|response| matches!(response, TaskbarResponse::Sound(_)))
+    };
+    assert_eq!(
+        toggle_mute(&mut input, &mut bar),
+        Some(TaskbarResponse::Sound(SoundAction::Mute {
+            device_id: 3,
+            muted: true,
+        }))
+    );
+    let shown = |bar: &Taskbar| {
+        let panel = bar.sound();
+        (
+            panel.mute.selection(),
+            panel.slider.value(),
+            panel.slider.state().enabled,
+        )
+    };
+    assert_eq!(shown(&bar), (SelectionState::Selected, 0, false));
+    let _ = bar.set_sound(speakers(-1_200, true, true));
+    assert_eq!(
+        shown(&bar),
+        (SelectionState::Selected, 0, false),
+        "the report that agrees keeps what the press showed"
+    );
+    let right = Point::new(layout.slider.right() - 2, centre(layout.slider).y);
+    assert!(
+        !matches!(
+            press(&mut input, &mut bar, right),
+            TaskbarResponse::Sound(_)
+        ),
+        "a silent level asks nothing"
+    );
+    release(&mut input, &mut bar);
+    assert_eq!(
+        toggle_mute(&mut input, &mut bar),
+        Some(TaskbarResponse::Sound(SoundAction::Mute {
+            device_id: 3,
+            muted: false,
+        }))
+    );
+    let level = permille_of_level(AudioGain::new(-1_200).expect("attenuation"));
+    assert_eq!(shown(&bar), (SelectionState::Unselected, level, true));
 }
 
 #[test]

@@ -3,9 +3,9 @@
 //! `docs/src/lib/controls.md`).
 //!
 //! A row is one setting: a label, an optional description line, and a trailing
-//! slot holding one real [`Toggle`], [`ComboBox`], [`Slider`], [`TextField`],
-//! [`SecretField`], [`Button`], [`FlagSet`] of checkboxes, read-only reading,
-//! or stated absence of one. It composes the row chrome [`ListRow`](crate::collection::ListRow)
+//! slot holding one real [`Toggle`], [`Checkbox`], [`ComboBox`], [`Slider`],
+//! [`TextField`], [`SecretField`], [`Button`], [`FlagSet`] of checkboxes,
+//! read-only reading, or stated absence of one. It composes the row chrome [`ListRow`](crate::collection::ListRow)
 //! and [`TableRow`](crate::collection::TableRow) paint and restates neither
 //! that nor any control. A group is the captioned plate those rows sit on,
 //! resolving one slot column so every control in it begins at the same x.
@@ -63,8 +63,11 @@ use crate::value::{Slider, SliderAction};
 /// controls is two settings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FieldControl {
-    /// A boolean setting.
+    /// A boolean setting: a feature switched on or off.
     Toggle(Toggle),
+    /// A boolean state marked on something beside it rather than a feature
+    /// of its own, such as a mute beneath a volume.
+    Checkbox(Checkbox),
     /// A small set of independent flags, such as the read, write and execute
     /// bits of one permission class.
     Flags(FlagSet),
@@ -93,7 +96,7 @@ pub enum FieldControl {
 /// [`FieldRow`] commits nothing itself and enforces no authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FieldAction {
-    /// The [`Toggle`] slot requests its value become `on`.
+    /// The [`Toggle`] or [`Checkbox`] slot requests its value become `on`.
     Set {
         /// The requested new on/off value.
         on: bool,
@@ -274,6 +277,7 @@ impl FieldControl {
         let font = role_font(theme, scale, TextRole::Body);
         match self {
             FieldControl::Toggle(toggle) => Some(toggle.measured_width(scale, theme)),
+            FieldControl::Checkbox(checkbox) => Some(checkbox.measured_width(scale, theme)),
             FieldControl::Flags(flags) => Some(flags.measured_width(scale, theme)),
             FieldControl::Combo(combo) => Some(combo.measured_width(scale, theme)),
             FieldControl::Button(button) => Some(button.measured_width(scale, theme)),
@@ -318,6 +322,7 @@ impl FieldControl {
         };
         match self {
             FieldControl::Toggle(c) => c.set_state(apply(c.state())),
+            FieldControl::Checkbox(c) => c.set_state(apply(c.state())),
             FieldControl::Flags(c) => {
                 for flag in &mut c.flags {
                     flag.set_state(apply(flag.state()));
@@ -339,6 +344,7 @@ impl FieldControl {
     fn set_focused(&mut self, focused: bool) -> bool {
         match self {
             FieldControl::Toggle(c) => c.set_focused(focused),
+            FieldControl::Checkbox(c) => c.set_focused(focused),
             FieldControl::Flags(c) => c.set_focused(focused),
             FieldControl::Combo(c) => c.set_focused(focused),
             FieldControl::Slider(c) => c.set_focused(focused),
@@ -367,6 +373,7 @@ impl FieldControl {
         let rect = self.drawn_rect(slot, scale, theme);
         match self {
             FieldControl::Toggle(c) => c.render(surface, rect, scale, theme),
+            FieldControl::Checkbox(c) => c.render(surface, rect, scale, theme),
             FieldControl::Flags(c) => c.render(surface, rect, scale, theme),
             FieldControl::Combo(c) => c.render(surface, rect, scale, theme),
             FieldControl::Slider(c) => c.render(surface, rect, scale, theme),
@@ -480,11 +487,7 @@ impl FlagSet {
     /// reported as a request; an out-of-range index changes nothing.
     pub fn set_on(&mut self, index: usize, on: bool) {
         if let Some(flag) = self.flags.get_mut(index) {
-            flag.set_selection(if on {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            });
+            flag.set_selection(SelectionState::of(on));
         }
     }
 
@@ -830,11 +833,7 @@ impl FieldRow {
     /// leading accent rail (a pane scrolling a searched-for setting into view
     /// marks it this way).
     pub fn set_selected(&mut self, selected: bool) {
-        self.state.selection = if selected {
-            SelectionState::Selected
-        } else {
-            SelectionState::Unselected
-        };
+        self.state.selection = SelectionState::of(selected);
     }
 
     /// Whether the row is selected.
@@ -1059,6 +1058,9 @@ impl FieldRow {
             FieldControl::Toggle(c) => c
                 .on_pointer(event, rect, damage)
                 .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
+            FieldControl::Checkbox(c) => c
+                .on_pointer(event, rect, damage)
+                .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
             FieldControl::Flags(c) => c.on_pointer(event, rect, scale, theme, damage),
             FieldControl::Combo(c) => c
                 .on_pointer(event, rect, layout.popup, scale, theme, damage)
@@ -1098,6 +1100,9 @@ impl FieldRow {
             FieldControl::Toggle(c) => c
                 .on_key(key)
                 .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
+            FieldControl::Checkbox(c) => c
+                .on_key(key)
+                .map(|SelectorAction::Set { on }| FieldAction::Set { on }),
             FieldControl::Flags(c) => c.on_key(key, rect, scale, theme, damage),
             FieldControl::Combo(c) => c
                 .on_key(key, rect, layout.popup, scale, theme, damage)
@@ -1119,6 +1124,7 @@ impl FieldRow {
         match &self.control {
             FieldControl::Secret(c) => c.deadline_ns(),
             FieldControl::Toggle(_)
+            | FieldControl::Checkbox(_)
             | FieldControl::Flags(_)
             | FieldControl::Combo(_)
             | FieldControl::Slider(_)
@@ -1663,7 +1669,7 @@ impl FieldGroup {
         scale: Scale,
         theme: &Theme,
     ) -> (u32, u32) {
-        let (_, iy, iw, ih) = inner;
+        let (_, iy, _, ih) = inner;
         let (pad, gap) = Self::insets(scale, theme);
         let top = iy
             .saturating_add(pad)
@@ -1672,7 +1678,7 @@ impl FieldGroup {
         let bottom = iy
             .saturating_add(ih)
             .saturating_sub(pad)
-            .saturating_sub(self.footnote_height(iw, scale, theme))
+            .saturating_sub(self.footnote_height(width, scale, theme))
             .saturating_sub(self.pictures_band(width, scale, theme));
         (top, bottom)
     }
@@ -1784,6 +1790,7 @@ impl FieldGroup {
                 FieldControl::Combo(combo) => Some(combo.popup_rect(slot, viewport, scale, theme)),
                 // Every other slot control draws wholly inside its own row.
                 FieldControl::Toggle(_)
+                | FieldControl::Checkbox(_)
                 | FieldControl::Flags(_)
                 | FieldControl::Slider(_)
                 | FieldControl::Text(_)

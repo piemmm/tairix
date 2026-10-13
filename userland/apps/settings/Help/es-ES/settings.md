@@ -37,12 +37,19 @@ Biblioteca de programas, o por su nombre desde un intérprete de órdenes.
 Requiere una sesión gráfica en marcha: sin ella el canal de ventana es
 inalcanzable y comunica el rechazo en el flujo de error estándar y termina.
 
-Sonido muestra cada salida y entrada con su elección predeterminada, su nivel
-y su silencio, y lo que está grabando: sus propias grabaciones por su nombre y
-cuántas hacen los demás. Sus controles cambian el dispositivo al instante, y
-solo mientras su sesión ocupa la sala a la que sirve; un dispositivo de la
-sala de otra sesión se muestra pero no se puede cambiar aquí. Su escritorio
-recuerda lo que ajusta.
+Sonido tiene dos paneles. *Output & Input* elige el dispositivo por el que
+suena el sonido y aquel desde el que se graba, y ajusta el volumen y el
+silencio de ese dispositivo: silenciarlo baja el volumen a nada hasta que quita
+el silencio, que lo devuelve a donde estaba. También muestra lo que está
+grabando: sus propias grabaciones por su nombre y cuántas hacen los demás. Esto
+cambia el dispositivo al instante, y solo mientras su sesión ocupa la sala a la
+que sirve el dispositivo; un dispositivo de la sala de otra sesión se muestra
+pero no se puede cambiar aquí. Su escritorio recuerda lo que ajusta. *Sound
+Effects* activa o desactiva los sonidos propios del escritorio, fija su tema y
+su volumen y, para cada evento —una notificación, un error, la campana del
+terminal—, si reproduce el sonido de su tema, un archivo que usted elija o
+nada. Los sonidos de arranque, inicio y cierre de sesión son del equipo y los
+fija su administrador.
 
 ## EXIT STATUS
 

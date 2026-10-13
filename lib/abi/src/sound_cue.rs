@@ -86,8 +86,8 @@ const POLICY_DOCUMENT_OFFSET: usize = POLICY_LEN_OFFSET + 4;
 ///
 /// A validation bound, not a capacity: it holds the longest document a push
 /// can carry — the master switch, the longest theme name at its longest
-/// quoted spelling, and every layered event's switch and level — with room to
-/// spare (`lib/soundtheme`'s `the_longest_pushed_document_fits_the_policy`),
+/// quoted spelling, the level, and every layered event's switch — with room
+/// to spare (`lib/soundtheme`'s `the_longest_pushed_document_fits_the_policy`),
 /// so a longer one is refused, never truncated.
 pub const POLICY_DOCUMENT_MAX: usize = 2048;
 

@@ -1,6 +1,6 @@
 //! The Sound Effects pane (`plans/SOUND.md`): whether the desktop makes
-//! sounds, the theme they come from, and each event's switch, level and
-//! sound — the user's own choices, which their desktop session keeps and
+//! sounds, the theme they come from, how loud they are, and what each event
+//! plays — the user's own choices, which their desktop session keeps and
 //! hands the cue authority while it holds the seat.
 //!
 //! This application holds no authority over them and keeps no store of its
@@ -19,17 +19,17 @@ use tairix_abi::Errno;
 use tairix_appconf::{bool_text, Registry};
 use tairix_audio::volume::{level_at_permille, permille_of_level};
 use tairix_controls::{
-    Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
-    FieldGroup, FieldRow, Slider, Toggle,
+    ComboBox, ControlState, FieldAction, FieldControl, FieldGroup, FieldRow, Slider, Toggle,
 };
 use tairix_soundtheme::{layered, merge_pushed, SoundKey, SoundSettings};
 
 /// What a reader may search for to reach the pane.
-pub(crate) const EFFECTS_FACTS: [&str; 6] = [
+pub(crate) const EFFECTS_FACTS: [&str; 7] = [
     "Sound effects",
     "Desktop sounds",
     "Sound theme",
     "Alert sound",
+    "Alert volume",
     "Bell",
     "Notification sound",
 ];
@@ -98,14 +98,10 @@ pub(crate) enum EffectsRow {
     Enabled,
     /// The theme sounds come from.
     Theme,
-    /// Whether the event makes its sound.
-    EventEnabled(SoundEvent),
-    /// The event's level.
-    EventGain(SoundEvent),
-    /// Choose the file the event plays.
-    Choose(SoundEvent),
-    /// Have the event play its theme's sound again.
-    UseTheme(SoundEvent),
+    /// How far every sound is turned down.
+    Gain,
+    /// What the event plays.
+    Event(SoundEvent),
 }
 
 /// What a row asks of the desktop session.
@@ -238,8 +234,47 @@ const fn label(event: SoundEvent) -> &'static str {
     }
 }
 
-/// The pane's plates and the row each control changes. A plate's reading
-/// rows come after its controls, and change nothing.
+/// What an event's chooser offers.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Offer {
+    /// The theme's sound.
+    Theme,
+    /// The file chosen for it.
+    Chosen,
+    /// No sound at all.
+    Silent,
+    /// Choose a file in the session's picker: a command, so the chooser never
+    /// rests on it.
+    Pick,
+}
+
+/// What the chooser of an event playing `file` offers and what it calls each,
+/// in its order: the chosen file, by its name, only while there is one.
+fn offers(file: &EffectFile) -> impl Iterator<Item = (Offer, &str)> {
+    let chosen = match file {
+        EffectFile::Theme => None,
+        EffectFile::Chosen(name) | EffectFile::Unavailable(name) => {
+            Some((Offer::Chosen, name.as_str()))
+        }
+    };
+    [(Offer::Theme, "Theme sound")]
+        .into_iter()
+        .chain(chosen)
+        .chain([(Offer::Silent, "None"), (Offer::Pick, "Choose File…")])
+}
+
+/// What `event` plays as `reading` has it.
+fn plays(reading: &EffectsReading, event: SoundEvent) -> Offer {
+    if !reading.settings.event(event).enabled {
+        Offer::Silent
+    } else if matches!(reading.files[event.index()], EffectFile::Theme) {
+        Offer::Theme
+    } else {
+        Offer::Chosen
+    }
+}
+
+/// The pane's plates and the row each control changes.
 pub(crate) fn groups(reading: Option<&EffectsReading>) -> (Vec<FieldGroup>, Vec<Vec<EffectsRow>>) {
     let Some(reading) = reading else {
         return (
@@ -253,85 +288,120 @@ pub(crate) fn groups(reading: Option<&EffectsReading>) -> (Vec<FieldGroup>, Vec<
             alloc::vec![Vec::new()],
         );
     };
-    let settings = &reading.settings;
-    let themes = reading.offered_themes();
-    let at = themes
-        .iter()
-        .position(|theme| theme == settings.theme())
-        .unwrap_or(0);
-    let mut groups = alloc::vec![FieldGroup::new(
+    let plate = |caption: &str, owners: Vec<EffectsRow>| {
+        let rows = owners.iter().map(|owner| row(*owner, reading)).collect();
+        (FieldGroup::new(caption, rows), owners)
+    };
+    let (effects, general) = plate(
         "SOUND EFFECTS",
+        alloc::vec![EffectsRow::Enabled, EffectsRow::Theme, EffectsRow::Gain],
+    );
+    let (events, each) = plate(
+        "EVENT SOUNDS",
+        SoundEvent::ALL
+            .into_iter()
+            .filter(|event| layered(*event))
+            .map(EffectsRow::Event)
+            .collect(),
+    );
+    (
         alloc::vec![
-            FieldRow::new(
-                "Play sounds",
-                FieldControl::Toggle(Toggle::new("", settings.enabled())),
+            effects.with_footnote(
+                "Start-up, sign-in and sign-out sounds are set by this machine's administrator: \
+                 they play while no one's choices are in force."
             ),
+            events,
+        ],
+        alloc::vec![general, each],
+    )
+}
+
+/// The row `owner` changes, as `reading` has it.
+///
+/// The one definition of each row, so a plate built afresh and a row brought
+/// in line in place cannot disagree. While the desktop makes no sound every
+/// row but its switch is disabled: none of them applies.
+pub(crate) fn row(owner: EffectsRow, reading: &EffectsReading) -> FieldRow {
+    let settings = &reading.settings;
+    let applies = ControlState::idle().with_enabled(settings.enabled());
+    match owner {
+        EffectsRow::Enabled => FieldRow::new(
+            "Play sound effects",
+            FieldControl::Toggle(Toggle::new("", settings.enabled())),
+        ),
+        EffectsRow::Theme => {
+            let themes = reading.offered_themes();
+            let at = themes
+                .iter()
+                .position(|theme| theme == settings.theme())
+                .unwrap_or(0);
             FieldRow::new(
                 "Theme",
                 FieldControl::Combo(ComboBox::new(themes).with_selected(at)),
-            ),
-            FieldRow::new(
-                "Machine sounds",
-                FieldControl::Reading(String::from(
-                    "start-up, sign-in and sign-out are the machine's",
-                )),
             )
-            .with_description(
-                "Set by this machine's administrator: they sound while no one's \
-                               choices are in force."
-            ),
-        ],
-    )];
-    let mut owners = alloc::vec![alloc::vec![EffectsRow::Enabled, EffectsRow::Theme]];
-    for event in SoundEvent::ALL.into_iter().filter(|event| layered(*event)) {
-        let (group, rows) = event_group(reading, event);
-        groups.push(group);
-        owners.push(rows);
+            .with_state(applies)
+        }
+        EffectsRow::Gain => FieldRow::new(
+            "Volume",
+            FieldControl::Slider(Slider::new(permille_of_level(settings.gain()))),
+        )
+        .with_description(format!("{}", settings.gain()))
+        .with_state(applies),
+        EffectsRow::Event(event) => {
+            let file = &reading.files[event.index()];
+            let current = plays(reading, event);
+            let at = offers(file)
+                .position(|(offer, _)| offer == current)
+                .unwrap_or(0);
+            let choices = offers(file).map(|(_, name)| String::from(name)).collect();
+            let row = FieldRow::new(
+                label(event),
+                FieldControl::Combo(ComboBox::new(choices).with_selected(at)),
+            )
+            .with_state(applies);
+            match file {
+                EffectFile::Unavailable(name) if current == Offer::Chosen => row.with_description(
+                    format!("{name} cannot be read, so the theme's sound plays."),
+                ),
+                _ => row,
+            }
+        }
     }
-    (groups, owners)
 }
 
-/// One event's plate: its switch, its level, and the sound it plays.
-fn event_group(reading: &EffectsReading, event: SoundEvent) -> (FieldGroup, Vec<EffectsRow>) {
-    let chosen = reading.settings.event(event);
-    let file = &reading.files[event.index()];
-    let plays = match file {
-        EffectFile::Theme => String::from("Plays the theme's sound."),
-        EffectFile::Chosen(name) => format!("Plays {name}."),
-        EffectFile::Unavailable(name) => {
-            format!("{name} cannot be read, so the theme's sound plays.")
+/// Whether `row` shows what a change to `changed`'s control moves: the
+/// desktop's switch decides whether every other row applies.
+pub(crate) fn touches(changed: EffectsRow, row: EffectsRow) -> bool {
+    changed == EffectsRow::Enabled || changed == row
+}
+
+/// Show `ask` in `reading` as the session will hold it once made, answering
+/// whether the reading moved: a pick moves nothing until the session has the
+/// file.
+pub(crate) fn apply(reading: &mut EffectsReading, ask: &EffectsAsk) -> bool {
+    match ask {
+        EffectsAsk::Apply { line, .. } => match merge_pushed(&reading.settings, line) {
+            Ok(settings) => {
+                reading.settings = settings;
+                true
+            }
+            Err(_) => false,
+        },
+        EffectsAsk::UseTheme(event) => {
+            reading.files[event.index()] = EffectFile::Theme;
+            reading
+                .settings
+                .read(SoundKey::EventEnabled(*event), bool_text(true))
         }
-    };
-    let button = |label: &str| {
-        FieldControl::Button(Button::new(
-            ButtonContent::Label(String::from(label)),
-            ControlRole::Neutral,
-        ))
-    };
-    let own = !matches!(file, EffectFile::Theme);
-    let rows = alloc::vec![
-        FieldRow::new(
-            "Play",
-            FieldControl::Toggle(Toggle::new("", chosen.enabled))
-        ),
-        FieldRow::new(
-            "Level",
-            FieldControl::Slider(Slider::new(permille_of_level(chosen.gain))),
-        )
-        .with_description(format!("{}", chosen.gain)),
-        FieldRow::new("Sound", button("Choose…")).with_description(plays),
-        FieldRow::new("", button("Use Theme Sound"))
-            .with_state(ControlState::idle().with_enabled(own)),
-    ];
-    (
-        FieldGroup::new(label(event).to_uppercase(), rows),
-        alloc::vec![
-            EffectsRow::EventEnabled(event),
-            EffectsRow::EventGain(event),
-            EffectsRow::Choose(event),
-            EffectsRow::UseTheme(event),
-        ],
-    )
+        EffectsAsk::Pick(_) => false,
+    }
+}
+
+/// Show the level a volume drag has reached at `permille`, before it settles
+/// and is asked for, answering whether the reading moved.
+pub(crate) fn show_level(reading: &mut EffectsReading, permille: u16) -> bool {
+    let level = level_at_permille(permille);
+    level != reading.settings.gain() && reading.settings.read(SoundKey::Gain, &format!("{level}"))
 }
 
 /// What `row`'s `action` asks of the session over `reading`: `None` for
@@ -357,15 +427,17 @@ pub(crate) fn effects_ask(
             let theme = reading.offered_themes().into_iter().nth(*index)?;
             changed(SoundKey::Theme, &theme)
         }
-        (EffectsRow::EventEnabled(event), FieldAction::Set { on }) => {
-            changed(SoundKey::EventEnabled(event), bool_text(*on))
+        (EffectsRow::Gain, FieldAction::Settled { permille }) => {
+            changed(SoundKey::Gain, &format!("{}", level_at_permille(*permille)))
         }
-        (EffectsRow::EventGain(event), FieldAction::Settled { permille }) => changed(
-            SoundKey::EventGain(event),
-            &format!("{}", level_at_permille(*permille)),
-        ),
-        (EffectsRow::Choose(event), FieldAction::Activated) => Some(EffectsAsk::Pick(event)),
-        (EffectsRow::UseTheme(event), FieldAction::Activated) => Some(EffectsAsk::UseTheme(event)),
+        (EffectsRow::Event(event), FieldAction::Selected { index }) => {
+            match offers(&reading.files[event.index()]).nth(*index)? {
+                (Offer::Theme, _) => Some(EffectsAsk::UseTheme(event)),
+                (Offer::Chosen, _) => changed(SoundKey::EventEnabled(event), bool_text(true)),
+                (Offer::Silent, _) => changed(SoundKey::EventEnabled(event), bool_text(false)),
+                (Offer::Pick, _) => Some(EffectsAsk::Pick(event)),
+            }
+        }
         _ => None,
     }
 }

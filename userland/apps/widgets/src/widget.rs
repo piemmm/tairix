@@ -95,6 +95,9 @@ fn commit_field(group: &mut FieldGroup, action: FieldGroupAction, rect: Rect, da
     };
     match (row.control_mut(), action.action) {
         (FieldControl::Toggle(c), FieldAction::Set { on }) => c.set_on(on),
+        (FieldControl::Checkbox(c), FieldAction::Set { on }) => {
+            c.set_selection(SelectionState::of(on));
+        }
         (FieldControl::Flags(c), FieldAction::SetFlag { index, on }) => c.set_on(index, on),
         (FieldControl::Combo(c), FieldAction::Selected { index }) => c.set_selected(index),
         (
@@ -296,7 +299,9 @@ impl DemoWidget {
             }
             DemoWidget::Checkbox(w) => {
                 let acted = w.on_pointer(event, rect, damage);
-                set_on(acted, rect, damage, |on| w.set_selection(selection_for(on)))
+                set_on(acted, rect, damage, |on| {
+                    w.set_selection(SelectionState::of(on));
+                })
             }
             DemoWidget::Radio(w) => {
                 let acted = w.on_pointer(event, rect, damage);
@@ -405,7 +410,9 @@ impl DemoWidget {
             }
             DemoWidget::Checkbox(w) => {
                 let acted = w.on_key(key);
-                set_on(acted, rect, damage, |on| w.set_selection(selection_for(on)))
+                set_on(acted, rect, damage, |on| {
+                    w.set_selection(SelectionState::of(on));
+                })
             }
             DemoWidget::Radio(w) => {
                 let acted = w.on_key(key);
@@ -534,13 +541,4 @@ fn set_on(
 fn committed(rect: Rect, damage: &mut Region) -> bool {
     damage.add(rect);
     true
-}
-
-/// The [`SelectionState`] a checkbox takes for a boolean set request.
-fn selection_for(on: bool) -> SelectionState {
-    if on {
-        SelectionState::Selected
-    } else {
-        SelectionState::Unselected
-    }
 }

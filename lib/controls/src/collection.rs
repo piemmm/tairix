@@ -188,11 +188,7 @@ impl ListRow {
 
     /// Set the row's selection.
     pub fn set_selected(&mut self, selected: bool) {
-        self.state.selection = if selected {
-            SelectionState::Selected
-        } else {
-            SelectionState::Unselected
-        };
+        self.state.selection = SelectionState::of(selected);
     }
 
     /// Whether the row is selected.
@@ -696,11 +692,7 @@ impl TableRow {
 
     /// Set the row's selection.
     pub fn set_selected(&mut self, selected: bool) {
-        self.state.selection = if selected {
-            SelectionState::Selected
-        } else {
-            SelectionState::Unselected
-        };
+        self.state.selection = SelectionState::of(selected);
     }
 
     /// Whether the row is selected.

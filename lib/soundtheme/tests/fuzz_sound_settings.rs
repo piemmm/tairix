@@ -34,7 +34,7 @@ fn row(key: SoundKey) -> RegistryRow {
     let (accepted, refused) = match key {
         SoundKey::Enabled | SoundKey::EventEnabled(_) => (BOOLS, NOT_BOOLS),
         SoundKey::Theme => (THEMES, NOT_THEMES),
-        SoundKey::EventGain(_) => (GAINS, NOT_GAINS),
+        SoundKey::Gain => (GAINS, NOT_GAINS),
         SoundKey::EventFile(_) => (FILES, NOT_FILES),
     };
     (SoundSettings::name(key), accepted, refused)

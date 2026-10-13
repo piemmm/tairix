@@ -667,11 +667,7 @@ impl Chooser {
     fn tile_state(&self, slot: usize) -> ControlState {
         let focused = slot == self.focus();
         ControlState::idle()
-            .with_selection(if focused {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            })
+            .with_selection(SelectionState::of(focused))
             .with_pointer(if self.armed == Some(slot) {
                 PointerState::Pressed
             } else {

@@ -7,7 +7,8 @@
 
 use crate::state::{
     ActivityState, AuthorityState, ControlDisposition, ControlState, FocusState, PointerState,
-    ProgressValue, SizeAction, ValidationState, WindowFurnitureState, WindowSizeState,
+    ProgressValue, SelectionState, SizeAction, ValidationState, WindowFurnitureState,
+    WindowSizeState,
 };
 
 // --- ControlDisposition (spec §13) --------------------------------------
@@ -176,4 +177,10 @@ fn furniture_state_default_is_inactive_restored_locked() {
     assert_eq!(f.size, WindowSizeState::Restored);
     assert!(!f.movable);
     assert!(!f.resizable);
+}
+
+#[test]
+fn a_yes_or_no_selection_marks_selected_or_unselected_and_nothing_between() {
+    assert_eq!(SelectionState::of(true), SelectionState::Selected);
+    assert_eq!(SelectionState::of(false), SelectionState::Unselected);
 }

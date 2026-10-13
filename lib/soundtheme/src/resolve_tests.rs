@@ -48,9 +48,8 @@ fn every_cue_resolves_in_the_one_order() {
             for master in [true, false] {
                 for own_switch in [true, false] {
                     let text = alloc::format!(
-                        "sound.enabled = {master}\nsound.theme = {theme}\n\
-                         sound.{}.enabled = {own_switch}\nsound.{}.gain = -3dB\n",
-                        event.name(),
+                        "sound.enabled = {master}\nsound.theme = {theme}\nsound.gain = -3dB\n\
+                         sound.{}.enabled = {own_switch}\n",
                         event.name()
                     );
                     let settings = settings(&text);

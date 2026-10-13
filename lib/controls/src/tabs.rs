@@ -770,11 +770,7 @@ impl Tabs {
             let rect = areas
                 .next_if(|&(index, _)| index == i)
                 .map_or(Rect::EMPTY, |(_, rect)| rect);
-            let selection = if i == index {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            };
+            let selection = SelectionState::of(i == index);
             if let Some(tab) = self.items.get_mut(i) {
                 damage::set(&mut tab.state.selection, selection, rect, damage);
             }
@@ -790,11 +786,7 @@ impl Tabs {
     /// than passing a rectangle it does not have.
     pub fn adopt_selected(&mut self, index: usize) {
         for (i, tab) in self.items.iter_mut().enumerate() {
-            tab.state.selection = if i == index {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            };
+            tab.state.selection = SelectionState::of(i == index);
         }
     }
 

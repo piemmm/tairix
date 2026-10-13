@@ -36,7 +36,7 @@ fn frame(request: &CueRequest<'_>) -> Vec<u8> {
     out[..len].to_vec()
 }
 
-const DOCUMENT: &str = "sound.enabled = true\nsound.bell.gain = 0.5\n";
+const DOCUMENT: &str = "sound.enabled = true\nsound.gain = -6dB\n";
 
 fn policy(document: &str) -> CueRequest<'_> {
     let mut files = [0u64; SoundEvent::ALL.len()];
