@@ -5,7 +5,7 @@
 #![allow(clippy::float_cmp)]
 
 use super::{
-    endpoint_level, fraction_to_millibel, level_at_permille, linear_to_millibel,
+    control_permille, endpoint_level, fraction_to_millibel, level_at_permille, linear_to_millibel,
     millibel_to_linear, permille_of_level, stream_multiply, typed_level, EndpointLevel, LevelError,
     VolumeRequest, DEFAULT_FLOOR_MILLIBEL, DUCK_MILLIBEL, UNITY_MILLIBEL,
 };
@@ -289,6 +289,19 @@ fn a_volume_control_tapers_from_the_floor_to_unity_and_reads_back() {
         assert_eq!(
             level_at_permille(permille_of_level(level)),
             level,
+            "{millibel}"
+        );
+    }
+}
+
+#[test]
+fn a_muted_control_stands_at_the_bottom_and_unmuting_restores_its_level() {
+    for millibel in [0, -1_200, -6_000] {
+        let level = AudioGain::new(millibel).expect("attenuation");
+        assert_eq!(control_permille(level, true), 0, "{millibel}");
+        assert_eq!(
+            control_permille(level, false),
+            permille_of_level(level),
             "{millibel}"
         );
     }

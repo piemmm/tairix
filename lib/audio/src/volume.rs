@@ -117,6 +117,18 @@ pub fn permille_of_level(level: AudioGain) -> u16 {
     u16::try_from((floor - below) * 1_000 / floor).unwrap_or(0)
 }
 
+/// Where an endpoint's volume control stands: at the bottom while it is
+/// muted, because nothing is heard, and at its `level` otherwise, which
+/// unmuting restores.
+#[must_use]
+pub fn control_permille(level: AudioGain, muted: bool) -> u16 {
+    if muted {
+        0
+    } else {
+        permille_of_level(level)
+    }
+}
+
 /// How an endpoint's own level is delivered: its device's control takes the
 /// attenuation it can, and the mixer applies the rest to every stream on it.
 ///

@@ -135,12 +135,13 @@ pub enum PinboardRequest {
         document: PinboardDocument,
     },
     /// Have the user choose, in the session's own picker, the file `event`
-    /// plays. Answered once the picker is closed, chosen or not.
+    /// plays; a file chosen turns the event on. Answered once the picker is
+    /// closed, chosen or not.
     SoundPick {
         /// The event the file is for.
         event: SoundEvent,
     },
-    /// Have `event` play its theme's sound again.
+    /// Have `event` play its theme's sound again, turning it on.
     SoundUseTheme {
         /// The event.
         event: SoundEvent,

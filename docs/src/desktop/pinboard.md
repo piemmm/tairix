@@ -124,8 +124,8 @@ sound choices (`plans/SOUND.md` SND23), attested exactly as an apply is:
 | `SoundRead` | the settings in effect, the user's over the machine's, and each event's file by its name alone (`encode_sound_reading`) |
 | `SoundThemes { from }` | up to `SOUND_THEMES_PAGE` themes from the `from`th, in name order; a short page is the last (`encode_sound_themes`) |
 | `SoundApply { document }` | the status, once the choices are stored; a document naming a file, or any setting of a sound no user's choices reach, is refused whole |
-| `SoundPick { event }` | the status, once the session's own picker has closed, chosen or not |
-| `SoundUseTheme { event }` | the status, once stored |
+| `SoundPick { event }` | the status, once the session's own picker has closed, chosen or not; a file chosen turns the event on |
+| `SoundUseTheme { event }` | the status, once stored, the event playing its theme's sound and turned on |
 
 No request names a path: the session's picker is the only way a file is
 chosen, so no caller can have the session play one the user did not pick.

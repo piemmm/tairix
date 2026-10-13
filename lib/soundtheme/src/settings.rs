@@ -1,5 +1,5 @@
-//! The sound document: whether the desktop makes sounds, the theme, and each
-//! event's switch, gain and replacement file.
+//! The sound document: whether the desktop makes sounds, the theme, how far
+//! its sounds are turned down, and each event's switch and replacement file.
 //!
 //! The same registry is read at two layers — the machine's document beneath,
 //! the user's own choices over it while their session holds the seat — read
@@ -22,10 +22,10 @@ pub enum SoundKey {
     Enabled,
     /// `sound.theme` — the theme sounds are drawn from.
     Theme,
+    /// `sound.gain` — how far every sound is turned down.
+    Gain,
     /// `sound.<event>.enabled` — whether the event makes its sound.
     EventEnabled(SoundEvent),
-    /// `sound.<event>.gain` — how far the event is turned down.
-    EventGain(SoundEvent),
     /// `sound.<event>.file` — a file the user chose to play instead; an
     /// empty value clears it.
     EventFile(SoundEvent),
@@ -33,80 +33,51 @@ pub enum SoundKey {
 
 const EVENTS: usize = SoundEvent::ALL.len();
 
-/// Every key: the two machine-wide ones, then each event's three.
-const KEYS: [SoundKey; 2 + 3 * EVENTS] = {
-    let mut keys = [SoundKey::Enabled; 2 + 3 * EVENTS];
+/// The keys every event has.
+const PER_EVENT: usize = 2;
+
+/// Every key: the three that hold for every sound, then each event's own.
+const KEYS: [SoundKey; 3 + PER_EVENT * EVENTS] = {
+    let mut keys = [SoundKey::Enabled; 3 + PER_EVENT * EVENTS];
     keys[1] = SoundKey::Theme;
+    keys[2] = SoundKey::Gain;
     let mut at = 0;
     while at < EVENTS {
         let event = SoundEvent::ALL[at];
-        keys[2 + 3 * at] = SoundKey::EventEnabled(event);
-        keys[3 + 3 * at] = SoundKey::EventGain(event);
-        keys[4 + 3 * at] = SoundKey::EventFile(event);
+        keys[3 + PER_EVENT * at] = SoundKey::EventEnabled(event);
+        keys[4 + PER_EVENT * at] = SoundKey::EventFile(event);
         at += 1;
     }
     keys
 };
 
-/// Each event's keys — switch, gain, file — in [`SoundEvent::ALL`] order.
-const EVENT_KEY_NAMES: [[&str; 3]; EVENTS] = [
-    [
-        "sound.startup.enabled",
-        "sound.startup.gain",
-        "sound.startup.file",
-    ],
-    [
-        "sound.shutdown.enabled",
-        "sound.shutdown.gain",
-        "sound.shutdown.file",
-    ],
-    [
-        "sound.login.enabled",
-        "sound.login.gain",
-        "sound.login.file",
-    ],
-    [
-        "sound.logout.enabled",
-        "sound.logout.gain",
-        "sound.logout.file",
-    ],
+/// Each event's keys — switch, file — in [`SoundEvent::ALL`] order.
+const EVENT_KEY_NAMES: [[&str; PER_EVENT]; EVENTS] = [
+    ["sound.startup.enabled", "sound.startup.file"],
+    ["sound.shutdown.enabled", "sound.shutdown.file"],
+    ["sound.login.enabled", "sound.login.file"],
+    ["sound.logout.enabled", "sound.logout.file"],
     [
         "sound.device_attached.enabled",
-        "sound.device_attached.gain",
         "sound.device_attached.file",
     ],
     [
         "sound.device_detached.enabled",
-        "sound.device_detached.gain",
         "sound.device_detached.file",
     ],
-    [
-        "sound.notification.enabled",
-        "sound.notification.gain",
-        "sound.notification.file",
-    ],
+    ["sound.notification.enabled", "sound.notification.file"],
     [
         "sound.notification_message.enabled",
-        "sound.notification_message.gain",
         "sound.notification_message.file",
     ],
     [
         "sound.notification_reminder.enabled",
-        "sound.notification_reminder.gain",
         "sound.notification_reminder.file",
     ],
-    [
-        "sound.error.enabled",
-        "sound.error.gain",
-        "sound.error.file",
-    ],
-    [
-        "sound.warning.enabled",
-        "sound.warning.gain",
-        "sound.warning.file",
-    ],
-    ["sound.info.enabled", "sound.info.gain", "sound.info.file"],
-    ["sound.bell.enabled", "sound.bell.gain", "sound.bell.file"],
+    ["sound.error.enabled", "sound.error.file"],
+    ["sound.warning.enabled", "sound.warning.file"],
+    ["sound.info.enabled", "sound.info.file"],
+    ["sound.bell.enabled", "sound.bell.file"],
 ];
 
 impl fmt::Display for SoundKey {
@@ -120,8 +91,6 @@ impl fmt::Display for SoundKey {
 pub struct EventSettings {
     /// Whether the event makes its sound.
     pub enabled: bool,
-    /// How far it is turned down; unity plays the asset bit-exact.
-    pub gain: AudioGain,
     /// A file the user chose to play instead of the theme's.
     pub file: Option<SettingPath>,
 }
@@ -130,7 +99,6 @@ impl Default for EventSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            gain: AudioGain::UNITY,
             file: None,
         }
     }
@@ -141,6 +109,7 @@ impl Default for EventSettings {
 pub struct SoundSettings {
     enabled: bool,
     theme: String,
+    gain: AudioGain,
     events: [EventSettings; EVENTS],
 }
 
@@ -149,6 +118,7 @@ impl Default for SoundSettings {
         Self {
             enabled: true,
             theme: String::from(DEFAULT_THEME),
+            gain: AudioGain::UNITY,
             events: core::array::from_fn(|_| EventSettings::default()),
         }
     }
@@ -167,6 +137,12 @@ impl SoundSettings {
         &self.theme
     }
 
+    /// How far every sound is turned down; unity plays each asset bit-exact.
+    #[must_use]
+    pub const fn gain(&self) -> AudioGain {
+        self.gain
+    }
+
     /// `event`'s own settings.
     #[must_use]
     pub const fn event(&self, event: SoundEvent) -> &EventSettings {
@@ -182,9 +158,9 @@ impl Registry for SoundSettings {
         match key {
             SoundKey::Enabled => "sound.enabled",
             SoundKey::Theme => "sound.theme",
+            SoundKey::Gain => "sound.gain",
             SoundKey::EventEnabled(event) => EVENT_KEY_NAMES[event.index()][0],
-            SoundKey::EventGain(event) => EVENT_KEY_NAMES[event.index()][1],
-            SoundKey::EventFile(event) => EVENT_KEY_NAMES[event.index()][2],
+            SoundKey::EventFile(event) => EVENT_KEY_NAMES[event.index()][1],
         }
     }
 
@@ -198,11 +174,9 @@ impl Registry for SoundSettings {
                 }
                 legal
             }
+            SoundKey::Gain => AudioGain::parse(text).map(|gain| self.gain = gain).is_ok(),
             SoundKey::EventEnabled(event) => as_bool(text)
                 .map(|on| self.events[event.index()].enabled = on)
-                .is_ok(),
-            SoundKey::EventGain(event) => AudioGain::parse(text)
-                .map(|gain| self.events[event.index()].gain = gain)
                 .is_ok(),
             SoundKey::EventFile(event) if text.is_empty() => {
                 self.events[event.index()].file = None;
@@ -218,8 +192,8 @@ impl Registry for SoundSettings {
         match key {
             SoundKey::Enabled => out.push_str(bool_text(self.enabled)),
             SoundKey::Theme => out.push_str(&self.theme),
+            SoundKey::Gain => return write!(out, "{}", self.gain).is_ok(),
             SoundKey::EventEnabled(event) => out.push_str(bool_text(self.event(event).enabled)),
-            SoundKey::EventGain(event) => return write!(out, "{}", self.event(event).gain).is_ok(),
             SoundKey::EventFile(event) => match &self.event(event).file {
                 Some(file) => out.push_str(file.as_str()),
                 None => return false,

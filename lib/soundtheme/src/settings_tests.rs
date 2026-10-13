@@ -22,10 +22,10 @@ fn every_key_is_spelled_once_as_its_event_names_it() {
     for name in &names {
         assert_eq!(validate_key(name), Ok(()), "{name}");
     }
+    assert_eq!(SoundSettings::name(SoundKey::Gain), "sound.gain");
     for event in SoundEvent::ALL {
         for (key, field) in [
             (SoundKey::EventEnabled(event), "enabled"),
-            (SoundKey::EventGain(event), "gain"),
             (SoundKey::EventFile(event), "file"),
         ] {
             assert_eq!(
@@ -47,10 +47,10 @@ fn nothing_stored_means_every_sound_on_at_unity_from_the_shipped_theme() {
     assert_eq!(settings, SoundSettings::default());
     assert!(settings.enabled());
     assert_eq!(settings.theme(), DEFAULT_THEME);
+    assert_eq!(settings.gain(), AudioGain::UNITY);
     for event in SoundEvent::ALL {
         let own = settings.event(event);
         assert!(own.enabled);
-        assert_eq!(own.gain, AudioGain::UNITY);
         assert_eq!(own.file, None);
     }
 }
@@ -59,18 +59,15 @@ fn nothing_stored_means_every_sound_on_at_unity_from_the_shipped_theme() {
 fn a_document_round_trips_through_its_own_spelling() {
     let text = "sound.enabled = false\n\
                 sound.theme = High Contrast\n\
+                sound.gain = -6.5dB\n\
                 sound.bell.enabled = off\n\
-                sound.login.gain = -6.5dB\n\
                 sound.error.file = /Users/ada/UserFiles/Music/oops.flac\n";
     let (settings, refused) = load(text);
     assert!(refused.is_empty());
     assert!(!settings.enabled());
     assert_eq!(settings.theme(), "High Contrast");
     assert!(!settings.event(SoundEvent::Bell).enabled);
-    assert_eq!(
-        settings.event(SoundEvent::Login).gain,
-        AudioGain::new(-650).expect("attenuation")
-    );
+    assert_eq!(settings.gain(), AudioGain::new(-650).expect("attenuation"));
     assert_eq!(
         settings
             .event(SoundEvent::Error)
@@ -90,7 +87,7 @@ fn a_stored_value_refused_costs_only_its_own_key() {
     let (settings, refused) = load(
         "sound.enabled = maybe\n\
          sound.theme = ../escape\n\
-         sound.warning.gain = 3dB\n\
+         sound.gain = 3dB\n\
          sound.info.file = relative.flac\n\
          sound.startup.enabled = false\n",
     );
@@ -99,13 +96,13 @@ fn a_stored_value_refused_costs_only_its_own_key() {
         [
             SoundKey::Enabled,
             SoundKey::Theme,
-            SoundKey::EventGain(SoundEvent::Warning),
+            SoundKey::Gain,
             SoundKey::EventFile(SoundEvent::Info),
         ]
     );
     assert!(settings.enabled());
     assert_eq!(settings.theme(), DEFAULT_THEME);
-    assert_eq!(settings.event(SoundEvent::Warning).gain, AudioGain::UNITY);
+    assert_eq!(settings.gain(), AudioGain::UNITY, "never a boost");
     assert!(
         !settings.event(SoundEvent::Startup).enabled,
         "a good key beside bad ones is still read"
@@ -130,15 +127,22 @@ fn an_empty_file_names_no_replacement() {
 
 #[test]
 fn a_refusal_says_which_setting_refused_its_value() {
-    let boost = merge_pushed(&SoundSettings::default(), "sound.error.gain = 6dB\n");
-    assert_eq!(
-        boost,
-        Err(Refusal::InvalidValue(SoundKey::EventGain(
-            SoundEvent::Error
-        )))
-    );
+    let boost = merge_pushed(&SoundSettings::default(), "sound.gain = 6dB\n");
+    assert_eq!(boost, Err(Refusal::InvalidValue(SoundKey::Gain)));
     assert_eq!(
         format!("{}", boost.unwrap_err()),
-        "`sound.error.gain` is not a value that setting accepts"
+        "`sound.gain` is not a value that setting accepts"
+    );
+}
+
+/// A gain is one setting for every sound, not one an event can carry: a
+/// per-event spelling names nothing.
+#[test]
+fn a_gain_is_the_documents_not_an_events() {
+    assert_eq!(
+        merge_pushed(&SoundSettings::default(), "sound.bell.gain = -6dB\n"),
+        Err(Refusal::UnknownKey(alloc::string::String::from(
+            "sound.bell.gain"
+        )))
     );
 }

@@ -222,6 +222,18 @@ pub enum SelectionState {
     Current,
 }
 
+impl SelectionState {
+    /// The mark for a plain yes-or-no selection.
+    #[must_use]
+    pub const fn of(selected: bool) -> Self {
+        if selected {
+            Self::Selected
+        } else {
+            Self::Unselected
+        }
+    }
+}
+
 /// The validation status of a control's value.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
 pub enum ValidationState {

@@ -10,7 +10,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_appconf::{merge_admitting, Document, Refusal, Registry, SettingPath};
+use tairix_appconf::{bool_text, merge_admitting, Document, Refusal, Registry, SettingPath};
 
 use crate::{SoundEvent, SoundKey, SoundSettings};
 
@@ -32,8 +32,8 @@ pub const fn layered(event: SoundEvent) -> bool {
 #[must_use]
 pub const fn pushable(key: SoundKey) -> bool {
     match key {
-        SoundKey::Enabled | SoundKey::Theme => true,
-        SoundKey::EventEnabled(event) | SoundKey::EventGain(event) => layered(event),
+        SoundKey::Enabled | SoundKey::Theme | SoundKey::Gain => true,
+        SoundKey::EventEnabled(event) => layered(event),
         SoundKey::EventFile(_) => false,
     }
 }
@@ -148,16 +148,22 @@ impl UserChoices {
         self.value(SoundKey::EventFile(event))
     }
 
-    /// Have `event` play the file at `path`, answering whether it may: a
-    /// sound no user's choices reach plays no file of theirs.
+    /// Have `event` play the file at `path`, turning it on if it was off,
+    /// answering whether it may: a sound no user's choices reach plays no
+    /// file of theirs.
     pub fn choose(&mut self, event: SoundEvent, path: &SettingPath) -> bool {
-        layered(event) && self.set(SoundKey::EventFile(event), path.as_str())
+        layered(event)
+            && self.set(SoundKey::EventFile(event), path.as_str())
+            && self.set(SoundKey::EventEnabled(event), bool_text(true))
     }
 
-    /// Have `event` play its theme's sound again.
+    /// Have `event` play its theme's sound again, turning it on if it was off.
     pub fn use_theme(&mut self, event: SoundEvent) {
         if let Some(slot) = slot_of(SoundKey::EventFile(event)) {
             self.values[slot] = None;
+        }
+        if layered(event) {
+            self.set(SoundKey::EventEnabled(event), bool_text(true));
         }
     }
 

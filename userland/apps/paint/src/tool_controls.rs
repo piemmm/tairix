@@ -186,7 +186,7 @@ impl ToolControls {
                     let mut state = check.state();
                     state.enabled = allowed;
                     let on = options.switch(item.setting).unwrap_or(false);
-                    let selection = selection(on && allowed);
+                    let selection = SelectionState::of(on && allowed);
                     if state != check.state() || selection != check.selection() {
                         check.set_state(state);
                         check.set_selection(selection);
@@ -793,7 +793,7 @@ impl Control {
             }
             switch if switch.is_switch() => Self::Switch(Checkbox::new(
                 switch.label(),
-                selection(options.switch(switch).unwrap_or(false)),
+                SelectionState::of(options.switch(switch).unwrap_or(false)),
             )),
             number => {
                 let (least, most) = number.bounds().unwrap_or((0, 0));
@@ -820,15 +820,6 @@ impl Control {
             Self::Choice(combo) => combo.state().enabled,
             Self::Switch(check) => check.state().enabled,
         }
-    }
-}
-
-/// The checkbox mark for `on`.
-pub(crate) const fn selection(on: bool) -> SelectionState {
-    if on {
-        SelectionState::Selected
-    } else {
-        SelectionState::Unselected
     }
 }
 
@@ -872,7 +863,7 @@ fn switch(
     damage: &mut Region,
 ) -> BarOutcome {
     options.set_switch(setting, on);
-    check.set_selection(selection(on));
+    check.set_selection(SelectionState::of(on));
     damage.add(rect);
     BarOutcome::Changed
 }

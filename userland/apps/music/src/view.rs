@@ -1416,11 +1416,7 @@ const fn repeat_icon(mode: Repeat) -> IconKind {
 /// Show `button` latched on or off.
 fn mark(button: &mut IconButton, on: bool) {
     let mut state = button.state();
-    state.selection = if on {
-        SelectionState::Selected
-    } else {
-        SelectionState::Unselected
-    };
+    state.selection = SelectionState::of(on);
     button.set_state(state);
 }
 

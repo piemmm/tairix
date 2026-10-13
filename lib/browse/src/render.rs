@@ -2334,12 +2334,7 @@ impl PermsSection {
                 .enumerate()
                 .map(|(bit, name)| {
                     let on = cells.get(triad * PERMISSION_FLAG_LABELS.len() + bit);
-                    let selection = if on.copied().unwrap_or(false) {
-                        SelectionState::Selected
-                    } else {
-                        SelectionState::Unselected
-                    };
-                    Checkbox::new(*name, selection)
+                    Checkbox::new(*name, SelectionState::of(on.copied().unwrap_or(false)))
                 })
                 .collect();
             access.push(FieldRow::new(

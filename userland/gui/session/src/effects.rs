@@ -383,7 +383,7 @@ impl Effects {
         Ok(self.ask(choices, Some(ticket)))
     }
 
-    /// Have `event` play its theme's sound again.
+    /// Have `event` play its theme's sound again, turning it on.
     ///
     /// # Errors
     ///

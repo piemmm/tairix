@@ -117,7 +117,7 @@ for filesystems, the feature section below.
 | Sound device controls kept per room tenant (default, level, mute; devices named by location; `audioctl`) | ✓ | ✓ | ✓ | ▢ |
 | Desktop sound: icon-bar volume panel and recording indicator, Settings Sound pane, Switchboard Audio pane; the user's controls remembered and restored per session | ✓ | ✓ | ✓ | ▢ |
 | Desktop event sounds (`soundd`: startup, shutdown, login, logout, device arrival and departure, bell, notifications; a machine sound only from the principal that owns it) | ✓ | ✓ | ✓ | ▢ |
-| A user's own event sounds (Settings' Sound Effects pane: switch, theme, level and a chosen file per event, in force while their session holds the seat; a file handed over as a descriptor, never a path) | ✓ | ✓ | ✓ | ▢ |
+| A user's own event sounds (Settings' Sound Effects pane: switch, theme and one volume, and each event's sound — its theme's, a chosen file, or none — in force while their session holds the seat; a file handed over as a descriptor, never a path) | ✓ | ✓ | ✓ | ▢ |
 | Production kernel binary | ✓ | ✓ | ▢ | ▢ |
 | Bootable image | ▢ iso | ✓ rpi.img | ▢ | ▢ |
 

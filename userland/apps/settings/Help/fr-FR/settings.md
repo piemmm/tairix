@@ -38,13 +38,20 @@ Bibliothèque de programmes, ou par son nom depuis un shell. Il exige une
 session graphique en cours : sans elle, le canal de fenêtre est inaccessible et
 il signale le refus sur le flux d'erreur standard puis se termine.
 
-Son affiche chaque sortie et chaque entrée avec son choix par défaut, son
-niveau et sa sourdine, ainsi que ce qui enregistre : vos propres
-enregistrements par leur nom, et combien en font les autres. Ses réglages
-changent le périphérique sur-le-champ, et seulement tant que votre session
-tient la salle qu'il dessert ; un périphérique de la salle d'une autre session
-est affiché mais ne peut pas être modifié ici. Votre bureau retient ce que
-vous réglez.
+Son comporte deux panneaux. *Output & Input* choisit le périphérique par lequel
+le son est joué et celui depuis lequel il est enregistré, et règle le volume et
+la sourdine de ce périphérique : la sourdine baisse le volume à rien jusqu'à ce
+que vous la retiriez, ce qui le remet où il était. Il montre aussi ce qui
+enregistre : vos propres enregistrements par leur nom, et combien en font les
+autres. Ces réglages changent le périphérique sur-le-champ, et seulement tant
+que votre session tient la salle qu'il dessert ; un périphérique de la salle
+d'une autre session est affiché mais ne peut pas être modifié ici. Votre bureau
+retient ce que vous réglez. *Sound Effects* active ou coupe les sons propres du
+bureau, règle leur thème et leur volume et, pour chaque événement — une
+notification, une erreur, la cloche du terminal —, indique s'il joue le son de
+son thème, un fichier que vous choisissez ou rien. Les sons de démarrage,
+d'ouverture et de fermeture de session appartiennent à la machine et sont
+fixés par son administrateur.
 
 ## EXIT STATUS
 

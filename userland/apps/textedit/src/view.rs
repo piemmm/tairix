@@ -1531,11 +1531,7 @@ impl View {
         ];
         for (button, on) in self.find_buttons.iter_mut().zip(marks) {
             let mut state = button.state();
-            state.selection = if on {
-                SelectionState::Selected
-            } else {
-                SelectionState::Unselected
-            };
+            state.selection = SelectionState::of(on);
             button.set_state(state);
         }
         damage.add(layout.find());

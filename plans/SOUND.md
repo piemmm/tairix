@@ -1846,7 +1846,9 @@ Two documents, layered, with no gap and no third place:
   `soundd` reads it again only when the file changes. A file it names for an
   event is the administrator's replacement, which `soundd` reads itself.
 - **The user's own choices**, layered over it while their session holds the
-  seat: a master enable, a per-event enable, gain and file, and the theme. They
+  seat: a master enable, the theme and one gain, and each event's enable and
+  file. The gain is the document's, not an event's: an event that is too loud
+  plays another file or none. They
   reach every sound but `Startup`, `Login` and `Logout`, which sound when no
   session holds the seat and so are the machine document's alone.
   They are the desktop session's private app-data document, and the session
@@ -1935,17 +1937,20 @@ sounds say, only while it is there, and nothing it hands over is a path.
   A store that cannot be read is read again on the same deadline, and nothing
   is stored over choices it was not read for.
 - **The pane.** Settings' *Sound Effects* pane reads the choices in effect and
-  every theme through `pinboard-v1`, renders each change through the sound
-  registry, asks once a level settles — one round trip at a time, every setting
-  changed meanwhile carried in the next with its newest value — and reads again
-  after every answered change; a file is chosen in the session's picker, which
-  concludes the pick for the session itself (`Requester::Sound`).
+  every theme through `pinboard-v1`: one plate of the switch, the theme and the
+  volume, and one chooser per event of what it plays — its theme's sound, the
+  file chosen for it, none, or a pick. It renders each change through the sound
+  registry, asks once the volume settles — one round trip at a time, every
+  setting changed meanwhile carried in the next with its newest value — and
+  reads again after every answered change; a file is chosen in the session's
+  picker, which concludes the pick for the session itself (`Requester::Sound`).
+  Choosing a file or the theme's sound turns the event on.
 
 The cross-process path is held by the kernel's own tests of the notice
 authority and the lease's readers, and by host tests of every layer over its
 real codecs; the end-to-end run is SND24.
 
-A per-event gain defaults to unity and **the shipped theme is unity
+The gain defaults to unity and **the shipped theme is unity
 throughout**, which is what keeps the shipped cue path bit-exact and therefore
 testable against the asset itself.
 
@@ -2049,8 +2054,8 @@ way and the directory goes with them.
 −9.2 dBFS, and peak is not loudness. A real loudness match needs an ITU-R
 BS.1770 meter, which nothing else in the tree wants, so the set is authored as
 a family, the build enforces a peak ceiling rather than a loudness target, and
-a user who finds one event too loud has a per-event gain. That is stated rather
-than left implied by a table of peaks.
+a user who finds one event too loud chooses another sound for it, or none.
+That is stated rather than left implied by a table of peaks.
 
 ### What bounds it
 
@@ -2179,14 +2184,18 @@ device's 0 dB point.
 
 The consumers, each owned by its own plan:
 
-- **Settings** — the Sound pane: a plate per sink and source (its default
-  choice, level and mute) and a Recording plate (the user's own live captures,
-  and how many others there are). The controls act on `audio-v1` directly,
-  under the room the user's session holds; the app holds no capability, and a
-  device another session's room holds is drawn disabled.
+- **Settings** — the Sound pane: an Output and an Input plate, each choosing
+  the device its direction uses and setting that device's volume and mute, and
+  a Recording plate (the user's own live captures, and how many others there
+  are). The controls act on `audio-v1` directly, under the room the user's
+  session holds; the app holds no capability, and a device another session's
+  room holds is drawn disabled.
 - **The taskbar** — a volume signal in the notification area, whose popup holds
   the default sink's level and mute: the level moves live as it is dragged,
-  coalesced, and is remembered where the drag settles. Beside it the recording
+  coalesced, and is remembered where the drag settles. Mute is a checkbox here
+  and in Settings alike: muted, the level stands at the bottom of its travel,
+  disabled, until unmuting restores it (`tairix_audio::volume::control_permille`,
+  the one rule both draw by). Beside it the recording
   indicator, drawn from the `AudioCapture` notice. Both are the session's own
   pixels, so no application can suppress them.
 - **The Switchboard** — an Audio device in the Resources rail: each sink and

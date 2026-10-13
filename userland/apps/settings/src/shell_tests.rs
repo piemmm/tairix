@@ -4496,15 +4496,15 @@ fn the_sound_effects_pane_reads_the_sessions_choices_and_asks_it_to_change_them(
     assert!(shell.effects_wanted(), "an answered ask reads them again");
 }
 
-/// A reading of the choices landing while one of their levels is dragged
-/// waits for the drag to settle.
+/// A reading of the choices landing while their volume is dragged waits for
+/// the drag to settle.
 #[test]
 fn a_sound_effects_reading_landing_mid_drag_waits_for_the_settle() {
     let gain_shown = |shell: &Shell| {
         let form = shell.form_for_test().expect("a composed form");
-        let tairix_controls::FieldControl::Slider(slider) = form.groups()[1].rows()[1].control()
+        let tairix_controls::FieldControl::Slider(slider) = form.groups()[0].rows()[2].control()
         else {
-            panic!("the level is a slider");
+            panic!("the volume is a slider");
         };
         slider.value()
     };
@@ -4518,7 +4518,7 @@ fn a_sound_effects_reading_landing_mid_drag_waits_for_the_settle() {
         ask: None,
         settled: false,
     });
-    shell.adopt_effects(Some(effects_reading("sound.shutdown.gain = -30dB\n")));
+    shell.adopt_effects(Some(effects_reading("sound.gain = -30dB\n")));
     assert_eq!(gain_shown(&shell), before, "held while the drag goes on");
     shell.conclude_for_test(crate::FormOutcome::Effects {
         ask: None,

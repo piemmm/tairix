@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_controls::{
     owner_chord, Button, ButtonAction, Checkbox, ComboAction, ComboBox, Keystroke, NumberAction,
-    NumberField, SelectorAction, Slider, SliderAction,
+    NumberField, SelectionState, SelectorAction, Slider, SliderAction,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -21,7 +21,7 @@ use tairix_theme::Theme;
 
 use crate::filter::Parameter;
 use crate::layout::Faces;
-use crate::tool_controls::{selection, spacing, words};
+use crate::tool_controls::{spacing, words};
 use crate::track::{Track, TRACK_HEIGHT};
 
 /// The most controls a part sets side by side.
@@ -231,7 +231,7 @@ impl Part {
                     combo.set_selected(index);
                 }
             }
-            Self::Switch(check) => check.set_selection(selection(value != 0)),
+            Self::Switch(check) => check.set_selection(SelectionState::of(value != 0)),
             Self::Buttons(_) | Self::Custom { .. } | Self::Note(_) => {}
         }
     }
@@ -1455,7 +1455,7 @@ fn set_enabled(part: &mut Part, enabled: bool) {
 /// A switch part's mark for `on`.
 #[must_use]
 pub fn switch(label: &str, on: bool) -> Part {
-    Part::Switch(Checkbox::new(label, selection(on)))
+    Part::Switch(Checkbox::new(label, SelectionState::of(on)))
 }
 
 #[cfg(test)]

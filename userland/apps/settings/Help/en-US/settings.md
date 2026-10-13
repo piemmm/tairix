@@ -48,6 +48,19 @@ view, as a wheel does, and how far a finger moves the pointer. Two fingers
 moving together scroll and two spreading or closing zoom wherever the program
 under the pointer zooms.
 
+**Sound** has two panes. *Output & Input* chooses the device sound plays
+through and the one it is recorded from, and sets that device's volume and
+mute: muting turns the volume down to nothing until you unmute, which puts it
+back where it was. It also shows what is recording — your own recordings by
+name, and how many of anyone else's. These change the device at once, and only
+while your session holds the room the device serves; a device another
+session's room holds is shown and cannot be changed here. Your desktop
+remembers what you set. *Sound Effects* turns the desktop's own sounds on or
+off and sets their theme and volume, and for each event — a notification, an
+error, the terminal bell — whether it plays its theme's sound, a file you
+choose, or nothing. The start-up, sign-in and sign-out sounds are the
+machine's, set by its administrator.
+
 **Storage** lists every mounted volume: where it is mounted, its filesystem,
 its device and medium, how full it is, and whether it is healthy. It is a
 report, not a control — mounting and unmounting are the file manager's and
@@ -85,12 +98,6 @@ It is launched from the *Settings…* row of the desktop's system menu, from the
 desktop's Program Library, or by name from a shell. It requires a running
 graphical session: without one the window channel is unreachable and it
 reports the refusal on the standard error stream and exits.
-
-Sound shows each output and input with its default choice, level and mute, and
-what is recording: your own recordings by name, and how many of anyone else's.
-Its controls change the device at once, and only while your session holds the
-room the device serves; a device another session's room holds is shown and
-cannot be changed here. Your desktop remembers what you set.
 
 ## EXIT STATUS
 
