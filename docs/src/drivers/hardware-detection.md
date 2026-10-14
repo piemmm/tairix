@@ -286,11 +286,13 @@ shared sink, giving audit consumers the full causal chain from match
 to load decision.
 
 The reactive `tairix_devmgr::run` loop re-reads the tree on every generation
-advance (§18.4) but re-matches it only when its node ids changed, the
-catalogue just arrived, or a device-channel hand-off is outstanding: an id is
-never reissued and only a node's fault-domain health changes after it is
-published, so an advance that recorded a health edge or asked for a
-re-evaluation gives the match nothing to do. A node's decision is logged only
+advance (§18.4) but re-matches it only when its node ids or the supplier
+roles its nodes serve changed, the catalogue just arrived, a bound driver
+ended, a restart fell due, or a device-channel hand-off is outstanding. An id
+is never reissued, so an advance that recorded only a health or settle edge,
+or asked for a re-evaluation, gives the match nothing to do; a supplier that
+starts serving changes no id, yet it is what releases the consumers held for
+it, so that change re-matches too. A node's decision is logged only
 the **first** time it is reached and again only when it *changes* (e.g.
 `13002` `NODE_UNBOUND` → `13001` `NODE_BOUND` once the late-bound catalogue
 arrives): the loop carries a per-node `ReportedNodes`/`NodeReport` memory,

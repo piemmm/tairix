@@ -116,6 +116,24 @@ fn a_hex_pattern_matches_bytes_the_text_view_cannot_type() {
     assert_eq!(parse_hex("zz"), Err(PatternError::NotHex));
 }
 
+/// A hex spelling past the bound is refused as it is read, before its bytes
+/// are held.
+#[test]
+fn an_overlong_hex_spelling_is_refused_before_it_is_held() {
+    assert_eq!(
+        parse_hex(&"00".repeat(MAX_PATTERN)).map(|bytes| bytes.len()),
+        Ok(MAX_PATTERN)
+    );
+    assert_eq!(
+        parse_hex(&"00".repeat(MAX_PATTERN + 1)),
+        Err(PatternError::TooLong)
+    );
+    assert_eq!(
+        Pattern::hex(&"ab ".repeat(MAX_PATTERN + 1)),
+        Err(PatternError::TooLong)
+    );
+}
+
 #[test]
 fn an_empty_or_overlong_pattern_is_refused() {
     assert_eq!(Pattern::text("", exact()), Err(PatternError::Empty));

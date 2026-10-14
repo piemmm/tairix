@@ -141,6 +141,12 @@ forget to, and a check-and-charge takes no lock.
   is the parent's intersected against the system default (`LimitSet::inherit`),
   so a child can never hold a bound wider than either the parent's ceiling or
   the default — the never-widen rule, mirroring capability delegation (§5.2).
+  The spawn attach block may lower any kind further (`SpawnAttach::limits`,
+  `LimitSet::lowered_by`): each lowered limit is intersected with the inherited
+  one field by field, so a spawn narrows its child but can never raise it, a
+  `CAP_RLIMIT_RAISE` holder included. init starts every service under the
+  limits its unit declares this way, and a parser sandbox's worker under a
+  memory ceiling and a single thread (`docs/src/security/sandbox.md`).
 
 Storing a limit is not enough — it is **enforced on the path that consumes the
 resource**, before the resource is committed, and fails closed (`AGENTS.md`

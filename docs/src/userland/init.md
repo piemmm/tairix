@@ -360,7 +360,10 @@ connect it, over the reserved `SERVICE_ACTIVATION_ENDPOINT`
 service name). The manager checks the service's declared connect capability
 against the caller's **kernel-attested** authority before it touches any
 state, starts the service if it is down, and parks the caller until it is
-ready. A parked caller blocks in the kernel on its own `ipc_call`: the
+ready. Only an on-demand service is started by a connect, and never one its
+administrator disabled: a down service of any other kind comes up, or stays
+down, by its own rule, so the connect is refused as unavailable rather than
+blamed on the caller. A parked caller blocks in the kernel on its own `ipc_call`: the
 manager holds the call's *ticket* and replies to it when the engine reports
 the park resolved, so there is no poll and no retry anywhere on the path.
 

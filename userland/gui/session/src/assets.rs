@@ -142,10 +142,11 @@ where
 {
     let mut assets = Vec::new();
     for kind in ICON_KINDS {
-        if let Some(bytes) = within(
-            reader.read(&icon_vector_path(kind), MAX_ARTWORK_BYTES),
-            MAX_ARTWORK_BYTES,
-        ) {
+        // A path the heap refuses leaves the kind to its built-in glyph.
+        let Some(path) = icon_vector_path(kind) else {
+            continue;
+        };
+        if let Some(bytes) = within(reader.read(&path, MAX_ARTWORK_BYTES), MAX_ARTWORK_BYTES) {
             assets.push((kind, bytes));
         }
     }

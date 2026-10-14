@@ -23,7 +23,7 @@ use core::cell::RefCell;
 
 use tairix_abi::{
     ActivationMode, CapabilityId, Duration64, Errno, ProcId, ReadinessKind, ReadyCondition,
-    RestartPolicy, ServiceLimit, ServiceManifest, SpawnAttach, SpawnSession,
+    RestartPolicy, ServiceLimit, ServiceManifest, SpawnAttach, SpawnLimits, SpawnSession,
 };
 
 use tairix_enrolment::{validate_service_name, EnrolError};
@@ -388,17 +388,23 @@ pub trait Spawner {
 
 /// How PID 1 starts every service and every console's login: as `account`,
 /// on `console`, anchoring a session of its own
-/// (`docs/src/architecture/sessions.md`).
+/// (`docs/src/architecture/sessions.md`), lowered to the `limits` its unit
+/// declares.
 ///
 /// Its own session is what makes a service the unit it is stopped as — when
 /// it exits, is stopped or dies, everything it started ends with it, so
 /// nothing a service leaves behind can outlive it unreachable.
 #[must_use]
-pub const fn service_attach(console: u64, account: u32) -> SpawnAttach {
+pub fn service_attach(console: u64, account: u32, limits: &[ServiceLimit]) -> SpawnAttach {
     SpawnAttach {
         target_uid: account,
         console,
         session: SpawnSession::New,
+        limits: limits
+            .iter()
+            .fold(SpawnLimits::INHERIT, |lowered, declared| {
+                lowered.lowering(declared.kind, declared.limit)
+            }),
         ..SpawnAttach::INHERIT
     }
 }
@@ -563,7 +569,7 @@ mod tests {
 
     #[test]
     fn a_service_is_started_as_its_account_on_its_console_in_a_session_of_its_own() {
-        let attach = service_attach(2, 13);
+        let attach = service_attach(2, 13, &[]);
         assert_eq!(attach.target_uid, 13);
         assert_eq!(attach.console, 2);
         assert_eq!(attach.session, SpawnSession::New);
@@ -571,6 +577,40 @@ mod tests {
         assert_eq!(
             attach.wires,
             [FdWire::Inherit; tairix_abi::STD_STREAM_COUNT]
+        );
+        assert_eq!(attach.limits, tairix_abi::SpawnLimits::INHERIT);
+    }
+
+    /// A unit's declared limits reach the kernel with its spawn, each kind
+    /// lowered to exactly what the unit names and every other inherited.
+    #[test]
+    fn a_service_is_started_under_the_limits_its_unit_declares() {
+        let streams = tairix_abi::ResourceLimit::new(32, 64).expect("well-formed");
+        let threads = tairix_abi::ResourceLimit::new(4, 4).expect("well-formed");
+        let declared = [
+            tairix_abi::ServiceLimit {
+                kind: tairix_abi::LimitKind::OpenStreams,
+                limit: streams,
+            },
+            tairix_abi::ServiceLimit {
+                kind: tairix_abi::LimitKind::Threads,
+                limit: threads,
+            },
+        ];
+        let attach = service_attach(2, 13, &declared);
+        assert_eq!(
+            attach.limits.get(tairix_abi::LimitKind::OpenStreams),
+            Some(streams)
+        );
+        assert_eq!(
+            attach.limits.get(tairix_abi::LimitKind::Threads),
+            Some(threads)
+        );
+        assert_eq!(attach.limits.get(tairix_abi::LimitKind::Processes), None);
+        assert_eq!(
+            tairix_abi::SpawnAttach::parse(&attach.to_le_bytes()),
+            Ok(attach),
+            "the block the kernel is handed parses back to the unit's limits"
         );
     }
 

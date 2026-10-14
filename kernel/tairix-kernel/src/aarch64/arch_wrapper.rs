@@ -28,7 +28,7 @@
 use tairix_arch_aarch64::context_hal::ContextSwitchHal;
 use tairix_arch_aarch64::entropy::PlatformRng as Aarch64PlatformEntropy;
 use tairix_arch_aarch64::fdt::PsciMethod;
-use tairix_arch_aarch64::gicv3::RedistributorRegion;
+use tairix_arch_aarch64::gicv3::{RedistributorRegion, RedistributorStride};
 use tairix_arch_aarch64::{halt_current_cpu, psci, serial, Aarch64Arch};
 use tairix_arch_api::{CpuId, PlatformEntropy, SchedulerArch, SecondaryBringup};
 use tairix_kernel_core::{
@@ -58,7 +58,7 @@ pub struct Aarch64BinArch {
     /// A GICv3's redistributor regions and the stride between redistributors
     /// where the firmware names one; empty on a GICv2.
     gic_redistributors: &'static [RedistributorRegion],
-    gic_redistributor_stride: Option<u64>,
+    gic_redistributor_stride: Option<RedistributorStride>,
 }
 
 impl Aarch64BinArch {
@@ -84,7 +84,7 @@ impl Aarch64BinArch {
     pub const fn with_gic_redistributors(
         mut self,
         regions: &'static [RedistributorRegion],
-        stride: Option<u64>,
+        stride: Option<RedistributorStride>,
     ) -> Self {
         self.gic_redistributors = regions;
         self.gic_redistributor_stride = stride;

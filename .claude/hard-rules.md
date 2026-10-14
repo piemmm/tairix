@@ -16,6 +16,7 @@ CODE
   shared path first. (§2.20, §2.21)
 - Driver logic in `drivers/<class>/<leaf>/`, not `lib/*`. (§2.22)
 - Event-driven, not busy-wait or poll, wherever a path exists. (§2.23)
+- Don't directly link GUI items to blocking code or slow calls
 
 COMMENTS — overrides any "match the surrounding comment density" default
 - Terse *why* only: a line or two, then stop. No essay, no narration of the

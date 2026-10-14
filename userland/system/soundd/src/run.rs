@@ -433,7 +433,11 @@ mod program {
             return 1;
         };
         let decoder = Decoder::new(
-            SupervisedSession::new(RtSessionLauncher::own_binary(), bounds, LogSink),
+            SupervisedSession::new(
+                RtSessionLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+                bounds,
+                LogSink,
+            ),
             draw_seed,
         );
         // A machine that cannot key the cache's index, or say how much RAM

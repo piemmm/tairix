@@ -75,10 +75,12 @@ const GICR_WAKER_CHILDREN_ASLEEP: u32 = 1 << 2;
 /// The SGI and PPI registers, 64 KiB past each redistributor's control frame
 /// and laid out as the distributor's first word of each bank.
 const SGI_FRAME: usize = 0x1_0000;
+/// One redistributor frame: the SGI frame is the second.
+const FRAME: u64 = SGI_FRAME as u64;
 /// A redistributor's control and SGI frames.
-const GICV3_FRAMES: u64 = 0x2_0000;
+const GICV3_FRAMES: u64 = 2 * FRAME;
 /// The same with the two GICv4 virtual-LPI frames.
-const GICV4_FRAMES: u64 = 0x4_0000;
+const GICV4_FRAMES: u64 = 4 * FRAME;
 
 const ICC_SRE_SRE: u64 = 1 << 0;
 /// Disable the FIQ and IRQ bypass: only the interface signals interrupts.
@@ -184,6 +186,31 @@ pub struct RedistributorRegion {
     pub base: u64,
     /// The region's length in bytes.
     pub len: u64,
+}
+
+/// The distance between consecutive redistributors a firmware names when it
+/// pads them: a whole number of 64 KiB frames, at least a GICv3
+/// redistributor's two.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RedistributorStride(u64);
+
+impl RedistributorStride {
+    /// `bytes` as a stride, or [`None`] for one no redistributor layout has:
+    /// zero among them, which would hold a walk on one frame forever.
+    #[must_use]
+    pub const fn new(bytes: u64) -> Option<Self> {
+        if bytes >= GICV3_FRAMES && bytes.is_multiple_of(FRAME) {
+            Some(Self(bytes))
+        } else {
+            None
+        }
+    }
+
+    /// The stride in bytes.
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        self.0
+    }
 }
 
 /// A CPU's affinity as `MPIDR_EL1` and `GICD_IROUTER<n>` both lay it out:
@@ -406,7 +433,7 @@ impl<M: Gicv3Mmio, C: CpuInterface> Gicv3<M, C> {
     pub fn find_redistributor(
         &self,
         regions: &[RedistributorRegion],
-        stride: Option<u64>,
+        stride: Option<RedistributorStride>,
         affinity: Affinity,
     ) -> Option<usize> {
         regions.iter().find_map(|region| {
@@ -427,11 +454,12 @@ impl<M: Gicv3Mmio, C: CpuInterface> Gicv3<M, C> {
                 if typer & GICR_TYPER_LAST != 0 {
                     return None;
                 }
-                let step = stride.unwrap_or(if typer & GICR_TYPER_VLPIS != 0 {
+                let architectural = if typer & GICR_TYPER_VLPIS != 0 {
                     GICV4_FRAMES
                 } else {
                     GICV3_FRAMES
-                });
+                };
+                let step = stride.map_or(architectural, RedistributorStride::bytes);
                 frame = frame.checked_add(step)?;
             }
             None

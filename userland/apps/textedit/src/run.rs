@@ -287,7 +287,10 @@ mod program {
         fn start(_: &Desktop, set: u64) -> Result<Self, i32> {
             let syntax = Arc::new(SyntaxWorker::new(
                 serve_syntax,
-                ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                ParserSandbox::new(
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+                    tairix_rt::LogSink,
+                ),
                 WorkerWake::create(),
             ));
             docapp::start_worker(APP_NAME, &syntax, set, APP_TOKEN, "syntax")?;

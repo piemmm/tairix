@@ -68,29 +68,14 @@ pub struct HostConfig<'h> {
     pub sink: &'h dyn Sink,
 }
 
-/// One row in the host's loaded-driver table.
-///
-/// Holds the *original* image bytes so [`Host::reload`] can re-verify
-/// without re-fetching, and so the wipe-on-drop pass covers the
-/// signature and capability-body bytes regardless of which buffer the
-/// source returned. The [`Drop`] impl runs `secure_clear` on the
-/// whole vector before its allocator frees the storage.
+/// One row in the host's loaded-driver table. It keeps no image bytes:
+/// [`Host::reload`] re-fetches the image, so there is no stored copy of the
+/// signature or capability body to wipe.
 struct LoadedRecord {
     handle: DriverHandle,
     path: String,
     kind: DriverKind,
     granted: CapabilitySet,
-    /// Sensitive buffer; cleared on drop.
-    image: Vec<u8>,
-}
-
-impl Drop for LoadedRecord {
-    fn drop(&mut self) {
-        // Wipe the signature + capability-body bytes the record held.
-        // `secure_clear` overwrites the live allocation in place; the
-        // subsequent `Vec` drop frees the (already-zeroed) storage.
-        secure_clear(self.image.as_mut_slice());
-    }
 }
 
 /// Userland driver host (Stage 4).
@@ -159,8 +144,6 @@ impl<'h> Host<'h> {
             HostError::SourceFailed(e)
         })?;
         let handle = self.verify_and_bind(path, &image, caller_caps)?;
-        // `verify_and_bind` copied the image bytes into the
-        // `LoadedRecord`; wipe the staging buffer before it is freed.
         secure_clear(image.as_mut_slice());
         Ok(handle)
     }
@@ -274,14 +257,11 @@ impl<'h> Host<'h> {
         // 9. Issue the handle only after a successful registration, so a
         // refused load never consumes an identifier.
         let handle = self.next_handle();
-        let mut record_image = Vec::with_capacity(image.len());
-        record_image.extend_from_slice(image);
         let record = LoadedRecord {
             handle,
             path: path.to_string(),
             kind: parsed.manifest.kind,
             granted: requested,
-            image: record_image,
         };
         self.loaded.push(record);
         self.audit_handle(events::DRIVER_LOADED, path, handle);

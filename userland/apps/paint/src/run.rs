@@ -408,7 +408,10 @@ mod program {
             // The decode queue's room grows with each window opened.
             let Ok(decoder) = DecodeWorker::queued(
                 serve_decode,
-                ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                ParserSandbox::new(
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                    tairix_rt::LogSink,
+                ),
                 WorkerWake::create(),
                 0,
             ) else {

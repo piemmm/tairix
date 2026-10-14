@@ -6889,7 +6889,8 @@ where
             // credential; it can only narrow the child.
             attach.is_sandbox(),
         )
-        .with_placement(placement);
+        .with_placement(placement)
+        .with_lowered_limits(attach.limits);
         // The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a
         // boot-floor program is a **prebuilt** plan carrying its already-
         // verified `'static` image and manifest request, so the child only
@@ -10653,11 +10654,11 @@ where
             1,
             self.soft_limit(caller, LimitKind::WaitSets),
         )?;
-        Ok(crate::waitset::create(
+        crate::waitset::create(
             caller.process().0,
             set,
             charges.empty(LimitKind::WaitSetMembers),
-        ))
+        )
     }
 
     // One dispatch owner-checks the resource each wait-set member names
@@ -13233,6 +13234,8 @@ where
     placement: Option<Placement>,
     /// The DMA translation a driver child's node is checked against.
     translation: Option<&'static crate::iommu::Translation>,
+    /// The limits the spawner lowered the child to below what it inherits.
+    lowered: tairix_abi::SpawnLimits,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -13296,6 +13299,7 @@ where
             sandbox,
             placement: None,
             translation: None,
+            lowered: tairix_abi::SpawnLimits::INHERIT,
         }
     }
 
@@ -13313,6 +13317,24 @@ where
     pub fn with_dma_translation(mut self, translation: &'static crate::iommu::Translation) -> Self {
         self.translation = Some(translation);
         self
+    }
+
+    /// Lower the child's limits to `lowered` where those are tighter than
+    /// what it inherits; never above.
+    #[must_use]
+    pub fn with_lowered_limits(mut self, lowered: tairix_abi::SpawnLimits) -> Self {
+        self.lowered = lowered;
+        self
+    }
+
+    /// The limits the child starts under: its parent's intersected with the
+    /// system default, so it never holds a bound wider than either (a parent
+    /// with no set of its own reads as the default), then lowered by what the
+    /// spawn asked.
+    fn child_limits(&self) -> LimitSet {
+        let aspaces = self.aspaces.read();
+        LimitSet::inherit(&aspaces.limits(self.parent), &aspaces.default_limits())
+            .lowered_by(&self.lowered)
     }
 }
 
@@ -14279,19 +14301,10 @@ where
             }
         }
 
-        // Inherit the parent's effective resource limits:
-        // the child's set is the parent's intersected against the system
-        // default policy, so it can never hold a bound wider than either the
-        // parent's ceiling or the default (the never-widen rule, mirroring
-        // capability delegation). A parent with no established set
-        // resolves to `LimitSet::DEFAULT`, so the child does too. Read and
-        // write are separate lock acquisitions because a fresh child id is
-        // never concurrently mutated by another path.
-        let inherited = {
-            let aspaces = self.aspaces.read();
-            LimitSet::inherit(&aspaces.limits(self.parent), &aspaces.default_limits())
-        };
-        self.aspaces.write().set_limits(sec_id, inherited);
+        // Read and write are separate lock acquisitions because a fresh child
+        // id is never concurrently mutated by another path.
+        let limits = self.child_limits();
+        self.aspaces.write().set_limits(sec_id, limits);
 
         // Inherit the parent's current working directory (POSIX: a child
         // starts in its parent's directory), so a relative path a spawned
@@ -22861,6 +22874,158 @@ mod tests {
         );
     }
 
+    /// The memory ceiling the sandbox spawn tests hold their workers to.
+    const SANDBOX_CEILING: u64 = 0x2000;
+
+    /// A spawn lowers its child below the limits it inherits and never above
+    /// them, whoever asks: a lowering past the parent's own ceiling is the
+    /// parent's ceiling, even for a holder of `CAP_RLIMIT_RAISE`, and the
+    /// parent's own limits are untouched.
+    #[test]
+    fn a_spawn_lowers_its_child_below_what_it_inherits_and_never_above() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let parent_cap = ResourceLimit::new(2, 4).expect("well-formed");
+        let streams = ResourceLimit::new(16, 32).expect("well-formed");
+        let attach = SpawnAttach {
+            limits: tairix_abi::SpawnLimits::INHERIT
+                .lowering(
+                    LimitKind::Processes,
+                    ResourceLimit::new(8, 8).expect("well-formed"),
+                )
+                .lowering(LimitKind::OpenStreams, streams),
+            ..SpawnAttach::INHERIT
+        };
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        aspaces
+            .write()
+            .set_limit(ProcessId(2), LimitKind::Processes, parent_cap);
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(
+            2,
+            &[CapabilityId::PROC_SPAWN, CapabilityId::RLIMIT_RAISE],
+            sink,
+        )
+        .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
+        table.write().insert(caps.clone());
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                SPAWN_PATH.len(),
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("spawn succeeds");
+        let child = aspaces.read().limits(ProcessId(pid));
+        assert_eq!(
+            child.get(LimitKind::Processes),
+            parent_cap,
+            "never above the parent"
+        );
+        assert_eq!(child.get(LimitKind::OpenStreams), streams, "lowered");
+        assert_eq!(
+            child.get(LimitKind::StackBytes),
+            LimitSet::DEFAULT.get(LimitKind::StackBytes),
+            "inherited where nothing was lowered"
+        );
+        let parent = aspaces.read().limits(ProcessId(2));
+        assert_eq!(parent.get(LimitKind::Processes), parent_cap);
+        assert_eq!(
+            parent.get(LimitKind::OpenStreams),
+            LimitSet::DEFAULT.get(LimitKind::OpenStreams)
+        );
+    }
+
+    /// A lowered limit whose soft bound exceeds its hard one refuses the
+    /// spawn before any child exists.
+    #[test]
+    fn a_malformed_lowered_limit_refuses_the_spawn() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let attach = SpawnAttach {
+            limits: tairix_abi::SpawnLimits::INHERIT
+                .lowering(LimitKind::Processes, ResourceLimit { soft: 9, hard: 3 }),
+            ..SpawnAttach::INHERIT
+        };
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
+        table.write().insert(caps.clone());
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+
+        let refused = h.spawn(
+            &ctx,
+            0x1000,
+            SPAWN_PATH.len(),
+            attach_addr(0),
+            SPAWN_ATTACH_LEN,
+            0,
+            0,
+        );
+        assert_eq!(refused, Err(Errno::OutOfRange));
+        assert_eq!(table.read().len(), 1, "no child record");
+    }
+
     /// The spawn admit path records the new child against the spawning
     /// caller (the parent) with the process-wait producer, so a later `wait`
     /// from that parent can reap it (`plans/SPAWN.md` SP6).
@@ -24415,7 +24580,10 @@ mod tests {
         let ipc = RwLock::new(PortRegistry::new());
         // A canonical sandbox block: every wire explicit (all closed
         // here), inherited credential, no console index.
-        let attach = SpawnAttach::sandbox([FdWire::Closed; tairix_abi::STD_STREAM_COUNT]);
+        let attach = SpawnAttach::sandbox(
+            [FdWire::Closed; tairix_abi::STD_STREAM_COUNT],
+            SANDBOX_CEILING,
+        );
         let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
@@ -24488,6 +24656,16 @@ mod tests {
         ] {
             assert_eq!(child_streams.mode(fd), StreamMode::Closed);
         }
+        // The worker holds the ceiling its block names, on its one thread.
+        let limits = aspaces.read().limits(ProcessId(pid));
+        assert_eq!(
+            limits.get(LimitKind::AddressSpaceBytes),
+            ResourceLimit::new(SANDBOX_CEILING, SANDBOX_CEILING).expect("well-formed")
+        );
+        assert_eq!(
+            limits.get(LimitKind::Threads),
+            ResourceLimit::new(1, 1).expect("well-formed")
+        );
     }
 
     /// The narrow `CAP_SANDBOX_SPAWN` admits a canonical parser sandbox —
@@ -24502,7 +24680,10 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let attach = SpawnAttach::sandbox([FdWire::Closed; tairix_abi::STD_STREAM_COUNT]);
+        let attach = SpawnAttach::sandbox(
+            [FdWire::Closed; tairix_abi::STD_STREAM_COUNT],
+            SANDBOX_CEILING,
+        );
         let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &[attach]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();
@@ -24677,7 +24858,10 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let attach = SpawnAttach::sandbox([FdWire::Closed; tairix_abi::STD_STREAM_COUNT]);
+        let attach = SpawnAttach::sandbox(
+            [FdWire::Closed; tairix_abi::STD_STREAM_COUNT],
+            SANDBOX_CEILING,
+        );
         // The payload the caller passes is the token, not a path.
         let (space, physmap) = send_aspace_with_attach(tairix_abi::SPAWN_SELF, &[attach]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
@@ -24805,7 +24989,10 @@ mod tests {
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
-        let attach = SpawnAttach::sandbox([FdWire::Closed; tairix_abi::STD_STREAM_COUNT]);
+        let attach = SpawnAttach::sandbox(
+            [FdWire::Closed; tairix_abi::STD_STREAM_COUNT],
+            SANDBOX_CEILING,
+        );
         let (space, physmap) = send_aspace_with_attach(tairix_abi::SPAWN_SELF, &[attach]);
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let rng = unseeded_rng();

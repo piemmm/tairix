@@ -35,7 +35,7 @@ pub fn live<P: Programme, F: Files<P::Item>>(
     Engine::new(
         programme,
         settings,
-        RtSessionLauncher::own_binary(),
+        RtSessionLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
         tairix_rt::LogSink,
         files,
         RtSpeaker {

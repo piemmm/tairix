@@ -2217,6 +2217,7 @@ dependencies = [
  "tairix-crypto",
  "tairix-devmatch",
  "tairix-devmgr",
+ "tairix-fuzzseed",
  "tairix-log",
 ]
 
@@ -3750,6 +3751,7 @@ dependencies = [
  "tairix-image",
  "tairix-log",
  "tairix-net",
+ "tairix-procinfo",
  "tairix-raster",
  "tairix-rt",
  "tairix-sound",

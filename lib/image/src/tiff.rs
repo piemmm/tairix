@@ -1033,6 +1033,7 @@ fn classic_lzw(data: &[u8]) -> bool {
 fn decompress(
     page: &Page<'_>,
     codecs: &mut Codecs,
+    fax_rows: &mut ccitt::ChangeRows,
     data: &[u8],
     rows: u32,
     columns: u32,
@@ -1090,7 +1091,15 @@ fn decompress(
                 },
             };
             out.fill(0);
-            ccitt::decode(data, tables, coding, columns, rows, page.fill_lsb, out)
+            ccitt::decode(
+                data,
+                tables,
+                coding,
+                (columns, rows),
+                page.fill_lsb,
+                fax_rows,
+                out,
+            )
         }
         // A JPEG unit is decoded whole by the JPEG decoder, never expanded.
         Codec::Jpeg => Err(DecodeError::TiffUnsupportedCompression),
@@ -1558,8 +1567,8 @@ fn admit<'p, 'a>(
 ) -> Result<Admitted<'p, 'a>, DecodeError> {
     let (width, height) = output_size(page);
     limits.check(width, height)?;
+    limits.check(page.grid.columns, page.grid.rows)?;
     if page.codec != Codec::Jpeg {
-        limits.check(page.grid.columns, page.grid.rows)?;
         page.layout(page.grid.rows)?;
     }
     Ok(Admitted {
@@ -1766,6 +1775,8 @@ fn walk_units(
         shuffle,
         codecs,
     } = scratch;
+    // A page's units share its width, so its strips share one reservation.
+    let mut fax_rows = ccitt::ChangeRows::new();
     let jpeg = page.codec == Codec::Jpeg;
     let tables = match page.ifd.field(TAG_JPEG_TABLES)? {
         Some(field) if jpeg => usize::try_from(field.count)
@@ -1797,7 +1808,18 @@ fn walk_units(
             let Some(layout) = &layout else {
                 let data = page.unit_data(file, unit)?;
                 let stream = splice_jpeg(&mut codecs.jpeg, tables, data)?;
-                let image = jpeg::decode(stream, limits)?;
+                let image =
+                    jpeg::decode(stream, &jpeg_unit_limits(page.grid.columns, rows, limits))
+                        .map_err(|err| match err {
+                            // The unit's own extent is the limit, so a frame
+                            // over it is one that disagrees with its unit.
+                            DecodeError::WidthExceedsLimit
+                            | DecodeError::HeightExceedsLimit
+                            | DecodeError::PixelCountExceedsLimit => {
+                                DecodeError::TiffJpegGeometryMismatch
+                            }
+                            other => other,
+                        })?;
                 if image.width() != page.grid.columns || image.height() != rows {
                     return Err(DecodeError::TiffJpegGeometryMismatch);
                 }
@@ -1816,7 +1838,15 @@ fn walk_units(
                 let target = buffer
                     .get_mut(from..from + layout.plane_bytes)
                     .ok_or(DecodeError::DimensionsOverflow)?;
-                decompress(page, codecs, data, rows, page.grid.columns, target)?;
+                decompress(
+                    page,
+                    codecs,
+                    &mut fax_rows,
+                    data,
+                    rows,
+                    page.grid.columns,
+                    target,
+                )?;
                 page.unpredict(target, shuffle, layout, rows)?;
             }
             visit(Walked::Unit(Unit {
@@ -2132,6 +2162,18 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
 /// the palette, and the tables the page's coding builds. A JPEG page's units
 /// are each decoded as a JPEG of up to the size `limits` admit, beside the
 /// run its tables and data are joined in, which a regrowth holds twice.
+/// The limits a JPEG-coded unit `columns` by `rows` is decoded under: its own
+/// extent, so a frame larger than the unit is refused before anything is
+/// allocated for it, and the caller's coefficient bound.
+fn jpeg_unit_limits(columns: u32, rows: u32, limits: &DecodeLimits) -> DecodeLimits {
+    DecodeLimits::new(
+        columns,
+        rows,
+        u64::from(columns) * u64::from(rows),
+        limits.max_progressive_coefficient_bytes(),
+    )
+}
+
 fn units_peak_bytes(
     bytes: &[u8],
     page: &Page<'_>,
@@ -2139,11 +2181,12 @@ fn units_peak_bytes(
 ) -> Result<u64, DecodeError> {
     // An empty working buffer grows to no fewer bytes than this.
     const MIN_GROWTH: u64 = 8;
+    limits.check(page.grid.columns, page.grid.rows)?;
     if page.codec == Codec::Jpeg {
         let joined = 2 * (2 + 2 * bytes.len() as u64);
-        return Ok(joined.saturating_add(jpeg::peak_ceiling(limits)));
+        let unit = jpeg_unit_limits(page.grid.columns, page.grid.rows, limits);
+        return Ok(joined.saturating_add(jpeg::peak_ceiling(&unit)));
     }
-    limits.check(page.grid.columns, page.grid.rows)?;
     let widest = page.layout(page.grid.rows)?;
     let unit = u64::from(widest.planes)
         .saturating_mul(widest.plane_bytes as u64)

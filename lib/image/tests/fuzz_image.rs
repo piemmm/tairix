@@ -3467,6 +3467,66 @@ fn gradient_jpeg(quality: u8) -> Vec<u8> {
     encode_jpeg(&Gradient { side: MEMORY_SIDE }, options).expect("encodes")
 }
 
+/// A page of one-row fax strips reserves the decoder's change rows once,
+/// rather than twice a strip.
+#[test]
+fn a_page_of_fax_strips_reserves_its_change_rows_once() {
+    let requests = |strips: u32| {
+        let fields: Vec<TiffField> = vec![
+            (256, 4, tiff_longs(&[8])),
+            (257, 4, tiff_longs(&[strips])),
+            (258, 3, tiff_shorts(&[1])),
+            (259, 3, tiff_shorts(&[2])),
+            (262, 3, tiff_shorts(&[0])),
+            (277, 3, tiff_shorts(&[1])),
+            (278, 4, tiff_longs(&[1])),
+        ];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"II");
+        tiff_u16(&mut bytes, false, 42);
+        tiff_u32(&mut bytes, false, 8);
+        // A Modified Huffman row of eight white pixels.
+        let units = vec![vec![0x98u8]; usize::try_from(strips).unwrap_or(0)];
+        tiff_page(&mut bytes, false, &fields, &units, true);
+        let limits = DecodeLimits::new(8, 1024, 8 * 1024, 0);
+        let (decoded, metering) = metered(|| decode(&bytes, &limits));
+        assert!(decoded.is_ok(), "{strips} strips: {:?}", decoded.err());
+        metering.allocations
+    };
+    assert_eq!(requests(512), requests(1));
+}
+
+/// A JPEG-coded strip is decoded under its own extent, so a frame far larger
+/// than the strip it stands for is refused from its header rather than after
+/// the whole frame was decoded.
+#[test]
+fn a_jpeg_unit_larger_than_its_strip_is_refused_before_it_is_decoded() {
+    let side = 16u32;
+    let fields: Vec<TiffField> = vec![
+        (256, 4, tiff_longs(&[side])),
+        (257, 4, tiff_longs(&[side])),
+        (258, 3, tiff_shorts(&[8, 8, 8])),
+        (259, 3, tiff_shorts(&[7])),
+        (262, 3, tiff_shorts(&[2])),
+        (277, 3, tiff_shorts(&[3])),
+        (278, 4, tiff_longs(&[side])),
+    ];
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"II");
+    tiff_u16(&mut bytes, false, 42);
+    tiff_u32(&mut bytes, false, 8);
+    let jpeg = gradient_jpeg(JpegOptions::DEFAULT_QUALITY);
+    tiff_page(&mut bytes, false, &fields, &[jpeg], true);
+
+    let (decoded, held) = peak_of(|| decode(&bytes, &memory_limits()));
+    assert_eq!(decoded.err(), Some(DecodeError::TiffJpegGeometryMismatch));
+    let frame = u64::from(MEMORY_SIDE) * u64::from(MEMORY_SIDE) * 4;
+    assert!(
+        held < frame,
+        "held {held} bytes refusing a {frame}-byte frame"
+    );
+}
+
 #[test]
 fn a_jpeg_decode_refused_its_memory_is_answered_typed() {
     let jpeg = gradient_jpeg(JpegOptions::DEFAULT_QUALITY);

@@ -175,6 +175,10 @@ pub struct AutoloadState {
     /// The ascending ids of the snapshot the last pass ran over, so a
     /// reaction that added or removed no node can be told apart.
     pub observed: Vec<u32>,
+    /// The nodes of that snapshot serving any supplier role, ascending by id
+    /// with the roles each serves: a supplier that starts serving changes no
+    /// id, yet it is what a consumer held for it waits on.
+    pub serving: Vec<(u32, u8)>,
     /// The suppliers each bound node's links name, so a supplier that
     /// vanishes takes its consumers down first.
     pub suppliers: BTreeMap<u32, Vec<u32>>,
@@ -831,6 +835,40 @@ fn changed(reported: &mut ReportedNodes, id: u32, kind: NodeReport) -> bool {
     reported.insert(id, kind) != Some(kind)
 }
 
+/// A consumer's match key, for this crate's supplier-link tests.
+#[cfg(test)]
+pub(crate) const CONSUMER_KEY: tairix_abi::hwtree::HwMatchKey =
+    tairix_abi::hwtree::HwMatchKey::virtio(0x0C0C);
+/// A supplier's match key, for this crate's supplier-link tests.
+#[cfg(test)]
+pub(crate) const SUPPLIER_KEY: tairix_abi::hwtree::HwMatchKey =
+    tairix_abi::hwtree::HwMatchKey::virtio(0x5C5C);
+
+/// Node `id`, matched by `key`, whose clock links name each of `suppliers`.
+///
+/// Shared so the reaction loop's tests drive the same linked node the match
+/// pass holds, rather than a second hand-built copy.
+#[cfg(test)]
+pub(crate) fn linked(id: u32, key: tairix_abi::hwtree::HwMatchKey, suppliers: &[u32]) -> HwNode {
+    use tairix_abi::driver::clock::CLOCK_CONTROLLER_ENDPOINTS;
+    use tairix_abi::hwlink::LinkRequest;
+    use tairix_abi::hwtree::HwDeviceClass;
+    let mut node = HwNode::new(id, 1, HwDeviceClass::Other);
+    node.push_match_key(key).expect("key fits");
+    for (index, &supplier) in (0u8..).zip(suppliers) {
+        let request = LinkRequest::new(
+            CLOCK_CONTROLLER_ENDPOINTS.endpoint(supplier),
+            index,
+            &[1],
+            b"",
+        )
+        .expect("valid");
+        node.push_resource(tairix_abi::HwResource::request(&request))
+            .expect("room");
+    }
+    node
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,30 +1155,6 @@ mod tests {
                 _ => Err(Errno::NotImplemented),
             }
         }
-    }
-
-    const CONSUMER_KEY: HwMatchKey = HwMatchKey::virtio(0x0C0C);
-    const SUPPLIER_KEY: HwMatchKey = HwMatchKey::virtio(0x5C5C);
-
-    /// Node `id`, matched by `key`, whose clock links name each of
-    /// `suppliers`.
-    fn linked(id: u32, key: HwMatchKey, suppliers: &[u32]) -> HwNode {
-        use tairix_abi::driver::clock::CLOCK_CONTROLLER_ENDPOINTS;
-        use tairix_abi::hwlink::LinkRequest;
-        let mut node = HwNode::new(id, 1, HwDeviceClass::Other);
-        node.push_match_key(key).expect("key fits");
-        for (index, &supplier) in (0u8..).zip(suppliers) {
-            let request = LinkRequest::new(
-                CLOCK_CONTROLLER_ENDPOINTS.endpoint(supplier),
-                index,
-                &[1],
-                b"",
-            )
-            .expect("valid");
-            node.push_resource(tairix_abi::HwResource::request(&request))
-                .expect("room");
-        }
-        node
     }
 
     /// `node`, its clock endpoint live.

@@ -362,7 +362,7 @@ mod program {
         }
         let grants = load_grants();
         let Ok(mut front) = Front::new(
-            RtSessionLauncher::own_binary(),
+            RtSessionLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
             LOG_SINK,
             RtHost { sockets },
             sockets,

@@ -232,7 +232,10 @@ mod program {
         // reserved self token (the kernel substitutes the path it admitted
         // this process from — argv is data, not authority), containment
         // events routed to the system log.
-        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink);
+        let mut sandbox = ParserSandbox::new(
+            RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+            tairix_rt::LogSink,
+        );
 
         let console = RtConsole;
         // The raw discipline (no echo, no indicator) only while the pager

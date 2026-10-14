@@ -21,9 +21,9 @@ use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 
 use super::{
     artwork_cache, artwork_kind_for_file, glyph_mask, icon_artwork_path, icon_vector_path,
-    ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader, ArtworkResolver,
-    IconArtwork, IconArtworkSource, IconRequest, InlineArtwork, NoArtwork, Resolved, Surface,
-    MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
+    render_artwork, ArtworkCache, ArtworkKey, ArtworkOutcome, ArtworkRasteriser, ArtworkReader,
+    ArtworkResolver, IconArtwork, IconArtworkSource, IconRequest, InlineArtwork, NoArtwork,
+    Resolved, Surface, MAX_ARTWORK_BYTES, VECTOR_SUFFIX,
 };
 use crate::glyph::IconKind;
 use crate::load::ICON_KINDS;
@@ -107,19 +107,19 @@ fn cache() -> ArtworkCache {
 #[test]
 fn icon_paths_spell_the_asset_id() {
     assert_eq!(
-        icon_vector_path(IconKind::Folder),
+        icon_vector_path(IconKind::Folder).expect("room for a path"),
         "/System/Graphics/Icons/folder.svg"
     );
     assert_eq!(
-        icon_artwork_path(IconKind::Folder),
+        icon_artwork_path(IconKind::Folder).expect("room for a path"),
         "/System/Graphics/Icons/folder.png"
     );
     assert_eq!(
-        icon_artwork_path(IconKind::DiskHard),
+        icon_artwork_path(IconKind::DiskHard).expect("room for a path"),
         "/System/Graphics/Icons/disk-hard.png"
     );
     assert_eq!(
-        icon_vector_path(IconKind::ImageSvg),
+        icon_vector_path(IconKind::ImageSvg).expect("room for a path"),
         "/System/Graphics/Icons/image-svg-xml.svg"
     );
 }
@@ -240,7 +240,7 @@ fn a_zero_side_is_refused_without_reading() {
 #[test]
 fn a_kind_request_resolves_the_raster_class_master() {
     let mut c = cache();
-    let path = icon_artwork_path(IconKind::Folder);
+    let path = icon_artwork_path(IconKind::Folder).expect("room for a path");
     let mut reader = CountingReader::new().with(&path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     assert!(c
@@ -252,12 +252,38 @@ fn a_kind_request_resolves_the_raster_class_master() {
         .is_some());
 }
 
+/// A path the heap refuses falls the kind tiers through to nothing, rather
+/// than aborting the draw: the caller's built-in glyph covers it.
+#[test]
+fn a_refused_asset_path_falls_a_tier_instead_of_aborting() {
+    let path = icon_artwork_path(IconKind::Folder).expect("room for a path");
+    let mut reader = CountingReader::new().with(&path, vec![0u8; 10]);
+    let mut ras = SquareRasteriser;
+    for key in [
+        ArtworkKey::Raster(IconKind::Folder),
+        ArtworkKey::Vector(IconKind::Folder),
+    ] {
+        let drawn = tairix_fuzzseed::meter::refusing_above(path.len() - 1, || {
+            render_artwork(&mut reader, &mut ras, &key, 8)
+        });
+        assert!(drawn.is_none(), "{key:?}");
+    }
+    assert_eq!(reader.reads, 0, "no path was built to read");
+    assert!(render_artwork(
+        &mut reader,
+        &mut ras,
+        &ArtworkKey::Raster(IconKind::Folder),
+        8
+    )
+    .is_some());
+}
+
 /// A class shipping only a vector master still draws: the class tier falls
 /// through the absent raster to the vector before the glyph.
 #[test]
 fn a_kind_with_only_a_vector_master_resolves_through_the_vector_tier() {
     let mut c = cache();
-    let vector = icon_vector_path(IconKind::Folder);
+    let vector = icon_vector_path(IconKind::Folder).expect("room for a path");
     let mut reader = CountingReader::new().with(&vector, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     assert!(c
@@ -269,7 +295,10 @@ fn a_kind_with_only_a_vector_master_resolves_through_the_vector_tier() {
         .is_some());
     assert_eq!(
         reader.read_paths,
-        vec![icon_artwork_path(IconKind::Folder), vector],
+        vec![
+            icon_artwork_path(IconKind::Folder).expect("room for a path"),
+            vector
+        ],
         "the raster is tried first, the vector second"
     );
 }
@@ -280,8 +309,8 @@ fn a_kind_with_only_a_vector_master_resolves_through_the_vector_tier() {
 #[test]
 fn a_kind_shipping_both_formats_prefers_the_raster() {
     let mut c = cache();
-    let raster = icon_artwork_path(IconKind::Folder);
-    let vector = icon_vector_path(IconKind::Folder);
+    let raster = icon_artwork_path(IconKind::Folder).expect("room for a path");
+    let vector = icon_vector_path(IconKind::Folder).expect("room for a path");
     let mut reader = CountingReader::new()
         .with(&raster, vec![0u8; 10])
         .with(&vector, vec![0u8; 10]);
@@ -331,7 +360,7 @@ fn no_artwork_never_resolves() {
 #[test]
 fn icon_artwork_source_resolves_through_the_cache() {
     let mut c = cache();
-    let path = icon_artwork_path(IconKind::AppBundle);
+    let path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new().with(&path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     let mut inline = InlineArtwork::new(&mut reader, &mut ras);
@@ -491,7 +520,7 @@ fn a_service_name_resolves_through_the_service_store() {
 #[test]
 fn a_users_own_store_resolves_their_own_programs_but_shadows_no_system_one() {
     let home = "/Users/ian";
-    let dirs = super::program_bundles("foo", Some(home));
+    let dirs = super::program_bundles("foo", Some(home)).expect("room for the paths");
     assert_eq!(dirs.len(), 6, "{dirs:?}");
     let own: Vec<&String> = dirs.iter().filter(|d| d.starts_with(home)).collect();
     assert_eq!(own.len(), 2, "the user's two stores: {dirs:?}");
@@ -559,7 +588,9 @@ fn a_home_that_is_not_an_absolute_path_contributes_no_store() {
         "/Users/ian/..",
     ] {
         assert_eq!(
-            super::program_bundles("foo", Some(home)).len(),
+            super::program_bundles("foo", Some(home))
+                .expect("room for the paths")
+                .len(),
             4,
             "{home:?} was treated as a home"
         );
@@ -570,15 +601,24 @@ fn a_home_that_is_not_an_absolute_path_contributes_no_store() {
 /// being pasted into a store path.
 #[test]
 fn a_program_name_with_a_path_separator_names_no_bundle() {
-    assert!(super::program_bundles("../../etc/x", None).is_empty());
-    assert!(super::program_bundles("", None).is_empty());
-    assert_eq!(super::program_bundles("ls", None).len(), 4);
+    assert!(super::program_bundles("../../etc/x", None)
+        .expect("room for the paths")
+        .is_empty());
+    assert!(super::program_bundles("", None)
+        .expect("room for the paths")
+        .is_empty());
+    assert_eq!(
+        super::program_bundles("ls", None)
+            .expect("room for the paths")
+            .len(),
+        4
+    );
 }
 
 #[test]
 fn a_bundle_with_no_icon_of_its_own_falls_back_to_its_kind() {
     let mut c = cache();
-    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new()
         .with("/Apps/x.app/AppInfo", manifest(""))
         .with(&kind_path, vec![0u8; 10]);
@@ -595,7 +635,7 @@ fn a_bundle_with_no_icon_of_its_own_falls_back_to_its_kind() {
 #[test]
 fn a_bundle_whose_icon_will_not_serve_falls_back_and_never_blanks() {
     let mut c = cache();
-    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     // The manifest names an icon, but the asset is absent from the bundle.
     let mut reader = CountingReader::new()
         .with("/Apps/x.app/AppInfo", manifest("gone.png"))
@@ -623,7 +663,7 @@ fn a_bundle_whose_icon_will_not_serve_falls_back_and_never_blanks() {
 #[test]
 fn a_bundle_icon_escaping_its_own_resources_is_refused() {
     let mut c = cache();
-    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new()
         .with("/Apps/x.app/AppInfo", manifest("../../../System/secret"))
         // The file the hostile name aims at, reachable if the name were ever
@@ -654,7 +694,7 @@ fn a_bundle_icon_escaping_its_own_resources_is_refused() {
 #[test]
 fn a_bundle_with_no_icon_re_reads_neither_its_manifest_nor_the_kind_asset() {
     let mut c = cache();
-    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new()
         .with("/Apps/x.app/AppInfo", manifest(""))
         .with(&kind_path, vec![0u8; 10]);
@@ -676,7 +716,7 @@ fn a_bundle_with_no_icon_re_reads_neither_its_manifest_nor_the_kind_asset() {
 #[test]
 fn an_asset_request_prefers_the_named_asset_over_the_kind() {
     let mut c = cache();
-    let kind_path = icon_artwork_path(IconKind::AppBundle);
+    let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new()
         .with("/Apps/x.app/Resources/x.png", vec![0u8; 10])
         .with(&kind_path, vec![0u8; 10]);
@@ -1151,7 +1191,7 @@ fn tightening_pressure_never_takes_the_drawn_icon_away() {
     // of windows on a small board is enough — drew a built-in glyph in place of
     // every icon it had already decoded, and re-read and re-decoded each of
     // them on every repaint thereafter.
-    let path = icon_artwork_path(IconKind::Folder);
+    let path = icon_artwork_path(IconKind::Folder).expect("room for a path");
     for band in [
         PressureBand::Normal,
         PressureBand::Mild,
@@ -1181,7 +1221,7 @@ fn a_decode_the_cache_cannot_keep_is_reported_once_not_repeated() {
     // A budget with no room for the decode at all. What must not happen is the
     // desktop asking for it again on every frame: the resolver is told the
     // answer was declined, so it can hold the key back until something moves.
-    let path = icon_artwork_path(IconKind::Folder);
+    let path = icon_artwork_path(IconKind::Folder).expect("room for a path");
     let (_gauge, mut cache) = cache_at_on(PressureBand::Normal, FB_TOO_SMALL_FOR_ONE_ICON);
     let mut reader = CountingReader::new().with(&path, vec![0u8; 64]);
     let mut ras = SquareRasteriser;
@@ -1215,7 +1255,7 @@ fn no_band_takes_the_decoded_icons_away() {
     let request = IconRequest::kind(IconKind::Folder);
     for band in PressureBand::ALL {
         let (gauge, mut cache) = cache_at(PressureBand::Normal);
-        let path = icon_artwork_path(IconKind::Folder);
+        let path = icon_artwork_path(IconKind::Folder).expect("room for a path");
         let mut reader = CountingReader::new().with(&path, vec![0u8; 64]);
         let mut ras = SquareRasteriser;
         let mut resolver = DecliningResolver::new(&mut reader, &mut ras);
@@ -1493,9 +1533,10 @@ fn a_retained_icon_is_drawn_again_without_allocating() {
 
     let own = "/Apps/One.app/Resources/icon.png";
     let mut c = cache();
-    let mut reader = CountingReader::new()
-        .with(own, vec![0u8; 64])
-        .with(&icon_artwork_path(IconKind::Folder), vec![0u8; 64]);
+    let mut reader = CountingReader::new().with(own, vec![0u8; 64]).with(
+        &icon_artwork_path(IconKind::Folder).expect("room for a path"),
+        vec![0u8; 64],
+    );
     draw(&mut c, &mut reader, own);
     let ((), metering) = tairix_fuzzseed::meter::metered(|| draw(&mut c, &mut reader, own));
     assert_eq!(metering.allocations, 0, "{metering:?}");

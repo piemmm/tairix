@@ -73,6 +73,7 @@ mod program {
     const BYTES_PER_PIXEL: usize = 4;
 
     /// Why one render produced no pixels.
+    #[derive(Copy, Clone)]
     enum RenderFailure {
         /// Refused for want of glyphs: the control's expected outcome, and
         /// a failure for every other render.
@@ -96,7 +97,10 @@ mod program {
     /// close — so what runs here is the path a user opening a picture takes,
     /// not a shortcut around it.
     fn render(document: &str, fonts: &mut dyn FontProvider) -> Result<Rendered, RenderFailure> {
-        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), LogSink);
+        let mut sandbox = ParserSandbox::new(
+            RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+            LogSink,
+        );
         send_document(&mut sandbox, document.as_bytes())
             .map_err(|_| RenderFailure::Failed("svgtext: the drawing could not be uploaded"))?;
         let opened = open_view(&mut sandbox, None, fonts).map_err(view_failure)?;
@@ -144,8 +148,10 @@ mod program {
     /// glyph drawn in any paint inks the same pixels.
     fn ink(rendered: &[u8]) -> u64 {
         let covered = rendered
-            .chunks_exact(BYTES_PER_PIXEL)
-            .filter(|pixel| pixel.get(3).is_some_and(|alpha| *alpha != 0))
+            .as_chunks::<BYTES_PER_PIXEL>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[3] != 0)
             .count();
         u64::try_from(covered).unwrap_or(u64::MAX)
     }
@@ -196,10 +202,10 @@ mod program {
     /// Report `reason` on `stderr` and on the system log, then exit
     /// non-zero. The vertical's guest gate watches the log; a developer
     /// running the command by hand reads `stderr`.
-    fn fail(sink: &LogSink, reason: &'static str) -> i32 {
+    fn fail(sink: LogSink, reason: &'static str) -> i32 {
         write_stderr_line(reason);
         log(
-            sink,
+            &sink,
             &Event {
                 level: Level::Error,
                 id: REPORT_FAILED_EVENT,
@@ -230,7 +236,7 @@ mod program {
         let sink = LogSink;
         let report = match measure() {
             Ok(report) => report,
-            Err(reason) => return fail(&sink, reason),
+            Err(reason) => return fail(sink, reason),
         };
         let fields = report.fields();
         sink.write_event(&Report::event(&fields));

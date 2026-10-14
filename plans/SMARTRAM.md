@@ -891,7 +891,8 @@ Status: **done** for every part with a current in-tree consumer
   wipes its transient frame/plaintext scratch on every cluster read,
   clone, and decompose path. Installed on both boot volumes
   (`system_mount` for `/System`, the unlock path for the writable
-  root).
+  root); the driver-store server's own `/System` window has none
+  (`plans/OPEN-DEFECTS.md` D993).
 - Within one boot the driver instance is the volume generation (mount
   starts empty; every mutation is seen by the one registered writer),
   matching section 6.1; removable-media generation tokens still arrive

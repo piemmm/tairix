@@ -30,3 +30,5 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # seam); the dev-dependency lives here so the signed
 # `.rxe` fixtures in `tests/fixtures/` are shared, not duplicated.
 tairix-devmgr = { path = "../devmgr", version = "=0.0.0" }
+# Test-only: meters what a load allocates and keeps.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }

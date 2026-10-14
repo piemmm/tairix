@@ -1137,7 +1137,10 @@ mod program {
         fn serve(&self) {
             let mut reader = VfsArtworkReader;
             let mut rasteriser = SandboxRasteriser {
-                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                sandbox: ParserSandbox::new(
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                    tairix_rt::LogSink,
+                ),
             };
             loop {
                 let job = {

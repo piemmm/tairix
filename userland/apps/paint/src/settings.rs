@@ -883,7 +883,10 @@ fn canvas_parts(record: &Preferences) -> Vec<Part> {
 /// `category` offers, so its panel is built again.
 fn reshapes(category: Category, was: &Preferences, now: &Preferences) -> bool {
     match category {
-        Category::NewPicture => was.format != now.format || was.new != now.new,
+        // The format decides the colours offered and whether a transparent
+        // background may be; a typed size or a pick among those is already
+        // what its own control shows.
+        Category::NewPicture => was.format != now.format,
         Category::Canvas => {
             (was.shades == Shades::Theme) != (now.shades == Shades::Theme)
                 || (was.surround == Surround::Theme) != (now.surround == Surround::Theme)

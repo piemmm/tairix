@@ -351,8 +351,8 @@ const PX_PER_POINT: (u32, u32) = (4, 3);
 #[must_use]
 pub fn line_box_px(points: u16, line_box: u16) -> u16 {
     let (num, den) = PX_PER_POINT;
-    let scaled = u32::from(points) * u32::from(line_box) * num;
-    let divisor = den * 1000;
+    let scaled = u64::from(points) * u64::from(line_box) * u64::from(num);
+    let divisor = u64::from(den) * 1000;
     let px = u16::try_from((scaled + divisor / 2) / divisor).unwrap_or(u16::MAX);
     px.clamp(Fonts::MIN_BASE_SIZE_PX, Fonts::MAX_BASE_SIZE_PX)
 }

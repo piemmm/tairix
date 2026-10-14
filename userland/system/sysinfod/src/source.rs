@@ -87,6 +87,25 @@ pub enum ProcessScope {
     Global,
 }
 
+/// The process instances the kernel counts live, sorted once so asking
+/// whether one is among them is a binary search.
+pub struct LiveInstances(Vec<ProcId>);
+
+impl LiveInstances {
+    /// The `census`, in any order.
+    #[must_use]
+    pub fn new(mut census: Vec<ProcId>) -> Self {
+        census.sort_unstable();
+        Self(census)
+    }
+
+    /// Whether `instance` is among them.
+    #[must_use]
+    pub fn contains(&self, instance: ProcId) -> bool {
+        self.0.binary_search(&instance).is_ok()
+    }
+}
+
 /// Read-only access to the live system state exposed by the `sysinfo` API.
 ///
 /// Every method is fallible and returns a [`tairix_abi::Errno`]; a source
@@ -263,13 +282,13 @@ pub trait SysinfoSource {
     fn cache_ledger_records(&self, caller: &Caller) -> Result<Vec<CacheLedgerRecord>, Errno>;
 
     /// Return the unforgeable process-instance id of every live process on
-    /// the machine, in no particular order.
+    /// the machine.
     ///
     /// Caller-independent — it takes no [`Caller`] — because the answer is a
     /// fact of the machine, not of the requester: it exists solely so
     /// [`crate::serve`] can expire a reporter registry entry whose process
     /// has since exited, never to answer a client query directly.
-    fn live_process_instances(&self) -> Result<Vec<ProcId>, Errno>;
+    fn live_process_instances(&self) -> Result<LiveInstances, Errno>;
 
     /// Return the `ramzip` compressed-tier accounting: counters only,
     /// never page contents or key material; an undriven tier truthfully

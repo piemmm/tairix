@@ -2350,9 +2350,11 @@ mod program {
         // than in this address space. The wallpaper and artwork threads own one
         // each of their own, so no sandbox handle crosses a thread; this one is
         // what both fall back to when the kernel grants no thread to hold them.
-        let sandbox: SharedSandbox = alloc::rc::Rc::new(core::cell::RefCell::new(
-            ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
-        ));
+        let sandbox: SharedSandbox =
+            alloc::rc::Rc::new(core::cell::RefCell::new(ParserSandbox::new(
+                RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                tairix_rt::LogSink,
+            )));
 
         // The session's workers, and the one pipe they all nudge the serve loop
         // through: a directory read, an icon decode, and a wallpaper
@@ -4833,7 +4835,10 @@ mod program {
         /// worker process starts with the first job and is let go whenever
         /// memory is short and nothing waits.
         fn serve(&self) {
-            let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink);
+            let mut sandbox = ParserSandbox::new(
+                RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                tairix_rt::LogSink,
+            );
             loop {
                 let job = {
                     let mut desk = self.desk.lock();
@@ -5326,7 +5331,7 @@ mod program {
         fn serve(&self) {
             let mut reader = ArtworkFileReader(VfsFileReader);
             let mut rasteriser = ArtworkSandbox(OwnedSandbox(ParserSandbox::new(
-                RtLauncher::own_binary(),
+                RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
                 tairix_rt::LogSink,
             )));
             loop {

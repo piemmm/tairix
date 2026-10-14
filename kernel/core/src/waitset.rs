@@ -117,7 +117,9 @@ struct Inner {
     /// handle is never reused (a stale handle then resolves to nothing rather
     /// than to a different task's set).
     next_handle: u64,
-    sets: alloc::collections::BTreeMap<u64, WaitSet>,
+    /// Fallible to grow, so a refused heap fails the create rather than the
+    /// kernel.
+    sets: tairix_collections::RadixTree<WaitSet>,
 }
 
 /// The global wait-set registry. Pure data behind a [`SpinLock`]; see the
@@ -125,28 +127,43 @@ struct Inner {
 static WAIT_SETS: SpinLock<Inner> = SpinLock::new(Inner {
     // Start above zero so a caller-zeroed handle slot is never a live set.
     next_handle: 1,
-    sets: alloc::collections::BTreeMap::new(),
+    sets: tairix_collections::RadixTree::new(),
 });
 
 /// Mint a fresh, empty wait-set owned by `owner`, returning its handle. It
 /// holds `set_charge` for itself and grows `member_charge` by a unit for each
 /// member added to it.
-#[must_use]
-pub fn create(owner: u64, set_charge: Charge, member_charge: Charge) -> u64 {
-    let mut g = WAIT_SETS.lock();
-    let handle = g.next_handle;
-    g.next_handle = g.next_handle.wrapping_add(1);
-    g.sets.insert(
-        handle,
-        WaitSet {
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when the heap refuses the registry room for it; the
+/// charges are returned with the set that was never made.
+pub fn create(owner: u64, set_charge: Charge, member_charge: Charge) -> Result<u64, Errno> {
+    WAIT_SETS.lock().create(owner, set_charge, member_charge)
+}
+
+impl Inner {
+    /// [`create`] against this registry.
+    fn create(
+        &mut self,
+        owner: u64,
+        set_charge: Charge,
+        member_charge: Charge,
+    ) -> Result<u64, Errno> {
+        let handle = self.next_handle;
+        let set = WaitSet {
             owner,
             members: Vec::new(),
             resume_after: None,
             _set_charge: set_charge,
             member_charge,
-        },
-    );
-    handle
+        };
+        self.sets
+            .try_insert(handle, set)
+            .map_err(|_| Errno::OutOfMemory)?;
+        self.next_handle = self.next_handle.wrapping_add(1);
+        Ok(handle)
+    }
 }
 
 /// Resolve `handle` to a set owned by `owner`, applying the owner check, and
@@ -157,7 +174,7 @@ pub fn create(owner: u64, set_charge: Charge, member_charge: Charge) -> u64 {
 /// before acting, fail closed).
 fn with_owned<R>(owner: u64, handle: u64, f: impl FnOnce(&mut WaitSet) -> R) -> Result<R, Errno> {
     let mut g = WAIT_SETS.lock();
-    let Some(set) = g.sets.get_mut(&handle) else {
+    let Some(set) = g.sets.get_mut(handle) else {
         return Err(Errno::NotFound);
     };
     if set.owner != owner {
@@ -343,8 +360,8 @@ pub fn note_reported(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> 
 pub fn close(owner: u64, handle: u64) -> Result<(), Errno> {
     let set = {
         let mut g = WAIT_SETS.lock();
-        match g.sets.get(&handle) {
-            Some(set) if set.owner == owner => g.sets.remove(&handle),
+        match g.sets.get(handle) {
+            Some(set) if set.owner == owner => g.sets.remove(handle),
             _ => None,
         }
     }
@@ -371,12 +388,12 @@ pub fn release_owned_by(owner: u64) -> usize {
             let mut g = WAIT_SETS.lock();
             let handle = g
                 .sets
-                .range(after..)
+                .iter_from(after)
                 .find(|(_, set)| set.owner == owner)
-                .map(|(&handle, _)| handle);
+                .map(|(handle, _)| handle);
             handle.and_then(|handle| {
                 after = handle;
-                g.sets.remove(&handle)
+                g.sets.remove(handle)
             })
         };
         let Some(set) = set else {
@@ -402,7 +419,7 @@ pub fn owned_by(owner: u64, handle: u64) -> bool {
     WAIT_SETS
         .lock()
         .sets
-        .get(&handle)
+        .get(handle)
         .is_some_and(|set| set.owner == owner)
 }
 
@@ -422,7 +439,42 @@ mod tests {
         let set = charges
             .charge(LimitKind::WaitSets, 1, RLIMIT_INFINITY)
             .expect("unlimited");
-        create(owner, set, charges.empty(LimitKind::WaitSetMembers))
+        create(owner, set, charges.empty(LimitKind::WaitSetMembers)).expect("room")
+    }
+
+    /// A registry the heap refuses room in fails the create closed, the
+    /// charges returned with the set that was never made, rather than
+    /// aborting the kernel, and its handle is not spent.
+    #[test]
+    fn a_create_the_heap_refuses_fails_closed_and_returns_its_charges() {
+        let charges = Arc::new(ResourceCharges::new());
+        let mut registry = Inner {
+            next_handle: 1,
+            sets: tairix_collections::RadixTree::new(),
+        };
+        let refused = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let set = charges
+                        .charge(LimitKind::WaitSets, 1, RLIMIT_INFINITY)
+                        .expect("unlimited");
+                    let members = charges.empty(LimitKind::WaitSetMembers);
+                    crate::test_alloc::refuse_allocations_on_current_thread(true);
+                    let made = registry.create(0xD471, set, members);
+                    crate::test_alloc::refuse_allocations_on_current_thread(false);
+                    made
+                })
+                .join()
+                .expect("the creating thread ends")
+        });
+        assert_eq!(refused, Err(Errno::OutOfMemory));
+        assert_eq!(charges.held(LimitKind::WaitSets), 0, "its charge returned");
+        assert_eq!(registry.next_handle, 1, "no handle spent");
+        let set = charges
+            .charge(LimitKind::WaitSets, 1, RLIMIT_INFINITY)
+            .expect("unlimited");
+        let members = charges.empty(LimitKind::WaitSetMembers);
+        assert_eq!(registry.create(0xD471, set, members), Ok(1));
     }
 
     fn put(owner: u64, handle: u64, member: Member) -> Result<(), Errno> {

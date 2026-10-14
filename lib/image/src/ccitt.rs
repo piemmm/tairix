@@ -483,16 +483,35 @@ fn fill(row: &mut [u8], from: u32, to: u32) {
 }
 
 /// Record a changing element, refusing a row that produces more than the
-/// two per mode its strictly-advancing walk can.
+/// `ceiling` its strictly-advancing walk can, two per mode.
 ///
-/// The reservation is what makes the push infallible, so a row that somehow
-/// reached the ceiling is refused rather than growing the buffer.
-fn record(changes: &mut Vec<u32>, at: u32) -> Result<(), DecodeError> {
-    if changes.len() >= changes.capacity() {
+/// The row was reserved for the ceiling, which is what makes the push
+/// infallible, so a row that somehow reached it is refused rather than
+/// growing the buffer.
+fn record(changes: &mut Vec<u32>, ceiling: usize, at: u32) -> Result<(), DecodeError> {
+    if changes.len() >= ceiling {
         return Err(DecodeError::TiffFaxRowOverflow);
     }
     changes.push(at);
     Ok(())
+}
+
+/// The two rows of changing elements a decode walks — the row being coded and
+/// the reference above it — kept by the caller, so a page of many strips
+/// reserves them once rather than once a strip.
+pub(crate) struct ChangeRows {
+    reference: Vec<u32>,
+    changes: Vec<u32>,
+}
+
+impl ChangeRows {
+    /// Rows that reserve nothing until a decode needs them.
+    pub(crate) const fn new() -> Self {
+        Self {
+            reference: Vec::new(),
+            changes: Vec::new(),
+        }
+    }
 }
 
 /// Decode one one-dimensionally coded row, recording its changing elements.
@@ -501,7 +520,7 @@ fn row_1d(
     codes: &Codes,
     columns: u32,
     row: &mut [u8],
-    changes: &mut Vec<u32>,
+    (changes, ceiling): (&mut Vec<u32>, usize),
 ) -> Result<(), DecodeError> {
     let mut at = 0u32;
     let mut black = false;
@@ -514,7 +533,7 @@ fn row_1d(
         if black {
             fill(row, at, end);
         }
-        record(changes, end)?;
+        record(changes, ceiling, end)?;
         at = end;
         black = !black;
     }
@@ -533,7 +552,7 @@ fn row_2d(
     columns: u32,
     reference: &[u32],
     row: &mut [u8],
-    changes: &mut Vec<u32>,
+    (changes, ceiling): (&mut Vec<u32>, usize),
 ) -> Result<(), DecodeError> {
     let mut a0 = -1i64;
     let mut black = false;
@@ -577,8 +596,8 @@ fn row_2d(
                 } else {
                     fill(row, a1, a2);
                 }
-                record(changes, a1)?;
-                record(changes, a2)?;
+                record(changes, ceiling, a1)?;
+                record(changes, ceiling, a2)?;
                 i64::from(a2)
             }
             Mode::Vertical(delta) => {
@@ -590,7 +609,7 @@ fn row_2d(
                 if black {
                     fill(row, start, a1);
                 }
-                record(changes, a1)?;
+                record(changes, ceiling, a1)?;
                 black = !black;
                 i64::from(a1)
             }
@@ -607,7 +626,8 @@ fn row_2d(
 }
 
 /// Decode `rows` rows of `columns` pixels into `out`, which the caller has
-/// sized `rows * ceil(columns / 8)` and zeroed.
+/// sized `rows * ceil(columns / 8)` and zeroed, walking the changing elements
+/// in `scratch`.
 ///
 /// A set bit is a black pixel. Data left after the last row — an end-of-facsimile
 /// block, fill, or a further page's worth — is not read.
@@ -615,9 +635,9 @@ pub(crate) fn decode(
     data: &[u8],
     codes: &Codes,
     coding: Coding,
-    columns: u32,
-    rows: u32,
+    (columns, rows): (u32, u32),
     lsb_first: bool,
+    scratch: &mut ChangeRows,
     out: &mut [u8],
 ) -> Result<(), DecodeError> {
     let stride =
@@ -625,9 +645,11 @@ pub(crate) fn decode(
     // Reserved whole, so recording an element never allocates.
     let elements = changing_elements(columns).ok_or(DecodeError::DimensionsOverflow)?;
     let mut bits = Bits::new(data, lsb_first);
-    let mut reference: Vec<u32> = Vec::new();
-    let mut changes: Vec<u32> = Vec::new();
-    if !fallible::reserve(&mut reference, elements) || !fallible::reserve(&mut changes, elements) {
+    let ChangeRows { reference, changes } = scratch;
+    // The first row is coded against an empty reference.
+    reference.clear();
+    changes.clear();
+    if !fallible::reserve(reference, elements) || !fallible::reserve(changes, elements) {
         return Err(DecodeError::OutOfMemory);
     }
     let mut two_dimensional = matches!(coding, Coding::Group4);
@@ -669,11 +691,18 @@ pub(crate) fn decode(
             .ok_or(DecodeError::DimensionsOverflow)?;
         changes.clear();
         if two_dimensional {
-            row_2d(&mut bits, codes, columns, &reference, row, &mut changes)?;
+            row_2d(
+                &mut bits,
+                codes,
+                columns,
+                reference,
+                row,
+                (changes, elements),
+            )?;
         } else {
-            row_1d(&mut bits, codes, columns, row, &mut changes)?;
+            row_1d(&mut bits, codes, columns, row, (changes, elements))?;
         }
-        core::mem::swap(&mut reference, &mut changes);
+        core::mem::swap(reference, changes);
     }
     Ok(())
 }

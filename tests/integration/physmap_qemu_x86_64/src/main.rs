@@ -101,7 +101,7 @@ mod kernel {
     /// trampoline's own identity window — the guest's RAM forced it.
     static MAP_SIZED_FROM_RAM: AtomicBool = AtomicBool::new(false);
 
-    /// Set when the RAM self-test reported verifying every usable byte.
+    /// Set when the RAM self-test reported covering every usable byte.
     static RAM_FULLY_REACHED: AtomicBool = AtomicBool::new(false);
 
     /// Page-table pages the structural probe's two roots draw from. A
@@ -121,7 +121,7 @@ mod kernel {
 
     /// A page-aligned frame the probe reads through the direct map. Never
     /// written: a read proves the translation, and the RAM self-test
-    /// above already writes and reads back every usable byte.
+    /// above already writes and reads back a word of every usable page.
     #[repr(C, align(4096))]
     struct ProbeFrame {
         marker: [u8; 8],

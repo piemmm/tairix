@@ -561,7 +561,10 @@ mod program {
         // reserved self token (the kernel substitutes the path it admitted
         // this process from — argv is data, not authority), containment
         // events routed to the system log.
-        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink);
+        let mut sandbox = ParserSandbox::new(
+            RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+            tairix_rt::LogSink,
+        );
         // The starting listing is read before the terminal is switched, so
         // a refused root fails loudly on a normal screen.
         let mut model = match Model::new(&mut fs, &root, help_text) {

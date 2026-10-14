@@ -216,7 +216,10 @@ socket-activation; it is capability-brokered endpoint activation:
   to that endpoint. If the service is not running the manager starts it (as
   its sandboxed service account), **parks the client** until the service is
   *ready* (§2.23 — wake on the readiness event, never busy-poll), then hands
-  back the endpoint.
+  back the endpoint. Only an on-demand service is started this way, and never
+  one its administrator disabled: a connect to any other down service is
+  refused as unavailable, so no principal can undo a stop or a disable by
+  asking for the service.
 - This one mechanism serves on-demand start, dependency-triggered start, and
   multiuser sharing. Requests that arrive while a service is `starting` are
   **queued and woken** on ready (§2.23), the queue **bounded** and

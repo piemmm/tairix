@@ -65,7 +65,7 @@ use tairix_abi::pinboard_ipc::{
 };
 use tairix_abi::power::PowerAction;
 use tairix_abi::process::{
-    FdWire, ProcessStart, ProcessStartHeader, SpawnAttach, SpawnSession, StringSlot,
+    FdWire, ProcessStart, ProcessStartHeader, SpawnAttach, SpawnLimits, SpawnSession, StringSlot,
     SPAWN_ATTACH_LEN, STD_STREAM_COUNT,
 };
 use tairix_abi::reply::decode_status_reply;
@@ -1404,12 +1404,27 @@ fn exercise_process(bytes: &[u8]) {
 }
 
 /// An accepted spawn attach block — untrusted syscall input — re-encodes to a
-/// block that parses back to the same selectors.
+/// block that parses back to the same selectors, and a sandbox block always
+/// holds its worker to a finite memory ceiling and thread bound.
 fn exercise_spawn_attach(bytes: &[u8]) {
     if let Ok(attach) = SpawnAttach::parse(bytes) {
         let reparsed = SpawnAttach::parse(&attach.to_le_bytes())
             .expect("round-trip of an accepted attach block must succeed");
         assert_eq!(attach, reparsed);
+        if attach.is_sandbox() {
+            for kind in [
+                tairix_abi::LimitKind::AddressSpaceBytes,
+                tairix_abi::LimitKind::Threads,
+            ] {
+                assert!(
+                    attach
+                        .limits
+                        .get(kind)
+                        .is_some_and(|limit| limit.hard != tairix_abi::RLIMIT_INFINITY),
+                    "a sandbox block left {kind:?} unbounded"
+                );
+            }
+        }
     }
 }
 
@@ -1476,7 +1491,14 @@ fn spawn_attach_blocks_with_flipped_bits_round_trip_or_are_refused() {
     let instance = tairix_abi::ProcId::from_raw([0x3C; 16]);
     let shapes = [
         SpawnAttach::INHERIT,
-        SpawnAttach::sandbox(explicit),
+        SpawnAttach::sandbox(explicit, 16 << 20),
+        SpawnAttach {
+            limits: SpawnLimits::INHERIT.lowering(
+                tairix_abi::LimitKind::OpenStreams,
+                tairix_abi::ResourceLimit { soft: 8, hard: 64 },
+            ),
+            ..SpawnAttach::INHERIT
+        },
         SpawnAttach {
             session: SpawnSession::New,
             ..SpawnAttach::INHERIT

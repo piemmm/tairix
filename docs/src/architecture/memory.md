@@ -163,7 +163,7 @@ tree above all. Firmware on both the aarch64 (`virt`/Pi) and riscv64 (`virt`)
 boards lands the DTB blob in the RAM window the map would otherwise call
 usable, so each boot path reserves its whole frames through the one shared
 `reserve_blob_frames` routine (`tairix-kernel::mem_map`). Without it the
-self-test would zero the live tree and the later root-storage bind and device
+self-test would write into the live tree and the later root-storage bind and device
 discovery would find it unreadable — the concrete failure this reservation
 prevents.
 
@@ -193,11 +193,14 @@ large machine, quicker still on real silicon than under QEMU/TCG.
 
 **Defeating the cache.** Reads and writes go through the *cacheable* direct
 map, so a naive write-then-read could be served from the CPU cache and never
-reach the DRAM cell under test. Before reading a sampled cell back the engine
-flushes just that cell's cache line via [`PhysMap::clean_invalidate`], which
-writes the dirty line back to DRAM and drops the cached copy, so the read
-observes what the DRAM actually holds — a per-word flush, never a
-whole-window one that would pay to write back RAM the test never reads. On an
+reach the DRAM cell under test. Before reading sampled cells back the engine
+flushes just their cache lines via [`PhysMap::clean_invalidate_each`], which
+writes the dirty lines back to DRAM and drops the cached copies, so each read
+observes what the DRAM actually holds — per-word flushes, never a
+whole-window one that would pay to write back RAM the test never reads. The
+cells are driven and flushed 64 at a time under one barrier: on aarch64 a
+barrier waits out every write-back before it, so one per sampled page
+serialised a DRAM round trip per page, where a batch overlaps them. On an
 I/O-coherent host or the `SimPhysMap` test double the flush is a documented
 no-op and the model is identical, which is what makes the engine fully
 host-testable (healthy RAM, an injected stuck-low/stuck-high bit, and a
@@ -1597,7 +1600,9 @@ with it, once per *cluster*.
   implementation is `tairix_kernel::transform_cache::TransformClusterCache`,
   installed by the boot path on both mounted volumes (`system_mount`
   for the read-only `/System` volume, the unlock path for the writable
-  root) via `ARXFS::with_cluster_cache`. A volume without a cache
+  root) via `ARXFS::with_cluster_cache`. The driver-store server's own
+  read-only window on `/System` has none (`plans/OPEN-DEFECTS.md` D993).
+  A volume without a cache
   behaves exactly as before, and the integrity passes (scrub, check,
   rescue) never consult it — they exist to verify the on-disk bytes.
 - **Complementary to `CachedFs`, not duplicate.** `CachedFs` (§7g)

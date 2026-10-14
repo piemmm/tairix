@@ -2864,6 +2864,13 @@ impl HwNode {
         self.served & served_bit(role) != 0
     }
 
+    /// Every role this node's endpoints serve, a bit each, so a reader can
+    /// see any of them change without asking role by role.
+    #[must_use]
+    pub const fn served_roles(&self) -> u8 {
+        self.served
+    }
+
     /// Record whether this node's endpoint for `role` is live.
     pub fn set_serves(&mut self, role: LinkRole, live: bool) {
         if live {

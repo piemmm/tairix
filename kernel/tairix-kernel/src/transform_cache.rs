@@ -11,9 +11,10 @@
 //! rather than duplicating it: `CachedFs` retains page-sized chunks of
 //! *served* plaintext for small reads, while this cache sits below the
 //! driver's own read path and also covers the large sequential reads
-//! (bundle and driver-store loads) that bypass `CachedFs` entirely and
-//! `CachedFs`'s misses, both of which otherwise re-run the whole
-//! transform per call.
+//! (bundle loads) that bypass `CachedFs` entirely and `CachedFs`'s misses,
+//! both of which otherwise re-run the whole transform per call. The
+//! driver-store server's own `/System` window is mounted without it
+//! (`plans/OPEN-DEFECTS.md` D993).
 //!
 //! # Classification, budget, pressure
 //!

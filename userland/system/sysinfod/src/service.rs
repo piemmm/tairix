@@ -193,6 +193,7 @@ fn dispatch(
     response: &mut [u8],
 ) -> Result<usize, Errno> {
     let mut page = ListPage {
+        source,
         walks,
         caller,
         query,
@@ -501,11 +502,8 @@ fn net_rates(source: &dyn SysinfoSource, page: &mut ListPage<'_>) -> Result<usiz
     )?;
     let caller = page.caller;
     walked(
-        page.walks,
-        caller,
-        page.query,
+        page,
         request.page,
-        page.response,
         || source.net_interface_rates(caller, request.window),
         NetInterfaceRatesRecord::to_le_bytes,
     )
@@ -524,7 +522,7 @@ fn combined_cache_rows(
     reports: &mut SelfReports,
 ) -> Result<Vec<CacheLedgerRecord>, Errno> {
     let mut rows = source.cache_ledger_records(caller)?;
-    reports.retain_live(&source.live_process_instances()?);
+    reports.retain_live(|| source.live_process_instances())?;
     rows.extend(reports.cache_rows());
     Ok(rows)
 }
@@ -542,7 +540,7 @@ fn live_frame_records(
     source: &dyn SysinfoSource,
     reports: &mut SelfReports,
 ) -> Result<Vec<DesktopFrameRecord>, Errno> {
-    reports.retain_live(&source.live_process_instances()?);
+    reports.retain_live(|| source.live_process_instances())?;
     Ok(reports.frame_records())
 }
 
@@ -622,6 +620,7 @@ fn self_account(
 /// One page asked of a list: whose walks it may be part of, by whom, of which
 /// list, its payload and the reply it is answered into.
 struct ListPage<'r> {
+    source: &'r dyn SysinfoSource,
     walks: &'r mut Walks,
     caller: &'r Caller,
     query: SysinfoQueryId,
@@ -630,40 +629,20 @@ struct ListPage<'r> {
 }
 
 impl ListPage<'_> {
-    /// [`paged`] over the records `read` answers, each encoded by `encode`.
+    /// Decode the [`PageRequest`] in the payload, then answer the page it
+    /// asks for of the list `read` answers, each record encoded by `encode`,
+    /// as [`walked`].
+    ///
+    /// The request is decoded before `read` runs, so a malformed one is
+    /// refused without walking anything.
     fn of<C: AsRef<[R]>, R, const N: usize>(
         &mut self,
         read: impl FnOnce() -> Result<C, Errno>,
         encode: impl Fn(&R) -> [u8; N],
     ) -> Result<usize, Errno> {
-        paged(
-            self.walks,
-            self.caller,
-            self.query,
-            self.payload,
-            self.response,
-            read,
-            encode,
-        )
+        let request = whole(self.payload, PageRequest::WIRE_LEN, PageRequest::from_bytes)?;
+        walked(self, request, read, encode)
     }
-}
-
-/// Decode the [`PageRequest`] in `payload`, then answer the page it asks for
-/// of the list `read` answers, as [`walked`].
-///
-/// The request is decoded before `read` runs, so a malformed one is refused
-/// without walking anything.
-fn paged<C: AsRef<[R]>, R, const N: usize>(
-    walks: &mut Walks,
-    caller: &Caller,
-    query: SysinfoQueryId,
-    payload: &[u8],
-    response: &mut [u8],
-    read: impl FnOnce() -> Result<C, Errno>,
-    encode: impl Fn(&R) -> [u8; N],
-) -> Result<usize, Errno> {
-    let request = whole(payload, PageRequest::WIRE_LEN, PageRequest::from_bytes)?;
-    walked(walks, caller, query, request, response, read, encode)
 }
 
 /// Page `request`'s window of the records `read` answers into `response`.
@@ -673,21 +652,26 @@ fn paged<C: AsRef<[R]>, R, const N: usize>(
 /// its short page, which a list shorter than a page reaches at once, with
 /// nothing held.
 fn walked<C: AsRef<[R]>, R, const N: usize>(
-    walks: &mut Walks,
-    caller: &Caller,
-    query: SysinfoQueryId,
+    asked: &mut ListPage<'_>,
     request: PageRequest,
-    response: &mut [u8],
     read: impl FnOnce() -> Result<C, Errno>,
     encode: impl Fn(&R) -> [u8; N],
 ) -> Result<usize, Errno> {
+    let ListPage {
+        source,
+        walks,
+        caller,
+        query,
+        response,
+        ..
+    } = asked;
     if request.walk == PageRequest::FRESH {
         return page(request, read()?.as_ref(), response, encode);
     }
     let key = WalkKey {
         caller: caller.origin().proc_id(),
         walk: request.walk,
-        query,
+        query: *query,
     };
     let served = if request.offset == 0 {
         let list = read()?;
@@ -696,6 +680,7 @@ fn walked<C: AsRef<[R]>, R, const N: usize>(
             walks.end(key);
             return page(request, records, response, encode);
         }
+        walks.retain_live(key.caller, || source.live_process_instances().ok());
         walks.begin(key, encoded(records, &encode));
         match walks.list(key) {
             Some(Walked::Held(held)) => page_bytes(request, held, N, response)?,
@@ -820,7 +805,7 @@ mod tests {
     use super::{serve, SelfReports, Walks};
     use crate::events;
     use crate::reporters::{MIN_REPORTERS, RAM_BYTES_PER_REPORTER};
-    use crate::source::{Caller, ProcessScope, SysinfoSource};
+    use crate::source::{Caller, LiveInstances, ProcessScope, SysinfoSource};
     use crate::testing::{kernel_caller, user_caller};
     use core::cell::RefCell;
     use tairix_abi::audio::{
@@ -1326,9 +1311,9 @@ mod tests {
         ) -> Result<alloc::vec::Vec<CacheLedgerRecord>, Errno> {
             Ok(self.cache_ledgers.clone())
         }
-        fn live_process_instances(&self) -> Result<alloc::vec::Vec<ProcId>, Errno> {
+        fn live_process_instances(&self) -> Result<LiveInstances, Errno> {
             *self.live_calls.borrow_mut() += 1;
-            Ok(self.live.borrow().clone())
+            Ok(LiveInstances::new(self.live.borrow().clone()))
         }
         fn ramzip_stats(&self, _caller: &Caller) -> Result<RamzipStats, Errno> {
             Ok(fixture_ramzip())
@@ -5294,6 +5279,66 @@ mod tests {
             walk_processes(&source, &who, &mut walks, PageRequest::FRESH, 1, |_| {}).unwrap();
         assert_eq!(fresh, walked);
         assert_eq!(*source.process_reads.borrow(), 1 + 4, "a reading a page");
+    }
+
+    /// A caller that exits part way through a walk never ends it, so the next
+    /// walk any caller begins lets go of what it held.
+    #[test]
+    fn a_walk_begun_lets_go_of_an_exited_callers_walks() {
+        let source = FixtureSource::new();
+        let gone = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0x61, 61);
+        let asking = user_caller(&[CapabilityId::SYSINFO_GLOBAL], 0x62, 62);
+        let mut walks = Walks::new(1 << 30);
+        let sink = RecordingSink::new();
+        let mut reports = SelfReports::new(1 << 30);
+        let mut resp = [0u8; SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN];
+        let first = |walk| {
+            let page = PageRequest {
+                offset: 0,
+                limit: 1,
+                flags: 0,
+                walk,
+            };
+            request_bytes(SysinfoQueryId::GLOBAL_PROCESS_LIST, &page.to_le_bytes())
+        };
+        let key = |who: &Caller, walk| crate::walks::WalkKey {
+            caller: who.origin().proc_id(),
+            walk,
+            query: SysinfoQueryId::GLOBAL_PROCESS_LIST,
+        };
+        serve(
+            &source,
+            &gone,
+            &mut reports,
+            &mut walks,
+            &sink,
+            &first(3),
+            &mut resp,
+        )
+        .expect("a first page");
+        assert!(walks.list(key(&gone, 3)).is_some(), "held part way");
+        assert_eq!(source.live_calls(), 0, "no other caller's walk to find");
+
+        source.set_live(alloc::vec![asking.origin().proc_id()]);
+        serve(
+            &source,
+            &asking,
+            &mut reports,
+            &mut walks,
+            &sink,
+            &first(4),
+            &mut resp,
+        )
+        .expect("a first page");
+        assert!(
+            walks.list(key(&gone, 3)).is_none(),
+            "the exited caller's walk"
+        );
+        assert!(
+            walks.list(key(&asking, 4)).is_some(),
+            "the asking caller's own"
+        );
+        assert_eq!(source.live_calls(), 1);
     }
 
     /// A list that changes part way through a walk changes nothing the walk

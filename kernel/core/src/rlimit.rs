@@ -266,6 +266,19 @@ impl LimitSet {
         }
         out
     }
+
+    /// This set with each kind `lowered` names narrowed to the tighter of the
+    /// two, field by field, so a spawn can lower its child but never raise
+    /// it — a `CAP_RLIMIT_RAISE` holder included.
+    #[must_use]
+    pub fn lowered_by(mut self, lowered: &tairix_abi::SpawnLimits) -> Self {
+        for kind in LimitKind::ALL {
+            if let Some(limit) = lowered.get(kind) {
+                self.set(kind, self.get(kind).intersect(limit));
+            }
+        }
+        self
+    }
 }
 
 impl Default for LimitSet {
@@ -479,5 +492,36 @@ mod tests {
         let current = ResourceLimit::new(10, 50).expect("well-formed");
         let higher = ResourceLimit::new(10, 100).expect("well-formed");
         assert_eq!(authorize_set(current, higher, true), Ok(higher));
+    }
+
+    /// Lowering takes the tighter bound field by field: the result never
+    /// exceeds the set or the request in either field, stays well-formed, and
+    /// a kind the request does not name keeps its own limit.
+    #[test]
+    fn a_lowered_set_is_never_above_the_set_or_the_request() {
+        const DOMAIN: [u64; 4] = [0, 1, 3, RLIMIT_INFINITY];
+        let limits = || {
+            DOMAIN.iter().flat_map(|&soft| {
+                DOMAIN
+                    .iter()
+                    .filter_map(move |&hard| ResourceLimit::new(soft, hard).ok())
+            })
+        };
+        for held in limits() {
+            for asked in limits() {
+                let mut set = LimitSet::DEFAULT;
+                set.set(LimitKind::OpenStreams, held);
+                set.set(LimitKind::Processes, held);
+                let lowered = set.lowered_by(
+                    &tairix_abi::SpawnLimits::INHERIT.lowering(LimitKind::OpenStreams, asked),
+                );
+                let got = lowered.get(LimitKind::OpenStreams);
+                assert!(got.is_well_formed(), "{held:?} {asked:?}");
+                assert!(got.soft <= held.soft && got.soft <= asked.soft);
+                assert!(got.hard <= held.hard && got.hard <= asked.hard);
+                assert_eq!(got, held.intersect(asked));
+                assert_eq!(lowered.get(LimitKind::Processes), held, "not named");
+            }
+        }
     }
 }

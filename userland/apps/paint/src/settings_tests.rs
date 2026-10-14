@@ -201,6 +201,28 @@ fn a_typed_number_is_an_edit_settled_by_enter() {
     assert_eq!((now.grid.spacing.0, settled), (8, true), "Enter settles it");
 }
 
+/// Typing the new picture's size edits the field in place: the panel is not
+/// built again under the caret on each digit, so Enter settles what was typed.
+#[test]
+fn a_typed_size_is_settled_by_enter_in_the_field_it_was_typed_in() {
+    let mut fixture = Fixture::at(Category::NewPicture);
+    let width = fixture.placed(0).controls[0];
+    let _ = fixture.click(width.center());
+    for _ in 0..4 {
+        let _ = fixture.key(Key::Named(NamedKey::Backspace), false);
+    }
+    let (_, typed, settled) = edited(fixture.key(Key::Char('8'), false));
+    assert_eq!(
+        (typed.new.size.0, settled),
+        (8, false),
+        "shown as typed, not written"
+    );
+    let (_, typed, settled) = edited(fixture.key(Key::Char('0'), false));
+    assert_eq!((typed.new.size.0, settled), (80, false));
+    let (_, now, settled) = edited(fixture.key(Key::Named(NamedKey::Enter), false));
+    assert_eq!((now.new.size.0, settled), (80, true), "Enter settles it");
+}
+
 #[test]
 fn restore_take_and_reset_are_asked_of_the_application() {
     let mut fixture = Fixture::at(Category::Panes);

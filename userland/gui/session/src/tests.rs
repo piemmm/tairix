@@ -11201,8 +11201,10 @@ fn class_artwork_larger_than_a_document_reaches_the_decoder_whole() {
     }
     let size = tairix_appconf::MAX_DOCUMENT_LEN + 1024;
     assert!(size <= MAX_ARTWORK_BYTES);
-    let assets =
-        MemoryAssets::default().with(&icon_artwork_path(IconKind::Library), &vec![0x89; size]);
+    let assets = MemoryAssets::default().with(
+        &icon_artwork_path(IconKind::Library).expect("room for a path"),
+        &vec![0x89; size],
+    );
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
     let mut reader = ArtworkFileReader(assets);
@@ -11476,7 +11478,10 @@ fn entry_with_icon(stem: &str, name: &str, asset: Option<&str>) -> LibraryEntry 
 /// The shipped application-bundle master, so the fallback rung has
 /// something to resolve to.
 fn shipped_app_bundle_master(assets: MemoryAssets) -> MemoryAssets {
-    assets.with(&icon_artwork_path(IconKind::AppBundle), &[SHIPPED_TINT])
+    assets.with(
+        &icon_artwork_path(IconKind::AppBundle).expect("room for a path"),
+        &[SHIPPED_TINT],
+    )
 }
 
 /// A session showing an open library popup over `catalog`.

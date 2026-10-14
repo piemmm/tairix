@@ -172,7 +172,7 @@ fn log_selftest(sink: &(dyn tairix_log::Sink + Sync), totals: tairix_kernel_mem:
     use tairix_log::{Event, Field, FieldValue, Level};
 
     let (level, message) = if totals.unreachable == 0 {
-        (Level::Info, "ram self-test verified every usable byte")
+        (Level::Info, "ram self-test covered every usable page")
     } else {
         (
             Level::Warn,
@@ -207,7 +207,7 @@ fn log_selftest(sink: &(dyn tairix_log::Sink + Sync), totals: tairix_kernel_mem:
 /// counter on each console as it goes — the framebuffer screen and the serial
 /// line alike, so a headless boot shows the same identity/RAM line a
 /// graphical one does. On success it returns and the boot continues, having
-/// left every tested region zeroed. On a fault it draws the failing location
+/// set every cell it wrote back to zero. On a fault it draws the failing location
 /// in red and calls [`KernelArch::halt`], which never returns.
 ///
 /// A port with no direct physical map (the host/`wasm32` environment) cannot

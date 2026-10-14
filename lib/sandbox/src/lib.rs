@@ -96,6 +96,7 @@ pub mod host;
 pub mod imageedit;
 pub mod imagerender;
 pub mod loopback;
+pub mod memory;
 pub mod proto;
 #[cfg(all(freestanding, feature = "program"))]
 pub mod rt;
@@ -110,6 +111,7 @@ pub mod wire;
 pub mod worker;
 
 pub use host::{Launcher, ParserSandbox, SandboxError, Unbelieved, WorkerEnd};
+pub use memory::WorkerMemory;
 pub use proto::{Channel, ProtoError, MAX_FRAME};
 pub use session::{
     serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionError,

@@ -23,7 +23,9 @@ use tairix_sync::SpinLock;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 use crate::gicv3::Affinity;
-use crate::gicv3::{CpuInterface, Gicv3, Gicv3Error, Gicv3Mmio, RedistributorRegion};
+use crate::gicv3::{
+    CpuInterface, Gicv3, Gicv3Error, Gicv3Mmio, RedistributorRegion, RedistributorStride,
+};
 
 /// The distributor base before discovery runs: QEMU `virt`'s.
 pub const DEFAULT_GICD_BASE: usize = 0x0800_0000;
@@ -248,11 +250,13 @@ pub fn for_each_its(fdt: &Fdt<'_>, mut visit: impl FnMut(Option<u32>, u64, u64))
 
 /// Hand `region` each redistributor region a GICv3 in `fdt` describes, and
 /// answer the stride between redistributors where the tree names one —
-/// [`None`] when the tree holds no GICv3 or a region does not decode.
+/// [`None`], with no region handed over, when the tree holds no GICv3, a
+/// region does not decode, or the stride is not one 64-bit value a
+/// redistributor layout can have.
 pub fn redistributor_regions(
     fdt: &Fdt<'_>,
     mut region: impl FnMut(RedistributorRegion),
-) -> Option<Option<u64>> {
+) -> Option<Option<RedistributorStride>> {
     tairix_fdt::scan_translated(fdt, |node, levels, depth| {
         let (_, version) = gic_of(node)?;
         if version != GicVersion::V3 {
@@ -262,15 +266,25 @@ pub fn redistributor_regions(
         if regions == 0 {
             return Some(None);
         }
-        for index in 1..=regions {
-            let Some((base, len)) = tairix_fdt::translated_reg(node, depth, levels, index) else {
-                return Some(None);
-            };
+        let stride = match node.property("redistributor-stride") {
+            None => None,
+            Some(named) => {
+                let Some(stride) = <[u8; 8]>::try_from(named.value())
+                    .ok()
+                    .and_then(|bytes| RedistributorStride::new(u64::from_be_bytes(bytes)))
+                else {
+                    return Some(None);
+                };
+                Some(stride)
+            }
+        };
+        let decoded = |index| tairix_fdt::translated_reg(node, depth, levels, index);
+        if (1..=regions).any(|index| decoded(index).is_none()) {
+            return Some(None);
+        }
+        for (base, len) in (1..=regions).filter_map(decoded) {
             region(RedistributorRegion { base, len });
         }
-        let stride = node
-            .property("redistributor-stride")
-            .and_then(|stride| stride.read_be_u64(0).ok());
         Some(Some(stride))
     })
     .flatten()
@@ -919,7 +933,7 @@ impl Default for GicCpu {
 pub struct GicTopology {
     cpus: &'static [GicCpu],
     redistributors: &'static [RedistributorRegion],
-    redistributor_stride: Option<u64>,
+    redistributor_stride: Option<RedistributorStride>,
 }
 
 #[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
@@ -940,7 +954,7 @@ impl GicTopology {
     pub const fn with_redistributors(
         self,
         regions: &'static [RedistributorRegion],
-        stride: Option<u64>,
+        stride: Option<RedistributorStride>,
     ) -> Self {
         Self {
             redistributors: regions,
@@ -1195,7 +1209,10 @@ pub unsafe fn init_secondary() -> Result<(), GicError> {
 /// before `init`, by a boot deciding whether devices may raise LPIs.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 #[must_use]
-pub fn local_lpis_available(regions: &[RedistributorRegion], stride: Option<u64>) -> bool {
+pub fn local_lpis_available(
+    regions: &[RedistributorRegion],
+    stride: Option<RedistributorStride>,
+) -> bool {
     if version() != GicVersion::V3 {
         return false;
     }

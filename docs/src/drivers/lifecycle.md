@@ -71,10 +71,9 @@ loaded-driver table (`AGENTS.md` §5.4 — fail closed).
 ### `Host::unload(handle)`
 
 1. Locates the record by handle. `HandleNotFound` if absent.
-2. Removes the record from the host's table. Its `Drop` impl runs
-   `zeroize::secure_clear` on the stored image bytes — the manifest
-   signature, capability body, and bind table are guaranteed to be
-   wiped before the underlying allocation is freed (`AGENTS.md` §4).
+2. Removes the record from the host's table. The record holds no image
+   bytes: the buffers that held the manifest signature, capability body,
+   and bind table were wiped before `load` returned (`AGENTS.md` §4).
 3. Emits the `DRIVER_UNLOADED` audit record.
 
 ### `Host::reload(handle, caller_caps)`
@@ -115,17 +114,13 @@ record stays in place and produces no event of its own.
 
 The host wipes every buffer that held the manifest signature or
 capability bitmap before its backing allocation is freed. There are
-three such buffers per `load`:
+two such buffers per `load`, and the loaded record keeps no copy:
 
 1. The staging `Vec<u8>` returned by `ImageSource::read` — wiped at
-   the end of `Host::load` once the bytes have been copied into the
-   `LoadedRecord`.
+   the end of `Host::load`.
 2. The transient `Vec<u8>` that holds `header[..signed_end] ||
    capability_body || bind_table` for the Ed25519 verifier — wiped
    between verification and the next pipeline step.
-3. The `LoadedRecord::image` buffer that backs the live record —
-   wiped on `Drop` (i.e. on `Host::unload` or successful
-   `Host::reload`).
 
 The wipe primitive is `tairix_drvhost::zeroize::secure_clear`, which
 combines `core::ptr::write_volatile` with a sequentially-consistent

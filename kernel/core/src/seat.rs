@@ -779,9 +779,7 @@ impl SeatRegistry {
         if out.len() < KeyInput::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let slot = self.resolve(seat_id)?;
-        slot.state.lock().access(owner).map_err(seat_errno)?;
-        Ok(slot.channel.drain_one(out))
+        self.drain_leased(seat_id, owner, out, |slot, out| slot.channel.drain_one(out))
     }
 
     /// Drain one decoded pointer event from seat `seat_id`'s pointer
@@ -812,9 +810,7 @@ impl SeatRegistry {
         if out.len() < PointerInput::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
-        let slot = self.resolve(seat_id)?;
-        slot.state.lock().access(owner).map_err(seat_errno)?;
-        Ok(slot.pointer.drain_one(out))
+        self.drain_leased(seat_id, owner, out, |slot, out| slot.pointer.drain_one(out))
     }
 
     /// Drain one touch frame from seat `seat_id`'s touch channel into `out`
@@ -839,9 +835,27 @@ impl SeatRegistry {
         if out.len() < TouchFrame::WIRE_LEN {
             return Err(Errno::BufferTooSmall);
         }
+        self.drain_leased(seat_id, owner, out, |slot, out| slot.touch.drain_one(out))
+    }
+
+    /// Drain one record of seat `seat_id` into `out` through `drain` for the
+    /// kernel-attested `owner`, the lease checked and the record taken under
+    /// one hold of the seat's state: a revoke, a new owner's acquire and its
+    /// first input all take that hold too, so none lands between the check
+    /// and the drain to hand the new owner's input to the old.
+    fn drain_leased(
+        &self,
+        seat_id: u64,
+        owner: SeatOwner,
+        out: &mut [u8],
+        drain: impl FnOnce(&SeatSlot, &mut [u8]) -> usize,
+    ) -> Result<usize, Errno> {
         let slot = self.resolve(seat_id)?;
-        slot.state.lock().access(owner).map_err(seat_errno)?;
-        Ok(slot.touch.drain_one(out))
+        let state = slot.state.lock();
+        state.access(owner).map_err(seat_errno)?;
+        let drained = drain(&slot, out);
+        drop(state);
+        Ok(drained)
     }
 
     /// The task currently holding seat `seat_id`, if any
@@ -1227,6 +1241,41 @@ mod tests {
 
     use tairix_abi::input::PointerButtonCode;
     use tairix_abi::time::NANOS_PER_MILLI as MS;
+
+    /// A read checks the lease and takes its record under one hold of the
+    /// seat's state, the hold a revoke and a new owner's input also take, so
+    /// nothing can land between the check and the drain: the drain runs with
+    /// the state held, and a reader that has lost the lease takes nothing.
+    #[test]
+    fn a_read_checks_its_lease_and_drains_under_one_hold() {
+        let seat = super::SeatRegistry::new(&super::NULL_CONSOLE_INPUT);
+        seat.acquire(super::SEAT_PRIMARY, super::SeatOwner(7))
+            .expect("acquired");
+        let mut out = [0u8; 4];
+        let held_while_draining = seat
+            .drain_leased(
+                super::SEAT_PRIMARY,
+                super::SeatOwner(7),
+                &mut out,
+                |slot, _| usize::from(slot.state.is_locked()),
+            )
+            .expect("the owner reads");
+        assert_eq!(held_while_draining, 1, "the drain ran under the hold");
+        let drained = core::cell::Cell::new(false);
+        assert_eq!(
+            seat.drain_leased(
+                super::SEAT_PRIMARY,
+                super::SeatOwner(8),
+                &mut out,
+                |_, _| {
+                    drained.set(true);
+                    0
+                }
+            ),
+            Err(tairix_abi::Errno::SeatNotOwner)
+        );
+        assert!(!drained.get(), "a reader without the lease drains nothing");
+    }
 
     #[test]
     fn a_chattering_repress_never_reaches_the_pointer_channel() {

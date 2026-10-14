@@ -13,9 +13,12 @@
 //! * caller lacks `CAP_DRV_LOAD` refused,
 //! * spawner miss refused (unknown driver),
 //! * driver `register()` failure refused,
-//! * zero-on-free of the manifest signature buffer on unload.
+//! * a load keeps no copy of the image it verified.
 
 mod fixtures;
+
+#[global_allocator]
+static ALLOCATOR: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 use fixtures::{
     alternative_signing_key, build_signed_image, build_signed_image_with_bind_keys, mock_register,
@@ -453,6 +456,44 @@ fn errno_mapping_exposed_publicly() {
     assert_eq!(
         HostError::KernelKindForbidden.as_errno(),
         tairix_abi::Errno::PermissionDenied
+    );
+}
+
+/// What a load still holds when it returns is the record's bookkeeping, never
+/// a copy of the bundle it verified.
+#[test]
+fn a_load_retains_no_copy_of_the_image() {
+    let sk = test_signing_key();
+    let trusted = [pubkey_of(&sk)];
+    let payload = vec![0x5A; 64 * 1024];
+    let img = build_signed_image(
+        &sk,
+        DriverKind::UserSpace,
+        SYS_HASH,
+        &[CapabilityId::FS_MOUNT],
+        &payload,
+    );
+    let image_len = img.len();
+    let mut source = MemSource::new();
+    source.images.insert("/d/big".into(), img);
+    let spawner = SingleSpawner;
+    let sink = RecordingSink::new();
+    let cfg = HostConfig {
+        trusted_signers: &trusted,
+        syscall_table_hash: SYS_HASH,
+        accepted_abi_version: ABI_VERSION_CURRENT,
+        source: &source,
+        spawner: &spawner,
+        sink: &sink,
+    };
+    let mut host = Host::new(cfg);
+    let caller = full_caps();
+    let (loaded, metering) = tairix_fuzzseed::meter::metered(|| host.load("/d/big", &caller));
+    loaded.expect("the image loads");
+    assert!(
+        metering.retained < image_len / 4,
+        "{} bytes kept after loading a {image_len}-byte image",
+        metering.retained
     );
 }
 

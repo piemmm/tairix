@@ -105,12 +105,17 @@ impl PhysMap for ConfiguredPhysMap {
     }
 
     fn clean_invalidate(&self, phys: PhysAddr, len: usize) {
-        if let Some(ptr) = self.translate(phys, len) {
-            tairix_arch_aarch64::kernel_arch::clean_invalidate_dcache_range(
-                ptr.as_ptr() as usize,
-                len,
-            );
-        }
+        self.clean_invalidate_each(&[phys], len);
+    }
+
+    fn clean_invalidate_each(&self, starts: &[PhysAddr], len: usize) {
+        tairix_arch_aarch64::kernel_arch::clean_invalidate_dcache_ranges(
+            starts
+                .iter()
+                .filter_map(|&phys| self.translate(phys, len))
+                .map(|ptr| ptr.as_ptr() as usize),
+            len,
+        );
     }
 
     fn sync_instruction_cache(&self, phys: PhysAddr, len: usize) {

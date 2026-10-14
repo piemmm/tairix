@@ -151,8 +151,9 @@ pub enum ActivateError {
     Denied,
     /// The service cannot be activated right now: a readiness condition it
     /// requires is unsatisfied (for example a GUI-only service on a headless
-    /// system), or it is mid-teardown or terminally failed. The client fails
-    /// closed and may retry once the condition holds.
+    /// system), it is mid-teardown or terminally failed, or it is down and not
+    /// one a connect starts (not on demand, or disabled by its administrator).
+    /// The client fails closed and may retry once the condition holds.
     Unavailable,
     /// The service's pending-connection queue is full. Bounded and
     /// fail-closed against a connect flood: the request is refused rather

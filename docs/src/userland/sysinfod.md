@@ -255,7 +255,10 @@ of them. Each walk is charged its
 list and a fixed share for its bookkeeping, so a flood of empty walks is
 bounded as one large walk is. A caller has at most four walks part way
 through, its own least recently used let go for a fifth; past the budget,
-the least recently active caller's oldest walk is let go. A page of a walk
+the least recently active caller's oldest walk is let go. A caller that exits
+never ends its walks, so a walk's first page lets go of every walk whose
+caller the kernel's process census no longer counts; the census is taken only
+when another caller holds a walk. A page of a walk
 let go is answered `Interrupted`, and its caller starts the walk again. A
 kernel list larger than the whole budget is read afresh for each page
 rather than held.

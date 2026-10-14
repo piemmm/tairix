@@ -27,7 +27,7 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::{Errno, ProcId};
 
-use crate::source::Caller;
+use crate::source::{Caller, LiveInstances};
 
 /// RAM, in bytes, one admitted reporter slot is derived from.
 ///
@@ -127,7 +127,7 @@ impl<T> ReportTable<T> {
         &mut self,
         caller: &Caller,
         value: T,
-        live: impl FnOnce() -> Result<Vec<ProcId>, Errno>,
+        live: impl FnOnce() -> Result<LiveInstances, Errno>,
     ) -> Result<(), Errno> {
         let proc_id = reporter_id(caller)?;
         let pid = caller.origin().pid();
@@ -170,8 +170,8 @@ impl<T> ReportTable<T> {
     /// a pid the kernel recycles to an unrelated process can never inherit a
     /// dead reporter's value: the recycled process reports under its own,
     /// different `ProcId` and is admitted as a fresh entry.
-    fn retain_live(&mut self, live: &[ProcId]) {
-        self.entries.retain(|e| live.contains(&e.proc_id));
+    fn retain_live(&mut self, live: &LiveInstances) {
+        self.entries.retain(|e| live.contains(e.proc_id));
     }
 
     /// Every entry, ordered by reporter.
@@ -205,11 +205,24 @@ impl SelfReports {
         }
     }
 
-    /// Drop every reporter, of either kind, whose process instance is not in
-    /// `live`.
-    pub fn retain_live(&mut self, live: &[ProcId]) {
-        self.caches.retain_live(live);
-        self.frames.retain_live(live);
+    /// Drop every reporter, of either kind, whose process instance the census
+    /// `live` does not count, taking the census only when there is a reporter
+    /// to check.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `live` raises.
+    pub fn retain_live(
+        &mut self,
+        live: impl FnOnce() -> Result<LiveInstances, Errno>,
+    ) -> Result<(), Errno> {
+        if self.caches.entries.is_empty() && self.frames.entries.is_empty() {
+            return Ok(());
+        }
+        let live = live()?;
+        self.caches.retain_live(&live);
+        self.frames.retain_live(&live);
+        Ok(())
     }
 
     /// Replace `caller`'s cache ledgers with `rows`.
@@ -259,7 +272,7 @@ impl SelfReports {
         &mut self,
         caller: &Caller,
         rows: Vec<CacheLedgerRecord>,
-        live: impl FnOnce() -> Result<Vec<ProcId>, Errno>,
+        live: impl FnOnce() -> Result<LiveInstances, Errno>,
     ) -> Result<(), Errno> {
         if rows.iter().any(|row| {
             row.origin != CacheLedgerOrigin::Unset
@@ -325,7 +338,7 @@ impl SelfReports {
         &mut self,
         caller: &Caller,
         totals: DesktopFrameTotals,
-        live: impl FnOnce() -> Result<Vec<ProcId>, Errno>,
+        live: impl FnOnce() -> Result<LiveInstances, Errno>,
     ) -> Result<(), Errno> {
         if totals == DesktopFrameTotals::ZERO {
             return self.frames.withdraw(caller);
@@ -353,6 +366,7 @@ mod tests {
     use super::{
         derive_capacity, SelfReports, MAX_REPORTERS, MIN_REPORTERS, RAM_BYTES_PER_REPORTER,
     };
+    use crate::source::LiveInstances;
     use crate::testing::{kernel_caller, user_caller};
     use alloc::vec;
     use tairix_abi::sysinfo::{CacheLedgerOrigin, CacheLedgerRecord, CacheOwnerKind};
@@ -364,7 +378,7 @@ mod tests {
     /// submission that needs no room must never ask for it. Every test below
     /// passes this, which is what pins a re-submission's cost off the process
     /// count rather than merely asserting it once.
-    fn never_swept() -> Result<alloc::vec::Vec<ProcId>, Errno> {
+    fn never_swept() -> Result<LiveInstances, Errno> {
         panic!("an admitted reporter's submission must not enumerate the process table")
     }
 
@@ -532,6 +546,14 @@ mod tests {
     }
 
     #[test]
+    fn a_registry_with_no_reporter_takes_no_census() {
+        let mut registry = SelfReports::new(1 << 30);
+        registry
+            .retain_live(|| panic!("a census with no reporter to check"))
+            .expect("nothing to check");
+    }
+
+    #[test]
     fn retain_live_drops_dead_reporters_by_proc_id() {
         let mut registry = SelfReports::new(1 << 30);
         let gone = user_caller(&[], 1, 42);
@@ -543,7 +565,9 @@ mod tests {
             .report_cache_ledgers(&staying, vec![row("artwork")], never_swept)
             .expect("admitted");
 
-        registry.retain_live(&[staying.origin().proc_id()]);
+        registry
+            .retain_live(|| Ok(LiveInstances::new(vec![staying.origin().proc_id()])))
+            .expect("a census");
 
         let rows = registry.cache_rows();
         assert_eq!(rows.len(), 1);
@@ -560,7 +584,9 @@ mod tests {
 
         // The instance is gone; its pid 99 is recycled to an unrelated
         // process with a fresh ProcId.
-        registry.retain_live(&[]);
+        registry
+            .retain_live(|| Ok(LiveInstances::new(vec![])))
+            .expect("a census");
         let recycled = user_caller(&[], 9, 99);
         registry
             .report_cache_ledgers(&recycled, vec![row("cursors")], never_swept)
@@ -592,7 +618,9 @@ mod tests {
         let (mut registry, admitted) = filled_to_capacity();
         let overflow = user_caller(&[], 200, 200);
         assert_eq!(
-            registry.report_cache_ledgers(&overflow, vec![row("glyphs")], || Ok(admitted.clone())),
+            registry.report_cache_ledgers(&overflow, vec![row("glyphs")], || {
+                Ok(LiveInstances::new(admitted.clone()))
+            }),
             Err(Errno::NoSpace)
         );
         assert_eq!(registry.cache_rows().len(), MIN_REPORTERS);
@@ -606,7 +634,9 @@ mod tests {
         let survivor = admitted[0];
         let newcomer = user_caller(&[], 200, 200);
         registry
-            .report_cache_ledgers(&newcomer, vec![row("cursors")], || Ok(vec![survivor]))
+            .report_cache_ledgers(&newcomer, vec![row("cursors")], || {
+                Ok(LiveInstances::new(vec![survivor]))
+            })
             .expect("the dead reporters' slots are freed for it");
 
         let rows = registry.cache_rows();

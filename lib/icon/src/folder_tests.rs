@@ -339,7 +339,7 @@ fn a_folder_picture_declines_without_its_back_or_below_a_readable_side() {
     struct NoBack;
     impl ArtworkReader for NoBack {
         fn read(&mut self, path: &str) -> Option<Vec<u8>> {
-            let back = icon_vector_path(IconKind::FolderBack);
+            let back = icon_vector_path(IconKind::FolderBack).expect("room for a path");
             (path != back.as_str())
                 .then(|| Shipped { photo: false }.read(path))
                 .flatten()

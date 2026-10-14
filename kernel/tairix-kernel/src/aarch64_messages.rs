@@ -229,7 +229,7 @@ pub fn published() -> Option<&'static LpiRoutes> {
 pub fn discover(
     fdt: &Fdt<'_>,
     regions: &[tairix_arch_aarch64::gicv3::RedistributorRegion],
-    stride: Option<u64>,
+    stride: Option<tairix_arch_aarch64::gicv3::RedistributorStride>,
 ) -> LpiPlanner {
     use tairix_arch_aarch64::gic;
     use tairix_arch_aarch64::its::{Its, VolatileItsMmio, FRAMES_BYTES};

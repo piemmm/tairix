@@ -483,8 +483,12 @@ impl View {
             down: Carry::default(),
             across: Carry::default(),
             find_open: false,
-            find: SearchField::new().with_placeholder("Find"),
-            replace: TextField::new().with_placeholder("Replace with"),
+            find: SearchField::new()
+                .with_placeholder("Find")
+                .with_max_len(crate::find::MAX_PATTERN_SPELLING),
+            replace: TextField::new()
+                .with_placeholder("Replace with")
+                .with_max_len(crate::find::MAX_PATTERN_SPELLING),
             find_buttons: FIND_BUTTONS.map(Button::labelled),
             options: Options::default(),
             hex_pattern: false,
@@ -1245,12 +1249,15 @@ impl View {
         }
     }
 
-    /// The bytes the replace field spells.
+    /// The bytes the replace field spells, no more than a pattern may be.
     fn replacement(&self) -> Result<Vec<u8>, PatternError> {
+        let text = self.replace.text();
         if self.hex_pattern {
-            crate::find::parse_hex(self.replace.text())
+            crate::find::parse_hex(text)
+        } else if text.len() > crate::find::MAX_PATTERN {
+            Err(PatternError::TooLong)
         } else {
-            Ok(self.replace.text().as_bytes().to_vec())
+            Ok(text.as_bytes().to_vec())
         }
     }
 

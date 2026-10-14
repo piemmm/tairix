@@ -33,9 +33,9 @@
 //!    [`tairix_log`].
 //!
 //! Buffers that held the manifest signature or capability bitmap are
-//! cleared with [`zeroize::secure_clear`] when the load record is dropped
+//! cleared with [`zeroize::secure_clear`] before they are freed
 //! ("Zero-on-free for any allocation that ever held
-//! credentials, keys, or capability tokens").
+//! credentials, keys, or capability tokens"); the load record keeps no copy.
 //!
 //! # Module map
 //!

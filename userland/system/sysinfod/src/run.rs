@@ -74,14 +74,14 @@ mod program {
         SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
-    use tairix_abi::{Errno, LimitKind, ProcId, PROC_ID_LEN};
+    use tairix_abi::{Errno, LimitKind, PROC_ID_LEN};
     use tairix_audio::live::RtAudio;
     use tairix_audio::stream::{devices, streams};
     use tairix_caps::CapabilitySet;
     use tairix_rt::LogSink;
     use tairix_sysinfod::lists::{page_peer, read_whole};
     use tairix_sysinfod::{
-        list_budget, serve, Caller, ProcessScope, SelfReports, SysinfoSource, Walks,
+        list_budget, serve, Caller, LiveInstances, ProcessScope, SelfReports, SysinfoSource, Walks,
     };
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
@@ -300,12 +300,13 @@ mod program {
             )
         }
 
-        fn live_process_instances(&self) -> Result<Vec<ProcId>, Errno> {
+        fn live_process_instances(&self) -> Result<LiveInstances, Errno> {
             decode_list(
                 IntrospectDomain::Processes,
                 ProcessRecord::WIRE_LEN,
                 |chunk| Ok(ProcessRecord::from_bytes(chunk)?.proc_id),
             )
+            .map(LiveInstances::new)
         }
 
         fn ramzip_stats(&self, _caller: &Caller) -> Result<RamzipStats, Errno> {

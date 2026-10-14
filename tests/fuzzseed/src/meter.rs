@@ -34,6 +34,9 @@ pub struct Metering {
     pub largest: usize,
     /// The most bytes held at once beyond what the thread held before.
     pub peak: usize,
+    /// The bytes still held when `f` returned beyond what the thread held
+    /// before: what a call kept.
+    pub retained: usize,
 }
 
 /// Run `f`, measuring what it allocates on the calling thread.
@@ -47,6 +50,7 @@ pub fn metered<R>(f: impl FnOnce() -> R) -> (R, Metering) {
         allocations: ALLOCATIONS.with(Cell::get),
         largest: LARGEST.with(Cell::get),
         peak: PEAK.with(Cell::get).saturating_sub(before),
+        retained: LIVE.with(Cell::get).saturating_sub(before),
     };
     (out, metering)
 }

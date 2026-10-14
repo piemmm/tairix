@@ -16,6 +16,7 @@
 #define TAIRIX_SYSCALL_H
 
 #include <stdint.h>
+#include "tairix_rlimit.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -211,8 +212,8 @@ typedef struct tairix_wait_status {
 * other than the values below (including 0) is reserved and refused; a HANDLE
 * wire names a descriptor of the CALLER'S OWN open table (a file, resource, or
 * pipe end), owner-checked kernel-side before any child state exists. */
-#define TAIRIX_SPAWN_ATTACH_VERSION 3u
-#define TAIRIX_SPAWN_ATTACH_LEN 80u
+#define TAIRIX_SPAWN_ATTACH_VERSION 4u
+#define TAIRIX_SPAWN_ATTACH_LEN 264u
 /* Attach-block flags. SANDBOX starts the child as a minimum-capability
 * parser sandbox: empty capability set, closed syscall allow-list, and
 * every wire must be CLOSED or HANDLE (nothing ambient flows in). A
@@ -237,6 +238,13 @@ typedef struct tairix_wait_status {
 #define TAIRIX_SPAWN_SESSION_NEW 2u
 #define TAIRIX_SPAWN_SESSION_ANCHORED 3u
 #define TAIRIX_SPAWN_SESSION_JOIN 4u
+/* Lowered limits: bit k of limits_mask lowers the child's limit of
+* TAIRIX_LIMIT_KIND k to limits[k], intersected with what it inherits, so a
+* spawn can narrow its child but never widen it. A bit at or past
+* TAIRIX_LIMIT_KIND_COUNT, a non-zero limits_reserved, a byte under a clear
+* bit, and a limit whose soft bound exceeds its hard one are refused. A
+* SANDBOX spawn must lower ADDRESS_SPACE_BYTES and THREADS to finite hard
+* bounds. */
 typedef struct tairix_fd_wire {
     uint32_t kind;
     uint32_t value;
@@ -250,6 +258,9 @@ typedef struct tairix_spawn_attach {
     uint32_t session;
     uint32_t session_reserved;
     uint8_t session_instance[16];
+    uint32_t limits_mask;
+    uint32_t limits_reserved;
+    tairix_resource_limit_t limits[11];
 } tairix_spawn_attach_t;
 
 /* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected

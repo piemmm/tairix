@@ -241,7 +241,7 @@ fn parent_caps() -> CapabilitySet {
 /// launchers always pass `[path, role-marker]` as the startup vector,
 /// which replaces the registry defaults — so every row requests no
 /// capability and pins no arguments.
-static CHILD_PROGRAMS: [EmbeddedProgram; 6] = [
+static CHILD_PROGRAMS: [EmbeddedProgram; 7] = [
     EmbeddedProgram {
         path: b"/bin/sbx",
         rxe: PROGRAM_RXE,
@@ -274,6 +274,12 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 6] = [
     },
     EmbeddedProgram {
         path: b"/bin/sbx-hang",
+        rxe: PROGRAM_RXE,
+        caps: &[],
+        args: &[],
+    },
+    EmbeddedProgram {
+        path: b"/bin/sbx-hog",
         rxe: PROGRAM_RXE,
         caps: &[],
         args: &[],

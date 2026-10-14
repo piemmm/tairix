@@ -260,7 +260,7 @@ mod program {
         fn spawn(&self, spec: &ServiceSpec) -> Result<Pid, Errno> {
             let ret = tairix_rt::spawn_in(
                 spec.binary_path().as_bytes(),
-                &service_attach(SERVICE_CONSOLE, spec.account()),
+                &service_attach(SERVICE_CONSOLE, spec.account(), spec.limits()),
             );
             if ret < 0 {
                 Err(Errno::from_syscall(ret))
@@ -1015,7 +1015,7 @@ mod program {
             // init's `CAP_SPAWN_AS_USER` and resolves the account's group
             // set and capability ceiling from the boot-installed identity
             // table, failing closed on an unknown uid.
-            tairix_rt::spawn_in(path, &service_attach(u64::from(console), uid))
+            tairix_rt::spawn_in(path, &service_attach(u64::from(console), uid, &[]))
         }
 
         fn wait_next(&mut self, timeout_ns: u64, status: &mut i32) -> Woke {

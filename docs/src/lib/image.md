@@ -882,11 +882,14 @@ sizing — the scale a JPEG decode picks, the page an icon decode picks, the
 buffers a PNG, GIF, BMP, TIFF or WebP decoder reserves — so the bound and the
 decode cannot drift apart, and the fuzz harness checks every decode it makes,
 valid or mutated, against it. Where a decoder's working set is not set by its
-picture alone — a JPEG-coded TIFF's units grow with the limits, and a
-lossless WebP's table of the groups its stream describes with the stream, to
-at most 65,536 entries — the bound grows the same way and stands far above
-what an ordinary file needs (`plans/OPEN-DEFECTS.md` has the decoder fixes
-that would bring the TIFF one down).
+picture alone — a TIFF unit is held at its declared size, which a tile may
+make far larger than the picture, and a lossless WebP's table of the groups
+its stream describes grows with the stream, to at most 65,536 entries — the
+bound grows the same way and stands far above what an ordinary file needs
+(`plans/OPEN-DEFECTS.md` has the decoder fix that would bring the TIFF one
+down). A JPEG-coded unit is decoded under its own extent, so a frame larger
+than its unit is refused from its header, before anything is allocated for
+it.
 
 ## API shape
 

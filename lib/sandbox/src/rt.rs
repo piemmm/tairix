@@ -31,6 +31,7 @@ use tairix_abi::{
 use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Stream, Write};
 
 use crate::host::Launcher;
+use crate::memory::WorkerMemory;
 use crate::proto::Channel;
 use crate::session::{serve_session, SessionDescriptors, SessionService, SessionTransport};
 use crate::supervise::SessionLauncher;
@@ -134,16 +135,19 @@ impl Channel for StdioChannel {
 pub struct RtLauncher {
     path: Vec<u8>,
     reply_deadline_ns: u64,
+    memory: WorkerMemory,
 }
 
 impl RtLauncher {
     /// Build a launcher over the program path to spawn as the worker, whose
-    /// workers answer within [`REPLY_DEADLINE_NS`].
+    /// workers parse what `memory` names and answer within
+    /// [`REPLY_DEADLINE_NS`].
     #[must_use]
-    pub fn new(path: &[u8]) -> Self {
+    pub fn new(path: &[u8], memory: WorkerMemory) -> Self {
         Self {
             path: path.to_vec(),
             reply_deadline_ns: REPLY_DEADLINE_NS,
+            memory,
         }
     }
 
@@ -162,18 +166,35 @@ impl RtLauncher {
     /// used — it is data the spawner chose (a shell passes the typed
     /// word), never a spawnable spelling the worker launch could trust.
     #[must_use]
-    pub fn own_binary() -> Self {
-        Self::new(tairix_abi::SPAWN_SELF)
+    pub fn own_binary(memory: WorkerMemory) -> Self {
+        Self::new(tairix_abi::SPAWN_SELF, memory)
     }
 }
 
-/// Spawn `path` as a sandboxed worker in `role` over a fresh pipe pair,
-/// returning the parent's `(pid, request write end, reply read end)`.
+/// The memory ceiling a `memory` worker launched now is held to: a document
+/// worker's is a share of the machine's installed RAM, read when it starts.
+fn ceiling_of(memory: WorkerMemory) -> u64 {
+    let ram = match memory {
+        WorkerMemory::Messages => 0,
+        WorkerMemory::Documents => {
+            tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0)
+        }
+    };
+    memory.ceiling(ram)
+}
+
+/// Spawn `path` as a sandboxed worker in `role` over a fresh pipe pair, held
+/// to `ceiling` bytes of mapped memory, returning the parent's `(pid,
+/// request write end, reply read end)`.
 ///
 /// The one place the pipe pair, the `SpawnAttach::sandbox` wiring, and the
 /// unwind are written: both worker shapes — one-shot and session — differ
 /// only in the role marker they pass.
-fn spawn_sandboxed_worker(path: &[u8], role: &[u8]) -> Result<(i64, u32, u32), Errno> {
+fn spawn_sandboxed_worker(
+    path: &[u8],
+    role: &[u8],
+    ceiling: u64,
+) -> Result<(i64, u32, u32), Errno> {
     // Request pipe: parent writes, worker fd 0 reads.
     let (request_read, request_write) = tairix_rt::pipe_create().map_err(Errno::from_syscall)?;
     // Reply pipe: worker fd 1 writes, parent reads.
@@ -188,7 +209,7 @@ fn spawn_sandboxed_worker(path: &[u8], role: &[u8]) -> Result<(i64, u32, u32), E
     let mut wires = [FdWire::Closed; STD_STREAM_COUNT];
     wires[STDIN as usize] = FdWire::Handle(request_read);
     wires[STDOUT as usize] = FdWire::Handle(reply_write);
-    let attach = SpawnAttach::sandbox(wires);
+    let attach = SpawnAttach::sandbox(wires, ceiling);
     let pid = tairix_rt::spawn_attached(path, &attach, &[path, role], &[]);
     // The child holds counted clones of its two wired ends; the parent's
     // own copies are closed regardless of the spawn outcome, so a dead
@@ -208,7 +229,8 @@ impl Launcher for RtLauncher {
     type Channel = RtChannel;
 
     fn launch(&mut self) -> Result<RtChannel, Errno> {
-        let (pid, write_fd, read_fd) = spawn_sandboxed_worker(&self.path, WORKER_ROLE_ARG)?;
+        let (pid, write_fd, read_fd) =
+            spawn_sandboxed_worker(&self.path, WORKER_ROLE_ARG, ceiling_of(self.memory))?;
         Ok(RtChannel {
             pid,
             write_fd,
@@ -298,7 +320,8 @@ pub struct RtSessionChannel {
 }
 
 impl RtSessionChannel {
-    /// Spawn `path` as this session's sandboxed worker.
+    /// Spawn `path` as this session's sandboxed worker, parsing what `memory`
+    /// names.
     ///
     /// Pass [`tairix_abi::SPAWN_SELF`] to run the caller's **own** binary:
     /// the kernel substitutes the exact path it admitted the caller from
@@ -309,8 +332,9 @@ impl RtSessionChannel {
     ///
     /// The typed reason the worker could not be started; the caller logs it
     /// through [`crate::host::log_unavailable`].
-    pub fn launch(path: &[u8]) -> Result<Self, Errno> {
-        let (pid, write_fd, read_fd) = spawn_sandboxed_worker(path, SESSION_ROLE_ARG)?;
+    pub fn launch(path: &[u8], memory: WorkerMemory) -> Result<Self, Errno> {
+        let (pid, write_fd, read_fd) =
+            spawn_sandboxed_worker(path, SESSION_ROLE_ARG, ceiling_of(memory))?;
         Ok(Self {
             pid,
             write_fd,
@@ -354,22 +378,25 @@ impl Drop for RtSessionChannel {
 /// [`RtSessionChannel`] over `path`.
 pub struct RtSessionLauncher {
     path: Vec<u8>,
+    memory: WorkerMemory,
 }
 
 impl RtSessionLauncher {
-    /// Launch `path`, for a fixture whose worker roles are distinct paths.
+    /// Launch `path`, whose workers parse what `memory` names, for a fixture
+    /// whose worker roles are distinct paths.
     #[must_use]
-    pub fn new(path: &[u8]) -> Self {
+    pub fn new(path: &[u8], memory: WorkerMemory) -> Self {
         Self {
             path: path.to_vec(),
+            memory,
         }
     }
 
     /// Launch this program's own binary through [`tairix_abi::SPAWN_SELF`],
     /// the one spelling of it a worker spawn trusts.
     #[must_use]
-    pub fn own_binary() -> Self {
-        Self::new(tairix_abi::SPAWN_SELF)
+    pub fn own_binary(memory: WorkerMemory) -> Self {
+        Self::new(tairix_abi::SPAWN_SELF, memory)
     }
 }
 
@@ -377,7 +404,7 @@ impl SessionLauncher for RtSessionLauncher {
     type Transport = RtSessionChannel;
 
     fn launch(&mut self) -> Result<RtSessionChannel, Errno> {
-        RtSessionChannel::launch(&self.path)
+        RtSessionChannel::launch(&self.path, self.memory)
     }
 }
 

@@ -174,7 +174,12 @@ Stability tier: **experimental**.
   production transport. `RtLauncher` spawns the program's **own binary**
   in a worker role: two fresh pipes wired to the child's fd 0/1 through
   `SpawnAttach::sandbox`, the shared `--parser-sandbox-worker` argv
-  marker, and a blocking reap on disposal. The worker side
+  marker, and a blocking reap on disposal. Every launcher names what its
+  worker parses (`WorkerMemory`), and the worker is spawned under that kind's
+  `AddressSpaceBytes` ceiling on one thread: a message parser its two frames
+  and a baseline, a document decoder a quarter of the machine's RAM and never
+  less than a whole document beside them. A decode that outgrows it ends as
+  the worker's own out-of-memory exit, reported like any other. The worker side
   (`worker_role` + `serve_stdio`) serves over fd 0/1 — exactly the
   surface the kernel sandbox allow-list admits — and ends with
   `ServeEnd::exit_code`, the one mapping of how its conversation ended to

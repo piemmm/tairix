@@ -1182,6 +1182,7 @@ fn a_point_size_draws_one_em_whatever_the_family() {
     // A size the ladder cannot author is held to its bounds.
     assert_eq!(line_box_px(1, 1210), Fonts::MIN_BASE_SIZE_PX);
     assert_eq!(line_box_px(u16::MAX, 3000), Fonts::MAX_BASE_SIZE_PX);
+    assert_eq!(line_box_px(u16::MAX, u16::MAX), Fonts::MAX_BASE_SIZE_PX);
 }
 
 #[test]

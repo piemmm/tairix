@@ -2613,8 +2613,8 @@ static TESTS: &[QemuTest] = &[
     // of it by pointer. The observer grades two records: the boot path
     // widened the direct map past the trampoline's window (so it sized it
     // from the discovered memory map, not a build-time constant), and the
-    // early-boot RAM self-test wrote and read back *every* usable byte
-    // through that map — the frames above the old window included.
+    // early-boot RAM self-test wrote and read back a word of *every* usable
+    // page through that map — the frames above the old window included.
     //
     // 3584 MiB is the smallest `-m` for which QEMU's `pc` machine places any
     // RAM above 4 GiB (below that it fits the whole guest under the hole),

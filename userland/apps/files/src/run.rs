@@ -2700,7 +2700,10 @@ mod program {
     impl SandboxRasteriser {
         fn new() -> Self {
             Self {
-                sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
+                sandbox: ParserSandbox::new(
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                    tairix_rt::LogSink,
+                ),
                 store: StoreSlot::Unopened,
             }
         }

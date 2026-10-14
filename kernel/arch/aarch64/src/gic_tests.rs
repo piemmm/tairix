@@ -559,7 +559,7 @@ fn cells(values: &[u64]) -> std::vec::Vec<u8> {
 fn gicv3_tree(
     declared: Option<u32>,
     regions: &[(u64, u64)],
-    stride: Option<u64>,
+    stride: Option<&[u8]>,
 ) -> std::vec::Vec<u8> {
     let mut b = tairix_fdt::write::FdtWriter::new();
     b.begin_node("");
@@ -577,7 +577,7 @@ fn gicv3_tree(
         b.prop_u32("#redistributor-regions", declared);
     }
     if let Some(stride) = stride {
-        b.prop("redistributor-stride", &stride.to_be_bytes());
+        b.prop("redistributor-stride", stride);
     }
     let mut reg = std::vec![0x0800_0000, 0x1_0000];
     for &(base, len) in regions {
@@ -658,12 +658,64 @@ fn a_gicv2_s_windows_are_its_distributor_and_cpu_interface() {
 #[test]
 fn redistributor_regions_follow_the_count_the_tree_names_and_its_stride() {
     let two = [QEMU_REDISTRIBUTORS, (0x40_0000_0000, 0x400_0000)];
-    let blob = gicv3_tree(Some(2), &two, Some(0x4_0000));
+    let blob = gicv3_tree(Some(2), &two, Some(&0x4_0000u64.to_be_bytes()));
     let fdt = Fdt::new(&blob).expect("valid fdt");
     let mut regions = std::vec::Vec::new();
     let stride = redistributor_regions(&fdt, |r| regions.push((r.base, r.len)));
-    assert_eq!(stride, Some(Some(0x4_0000)));
+    assert_eq!(
+        stride.flatten().map(RedistributorStride::bytes),
+        Some(0x4_0000)
+    );
     assert_eq!(regions, two);
+}
+
+#[test]
+fn a_stride_no_redistributor_layout_has_refuses_the_whole_description() {
+    let zero = 0u64.to_be_bytes();
+    let one_frame = 0x1_0000u64.to_be_bytes();
+    let part_frame = 0x2_8000u64.to_be_bytes();
+    let one_cell = 0x4_0000u32.to_be_bytes();
+    let three_cells = [0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0];
+    for stride in [&zero[..], &one_frame, &part_frame, &one_cell, &three_cells] {
+        let blob = gicv3_tree(Some(1), &[QEMU_REDISTRIBUTORS], Some(stride));
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut regions = 0;
+        assert_eq!(
+            redistributor_regions(&fdt, |_| regions += 1),
+            None,
+            "{stride:x?}"
+        );
+        assert_eq!(regions, 0, "{stride:x?}");
+    }
+}
+
+#[test]
+fn a_region_that_does_not_translate_hands_over_none_of_its_siblings() {
+    let mut b = tairix_fdt::write::FdtWriter::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+    b.begin_node("soc");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+    // The bus reaches the low 4 GiB alone, so only the first region translates.
+    b.prop("ranges", &cells(&[0, 0, 0x1_0000_0000]));
+    b.begin_node("intc@8000000");
+    b.prop_str("compatible", "arm,gic-v3");
+    b.prop_u32("#redistributor-regions", 2);
+    let (base, len) = QEMU_REDISTRIBUTORS;
+    b.prop(
+        "reg",
+        &cells(&[0x0800_0000, 0x1_0000, base, len, 0x40_0000_0000, 0x400_0000]),
+    );
+    b.end_node();
+    b.end_node();
+    b.end_node();
+    let blob = b.build();
+    let fdt = Fdt::new(&blob).expect("valid fdt");
+    let mut regions = 0;
+    assert_eq!(redistributor_regions(&fdt, |_| regions += 1), None);
+    assert_eq!(regions, 0);
 }
 
 #[test]
@@ -778,8 +830,14 @@ fn a_gicv3_topology_carries_its_redistributor_regions_and_stride() {
         base: 0x080A_0000,
         len: 0xF6_0000,
     }];
-    let topology = GicTopology::new(&CPUS).with_redistributors(&REGIONS, Some(0x4_0000));
+    let topology =
+        GicTopology::new(&CPUS).with_redistributors(&REGIONS, RedistributorStride::new(0x4_0000));
     assert_eq!(topology.redistributors, &REGIONS);
-    assert_eq!(topology.redistributor_stride, Some(0x4_0000));
+    assert_eq!(
+        topology
+            .redistributor_stride
+            .map(RedistributorStride::bytes),
+        Some(0x4_0000)
+    );
     assert_eq!(topology.cpus.len(), 1);
 }

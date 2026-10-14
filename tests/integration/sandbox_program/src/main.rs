@@ -98,6 +98,30 @@ mod program {
     /// Registry path whose worker never answers and never exits: the
     /// stand-in for a decoder a hostile file drives round a loop.
     const HANG_PATH: &[u8] = b"/bin/sbx-hang";
+    /// Registry path whose worker maps as many bytes as a request names:
+    /// the stand-in for a decoder a hostile file makes allocate without
+    /// bound.
+    const HOG_PATH: &[u8] = b"/bin/sbx-hog";
+
+    /// The hog worker's service: fill a buffer of the little-endian length
+    /// a request names and answer its last byte. The allocation is
+    /// deliberately infallible, so one past the worker's ceiling ends it
+    /// through the out-of-memory exit a runaway decoder would take.
+    struct HogService;
+
+    impl Service for HogService {
+        fn handle(&mut self, request: &[u8]) -> Vec<u8> {
+            let len = request
+                .first_chunk::<8>()
+                .map_or(0, |bytes| u64::from_le_bytes(*bytes));
+            let held = vec![HOG_FILL; usize::try_from(len).unwrap_or(usize::MAX)];
+            vec![held.last().copied().unwrap_or(0)]
+        }
+    }
+
+    /// The byte the hog fills its buffer with, so its answer proves the
+    /// whole buffer was mapped.
+    const HOG_FILL: u8 = 0xA5;
     /// How long the hung worker is given before it is ended.
     const HANG_DEADLINE_NS: u64 = 2_000_000_000;
     /// The frame the stream worker dies on.
@@ -257,13 +281,14 @@ mod program {
     fn session_leg() -> i32 {
         // A session has no launcher of its own, so its owner logs a failed
         // transport construction through the seam's one emitter of that id.
-        let transport = match RtSessionChannel::launch(SESSION_PATH) {
-            Ok(transport) => transport,
-            Err(errno) => {
-                log_unavailable(&CountingSink::default(), errno);
-                return 40;
-            }
-        };
+        let transport =
+            match RtSessionChannel::launch(SESSION_PATH, tairix_sandbox::WorkerMemory::Messages) {
+                Ok(transport) => transport,
+                Err(errno) => {
+                    log_unavailable(&CountingSink::default(), errno);
+                    return 40;
+                }
+            };
         let Ok(bounds) = SessionBounds::new(SESSION_QUEUE, SESSION_QUEUE) else {
             return 41;
         };
@@ -421,7 +446,11 @@ mod program {
             return 60;
         };
         let sink = CountingSink::default();
-        let mut session = Stream::new(RtSessionLauncher::new(STREAM_PATH), bounds, sink.clone());
+        let mut session = Stream::new(
+            RtSessionLauncher::new(STREAM_PATH, tairix_sandbox::WorkerMemory::Messages),
+            bounds,
+            sink.clone(),
+        );
         let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
             return 61;
         };
@@ -482,7 +511,10 @@ mod program {
     /// The parent role: every check distinct, fail-closed, in seam order.
     fn parent() -> i32 {
         // A healthy sandboxed decode worker spawned from this binary.
-        let mut good = ParserSandbox::new(RtLauncher::new(SBX_PATH), CountingSink::default());
+        let mut good = ParserSandbox::new(
+            RtLauncher::new(SBX_PATH, tairix_sandbox::WorkerMemory::Messages),
+            CountingSink::default(),
+        );
 
         // 1. A valid container decodes through the real sandbox path.
         match container_summary(&mut good, WASM_FIXTURE) {
@@ -524,7 +556,10 @@ mod program {
         //    process that exits without serving. The request must fail
         //    typed, the crash must be logged, and this caller must survive.
         let sink = CountingSink::default();
-        let mut dying = ParserSandbox::new(RtLauncher::new(DIE_PATH), sink.clone());
+        let mut dying = ParserSandbox::new(
+            RtLauncher::new(DIE_PATH, tairix_sandbox::WorkerMemory::Messages),
+            sink.clone(),
+        );
         match dying.request(b"anything") {
             Err(SandboxError::WorkerFailed(_)) => {}
             Ok(_) => return 20,
@@ -541,7 +576,10 @@ mod program {
         }
 
         // 5. The syscall wall, probed from inside a live sandbox.
-        let mut probe = ParserSandbox::new(RtLauncher::new(PROBE_PATH), CountingSink::default());
+        let mut probe = ParserSandbox::new(
+            RtLauncher::new(PROBE_PATH, tairix_sandbox::WorkerMemory::Messages),
+            CountingSink::default(),
+        );
         match probe.request(b"go") {
             Ok(reply) => {
                 if reply.as_slice() != [1u8, 1] {
@@ -569,13 +607,42 @@ mod program {
         //    deadline passes, rather than never, and the worker — which
         //    ignores the end of its input — is killed and reaped, as is its
         //    replacement when the seam is let go.
-        hang_leg()
+        let hang = hang_leg();
+        if hang != 0 {
+            return hang;
+        }
+
+        // 9. A worker held to its memory ceiling: within it the worker
+        //    answers, past it the worker ends out of memory and the caller
+        //    survives.
+        let sink = CountingSink::default();
+        let mut hog = ParserSandbox::new(
+            RtLauncher::new(HOG_PATH, tairix_sandbox::WorkerMemory::Messages),
+            sink.clone(),
+        );
+        let within = (1u64 << 20).to_le_bytes();
+        match hog.request(&within) {
+            Ok(reply) if reply.as_slice() == [HOG_FILL] => {}
+            Ok(_) => return 90,
+            Err(_) => return 91,
+        }
+        let past = (2 * tairix_sandbox::memory::MESSAGE_WORKER_BYTES).to_le_bytes();
+        match hog.request(&past) {
+            Err(SandboxError::WorkerFailed(WorkerEnd::OutOfMemory)) => {}
+            Ok(_) => return 92,
+            Err(_) => return 93,
+        }
+        if sink.crashes() == 0 {
+            return 94;
+        }
+        0
     }
 
     /// Leg 8 of [`parent`].
     fn hang_leg() -> i32 {
         let sink = CountingSink::default();
-        let launcher = RtLauncher::new(HANG_PATH).answering_within(HANG_DEADLINE_NS);
+        let launcher = RtLauncher::new(HANG_PATH, tairix_sandbox::WorkerMemory::Messages)
+            .answering_within(HANG_DEADLINE_NS);
         let mut hung = ParserSandbox::new(launcher, sink.clone());
         let asked = tairix_rt::clock_get();
         match hung.request(b"anything") {
@@ -609,6 +676,7 @@ mod program {
                 Some(path) if path == DIE_PATH => DIE_EXIT,
                 Some(path) if path == HANG_PATH => run_hang_worker(),
                 Some(path) if path == PROBE_PATH => run_worker(&mut ProbeService),
+                Some(path) if path == HOG_PATH => run_worker(&mut HogService),
                 _ => run_worker(&mut DecodeService),
             };
         }

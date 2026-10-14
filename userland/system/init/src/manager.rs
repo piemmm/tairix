@@ -855,9 +855,10 @@ impl<'a> Init<'a> {
     /// * if the service is already ready, adds the client to the sink and
     ///   returns [`ActivationOutcome::Connected`] so the caller hands back
     ///   the endpoint immediately;
-    /// * if the service is down (and every readiness condition it requires
-    ///   is satisfied), starts it as its own service account, parks the
-    ///   client, and returns [`ActivationOutcome::Queued`];
+    /// * if the service is on demand, down and not disabled (and every
+    ///   readiness condition it requires is satisfied), starts it as its own
+    ///   service account, parks the client, and returns
+    ///   [`ActivationOutcome::Queued`];
     /// * if the service is already starting, parks the client behind the
     ///   others and returns [`ActivationOutcome::Queued`].
     ///
@@ -873,8 +874,10 @@ impl<'a> Init<'a> {
     /// * [`ActivateError::Denied`] — the client does not hold the endpoint's
     ///   required capability. Refused before the service is touched.
     /// * [`ActivateError::Unavailable`] — a required readiness condition is
-    ///   unsatisfied (for example a GUI service on a headless system), or the
-    ///   service is mid-teardown or terminally failed.
+    ///   unsatisfied (for example a GUI service on a headless system), the
+    ///   service is mid-teardown or terminally failed, or it is down and not
+    ///   one a connect starts: not on demand, or disabled by its
+    ///   administrator.
     /// * [`ActivateError::QueueFull`] — the service's bounded pending-connection
     ///   queue is full.
     /// * [`ActivateError::NotActivatable`] — the service could not be
@@ -920,7 +923,24 @@ impl<'a> Init<'a> {
                 Ok(ActivationOutcome::Connected)
             }
             ServiceState::Starting => self.park_client(idx, client),
-            ServiceState::Inactive | ServiceState::Stopped => self.activate(idx, client),
+            ServiceState::Inactive | ServiceState::Stopped => {
+                // The client is not to blame for a service a connect may not
+                // start, so neither refusal is a denial of its authority.
+                let refusal = if self.services[idx].enrolled
+                    && self.enrolment_of(name) == ServiceEnrolment::Disabled
+                {
+                    Some("service disabled")
+                } else if !self.services[idx].spec.activation().is_on_demand() {
+                    Some("not started on demand")
+                } else {
+                    None
+                };
+                if let Some(reason) = refusal {
+                    self.audit(events::ACTIVATION_DENIED, Level::Warn, name, reason);
+                    return Err(ActivateError::Unavailable);
+                }
+                self.activate(idx, client)
+            }
             ServiceState::Stopping | ServiceState::Failed => {
                 self.audit(
                     events::ACTIVATION_DENIED,
@@ -4168,6 +4188,87 @@ mod tests {
             .unwrap();
         assert_eq!(out, ActivationOutcome::Connected);
         assert_eq!(init.state_of("secure"), Some(ServiceState::Running));
+    }
+
+    /// A connect never starts a service that is not started on demand: one
+    /// stopped by its administrator stays stopped.
+    #[test]
+    fn connect_never_restarts_a_stopped_service_that_is_not_on_demand() {
+        let spawner = MockSpawner::new();
+        let reaper = ScriptedReaper::new(&[]);
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(spec("netstack", &[])).unwrap();
+        init.start_all().unwrap();
+        let pid = init.running_pid("netstack").unwrap();
+        init.stop("netstack", Duration64::from_secs(1)).unwrap();
+        reaper.push(ReapedChild { pid, exit_code: 0 });
+        init.reap(Duration64::from_secs(2));
+        assert_eq!(init.state_of("netstack"), Some(ServiceState::Stopped));
+        let launched = spawner.launched.borrow().len();
+
+        assert_eq!(
+            init.connect("netstack", &CapabilitySet::empty(), client(1)),
+            Err(ActivateError::Unavailable)
+        );
+        assert_eq!(init.state_of("netstack"), Some(ServiceState::Stopped));
+        assert_eq!(spawner.launched.borrow().len(), launched, "nothing spawned");
+        assert_eq!(sink.count(events::ACTIVATION_DENIED), 1);
+    }
+
+    /// A connect never brings up a service awaiting admission early; it comes
+    /// up by itself once its dependency is ready.
+    #[test]
+    fn connect_leaves_a_service_awaiting_admission_to_come_up_by_itself() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register(notify_spec("a", &[])).unwrap();
+        init.register(spec("b", &["a"])).unwrap();
+        init.start_all().unwrap();
+        assert_eq!(init.state_of("b"), Some(ServiceState::Inactive));
+
+        assert_eq!(
+            init.connect("b", &CapabilitySet::empty(), client(1)),
+            Err(ActivateError::Unavailable)
+        );
+        assert_eq!(init.running_pid("b"), None);
+        init.notify("a", LifecycleSignal::Ready).unwrap();
+        assert_eq!(init.state_of("b"), Some(ServiceState::Running));
+    }
+
+    /// A connect never starts an on-demand service its administrator
+    /// disabled.
+    #[test]
+    fn connect_never_starts_a_disabled_on_demand_service() {
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register_enrolled(
+            alloc::vec![on_demand_spec("fontd", 30)],
+            Enrolment::of(["fontd"]).expect("valid names"),
+            Some(EnrolmentOverride::empty()),
+        )
+        .unwrap();
+        init.start_all().unwrap();
+        let store = OverrideStore::default();
+        init.enrol_control(
+            disable_req("fontd"),
+            Duration64::from_secs(1),
+            store.persist(),
+        )
+        .unwrap();
+        assert_eq!(init.enrolment_of("fontd"), ServiceEnrolment::Disabled);
+
+        assert_eq!(
+            init.connect("fontd", &CapabilitySet::empty(), client(1)),
+            Err(ActivateError::Unavailable)
+        );
+        assert!(spawner.launched.borrow().is_empty(), "nothing spawned");
+        assert_eq!(sink.count(events::SERVICE_ACTIVATED), 0);
     }
 
     #[test]

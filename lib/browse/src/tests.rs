@@ -2922,7 +2922,8 @@ impl CountingReader {
     /// Ship `bytes` as the raster master for `kind`, at the one shared asset
     /// path the desktop resolves that kind to.
     fn shipping(mut self, kind: IconKind, bytes: Vec<u8>) -> Self {
-        self.assets.insert(icon_artwork_path(kind), bytes);
+        self.assets
+            .insert(icon_artwork_path(kind).expect("room for a path"), bytes);
         self
     }
 
@@ -3040,7 +3041,12 @@ fn content_kinds(asked: &[(IconKind, u32)]) -> Vec<IconKind> {
 fn content_reads(read: &[String]) -> Vec<String> {
     let chrome: Vec<String> = CHROME_KINDS
         .iter()
-        .flat_map(|&kind| [icon_artwork_path(kind), icon_vector_path(kind)])
+        .flat_map(|&kind| {
+            [
+                icon_artwork_path(kind).expect("room for a path"),
+                icon_vector_path(kind).expect("room for a path"),
+            ]
+        })
         .collect();
     read.iter()
         .filter(|path| !chrome.contains(path))
@@ -3213,7 +3219,7 @@ fn a_bundle_tile_draws_the_icon_the_bundle_itself_carries() {
         !reader
             .read
             .iter()
-            .any(|p| *p == icon_artwork_path(IconKind::AppBundle)),
+            .any(|p| *p == icon_artwork_path(IconKind::AppBundle).expect("room for a path")),
         "the class artwork is not consulted when the bundle has its own: {:?}",
         reader.read
     );
@@ -3245,7 +3251,7 @@ fn a_bundle_with_no_icon_of_its_own_falls_back_to_the_class_artwork_then_the_gly
     assert!(reader
         .read
         .iter()
-        .any(|p| *p == icon_artwork_path(IconKind::AppBundle)));
+        .any(|p| *p == icon_artwork_path(IconKind::AppBundle).expect("room for a path")));
 
     // Neither a manifest nor class artwork: the tile is the built-in glyph,
     // never a blank tile — and no byte ever reaches a decoder.
@@ -3309,7 +3315,7 @@ fn a_hundred_tiles_of_one_kind_are_read_and_decoded_exactly_once() {
     // toolbar above the grid resolves its own icons through the same cache, so
     // the count is asserted for the *tiles'* asset rather than over the whole
     // window.
-    let tile_asset = icon_artwork_path(IconKind::File);
+    let tile_asset = icon_artwork_path(IconKind::File).expect("room for a path");
     assert_eq!(
         reader
             .read
@@ -3340,8 +3346,8 @@ fn a_hundred_tiles_of_one_kind_are_read_and_decoded_exactly_once() {
 fn scrolling_to_new_entries_decodes_only_the_newly_visible_kinds() {
     let mut browser = two_kind_grid(40, 40);
     let vp = Rect::new(0, 0, 400, 400);
-    let png = icon_artwork_path(IconKind::ImagePng);
-    let text = icon_artwork_path(IconKind::Text);
+    let png = icon_artwork_path(IconKind::ImagePng).expect("room for a path");
+    let text = icon_artwork_path(IconKind::Text).expect("room for a path");
 
     let mut cache = test_artwork_cache();
     let mut reader = CountingReader::new()

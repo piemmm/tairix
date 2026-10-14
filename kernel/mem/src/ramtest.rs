@@ -27,11 +27,12 @@
 //!
 //! Reads and writes go through the *cacheable* direct map, so a naive
 //! write-then-read would be served from the CPU cache and never reach the
-//! DRAM cell under test. Before reading a cell back the engine flushes just
-//! that cell's cache line ([`WordWindow::flush_word`], backed by
-//! [`PhysMap::clean_invalidate`]), which writes the dirty line back to DRAM
-//! and drops the cached copy, so the read observes the value the DRAM
-//! actually holds. On an I/O-coherent host or simulator the flush is a
+//! DRAM cell under test. Before reading cells back the engine flushes just
+//! their cache lines ([`WordWindow::flush_words`], backed by
+//! [`PhysMap::clean_invalidate_each`]), which writes the dirty lines back to
+//! DRAM and drops the cached copies, so each read observes the value the DRAM
+//! actually holds. Cells are flushed a batch at a time under one barrier, so
+//! their DRAM round trips overlap instead of serialising one per page. On an I/O-coherent host or simulator the flush is a
 //! documented no-op and the model is identical.
 //!
 //! # The algorithm
@@ -132,6 +133,15 @@ pub trait WordWindow {
     /// never read, which is the `O(all bytes)` cost this sampling test
     /// exists to avoid.
     fn flush_word(&self, i: usize);
+
+    /// [`flush_word`](Self::flush_word) each of `indices`, every flush
+    /// complete before this returns: a window whose flush ends in a barrier
+    /// pays one for the set, so the cells' DRAM round trips overlap.
+    fn flush_words(&self, indices: &[usize]) {
+        for &i in indices {
+            self.flush_word(i);
+        }
+    }
 }
 
 /// Test pattern: alternating `1010…` bits.
@@ -168,32 +178,29 @@ fn address_pass<W: WordWindow>(w: &W, base: PhysAddr) -> Result<(), RamFault> {
         // proves that lone cell.
         return Ok(());
     }
-    // Stamp offset 0 and each power-of-two offset with its marker, flushing
-    // each so the later read-back reaches DRAM rather than a cached copy.
-    w.write(0, address_marker(0));
-    w.flush_word(0);
+    let mut offsets = [0; usize::BITS as usize + 1];
+    let mut count = 1;
     let mut off = 1;
     while off < n {
-        w.write(off, address_marker(off));
-        w.flush_word(off);
+        offsets[count] = off;
+        count += 1;
         off <<= 1;
     }
-    // Read every marker back; an aliasing address line shows up as a marker
-    // that landed on, or was overwritten at, the wrong offset.
-    check(w, base, 0, address_marker(0))?;
-    let mut off = 1;
-    while off < n {
+    let offsets = &offsets[..count];
+    for &off in offsets {
+        w.write(off, address_marker(off));
+    }
+    // The flushes write the markers back in ascending order, as one flush per
+    // stamp did, so an aliasing line leaves the same marker in DRAM.
+    w.flush_words(offsets);
+    for &off in offsets {
         check(w, base, off, address_marker(off))?;
-        off <<= 1;
     }
     // Restore the handful of cells this pass wrote back to zero (no flush
     // needed — nothing reads them again, and the allocator's consumers zero
     // their own frames), so the pass leaves no marker behind in RAM.
-    w.write(0, 0);
-    let mut off = 1;
-    while off < n {
+    for &off in offsets {
         w.write(off, 0);
-        off <<= 1;
     }
     Ok(())
 }
@@ -222,6 +229,11 @@ const DEVICE_SAMPLE_INTERVAL_BYTES: usize = 4 * 1024;
 /// is `memtest86`'s job, not the boot path's.
 const DEVICE_SAMPLE_STRIDE_WORDS: usize = DEVICE_SAMPLE_INTERVAL_BYTES / WORD_BYTES;
 
+/// Sampled cells driven through each pattern under one flush. A flush ends in
+/// a barrier that waits out every write-back before it, so a cell per barrier
+/// serialises a DRAM round trip per page; a batch overlaps them.
+const SAMPLE_BATCH: usize = 64;
+
 /// Prove a sampled word of every page holds both a `1` and a `0` — the fast,
 /// sampling device test.
 ///
@@ -242,26 +254,38 @@ const DEVICE_SAMPLE_STRIDE_WORDS: usize = DEVICE_SAMPLE_INTERVAL_BYTES / WORD_BY
 /// whole-region scrub.
 fn device_pass<W: WordWindow>(w: &W, base: PhysAddr) -> Result<(), RamFault> {
     let n = w.words();
-    let mut i = 0;
-    while i < n {
-        prove_cell(w, base, i)?;
-        i += DEVICE_SAMPLE_STRIDE_WORDS;
+    let mut batch = [0; SAMPLE_BATCH];
+    let mut next = 0;
+    while next < n {
+        let mut len = 0;
+        while len < SAMPLE_BATCH && next < n {
+            batch[len] = next;
+            len += 1;
+            next += DEVICE_SAMPLE_STRIDE_WORDS;
+        }
+        prove_cells(w, base, &batch[..len])?;
     }
     Ok(())
 }
 
-/// Drive word `i` to each bit polarity in turn, reading it back through a
-/// flush so the read observes DRAM and not the cache, then set it back to
-/// zero. Fails closed naming the cell on the first mismatch.
-fn prove_cell<W: WordWindow>(w: &W, base: PhysAddr, i: usize) -> Result<(), RamFault> {
+/// Drive each of `cells` to each bit polarity in turn, reading them back
+/// through a flush so every read observes DRAM and not the cache, then set
+/// them back to zero. Fails closed naming the first cell that mismatches.
+fn prove_cells<W: WordWindow>(w: &W, base: PhysAddr, cells: &[usize]) -> Result<(), RamFault> {
     for pattern in [PATTERN, ANTIPATTERN] {
-        w.write(i, pattern);
-        w.flush_word(i);
-        check(w, base, i, pattern)?;
+        for &i in cells {
+            w.write(i, pattern);
+        }
+        w.flush_words(cells);
+        for &i in cells {
+            check(w, base, i, pattern)?;
+        }
     }
-    // Leave the sampled cell zeroed; no flush — nothing reads it again in
+    // Leave the sampled cells zeroed; no flush — nothing reads them again in
     // this test and each consumer zeroes its own frames before use.
-    w.write(i, 0);
+    for &i in cells {
+        w.write(i, 0);
+    }
     Ok(())
 }
 
@@ -326,6 +350,11 @@ impl<'a, M: PhysMap + ?Sized> PhysWindow<'a, M> {
         })
     }
 
+    /// The physical address of word `i`.
+    fn phys_of(&self, i: usize) -> PhysAddr {
+        PhysAddr::new(self.base.as_u64() + (i as u64) * WORD_BYTES as u64)
+    }
+
     /// CPU pointer to word `i`, or [`None`] if `i` is out of range.
     ///
     /// Routes the offset through the crate's bounds-checked pointer helper,
@@ -373,8 +402,18 @@ impl<M: PhysMap + ?Sized> WordWindow for PhysWindow<'_, M> {
     }
 
     fn flush_word(&self, i: usize) {
-        let phys = PhysAddr::new(self.base.as_u64() + (i as u64) * WORD_BYTES as u64);
-        self.physmap.clean_invalidate(phys, WORD_BYTES);
+        self.physmap.clean_invalidate(self.phys_of(i), WORD_BYTES);
+    }
+
+    fn flush_words(&self, indices: &[usize]) {
+        let mut starts = [PhysAddr::new(0); SAMPLE_BATCH];
+        for chunk in indices.chunks(SAMPLE_BATCH) {
+            for (start, &i) in starts.iter_mut().zip(chunk) {
+                *start = self.phys_of(i);
+            }
+            self.physmap
+                .clean_invalidate_each(&starts[..chunk.len()], WORD_BYTES);
+        }
     }
 }
 
@@ -1025,6 +1064,8 @@ mod tests {
         cells: Vec<Cell<Word>>,
         fault: Fault,
         flushes: Cell<usize>,
+        /// Batched flushes: each is one barrier on a port that pays one.
+        batches: Cell<usize>,
     }
 
     impl FakeRam {
@@ -1037,6 +1078,7 @@ mod tests {
                 cells,
                 fault,
                 flushes: Cell::new(0),
+                batches: Cell::new(0),
             }
         }
 
@@ -1071,11 +1113,48 @@ mod tests {
         fn flush_word(&self, _i: usize) {
             self.flushes.set(self.flushes.get() + 1);
         }
+
+        fn flush_words(&self, indices: &[usize]) {
+            self.batches.set(self.batches.get() + 1);
+            for &i in indices {
+                self.flush_word(i);
+            }
+        }
     }
 
     /// One word sampled per this many by the device pass, mirrored in the
     /// tests so a fault can be placed on (or deliberately between) samples.
     const STRIDE: usize = DEVICE_SAMPLE_STRIDE_WORDS;
+
+    /// The boot test's cost is its barriers, so a window pays a fixed few per
+    /// batch of samples rather than one per sampled page, while every sample
+    /// is still flushed before it is read.
+    #[test]
+    fn a_window_flushes_its_samples_a_batch_per_barrier() {
+        let samples = 2 * SAMPLE_BATCH + 2;
+        let ram = FakeRam::new(samples * STRIDE, Fault::None);
+        assert_eq!(test_window(&ram, PhysAddr::new(0x4000)), Ok(()));
+        let markers = (samples * STRIDE).ilog2() as usize + 2;
+        assert_eq!(
+            ram.batches.get(),
+            1 + 2 * 3,
+            "one marker batch, three per pattern"
+        );
+        assert_eq!(ram.flushes.get(), markers + 2 * samples);
+    }
+
+    /// A stuck cell in a later batch is named exactly as one in the first.
+    #[test]
+    fn a_stuck_cell_past_the_first_batch_is_named() {
+        let samples = 2 * SAMPLE_BATCH + 2;
+        let word = (SAMPLE_BATCH + 5) * STRIDE;
+        let ram = FakeRam::new(samples * STRIDE, Fault::StuckHigh { word, bit: 3 });
+        let fault = test_window(&ram, PhysAddr::new(0x4000)).expect_err("caught");
+        assert_eq!(
+            fault.phys,
+            PhysAddr::new(0x4000 + (word * WORD_BYTES) as u64)
+        );
+    }
 
     #[test]
     fn healthy_window_passes_and_is_left_zeroed() {

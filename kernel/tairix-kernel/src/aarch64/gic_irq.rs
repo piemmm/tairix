@@ -798,7 +798,7 @@ pub fn install_device_irq_dispatch(
     table: &'static IrqTable,
     cpus: u32,
     redistributors: &'static [tairix_arch_aarch64::gicv3::RedistributorRegion],
-    stride: Option<u64>,
+    stride: Option<tairix_arch_aarch64::gicv3::RedistributorStride>,
 ) -> Result<(), &'static str> {
     if IRQ_TABLE_SLOT.set(table).is_err() {
         tairix_arch_aarch64::halt_current_cpu();

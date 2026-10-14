@@ -804,7 +804,7 @@ pub fn build_boot_memory_map(dtb: u64) -> Result<BootMemoryMap, BootError> {
 /// that usable span. OpenSBI places the DTB high in RAM (well above the
 /// kernel image), so without this the blob sits in usable memory the frame
 /// allocator would eventually hand out and the early-boot RAM self-test
-/// (`tairix_kernel_mem::ramtest`) would zero, destroying the tree every later
+/// (`tairix_kernel_mem::ramtest`) would write into, destroying the tree every later
 /// consumer (device discovery, the QEMU scenarios) still reads. The blob is
 /// live for the life of the kernel, so it is reserved like the kernel image.
 fn memory_map_from_fdt(fdt: &Fdt<'_>, dtb_base: u64) -> Result<BootMemoryMap, BootError> {

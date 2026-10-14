@@ -488,7 +488,10 @@ mod program {
                 rtc: RtRtc,
                 store: RtRecordStore,
                 transport: RtTransport::new(&selection.servers, deliver.id()),
-                sandbox: ParserSandbox::new(RtLauncher::own_binary(), LOG_SINK),
+                sandbox: ParserSandbox::new(
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
+                    LOG_SINK,
+                ),
                 sink: LOG_SINK,
                 selection: selection.clone(),
                 refresh,

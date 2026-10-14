@@ -820,8 +820,15 @@ pub fn busy_delay_us(_us: u32) {}
 /// Post-MMU firmware/DMA exchanges use this before handing cacheable kernel
 /// RAM to a device-side reader/writer, then again before the CPU consumes the
 /// device's response. A zero-length range is a no-op.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub fn clean_invalidate_dcache_range(start: usize, len: usize) {
+    clean_invalidate_dcache_ranges(core::iter::once(start), len);
+}
+
+/// [`clean_invalidate_dcache_range`] over the `len` bytes at each of `starts`,
+/// completed by one barrier: the lines' write-backs overlap instead of each
+/// range waiting out its own.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn clean_invalidate_dcache_ranges(starts: impl IntoIterator<Item = usize>, len: usize) {
     if len == 0 {
         return;
     }
@@ -832,27 +839,29 @@ pub fn clean_invalidate_dcache_range(start: usize, len: usize) {
         core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack, preserves_flags));
     }
     let line = crate::paging::dcache_line_bytes(ctr);
-    let end = start.saturating_add(len);
-    let mut addr = start & !(line - 1);
-    while addr < end {
-        // SAFETY: `dc civac` performs cache maintenance for the line
-        // containing `addr`; it modifies no memory contents and the caller
-        // supplied a kernel-owned range.
-        unsafe {
-            core::arch::asm!("dc civac, {0}", in(reg) addr, options(nostack, preserves_flags));
+    for start in starts {
+        let end = start.saturating_add(len);
+        let mut addr = start & !(line - 1);
+        while addr < end {
+            // SAFETY: `dc civac` performs cache maintenance for the line
+            // containing `addr`; it modifies no memory contents and the
+            // caller supplied kernel-owned ranges.
+            unsafe {
+                core::arch::asm!("dc civac, {0}", in(reg) addr, options(nostack, preserves_flags));
+            }
+            addr += line;
         }
-        addr += line;
     }
     // SAFETY: barrier-only instruction completing the maintenance before the
-    // firmware/device observes or the CPU re-reads the range.
+    // firmware/device observes or the CPU re-reads the ranges.
     unsafe {
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));
     }
 }
 
-/// Host-test twin of [`clean_invalidate_dcache_range`].
+/// Host-test twin of [`clean_invalidate_dcache_ranges`].
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-pub fn clean_invalidate_dcache_range(_start: usize, _len: usize) {}
+pub fn clean_invalidate_dcache_ranges(_starts: impl IntoIterator<Item = usize>, _len: usize) {}
 
 /// Make freshly-written bytes in `[start, start + len)` visible to
 /// instruction fetch — the "ensure the visibility of updates to

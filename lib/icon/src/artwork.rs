@@ -43,7 +43,6 @@
 //! pixels without knowing anything about I/O, and [`NoArtwork`] is the
 //! all-glyph lookup a headless build or a test uses.
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
@@ -62,6 +61,7 @@ use tairix_reclaim::{
     working_set_ui_budget, working_set_ui_cache, CacheLedger, CachedBytes, PressureGauge,
     ReclaimCache, Served,
 };
+use tairix_util::fallible;
 
 use crate::badge::badge_picture;
 use crate::folder::{
@@ -115,16 +115,18 @@ const RASTER_SUFFIX: &str = ".png";
 /// to.
 const VECTOR_SUFFIX: &str = ".svg";
 
-/// The on-disk path of the vector asset for `kind` (`<ICONS_DIR>/<id>.svg`).
+/// The on-disk path of the vector asset for `kind` (`<ICONS_DIR>/<id>.svg`),
+/// or `None` when the heap refuses it, so a draw falls a tier.
 #[must_use]
-pub fn icon_vector_path(kind: IconKind) -> String {
-    format!("{ICONS_DIR}/{}{VECTOR_SUFFIX}", kind.asset_id())
+pub fn icon_vector_path(kind: IconKind) -> Option<String> {
+    fallible::concatenated(&[ICONS_DIR, "/", kind.asset_id(), VECTOR_SUFFIX])
 }
 
-/// The on-disk path of the raster artwork for `kind` (`<ICONS_DIR>/<id>.png`).
+/// The on-disk path of the raster artwork for `kind` (`<ICONS_DIR>/<id>.png`),
+/// or `None` when the heap refuses it, so a draw falls a tier.
 #[must_use]
-pub fn icon_artwork_path(kind: IconKind) -> String {
-    format!("{ICONS_DIR}/{}{RASTER_SUFFIX}", kind.asset_id())
+pub fn icon_artwork_path(kind: IconKind) -> Option<String> {
+    fallible::concatenated(&[ICONS_DIR, "/", kind.asset_id(), RASTER_SUFFIX])
 }
 
 /// Whether `name` is a legal shipped-artwork file name: a known
@@ -792,14 +794,14 @@ impl ArtView<'_> {
     /// machine falls a tier rather than aborting.
     fn to_key(self) -> Option<ArtworkKey> {
         Some(match self {
-            Self::Asset(path) => ArtworkKey::Asset(copied(path)?),
+            Self::Asset(path) => ArtworkKey::Asset(fallible::concatenated(&[path])?),
             Self::Raster(kind) => ArtworkKey::Raster(kind),
             Self::Vector(kind) => ArtworkKey::Vector(kind),
-            Self::Bundle(dir) => ArtworkKey::Bundle(copied(dir)?),
+            Self::Bundle(dir) => ArtworkKey::Bundle(fallible::concatenated(&[dir])?),
             Self::Program { name, home } => ArtworkKey::Program {
-                name: copied(name)?,
+                name: fallible::concatenated(&[name])?,
                 home: match home {
-                    Some(home) => Some(copied(home)?),
+                    Some(home) => Some(fallible::concatenated(&[home])?),
                     None => None,
                 },
             },
@@ -810,7 +812,7 @@ impl ArtView<'_> {
                 stamp,
                 reading,
             } => ArtworkKey::Thumbnail(Thumbnail {
-                path: copied(path)?,
+                path: fallible::concatenated(&[path])?,
                 stamp,
                 reading,
             }),
@@ -824,14 +826,6 @@ impl ArtView<'_> {
             _ => false,
         }
     }
-}
-
-/// `text` copied into a string of its own, or `None` when the heap refuses it.
-fn copied(text: &str) -> Option<String> {
-    let mut owned = String::new();
-    owned.try_reserve_exact(text.len()).ok()?;
-    owned.push_str(text);
-    Some(owned)
 }
 
 /// The cache slot a decode is retained in: the artwork, the pixel side, and
@@ -1400,17 +1394,17 @@ pub fn render_artwork<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
             let path = bundle_icon_path(reader, dir)?;
             render_icon(reader, rasteriser, &path, side).map(Artwork::new)
         }
-        ArtworkKey::Program { name, home } => program_bundles(name, home.as_deref())
-            .into_iter()
-            .find_map(|dir| bundle_icon_path(reader, &dir))
+        ArtworkKey::Program { name, home } => program_bundles(name, home.as_deref())?
+            .iter()
+            .find_map(|dir| bundle_icon_path(reader, dir))
             .and_then(|path| render_icon(reader, rasteriser, &path, side))
             .map(Artwork::new),
-        ArtworkKey::Raster(kind) => {
-            render_icon(reader, rasteriser, &icon_artwork_path(*kind), side).map(Artwork::new)
-        }
-        ArtworkKey::Vector(kind) => {
-            render_icon(reader, rasteriser, &icon_vector_path(*kind), side).map(Artwork::new)
-        }
+        ArtworkKey::Raster(kind) => icon_artwork_path(*kind)
+            .and_then(|path| render_icon(reader, rasteriser, &path, side))
+            .map(Artwork::new),
+        ArtworkKey::Vector(kind) => icon_vector_path(*kind)
+            .and_then(|path| render_icon(reader, rasteriser, &path, side))
+            .map(Artwork::new),
         // Built-in art is first-party and compiled into this binary, so the
         // cache rasterises it in place and no resolver is ever handed one.
         ArtworkKey::Builtin(kind) => builtin_picture(*kind, side).map(Artwork::new),
@@ -1439,8 +1433,11 @@ fn folder_picture<R: ArtworkReader + ?Sized, D: ArtworkRasteriser + ?Sized>(
         return None;
     }
     let part = |reader: &mut R, rasteriser: &mut D, kind: IconKind, side: u32| {
-        render_icon(reader, rasteriser, &icon_artwork_path(kind), side)
-            .or_else(|| render_icon(reader, rasteriser, &icon_vector_path(kind), side))
+        icon_artwork_path(kind)
+            .and_then(|path| render_icon(reader, rasteriser, &path, side))
+            .or_else(|| {
+                icon_vector_path(kind).and_then(|path| render_icon(reader, rasteriser, &path, side))
+            })
     };
     let back = part(reader, rasteriser, IconKind::FolderBack, side)?;
     let front = part(reader, rasteriser, IconKind::FolderFront, side)?;
@@ -1511,15 +1508,19 @@ const MASK_COLOR: Color = Color::rgba(255, 255, 255, 255);
 /// Not the command-search order (`lib/cmdres`): a running image can have come
 /// from the service store or `/Apps`, and never from a `PATH` entry. Only the
 /// asking session's home is searched, so no account chooses the picture
-/// another's task wears.
-fn program_bundles(name: &str, home: Option<&str>) -> Vec<String> {
+/// another's task wears. `None` when the heap refuses the paths, rather than a
+/// shorter list that would let a later store's bundle answer for an earlier's.
+fn program_bundles(name: &str, home: Option<&str>) -> Option<Vec<String>> {
     if name.is_empty() || name.contains('/') {
-        return Vec::new();
+        return Some(Vec::new());
     }
-    identity_roots(home)
-        .into_iter()
-        .map(|root| format!("{root}/{name}{BUNDLE_SUFFIX}"))
-        .collect()
+    let roots = identity_roots(home);
+    let mut bundles = Vec::new();
+    bundles.try_reserve_exact(roots.len()).ok()?;
+    for root in &roots {
+        bundles.push(fallible::concatenated(&[root, "/", name, BUNDLE_SUFFIX])?);
+    }
+    Some(bundles)
 }
 
 /// The path of the icon a bundle's own manifest names, or `None` when it names
@@ -1532,7 +1533,7 @@ fn bundle_icon_path<R: ArtworkReader + ?Sized>(reader: &mut R, dir: &str) -> Opt
     let header = decode_manifest(&reader.read(&manifest_path(dir))?)?;
     let asset = header.library_icon()?;
     tairix_path::validate_file_name(asset).ok()?;
-    Some(format!("{dir}/{}/{asset}", BundleEntry::Resources.as_str()))
+    fallible::concatenated(&[dir, "/", BundleEntry::Resources.as_str(), "/", asset])
 }
 
 /// Read, rasterise, and verify one asset (the cache-miss path).

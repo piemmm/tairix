@@ -103,7 +103,7 @@ mod kernel {
     /// `/memory` window rather than from one gigapage.
     static MAP_SIZED_FROM_RAM: AtomicBool = AtomicBool::new(false);
 
-    /// Set when the RAM self-test reported verifying every usable byte.
+    /// Set when the RAM self-test reported covering every usable byte.
     static RAM_FULLY_REACHED: AtomicBool = AtomicBool::new(false);
 
     /// Page-table pages the structural probe's root draws from. A `.bss`
@@ -123,7 +123,7 @@ mod kernel {
 
     /// A page-aligned frame the probe reads through the direct map. Never
     /// written: a read proves the translation, and the RAM self-test above
-    /// already writes and reads back every usable byte.
+    /// already writes and reads back a word of every usable page.
     #[repr(C, align(4096))]
     struct ProbeFrame {
         marker: [u8; 8],
@@ -209,7 +209,7 @@ mod kernel {
         // address physically is reachable through the map and reachable
         // *only* through it. The frame is the last page of the guest's RAM;
         // nothing owns it at this point in the boot (no allocator exists
-        // yet) and the RAM self-test overwrites every usable byte
+        // yet) and the RAM self-test writes into every usable page
         // afterwards regardless.
         let ram_top = RAM_BASE + (GUEST_RAM_MIB << 20);
         let high_phys = (ram_top - PAGE_BYTES) & !(PAGE_BYTES - 1);

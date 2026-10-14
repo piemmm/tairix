@@ -19,6 +19,10 @@ use crate::text::{is_word, last_unit, Decoder, Glyph};
 /// a scan reads past its range, not a capacity.
 pub const MAX_PATTERN: usize = 1024;
 
+/// The most characters the find and replace fields hold: a longest pattern's
+/// bytes spelled in hex, a separator after each pair.
+pub const MAX_PATTERN_SPELLING: usize = 3 * MAX_PATTERN;
+
 /// Most matches one Replace All takes in: a bound on the one edit it makes
 /// and the history it leaves. More are replaced by asking again.
 pub const MAX_REPLACEMENTS: usize = 10_000;
@@ -86,6 +90,9 @@ impl Pattern {
     ///
     /// [`PatternError::Empty`] or [`PatternError::TooLong`].
     pub fn text(needle: &str, options: Options) -> Result<Self, PatternError> {
+        if needle.len() > MAX_PATTERN {
+            return Err(PatternError::TooLong);
+        }
         let units = !options.match_case || options.whole_word;
         let keys: Vec<u32> = if units {
             needle
@@ -97,14 +104,7 @@ impl Pattern {
         };
         // A folded character may be stored in more bytes than its needle's.
         let span = if units { keys.len() * 4 } else { keys.len() };
-        Self::compile(
-            keys,
-            needle.len(),
-            units,
-            !options.match_case,
-            options.whole_word,
-            span,
-        )
+        Self::compile(keys, units, !options.match_case, options.whole_word, span)
     }
 
     /// A pattern for the bytes `digits` spells in hex: pairs of digits,
@@ -119,7 +119,6 @@ impl Pattern {
         let len = bytes.len();
         Self::compile(
             bytes.into_iter().map(u32::from).collect(),
-            len,
             false,
             false,
             false,
@@ -129,7 +128,6 @@ impl Pattern {
 
     fn compile(
         needle: Vec<u32>,
-        bytes: usize,
         units: bool,
         fold: bool,
         whole_word: bool,
@@ -137,9 +135,6 @@ impl Pattern {
     ) -> Result<Self, PatternError> {
         if needle.is_empty() {
             return Err(PatternError::Empty);
-        }
-        if bytes > MAX_PATTERN {
-            return Err(PatternError::TooLong);
         }
         let mut fail = alloc::vec![0; needle.len()];
         let mut k = 0;
@@ -185,7 +180,9 @@ impl Pattern {
 ///
 /// # Errors
 ///
-/// [`PatternError::NotHex`] for anything but pairs of hex digits.
+/// [`PatternError::NotHex`] for anything but pairs of hex digits, and
+/// [`PatternError::TooLong`] past [`MAX_PATTERN`] bytes, refused before they
+/// are held.
 pub fn parse_hex(digits: &str) -> Result<Vec<u8>, PatternError> {
     let mut bytes = Vec::new();
     let mut high: Option<u8> = None;
@@ -198,6 +195,7 @@ pub fn parse_hex(digits: &str) -> Result<Vec<u8>, PatternError> {
         }
         let value = crate::hex::digit_value(ch).ok_or(PatternError::NotHex)?;
         match high.take() {
+            Some(_) if bytes.len() == MAX_PATTERN => return Err(PatternError::TooLong),
             Some(first) => bytes.push((first << 4) | value),
             None => high = Some(value),
         }

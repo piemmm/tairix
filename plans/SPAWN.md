@@ -1384,8 +1384,8 @@ guarantees:
   a session's anchor dies the kernel kills (`Kill`, status 137) every member
   of it and of every session nested in it. The root session (PID 1, the
   kernel's drivers) never ends.
-- **The selector.** `SpawnAttach::session` (`SpawnSession`; attach block v3,
-  80 bytes): `Inherit`; `New`, a session anchored at the child inside the one
+- **The selector.** `SpawnAttach::session` (`SpawnSession`; attach block v4,
+  264 bytes, its last 184 the lowered limits): `Inherit`; `New`, a session anchored at the child inside the one
   anchored at the spawner; `Anchored`, the session anchored at the spawner;
   `Join(ProcId)`, a live instance's session within the spawner's own. The
   spawner's anchored session is founded on first use, so a spawner contains

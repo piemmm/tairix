@@ -399,9 +399,35 @@ fn a_named_stride_overrides_the_architecture_s_spacing() {
         len: 0x10_0000,
     }];
     assert_eq!(
-        gic.find_redistributor(&region, Some(0x8_0000), Affinity::of_mpidr(1)),
+        gic.find_redistributor(
+            &region,
+            RedistributorStride::new(0x8_0000),
+            Affinity::of_mpidr(1)
+        ),
         Some(RD0 + 0x8_0000)
     );
+    // A stride that would carry the walk past the address space ends it.
+    assert_eq!(
+        gic.find_redistributor(
+            &region,
+            RedistributorStride::new(u64::MAX - 0xFFFF),
+            Affinity::of_mpidr(1)
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_stride_is_whole_frames_and_never_less_than_one_redistributor() {
+    for bytes in [0x2_0000, 0x3_0000, 0x4_0000, 0x8_0000, u64::MAX - 0xFFFF] {
+        assert_eq!(
+            RedistributorStride::new(bytes).map(RedistributorStride::bytes),
+            Some(bytes)
+        );
+    }
+    for bytes in [0, 0x1_0000, 0x1_FFFF, 0x2_0001, 0x2_8000, u64::MAX] {
+        assert_eq!(RedistributorStride::new(bytes), None, "{bytes:#x}");
+    }
 }
 
 #[test]

@@ -91,8 +91,8 @@ fn align_up(value: u64, align: u64) -> Option<u64> {
 /// wherever it likes, and on both the aarch64 `virt`/Pi and riscv64 `virt`
 /// boards that landing spot is inside the RAM window the map otherwise marks
 /// usable. Left usable, the blob is fair game for the frame allocator *and*
-/// is overwritten by the early-boot RAM self-test that zeroes every usable
-/// byte (`tairix_kernel_mem::ramtest`) — destroying the tree every later
+/// is overwritten by the early-boot RAM self-test that writes a word of every
+/// usable page (`tairix_kernel_mem::ramtest`) — destroying the tree every later
 /// consumer (device discovery, root-storage bind, the QEMU scenarios) still
 /// reads. Reserving its frames keeps the blob live for the life of the
 /// kernel, exactly as the kernel image is reserved.

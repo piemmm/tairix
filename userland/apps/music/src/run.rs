@@ -431,7 +431,10 @@ mod program {
                 side,
             } => {
                 let renderer = shop.renderer.get_or_insert_with(|| {
-                    ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink)
+                    ParserSandbox::new(
+                        RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                        tairix_rt::LogSink,
+                    )
                 });
                 Answer::Art {
                     entry: *entry,
@@ -501,7 +504,7 @@ mod program {
             let set = u64::try_from(tairix_rt::waitset_create()).ok()?;
             Some(Self {
                 session: SupervisedSession::new(
-                    RtSessionLauncher::own_binary(),
+                    RtSessionLauncher::own_binary(tairix_sandbox::WorkerMemory::Messages),
                     bounds,
                     tairix_rt::LogSink,
                 ),

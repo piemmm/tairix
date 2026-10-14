@@ -10,6 +10,8 @@ use tairix_collections::LruMap;
 use tairix_hash::BuildFastHash;
 use tairix_inline::ArrayVec;
 
+use crate::source::LiveInstances;
+
 /// Walks one caller may have part way through at once; its oldest is let go
 /// for another, so one process cannot take every other's.
 pub const WALKS_PER_CALLER: usize = 4;
@@ -152,6 +154,28 @@ impl Walks {
             Some(list) => Walked::Held(list),
             None => Walked::Unheld,
         })
+    }
+
+    /// Let go of every walk of a caller the census `live` does not count: one
+    /// that exited never ends its walks, and an instance id is never reused,
+    /// so nothing else would. `asking` is alive, so the census is taken only
+    /// when another caller holds a walk; one that fails lets go of nothing.
+    pub fn retain_live(&mut self, asking: ProcId, live: impl FnOnce() -> Option<LiveInstances>) {
+        if self.callers.len() <= usize::from(self.callers.contains_key(&asking)) {
+            return;
+        }
+        let Some(live) = live() else {
+            return;
+        };
+        let mut released = 0;
+        self.callers.retain(|caller, own| {
+            let alive = live.contains(*caller);
+            if !alive {
+                released += own.iter().map(Held::charge).sum::<usize>();
+            }
+            alive
+        });
+        self.charged -= released;
     }
 
     /// End `key`'s walk, letting go of its list.

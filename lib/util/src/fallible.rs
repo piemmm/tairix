@@ -12,6 +12,7 @@
 //! buffer reserves exactly what it needs, and a scratch that is grown across
 //! uses reserves amortised so repeated growth is not quadratic.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// `count` copies of `value`, or `None` when the allocator refuses room for
@@ -48,6 +49,21 @@ pub fn grow_to<T: Clone>(scratch: &mut Vec<T>, count: usize, value: T) -> bool {
     }
     scratch.resize(count, value);
     true
+}
+
+/// `parts` joined end to end in a string of exactly their length, or `None`
+/// when the allocator refuses it.
+#[must_use]
+pub fn concatenated(parts: &[&str]) -> Option<String> {
+    let len = parts
+        .iter()
+        .try_fold(0usize, |len, part| len.checked_add(part.len()))?;
+    let mut joined = String::new();
+    joined.try_reserve_exact(len).ok()?;
+    for part in parts {
+        joined.push_str(part);
+    }
+    Some(joined)
 }
 
 /// Room in `buffer` for `count` more items, reporting whether the allocator

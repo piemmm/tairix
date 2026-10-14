@@ -2777,7 +2777,8 @@ fn generate_syscall() -> String {
     use std::fmt::Write as _;
     let mut out = banner("Syscall numbers and C entry-point prototypes (AGENTS.md sec.9).");
     out.push_str("#ifndef TAIRIX_SYSCALL_H\n#define TAIRIX_SYSCALL_H\n\n");
-    out.push_str("#include <stdint.h>\n\n");
+    out.push_str("#include <stdint.h>\n");
+    out.push_str("#include \"tairix_rlimit.h\"\n\n");
     out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
 
     out.push_str("/* Syscall numbers (AGENTS.md sec.9). */\n");
@@ -3636,6 +3637,15 @@ fn emit_spawn_attach_contract(out: &mut String) {
         let _ = writeln!(out, "#define TAIRIX_SPAWN_SESSION_{name} {value}u");
     }
     out.push_str(
+        "/* Lowered limits: bit k of limits_mask lowers the child's limit of\n\
+         * TAIRIX_LIMIT_KIND k to limits[k], intersected with what it inherits, so a\n\
+         * spawn can narrow its child but never widen it. A bit at or past\n\
+         * TAIRIX_LIMIT_KIND_COUNT, a non-zero limits_reserved, a byte under a clear\n\
+         * bit, and a limit whose soft bound exceeds its hard one are refused. A\n\
+         * SANDBOX spawn must lower ADDRESS_SPACE_BYTES and THREADS to finite hard\n\
+         * bounds. */\n",
+    );
+    out.push_str(
         "typedef struct tairix_fd_wire {\n\
          \x20   uint32_t kind;\n\
          \x20   uint32_t value;\n\
@@ -3649,9 +3659,15 @@ fn emit_spawn_attach_contract(out: &mut String) {
          \x20   uint32_t session;\n\
          \x20   uint32_t session_reserved;\n\
          \x20   uint8_t session_instance[16];\n\
-         } tairix_spawn_attach_t;\n",
+         \x20   uint32_t limits_mask;\n\
+         \x20   uint32_t limits_reserved;\n",
     );
-    out.push('\n');
+    let _ = writeln!(
+        out,
+        "    tairix_resource_limit_t limits[{}];",
+        tairix_abi::LimitKind::COUNT
+    );
+    out.push_str("} tairix_spawn_attach_t;\n\n");
 }
 
 /// `tairix_abi.h` — the umbrella header that includes every module header.
@@ -5849,18 +5865,25 @@ mod tests {
             );
         }
         assert!(
-            h.contains(concat!(
-                "    tairix_fd_wire_t wires[4];\n",
-                "    uint32_t session;\n",
-                "    uint32_t session_reserved;\n",
-                "    uint8_t session_instance[16];\n",
-                "} tairix_spawn_attach_t;",
+            h.contains(&format!(
+                concat!(
+                    "    tairix_fd_wire_t wires[4];\n",
+                    "    uint32_t session;\n",
+                    "    uint32_t session_reserved;\n",
+                    "    uint8_t session_instance[16];\n",
+                    "    uint32_t limits_mask;\n",
+                    "    uint32_t limits_reserved;\n",
+                    "    tairix_resource_limit_t limits[{}];\n",
+                    "}} tairix_spawn_attach_t;",
+                ),
+                tairix_abi::LimitKind::COUNT
             )),
-            "spawn attach session selector: {h}"
+            "spawn attach session selector and lowered limits: {h}"
         );
+        assert!(h.contains("#include \"tairix_rlimit.h\""), "{h}");
         // The struct is the block: its members sum to the encoded length.
         assert_eq!(
-            4 + 4 + 8 + 8 + 4 * 8 + 4 + 4 + 16,
+            4 + 4 + 8 + 8 + 4 * 8 + 4 + 4 + 16 + 4 + 4 + tairix_abi::LimitKind::COUNT * 16,
             tairix_abi::SPAWN_ATTACH_LEN
         );
     }

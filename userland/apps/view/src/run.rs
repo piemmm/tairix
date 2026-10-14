@@ -203,9 +203,12 @@ mod program {
         /// A window that never opens a document never spawns a decoder, which
         /// is what keeps a viewer sitting on the icon bar costing nothing.
         fn sandbox(&mut self, window: u64) -> &mut ParserSandbox<RtLauncher, tairix_rt::LogSink> {
-            self.sandboxes
-                .entry(window)
-                .or_insert_with(|| ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink))
+            self.sandboxes.entry(window).or_insert_with(|| {
+                ParserSandbox::new(
+                    RtLauncher::own_binary(tairix_sandbox::WorkerMemory::Documents),
+                    tairix_rt::LogSink,
+                )
+            })
         }
 
         /// Drop `window`'s sandbox, ending its decoder.

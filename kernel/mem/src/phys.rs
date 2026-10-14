@@ -60,6 +60,16 @@ pub trait PhysMap {
     /// silently inherited no-op is how the defect above shipped.
     fn clean_invalidate(&self, phys: PhysAddr, len: usize);
 
+    /// [`clean_invalidate`](Self::clean_invalidate) the `len` bytes at each of
+    /// `starts`, every range complete on return. A port whose maintenance
+    /// ends in a barrier overrides this to pay one barrier for the set rather
+    /// than one per range; the default inherits each range's own decision.
+    fn clean_invalidate_each(&self, starts: &[PhysAddr], len: usize) {
+        for &phys in starts {
+            self.clean_invalidate(phys, len);
+        }
+    }
+
     /// Make bytes the kernel just wrote through the direct-map alias of
     /// `[phys, phys + len)` visible to **instruction fetch**, for a range
     /// that will be executed (a freshly-loaded program's code pages).

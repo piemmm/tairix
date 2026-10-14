@@ -95,7 +95,7 @@ mod kernel {
     /// the spawn path used to carry — the guest's RAM forced it.
     static MAP_SIZED_FROM_RAM: AtomicBool = AtomicBool::new(false);
 
-    /// Set when the RAM self-test reported verifying every usable byte.
+    /// Set when the RAM self-test reported covering every usable byte.
     static RAM_FULLY_REACHED: AtomicBool = AtomicBool::new(false);
 
     /// Page-table pages the structural probe's root draws from. A `.bss`
@@ -115,7 +115,7 @@ mod kernel {
 
     /// A page-aligned frame the probe reads through the direct map. Never
     /// written: a read proves the translation, and the RAM self-test above
-    /// already writes and reads back every usable byte.
+    /// already writes and reads back a word of every usable page.
     #[repr(C, align(4096))]
     struct ProbeFrame {
         marker: [u8; 8],
@@ -203,7 +203,7 @@ mod kernel {
         // window, so the two addresses are witnessed to alias the same
         // physical frame. Nothing owns the frame — the frame allocator does
         // not exist yet at this point in the boot — and the RAM self-test
-        // overwrites every usable byte afterwards regardless.
+        // writes into every usable page afterwards regardless.
         let high_phys = (paging::physmap_bytes() - PAGE_BYTES) & !(PAGE_BYTES - 1);
         if high_phys <= (OLD_SPAWN_WINDOW_GIB << 30) {
             return Err("the guest's RAM does not top the old window");

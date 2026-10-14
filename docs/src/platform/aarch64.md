@@ -778,7 +778,12 @@ with the parent bus's cells and translated through the ancestor buses'
 `ranges`. A GICv2's region 0 is its distributor and region 1 its CPU
 interface. A GICv3's region 0 is its distributor and the next
 `#redistributor-regions` its redistributor regions, stepped by
-`redistributor-stride` where the tree names one. `configure_from_fdt` points
+`redistributor-stride` where the tree names one. A stride must be one 64-bit
+value of whole 64 KiB frames, at least a redistributor's two. Any other stride,
+or a region that does not translate, refuses the whole description, so GIC
+bring-up fails with `gic_no_redistributors` instead of walking a layout it
+cannot trust (a zero stride would never leave its first frame).
+`configure_from_fdt` points
 the driver at what was found and leaves the `virt` GICv2 bases in place for a
 tree naming none. The walks return at the GIC's node, or once past its subtree,
 so they are safe with the MMU off.

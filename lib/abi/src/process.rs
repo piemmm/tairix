@@ -38,6 +38,7 @@
 
 use crate::le::{read_u32, read_u64};
 use crate::origin::{ProcId, PROC_ID_LEN};
+use crate::rlimit::{LimitKind, ResourceLimit, RLIMIT_INFINITY};
 use crate::Errno;
 
 /// Magic number identifying an `abi-v1` startup-vector block (`"PSV1"`
@@ -656,18 +657,28 @@ pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 /// block. A block bearing any other value is refused with
 /// [`Errno::BadMagic`], so a stale or foreign encoding can never be
 /// misread as wiring.
-pub const SPAWN_ATTACH_VERSION: u32 = 3;
+pub const SPAWN_ATTACH_VERSION: u32 = 4;
 
 /// Byte offset of the session selector in an encoded [`SpawnAttach`] block:
 /// after the version and target-uid words, the console selector, the flags
 /// word, and one `(kind, value)` pair per standard descriptor.
 const SPAWN_ATTACH_SESSION_AT: usize = 4 + 4 + 8 + 8 + STD_STREAM_COUNT * 8;
 
+/// Byte offset of the lowered limits in an encoded [`SpawnAttach`] block:
+/// after the session selector's kind and reserved words and the instance a
+/// join names.
+const SPAWN_ATTACH_LIMITS_AT: usize = SPAWN_ATTACH_SESSION_AT + 4 + 4 + PROC_ID_LEN;
+
 /// Exact byte length of an encoded [`SpawnAttach`] block: everything before
-/// the session selector, then the selector's kind and reserved words and the
-/// instance a join names. The block is fixed-length by design — the kernel
-/// bounds the copy before staging and refuses any other length.
-pub const SPAWN_ATTACH_LEN: usize = SPAWN_ATTACH_SESSION_AT + 4 + 4 + PROC_ID_LEN;
+/// the lowered limits, then a mask naming the lowered kinds, a reserved word,
+/// and one limit per [`LimitKind`]. The block is fixed-length by design — the
+/// kernel bounds the copy before staging and refuses any other length.
+pub const SPAWN_ATTACH_LEN: usize =
+    SPAWN_ATTACH_LIMITS_AT + 4 + 4 + LimitKind::COUNT * ResourceLimit::WIRE_LEN;
+
+/// The threads a sandbox worker may hold: its leader alone, so no stack
+/// beyond its own escapes the memory ceiling its block names.
+const SANDBOX_THREADS: ResourceLimit = ResourceLimit { soft: 1, hard: 1 };
 
 /// Wire discriminant for [`SpawnSession::Inherit`]. `0` is reserved so a
 /// zeroed selector fails closed.
@@ -946,6 +957,80 @@ pub struct SpawnAttach {
     pub wires: [FdWire; STD_STREAM_COUNT],
     /// The session the child belongs to.
     pub session: SpawnSession,
+    /// The limits the child is lowered to below the ones it inherits.
+    pub limits: SpawnLimits,
+}
+
+/// The resource limits a spawn lowers its child to, each kind at most once.
+///
+/// The child holds, of each lowered kind, the tighter of the limit it
+/// inherits and this one, so a spawn can narrow its child but never widen it,
+/// whatever capabilities the spawner holds.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SpawnLimits {
+    lowered: [Option<ResourceLimit>; LimitKind::COUNT],
+}
+
+impl SpawnLimits {
+    /// Lowering nothing: the child inherits its spawner's limits whole.
+    pub const INHERIT: Self = Self {
+        lowered: [None; LimitKind::COUNT],
+    };
+
+    /// These limits with `kind` lowered to `limit` as well.
+    #[must_use]
+    pub const fn lowering(mut self, kind: LimitKind, limit: ResourceLimit) -> Self {
+        self.lowered[kind.as_u32() as usize] = Some(limit);
+        self
+    }
+
+    /// What `kind` is lowered to, or `None` where the child inherits it.
+    #[must_use]
+    pub const fn get(&self, kind: LimitKind) -> Option<ResourceLimit> {
+        self.lowered[kind.as_u32() as usize]
+    }
+
+    /// Whether `kind` is lowered to a finite hard bound.
+    const fn bounds(&self, kind: LimitKind) -> bool {
+        matches!(self.get(kind), Some(limit) if limit.hard != RLIMIT_INFINITY)
+    }
+
+    /// Encode into `out`: the mask, the reserved word, then every kind's
+    /// entry, zero where the kind is not lowered so a block has one encoding.
+    fn write(&self, out: &mut [u8]) {
+        let mut mask = 0u32;
+        for kind in LimitKind::ALL {
+            if let Some(limit) = self.get(kind) {
+                mask |= 1 << kind.as_u32();
+                let at = 8 + kind.as_u32() as usize * ResourceLimit::WIRE_LEN;
+                out[at..at + ResourceLimit::WIRE_LEN].copy_from_slice(&limit.encode());
+            }
+        }
+        out[0..4].copy_from_slice(&mask.to_le_bytes());
+    }
+
+    /// Decode what [`Self::write`] wrote, fail-closed: a mask bit no kind
+    /// has, a non-zero reserved word, an entry under a clear bit, or a
+    /// lowered limit whose soft bound exceeds its hard one is refused.
+    fn read(bytes: &[u8]) -> Result<Self, Errno> {
+        let mask = read_u32(bytes, 0);
+        if mask >> LimitKind::COUNT != 0 || read_u32(bytes, 4) != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let mut limits = Self::INHERIT;
+        for kind in LimitKind::ALL {
+            let at = 8 + kind.as_u32() as usize * ResourceLimit::WIRE_LEN;
+            let entry = bytes
+                .get(at..at + ResourceLimit::WIRE_LEN)
+                .ok_or(Errno::LengthOutOfRange)?;
+            if mask & (1 << kind.as_u32()) != 0 {
+                limits = limits.lowering(kind, ResourceLimit::decode(entry)?);
+            } else if entry.iter().any(|&byte| byte != 0) {
+                return Err(Errno::OutOfRange);
+            }
+        }
+        Ok(limits)
+    }
 }
 
 impl SpawnAttach {
@@ -958,25 +1043,35 @@ impl SpawnAttach {
         flags: 0,
         wires: [FdWire::Inherit; STD_STREAM_COUNT],
         session: SpawnSession::Inherit,
+        limits: SpawnLimits::INHERIT,
     };
 
-    /// Build a canonical [`SPAWN_FLAG_SANDBOX`] block over `wires`.
+    /// Build a canonical [`SPAWN_FLAG_SANDBOX`] block over `wires`, its worker
+    /// held to `address_space_bytes` of mapped memory on its one thread.
     ///
     /// The selectors take the only values a sandbox block permits: the
     /// caller's own credential and console, and the session anchored at the
     /// caller, so the worker ends with its owner whatever session the owner is
-    /// in. The caller supplies the explicit wires. The result still
-    /// round-trips through [`Self::parse`], which refuses any inherit-form
-    /// wire, so a non-canonical `wires` array is caught before it reaches the
-    /// kernel.
+    /// in. The ceiling is what turns a decoder's runaway allocation into the
+    /// worker's own out-of-memory end rather than the machine's. The result
+    /// still round-trips through [`Self::parse`], which refuses any
+    /// inherit-form wire and an unbounded ceiling, so a non-canonical block is
+    /// caught before it reaches the kernel.
     #[must_use]
-    pub const fn sandbox(wires: [FdWire; STD_STREAM_COUNT]) -> Self {
+    pub const fn sandbox(wires: [FdWire; STD_STREAM_COUNT], address_space_bytes: u64) -> Self {
+        let ceiling = ResourceLimit {
+            soft: address_space_bytes,
+            hard: address_space_bytes,
+        };
         Self {
             target_uid: SPAWN_UID_INHERIT,
             console: CONSOLE_INHERIT,
             flags: SPAWN_FLAG_SANDBOX,
             wires,
             session: SpawnSession::Anchored,
+            limits: SpawnLimits::INHERIT
+                .lowering(LimitKind::AddressSpaceBytes, ceiling)
+                .lowering(LimitKind::Threads, SANDBOX_THREADS),
         }
     }
 
@@ -1003,7 +1098,8 @@ impl SpawnAttach {
         let (kind, instance) = self.session.to_wire();
         let at = SPAWN_ATTACH_SESSION_AT;
         out[at..at + 4].copy_from_slice(&kind.to_le_bytes());
-        out[at + 8..SPAWN_ATTACH_LEN].copy_from_slice(&instance.to_le_bytes());
+        out[at + 8..SPAWN_ATTACH_LIMITS_AT].copy_from_slice(&instance.to_le_bytes());
+        self.limits.write(&mut out[SPAWN_ATTACH_LIMITS_AT..]);
         out
     }
 
@@ -1015,11 +1111,13 @@ impl SpawnAttach {
     /// [`SPAWN_ATTACH_LEN`], [`Errno::BadMagic`] for a version other than
     /// [`SPAWN_ATTACH_VERSION`], and [`Errno::OutOfRange`] for any
     /// non-canonical wire (see [`FdWire`]), any reserved flag bit, a
-    /// non-canonical session selector (see [`SpawnSession`]), or a
-    /// non-canonical [`SPAWN_FLAG_SANDBOX`] block (an inherit-form wire, a
-    /// uid switch, a console index, or a session other than the one anchored
-    /// at the parent — nothing ambient may flow into a sandbox, and nothing
-    /// may let it outlive its owner). A refused block wires nothing.
+    /// non-canonical session selector (see [`SpawnSession`]), a
+    /// non-canonical lowered limit (see [`SpawnLimits`]), or a non-canonical
+    /// [`SPAWN_FLAG_SANDBOX`] block (an inherit-form wire, a uid switch, a
+    /// console index, a session other than the one anchored at the parent, or
+    /// no finite memory ceiling and thread bound — nothing ambient may flow
+    /// into a sandbox, nothing may let it outlive its owner, and nothing it
+    /// decodes may take the machine's memory). A refused block wires nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != SPAWN_ATTACH_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -1042,14 +1140,16 @@ impl SpawnAttach {
         let session = SpawnSession::from_wire(
             read_u32(bytes, at),
             read_u32(bytes, at + 4),
-            ProcId::from_bytes(&bytes[at + 8..SPAWN_ATTACH_LEN])?,
+            ProcId::from_bytes(&bytes[at + 8..SPAWN_ATTACH_LIMITS_AT])?,
         )?;
+        let limits = SpawnLimits::read(&bytes[SPAWN_ATTACH_LIMITS_AT..])?;
         let block = Self {
             target_uid,
             console,
             flags,
             wires,
             session,
+            limits,
         };
         if block.is_sandbox() {
             let explicit = block
@@ -1060,6 +1160,8 @@ impl SpawnAttach {
                 || block.target_uid != SPAWN_UID_INHERIT
                 || block.console != CONSOLE_INHERIT
                 || block.session != SpawnSession::Anchored
+                || !block.limits.bounds(LimitKind::AddressSpaceBytes)
+                || !block.limits.bounds(LimitKind::Threads)
             {
                 return Err(Errno::OutOfRange);
             }
@@ -1757,17 +1859,20 @@ mod tests {
     extern crate alloc;
     use super::{
         load_failure_reason, load_failure_status, DescriptorTable, FdWire, ProcessStart,
-        ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, SpawnSession,
-        StreamMode, StringSlot, WaitStatus, WaitStatusRecord, LOAD_FAILURE_STATUS_BASE,
-        LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED, PROCESS_START_MAGIC,
-        PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
-        SPAWN_ATTACH_LEN, SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL,
-        SPAWN_FLAG_SANDBOX, SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT, SPAWN_SESSION_JOIN,
-        STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED,
-        WAIT_STATUS_KIND_STOPPED,
+        ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, SpawnLimits,
+        SpawnSession, StreamMode, StringSlot, WaitStatus, WaitStatusRecord,
+        LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
+        PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+        PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN, SPAWN_ATTACH_LIMITS_AT,
+        SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX,
+        SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT, SPAWN_SESSION_JOIN, STDERR, STDIN, STDINFO,
+        STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
     };
-    use crate::{Errno, ProcId, ABI_VERSION_CURRENT};
+    use crate::{Errno, LimitKind, ProcId, ResourceLimit, ABI_VERSION_CURRENT, RLIMIT_INFINITY};
     use alloc::vec::Vec;
+
+    /// A sandbox worker's memory ceiling, for blocks that need one.
+    const CEILING: u64 = 16 << 20;
 
     /// Every defined signal, for the exhaustive loops below.
     const ALL_SIGNALS: [Signal; 5] = [
@@ -1791,6 +1896,7 @@ mod tests {
                 FdWire::Inherit,
             ],
             session: SpawnSession::Inherit,
+            limits: SpawnLimits::INHERIT,
         };
         let bytes = attach.to_le_bytes();
         assert_eq!(bytes.len(), SPAWN_ATTACH_LEN);
@@ -1874,12 +1980,15 @@ mod tests {
 
     #[test]
     fn spawn_attach_sandbox_round_trips_and_reports_the_mode() {
-        let attach = SpawnAttach::sandbox([
-            FdWire::Handle(4),
-            FdWire::Handle(5),
-            FdWire::Closed,
-            FdWire::Closed,
-        ]);
+        let attach = SpawnAttach::sandbox(
+            [
+                FdWire::Handle(4),
+                FdWire::Handle(5),
+                FdWire::Closed,
+                FdWire::Closed,
+            ],
+            CEILING,
+        );
         assert!(attach.is_sandbox());
         assert_eq!(
             attach.flags, SPAWN_FLAG_SANDBOX,
@@ -1904,7 +2013,7 @@ mod tests {
             wires[2] = ambient;
             let block = SpawnAttach {
                 wires,
-                ..SpawnAttach::sandbox(explicit)
+                ..SpawnAttach::sandbox(explicit, CEILING)
             };
             assert_eq!(
                 SpawnAttach::parse(&block.to_le_bytes()),
@@ -1914,7 +2023,7 @@ mod tests {
         // A credential switch inside a sandbox spawn is refused.
         let uid_switch = SpawnAttach {
             target_uid: 42,
-            ..SpawnAttach::sandbox(explicit)
+            ..SpawnAttach::sandbox(explicit, CEILING)
         };
         assert_eq!(
             SpawnAttach::parse(&uid_switch.to_le_bytes()),
@@ -1923,7 +2032,7 @@ mod tests {
         // A console index is a console-backed base table; refused.
         let console = SpawnAttach {
             console: 0,
-            ..SpawnAttach::sandbox(explicit)
+            ..SpawnAttach::sandbox(explicit, CEILING)
         };
         assert_eq!(
             SpawnAttach::parse(&console.to_le_bytes()),
@@ -1932,7 +2041,7 @@ mod tests {
         // A worker lives in the session anchored at its owner, so it can never
         // outlive it.
         assert_eq!(
-            SpawnAttach::sandbox(explicit).session,
+            SpawnAttach::sandbox(explicit, CEILING).session,
             SpawnSession::Anchored
         );
         for session in [
@@ -1942,13 +2051,112 @@ mod tests {
         ] {
             let block = SpawnAttach {
                 session,
-                ..SpawnAttach::sandbox(explicit)
+                ..SpawnAttach::sandbox(explicit, CEILING)
             };
             assert_eq!(
                 SpawnAttach::parse(&block.to_le_bytes()),
                 Err(Errno::OutOfRange)
             );
         }
+    }
+
+    #[test]
+    fn spawn_limits_round_trip_each_kind_alone_and_every_kind_together() {
+        let limit = ResourceLimit { soft: 3, hard: 9 };
+        let mut every = SpawnLimits::INHERIT;
+        for kind in LimitKind::ALL {
+            let alone = SpawnAttach {
+                limits: SpawnLimits::INHERIT.lowering(kind, limit),
+                ..SpawnAttach::INHERIT
+            };
+            assert_eq!(
+                SpawnAttach::parse(&alone.to_le_bytes()),
+                Ok(alone),
+                "{kind:?}"
+            );
+            every = every.lowering(kind, limit);
+        }
+        let all = SpawnAttach {
+            limits: every,
+            ..SpawnAttach::INHERIT
+        };
+        assert_eq!(SpawnAttach::parse(&all.to_le_bytes()), Ok(all));
+        assert_eq!(SPAWN_ATTACH_LIMITS_AT, 80);
+        assert_eq!(SPAWN_ATTACH_LEN, 80 + 8 + LimitKind::COUNT * 16);
+    }
+
+    #[test]
+    fn spawn_limits_refuse_every_non_canonical_shape() {
+        let at = SPAWN_ATTACH_LIMITS_AT;
+        let entry = |kind: LimitKind| at + 8 + kind.as_u32() as usize * 16;
+        let parse = |edit: &dyn Fn(&mut [u8; SPAWN_ATTACH_LEN])| {
+            let mut bytes = SpawnAttach::INHERIT.to_le_bytes();
+            edit(&mut bytes);
+            SpawnAttach::parse(&bytes)
+        };
+        // A mask bit no kind has, and the reserved word.
+        let bit_past_every_kind = 1u32 << LimitKind::COUNT;
+        assert_eq!(
+            parse(&|bytes| bytes[at..at + 4].copy_from_slice(&bit_past_every_kind.to_le_bytes())),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(parse(&|bytes| bytes[at + 4] = 1), Err(Errno::OutOfRange));
+        // A byte under a clear bit gives a block a second encoding.
+        let threads = entry(LimitKind::Threads);
+        assert_eq!(parse(&|bytes| bytes[threads] = 1), Err(Errno::OutOfRange));
+        // A lowered limit whose soft bound exceeds its hard one.
+        let inverted = ResourceLimit { soft: 9, hard: 3 };
+        let block = SpawnAttach {
+            limits: SpawnLimits::INHERIT.lowering(LimitKind::Threads, inverted),
+            ..SpawnAttach::INHERIT
+        };
+        assert_eq!(
+            SpawnAttach::parse(&block.to_le_bytes()),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_sandbox_block_must_bound_its_workers_memory_and_threads() {
+        let explicit = [
+            FdWire::Handle(4),
+            FdWire::Handle(5),
+            FdWire::Closed,
+            FdWire::Closed,
+        ];
+        let sandbox = SpawnAttach::sandbox(explicit, CEILING);
+        assert_eq!(
+            sandbox.limits.get(LimitKind::AddressSpaceBytes),
+            Some(ResourceLimit {
+                soft: CEILING,
+                hard: CEILING
+            })
+        );
+        assert_eq!(
+            sandbox.limits.get(LimitKind::Threads),
+            Some(ResourceLimit { soft: 1, hard: 1 })
+        );
+        let refused = |limits: SpawnLimits| {
+            SpawnAttach::parse(&SpawnAttach { limits, ..sandbox }.to_le_bytes())
+        };
+        assert_eq!(
+            SpawnAttach::parse(&SpawnAttach::sandbox(explicit, RLIMIT_INFINITY).to_le_bytes()),
+            Err(Errno::OutOfRange),
+            "an unbounded ceiling"
+        );
+        assert_eq!(
+            refused(SpawnLimits::INHERIT),
+            Err(Errno::OutOfRange),
+            "no ceiling"
+        );
+        let unthreaded = sandbox
+            .limits
+            .lowering(LimitKind::Threads, ResourceLimit::UNLIMITED);
+        assert_eq!(
+            refused(unthreaded),
+            Err(Errno::OutOfRange),
+            "unbounded threads"
+        );
     }
 
     #[test]
@@ -1974,7 +2182,7 @@ mod tests {
             let mut bytes = SpawnAttach::INHERIT.to_le_bytes();
             bytes[at..at + 4].copy_from_slice(&kind.to_le_bytes());
             bytes[at + 4..at + 8].copy_from_slice(&reserved.to_le_bytes());
-            bytes[at + 8..SPAWN_ATTACH_LEN].copy_from_slice(&instance);
+            bytes[at + 8..SPAWN_ATTACH_LIMITS_AT].copy_from_slice(&instance);
             SpawnAttach::parse(&bytes)
         };
         // Kind 0 is reserved and unknown kinds are refused.

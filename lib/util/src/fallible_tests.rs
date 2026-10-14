@@ -1,6 +1,6 @@
 //! Tests for the shared fallible allocation helpers.
 
-use super::{collected, filled, grow_to, reserve};
+use super::{collected, concatenated, filled, grow_to, reserve};
 use alloc::vec::Vec;
 
 /// A count whose `T`-sized layout cannot be reserved on any target: the
@@ -34,4 +34,12 @@ fn a_granted_reservation_holds_exactly_what_was_asked_for() {
         "a scratch already long enough is left alone"
     );
     assert_eq!(scratch.len(), 4);
+}
+
+#[test]
+fn parts_are_joined_into_a_string_of_exactly_their_length() {
+    let joined = concatenated(&["/System", "/", "icon", ".png"]).expect("room");
+    assert_eq!(joined, "/System/icon.png");
+    assert_eq!(joined.capacity(), joined.len());
+    assert_eq!(concatenated(&[]).as_deref(), Some(""));
 }

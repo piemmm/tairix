@@ -8,7 +8,8 @@
 //! the loop reads/waits through the [`HwTreeService`] seam and fetches/loads
 //! through the [`DriverStoreCall`] seam, so its logic — fetch once, then
 //! unload and match-and-load whenever a generation advance changes the node
-//! set — is exercised on the host against scripted doubles, independently
+//! set or what its suppliers serve — is exercised on the host against
+//! scripted doubles, independently
 //! of the freestanding
 //! `hw_tree_read` / `hw_tree_wait` / `ipc_call` syscalls it binds in
 //! production.
@@ -171,11 +172,12 @@ fn grow_zeroed(buf: &mut Vec<u8>, len: usize) -> Result<(), Errno> {
 /// the drivers of nodes that left it, and match-and-load each node through
 /// `store`, returning the generation the snapshot was taken at.
 ///
-/// The unload, match and channel passes run only when the node ids differ
-/// from the last snapshot's, the catalogue just arrived, or a channel
-/// hand-off is outstanding: a generation advance that only recorded a
-/// node's fault-domain health, or asked for a re-evaluation, changes nothing
-/// they act on. The configuration deliveries run on every reaction.
+/// The unload, match and channel passes run only when the node ids or the
+/// roles the nodes serve differ from the last snapshot's, the catalogue just
+/// arrived, or a channel hand-off is outstanding: a generation advance that
+/// only recorded a node's fault-domain health, or asked for a re-evaluation,
+/// changes nothing they act on. The configuration deliveries run on every
+/// reaction.
 ///
 /// The catalogue is retried while `catalogue` is [`None`]: the kernel serves
 /// the store endpoint only once the boot floor has the system volume up, so a
@@ -257,11 +259,13 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
     let now_ns = tree.now_ns();
     state.now_ns = now_ns;
     let present = node_ids(&nodes)?;
-    // A node id is never reissued, so a snapshot with the same ids, no driver
-    // ended, no restart due and nothing left over from the last pass gives the
-    // tree passes nothing to do.
+    let serving = serving_roles(&nodes)?;
+    // A node id is never reissued, so a snapshot with the same ids and serving
+    // roles, no driver ended, no restart due and nothing left over from the
+    // last pass gives the tree passes nothing to do.
     let restructured = catalogue_arrived
         || present != state.observed
+        || serving != state.serving
         || state.any_ended(&nodes)
         || state.restart_due()
         || netbind.has_deferred_work()
@@ -319,6 +323,7 @@ fn react_once<T: HwTreeService + Presence, C: DriverStoreCall>(
         tree.cue(event);
     }
     state.observed = present;
+    state.serving = serving;
     Ok(())
 }
 
@@ -358,9 +363,32 @@ fn node_ids(nodes: &[HwNode]) -> Result<Vec<u32>, Errno> {
     Ok(ids)
 }
 
+/// The nodes of `nodes` serving any supplier role, ascending by id, each with
+/// the roles it serves.
+///
+/// # Errors
+///
+/// [`Errno::OutOfMemory`] when the list cannot be allocated.
+fn serving_roles(nodes: &[HwNode]) -> Result<Vec<(u32, u8)>, Errno> {
+    let serves = |node: &&HwNode| node.served_roles() != 0;
+    let mut serving = Vec::new();
+    serving
+        .try_reserve_exact(nodes.iter().filter(serves).count())
+        .map_err(|_| Errno::OutOfMemory)?;
+    serving.extend(
+        nodes
+            .iter()
+            .filter(serves)
+            .map(|node| (node.id(), node.served_roles())),
+    );
+    serving.sort_unstable();
+    Ok(serving)
+}
+
 /// Run the reactive match-and-load loop: read the tree, load a driver for
 /// every matched node, and block until the generation advances to re-read
-/// it, re-matching only when its node set changed.
+/// it, re-matching only when its node set or what its suppliers serve
+/// changed.
 ///
 /// * `tree` — the hardware-tree read/wait seam.
 /// * `store` — the driver-store catalogue/load seam.
@@ -1387,6 +1415,61 @@ mod tests {
             "the second snapshot was not re-matched"
         );
         assert_eq!(tree.reported_nodes, [1, 2, 3, 1, 2, 3], "both were read");
+    }
+
+    /// A supplier that starts serving changes no node id, yet the consumer
+    /// held for it is loaded on that very reaction rather than at the next
+    /// unrelated change to the tree.
+    #[test]
+    fn a_consumer_held_for_its_supplier_loads_once_the_supplier_serves() {
+        use crate::autoload::{linked, CONSUMER_KEY, SUPPLIER_KEY};
+        use tairix_abi::hwlink::LinkRole;
+        let root = HwNode::new(1, HW_NODE_ROOT, HwDeviceClass::Root);
+        let consumer = linked(2, CONSUMER_KEY, &[5]);
+        let supplier = linked(5, SUPPLIER_KEY, &[]);
+        let mut admitted = supplier;
+        admitted.set_driven(true);
+        let mut serving = admitted;
+        serving.set_serves(LinkRole::Clock, true);
+        let mut tree = ScriptedTree::new(vec![
+            encode(1, &[root, consumer, supplier]),
+            encode(2, &[root, consumer, admitted]),
+            encode(3, &[root, consumer, serving]),
+        ]);
+        let mut store = ScriptedStore::new(vec![
+            (7, vec![bind(5, CONSUMER_KEY)]),
+            (8, vec![bind(5, SUPPLIER_KEY)]),
+        ]);
+        let sink = RecordingSink::new();
+        let mut reply_buf = [0u8; 4096];
+
+        run(
+            &mut tree,
+            &mut store,
+            &mut NoNetstack,
+            &mut NoAudiod,
+            &mut NoAudioBaseline,
+            &mut NoConfig,
+            &mut NoIfConfig,
+            &sink,
+            &mut reply_buf,
+            Some(2),
+        )
+        .expect("every reaction runs");
+
+        assert_eq!(
+            store.ops,
+            [
+                StoreOp::Load {
+                    bundle_id: 8,
+                    node_id: 5
+                },
+                StoreOp::Load {
+                    bundle_id: 7,
+                    node_id: 2
+                },
+            ]
+        );
     }
 
     #[test]

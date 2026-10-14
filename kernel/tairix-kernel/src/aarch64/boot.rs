@@ -815,7 +815,7 @@ fn select_secondary_start(
 /// than a panic. The blob must be reserved because the QEMU `virt`/Pi
 /// firmware lands it high in RAM, above the kernel image the map already
 /// reserves: left usable, the frame allocator or the early-boot RAM
-/// self-test (which zeroes every usable byte) would clobber the tree the
+/// self-test (which writes a word of every usable page) would clobber the tree the
 /// later root-storage bind and device discovery re-parse. An absent tree
 /// reserves nothing.
 fn build_boot_memory_layout(
@@ -1257,7 +1257,7 @@ fn audit_root_storage_binding(
     dtb: u64,
     video: Option<video::DiscoveredVideo>,
     gic_redistributors: &[gicv3::RedistributorRegion],
-    gic_redistributor_stride: Option<u64>,
+    gic_redistributor_stride: Option<gicv3::RedistributorStride>,
     log_sink: &'static (dyn Sink + Sync),
 ) {
     if dtb == 0 {
@@ -1797,7 +1797,7 @@ struct Discovered {
     /// A GICv3's redistributor regions, in tree order; empty on a GICv2.
     gic_redistributors: Vec<gicv3::RedistributorRegion>,
     /// The stride between a GICv3's redistributors, where the tree names one.
-    gic_redistributor_stride: Option<u64>,
+    gic_redistributor_stride: Option<gicv3::RedistributorStride>,
 }
 
 /// Discover the board's post-MMU facts from the device tree at `dtb`:

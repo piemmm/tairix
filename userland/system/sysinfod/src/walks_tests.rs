@@ -102,3 +102,34 @@ fn a_flood_of_empty_walks_is_bounded() {
     assert!(walks.list(key(0, 1)).is_none(), "the earliest let go");
     assert!(walks.list(key(callers - 1, 1)).is_some(), "the latest kept");
 }
+
+/// A caller that exits never ends its walks, so they go when it is found gone,
+/// their charge with them, and a live caller's stay.
+#[test]
+fn an_exited_callers_walks_are_let_go_of_and_a_live_callers_kept() {
+    let mut walks = Walks::new(1 << 30);
+    let (gone, staying) = (key(1, 1), key(2, 1));
+    walks.begin(gone, Some(vec![1; 64]));
+    walks.begin(staying, Some(vec![2; 64]));
+    let both = walks.charged;
+    walks.retain_live(caller(9), || {
+        Some(LiveInstances::new(vec![caller(9), caller(2)]))
+    });
+    assert!(walks.list(gone).is_none(), "the exited caller's walk");
+    assert_eq!(held(&mut walks, staying), Some(vec![2; 64]));
+    assert!(walks.charged < both, "its charge released");
+    walks.end(staying);
+    assert_eq!(walks.charged, 0);
+}
+
+/// The asking caller is alive, so a census is taken only when another caller
+/// holds a walk, and one that fails lets go of nothing.
+#[test]
+fn a_census_is_taken_only_when_another_caller_holds_a_walk() {
+    let mut walks = Walks::new(1 << 30);
+    let own = key(2, 1);
+    walks.begin(own, Some(vec![2; 64]));
+    walks.retain_live(caller(2), || panic!("nothing another caller holds"));
+    walks.retain_live(caller(3), || None);
+    assert_eq!(held(&mut walks, own), Some(vec![2; 64]));
+}

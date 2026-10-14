@@ -1222,6 +1222,31 @@ fn replacing_one_match_lays_the_window_out_again_when_the_gutter_widens() {
     );
 }
 
+/// The find and replace fields hold no more than a longest pattern spelled
+/// in hex, so a large paste is neither drawn on every find-bar repaint nor
+/// turned into a pattern, and a replacement past a pattern's bound is refused.
+#[test]
+fn the_find_bar_holds_no_more_than_a_pattern_spelled_in_hex() {
+    let mut harness = Harness::new(b"text", Format::PlainText);
+    let paste = "x".repeat(4 * crate::find::MAX_PATTERN_SPELLING);
+    harness.view.find.set_text(&paste);
+    harness.view.replace.set_text(&paste);
+    assert_eq!(
+        harness.view.find.text().len(),
+        crate::find::MAX_PATTERN_SPELLING
+    );
+    assert_eq!(
+        harness.view.replace.text().len(),
+        crate::find::MAX_PATTERN_SPELLING
+    );
+    assert_eq!(
+        harness.view.replacement(),
+        Err(crate::find::PatternError::TooLong)
+    );
+    harness.view.replace.set_text("short");
+    assert_eq!(harness.view.replacement(), Ok(b"short".to_vec()));
+}
+
 #[test]
 fn a_blank_document_is_measured_once_not_on_every_event() {
     let mut harness = Harness::new(b"\n\n\n", Format::PlainText);
