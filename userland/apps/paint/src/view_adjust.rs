@@ -73,6 +73,16 @@ pub(crate) struct Looks {
     histogram: Option<(Histogram, Basis)>,
 }
 
+impl Looks {
+    /// Drop what was worked out for one adjustment's settings. The histogram
+    /// is a reading of the picture, whichever adjustment reads it, and the job
+    /// out still lands where its answer applies, so both are kept.
+    fn forget_adjustment(&mut self) {
+        self.shown = None;
+        self.kind = None;
+    }
+}
+
 impl View {
     /// The state an adjustment's answer is written over.
     pub(super) fn basis(&self) -> Basis {
@@ -171,7 +181,7 @@ impl View {
             return self.apply_once(filter, layout, damage);
         }
         self.adjustment = AdjustPane::setting(filter);
-        self.looks = Looks::default();
+        self.looks.forget_adjustment();
         self.retitle_adjustment();
         self.panes.show(PaneKind::Adjustment);
         let mut outcome = self.refresh_adjustment(layout, damage);
@@ -187,7 +197,7 @@ impl View {
             return;
         }
         self.adjustment = AdjustPane::choosing();
-        self.looks = Looks::default();
+        self.looks.forget_adjustment();
         self.retitle_adjustment();
         damage.add(layout.canvas());
     }
@@ -330,6 +340,10 @@ impl View {
 
     /// The adjustment's job answered: land it on the state it was asked of,
     /// or drop it where that has moved, and ask for what is needed next.
+    ///
+    /// A preview lands only on an open adjustment of the kind it was worked
+    /// out for; a histogram on the picture it read, whichever adjustment is
+    /// open, if any.
     pub(super) fn looked(
         &mut self,
         answer: Computed,
@@ -339,18 +353,22 @@ impl View {
         let Some(out) = self.looks.job.take() else {
             return Outcome::none();
         };
-        let current = self.basis() == out.basis && self.adjustment.filter().is_some();
+        let open = self.adjustment.filter();
+        let read_now = self.basis() == out.basis;
+        let current = read_now && open.is_some();
         let landed = match (out.looking, answer) {
             (Looking::Preview(filter), Computed::Filtered(Ok(tiles))) => {
-                if current {
+                if read_now && open.is_some_and(|open| open.same_kind(&filter)) {
                     self.show_preview(filter, tiles, out.basis, layout, damage);
                 }
                 true
             }
             (Looking::Histogram, Computed::Histogram(Ok(histogram))) => {
-                if current {
+                if read_now {
                     self.looks.histogram = Some((histogram, out.basis));
-                    damage.add(layout.adjustment());
+                    if current {
+                        damage.add(layout.adjustment());
+                    }
                 }
                 true
             }

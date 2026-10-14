@@ -1672,6 +1672,7 @@ mod program {
             &'a mut ResolutionPrompt,
         ),
         saver: &'a mut Screensaver,
+        lock: &'a mut ScreenLock,
         idle: &'a mut IdleClock,
         /// The machine's memory, which the frosted backdrops' share is of.
         memory_bytes: usize,
@@ -1754,8 +1755,9 @@ mod program {
     /// compositor draws now: the bar, the backdrop and its icons, the windows
     /// fitted onto it, the prompts placed on it again, any menu or tip and the
     /// screensaver taken down — the screensaver due again at once, over the
-    /// new screen — the pointer held on it, and every application told. The
-    /// lock covers the new screen itself before the next composite.
+    /// new screen — the pointer held on it, and every application told. A
+    /// lock up is drawn over the new screen here, before anything presents
+    /// it; one it cannot be drawn over leaves the screen unpresented.
     fn relay_screen<S: DirectorySource, C, T>(parts: &mut Resize<'_, S, C, T>) {
         let screen = parts.compositor.screen_rect();
         lay_out_screen(
@@ -1781,6 +1783,9 @@ mod program {
             parts.wallpapers.forget_slides();
             parts.idle.saver_withdrawn();
         }
+        parts
+            .lock
+            .keep_topmost(parts.shell, parts.compositor, parts.saver.window());
         if let Ok(at) = parts.pointer.set_screen(screen, parts.compositor.scale()) {
             parts.shell.track_pointer(at, parts.compositor);
         }
@@ -2030,6 +2035,10 @@ mod program {
             let Some(display) = self.display.as_mut() else {
                 return Err(Errno::NotConnected);
             };
+            // The loop presents once the lock covers the screen again.
+            if self.parts.lock.uncovered(self.parts.compositor) {
+                return Ok(());
+            }
             self.parts
                 .compositor
                 .present(display)
@@ -3277,6 +3286,7 @@ mod program {
                             pointer: &mut pointer,
                             prompts: (&mut confirm, &mut elevate, &mut resolution),
                             saver: &mut saver,
+                            lock: &mut lock,
                             idle: &mut idle,
                             memory_bytes,
                         },
@@ -3471,7 +3481,12 @@ mod program {
                 );
                 // A display switched off is presented nothing: no frame sent
                 // to it could be seen, and the damage waits for it to wake.
-                if !saver.is_dark() && pacer.admit(now_ns, compositor.has_damage()) {
+                // Nor is a frame the lock does not cover, which would show
+                // the session around it.
+                if !saver.is_dark()
+                    && !lock.uncovered(&compositor)
+                    && pacer.admit(now_ns, compositor.has_damage())
+                {
                     if let Err(code) = present(
                         &mut shell,
                         &mut compositor,
@@ -3832,6 +3847,7 @@ mod program {
                                 pointer: &mut pointer,
                                 prompts: (&mut confirm, &mut elevate, &mut resolution),
                                 saver: &mut saver,
+                                lock: &mut lock,
                                 idle: &mut idle,
                                 memory_bytes,
                             },
@@ -4173,6 +4189,7 @@ mod program {
                             pointer: &mut pointer,
                             prompts: (&mut confirm, &mut elevate, &mut resolution),
                             saver: &mut saver,
+                            lock: &mut lock,
                             idle: &mut idle,
                             memory_bytes,
                         },
@@ -4323,6 +4340,7 @@ mod program {
                                 pointer: &mut pointer,
                                 prompts: (&mut confirm, &mut elevate, &mut resolution),
                                 saver: &mut saver,
+                                lock: &mut lock,
                                 idle: &mut idle,
                                 memory_bytes,
                             },
@@ -4640,7 +4658,11 @@ mod program {
             // One present per frame deadline: the compositor accumulates the
             // damage the pumped events and served presents produced, and the
             // ring copies only that region once the pacer admits the frame.
-            if !saver.is_dark() && pacer.admit(now_ns, compositor.has_damage()) {
+            // A frame the lock does not cover is never presented.
+            if !saver.is_dark()
+                && !lock.uncovered(&compositor)
+                && pacer.admit(now_ns, compositor.has_damage())
+            {
                 if let Err(code) = present(
                     &mut shell,
                     &mut compositor,

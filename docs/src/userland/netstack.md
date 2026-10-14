@@ -365,6 +365,13 @@ and a listener's `Accepted`). Stream timers (retransmit, delayed ACK,
 persist, user timeout, TIME-WAIT) fold into the wait-set deadline and run on
 the timer wake, so the stream path is event-driven with no polling.
 
+Each connection a listener completes becomes a pending child socket queued
+on that listener in completion order: the children link each other by
+handle and the listener holds the queue's two ends, so `Accept` takes the
+oldest, and a child leaving the queue any other way (a close of its handle,
+its owner exiting) unlinks itself, each in constant time however large the
+table. Closing a listener abandons its queue, child by child.
+
 A socket whose client is owed an event is listed, and the service posts
 what each is owed at the top of every loop pass (`deliver_owed`). Received
 bytes leave a connection only once a post of them lands, so a client whose

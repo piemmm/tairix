@@ -31,6 +31,7 @@
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use tairix_controls::button::{Button, ButtonContent, ContentAlign};
 use tairix_controls::decision::Dialog;
@@ -69,6 +70,7 @@ use crate::progress::ProgressModel;
 use crate::properties::{Attributes, Properties};
 use crate::source::DirectorySource;
 use crate::trash::DeleteDisposition;
+use tairix_abi::fs::FileKind;
 
 /// Padding between a panel's edge and its label text, in logical pixels.
 const LABEL_PADDING: u32 = 4;
@@ -2256,6 +2258,9 @@ const ACCESS: usize = 0;
 /// See [`ACCESS`].
 const OWNERSHIP: usize = 1;
 
+/// How many groups the section stacks.
+const PERMS_GROUPS: usize = 2;
+
 /// The access group's first class row: the mode reading sits above the three.
 const FIRST_CLASS_ROW: usize = 1;
 
@@ -2281,11 +2286,119 @@ const OWNERSHIP_REFUSED: &str = "Changing ownership here needs the capability to
 /// one placement, so a press or a key only ever reaches a control that was
 /// drawn.
 struct PermsSection {
-    groups: [FieldGroup; 2],
+    groups: [FieldGroup; PERMS_GROUPS],
 }
+
+/// Where each of the section's groups sits, in stacking order.
+type PermsPlaced = [(usize, FieldLayout); PERMS_GROUPS];
 
 /// Whether the session may reassign an owner, and the id editor it has open.
 type OwnerGate<'a> = (bool, Option<(OwnerField, &'a TextField)>);
+
+/// What a window's Permissions section is composed from besides the node —
+/// the ownership gate and any id editor open over it — with the section the
+/// window keeps.
+#[derive(Copy, Clone)]
+pub struct PermsShown<'a> {
+    /// Whether the launching user holds `CAP_FS_CHOWN`, the one gate on
+    /// offering an editable ownership control at all.
+    pub can_chown: bool,
+    /// The open owning-id editor, when one is being typed into.
+    pub owner: Option<(OwnerField, &'a TextField)>,
+    /// The section the window keeps between events.
+    pub panel: &'a PermsPanel,
+}
+
+impl<'a> PermsShown<'a> {
+    const fn gate(self) -> OwnerGate<'a> {
+        (self.can_chown, self.owner)
+    }
+
+    /// Run `f` on the section showing `props` with the keyboard at `cursor`.
+    fn with<R>(
+        self,
+        props: &Properties,
+        cursor: PermsCursor,
+        f: impl FnOnce(&mut PermsSection) -> R,
+    ) -> R {
+        self.panel.with(props, self.gate(), cursor, f)
+    }
+}
+
+/// The Permissions section a Properties window keeps between events.
+///
+/// Composing the section costs a few dozen small allocations, and a window
+/// reaches it on every paint, press, key and pointer motion, so the window
+/// keeps the one it last composed beside what it was composed from, and
+/// composes again only when that changed: the node's type, mode and owning
+/// ids, the ownership gate, the open id editor and the keyboard cursor.
+#[derive(Default)]
+pub struct PermsPanel {
+    kept: Cell<Option<KeptPerms>>,
+}
+
+/// A composed section and what it was composed from.
+struct KeptPerms {
+    shows: PermsShows,
+    /// The open editor as it was handed in. The section's own copy takes its
+    /// row's focus as it is placed, so it is not what the window holds.
+    editor: Option<TextField>,
+    section: PermsSection,
+}
+
+/// The values a section's composition reads, besides the open editor itself.
+#[derive(Copy, Clone, Eq, PartialEq)]
+struct PermsShows {
+    kind: FileKind,
+    mode: u32,
+    ids: [u32; 2],
+    can_chown: bool,
+    editing: Option<OwnerField>,
+    cursor: PermsCursor,
+}
+
+impl PermsPanel {
+    /// Run `f` on the section showing `props` under `gate` with the keyboard
+    /// at `cursor`, composing it first only when the kept one shows anything
+    /// else.
+    fn with<R>(
+        &self,
+        props: &Properties,
+        gate: OwnerGate<'_>,
+        cursor: PermsCursor,
+        f: impl FnOnce(&mut PermsSection) -> R,
+    ) -> R {
+        let shows = PermsShows {
+            kind: props.file_kind(),
+            mode: props.mode(),
+            ids: OwnerField::BOTH.map(|field| field.id(props)),
+            can_chown: gate.0,
+            editing: gate.1.map(|(field, _)| field),
+            cursor,
+        };
+        let editor = gate.1.map(|(_, editor)| editor);
+        let mut kept = self
+            .kept
+            .take()
+            .filter(|kept| kept.shows == shows && kept.editor.as_ref() == editor);
+        let out = f(&mut kept
+            .get_or_insert_with(|| KeptPerms {
+                shows,
+                editor: editor.cloned(),
+                section: PermsSection::new(props, gate, cursor),
+            })
+            .section);
+        self.kept.set(kept);
+        out
+    }
+
+    /// Drop the kept section, so the next use composes afresh: a key changes
+    /// the section's own focus state, which nothing it was composed from
+    /// records.
+    fn forget(&self) {
+        self.kept.set(None);
+    }
+}
 
 impl PermsSection {
     /// The section showing `props` under `gate`, the keyboard resting where
@@ -2402,7 +2515,7 @@ impl PermsSection {
         offset: u64,
         scale: Scale,
         theme: &Theme,
-    ) -> (Scrolled, Vec<(usize, FieldLayout)>) {
+    ) -> (Scrolled, PermsPlaced) {
         let (scrolled, frame) = Scrolled::measured(
             body,
             gutter_width(scale, theme, body.width),
@@ -2414,17 +2527,18 @@ impl PermsSection {
 
     /// Where each group sits down `body`, in stacking order, with the
     /// section's one column.
-    fn placed(&self, body: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, FieldLayout)> {
+    fn placed(&self, body: Rect, scale: Scale, theme: &Theme) -> PermsPlaced {
         let across = stack::plate_width(body.width, scale, theme);
         let column = self.column(scale, theme);
-        stack::place(body, self.groups.len(), scale, theme, |index| {
+        let mut plates = stack::placements(body, PERMS_GROUPS, scale, theme, |index| {
             self.groups.get(index).map_or(0, |group| {
                 group.measured_height(across, column, scale, theme)
             })
+        });
+        core::array::from_fn(|index| {
+            let rect = plates.next().map_or(Rect::EMPTY, |(_, rect)| rect);
+            (index, FieldLayout::new(rect, column))
         })
-        .into_iter()
-        .map(|(index, rect)| (index, FieldLayout::new(rect, column)))
-        .collect()
     }
 
     /// The height the section needs stacked in a body `width` pixels wide.
@@ -3016,13 +3130,15 @@ pub fn draw_properties_window(
             scrolled.draw_bar(surface, controls.scrollbar, scale, theme);
         }
         PropertiesTab::Permissions => {
-            PermsSection::new(props, controls.owner_gate(), view.perms).render(
-                surface,
-                (body, view.scroll),
-                controls.scrollbar,
-                scale,
-                theme,
-            );
+            controls.perms_shown().with(props, view.perms, |section| {
+                section.render(
+                    surface,
+                    (body, view.scroll),
+                    controls.scrollbar,
+                    scale,
+                    theme,
+                );
+            });
         }
         PropertiesTab::Attributes => {
             draw_attributes_section(surface, props, body, view, controls, scale, theme, font);
@@ -3072,12 +3188,19 @@ pub struct PropertiesControls<'a> {
     /// The bar of the selected section's scrolling column, carrying its live
     /// hover and drag state.
     pub scrollbar: &'a ScrollBar,
+    /// The Permissions section the window keeps.
+    pub perms: &'a PermsPanel,
 }
 
 impl<'a> PropertiesControls<'a> {
-    /// The two of these the Permissions section is composed from.
-    const fn owner_gate(self) -> OwnerGate<'a> {
-        (self.can_chown, self.owner)
+    /// What the Permissions section is composed from, and where it is kept.
+    #[must_use]
+    pub const fn perms_shown(self) -> PermsShown<'a> {
+        PermsShown {
+            can_chown: self.can_chown,
+            owner: self.owner,
+            panel: self.perms,
+        }
     }
 }
 
@@ -3214,12 +3337,11 @@ pub fn properties_hit(
     let body = layout.body.filter(|body| body.contains(point))?;
     match view.tab {
         PropertiesTab::General => None,
-        PropertiesTab::Permissions => {
-            let section = PermsSection::new(props, controls.owner_gate(), view.perms);
+        PropertiesTab::Permissions => controls.perms_shown().with(props, view.perms, |section| {
             let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
             let at = scrolled.view.to_content(point)?;
             section.target_at(&placed, scale, theme, at)
-        }
+        }),
         PropertiesTab::Attributes => {
             let attrs = AttrsLayout::resolve(body, scale, theme, font)?;
             for ((action, _), rect) in ATTR_ACTIONS.iter().zip(attrs.actions.iter()) {
@@ -3250,12 +3372,12 @@ fn contains(rect: Rect, point: Point) -> bool {
 /// the section's keyboard cursor rests — or `None` when the window lays out no
 /// column: a body too short, or an attribute list with nothing in it.
 ///
-/// `can_chown` is the gate the draw took: a session refused ownership is shown
-/// a footnote saying why, which lengthens the Permissions column.
+/// `perms` is what the draw took: a session refused ownership is shown a
+/// footnote saying why, which lengthens the Permissions column.
 fn section_column(
     props: &Properties,
     view: PropertiesView,
-    can_chown: bool,
+    perms: PermsShown<'_>,
     (window, scale, theme): (Rect, Scale, &Theme),
 ) -> Option<(Scrolled, Option<Rect>)> {
     let body = PropertiesLayout::resolve(window, scale, theme).body?;
@@ -3264,15 +3386,14 @@ fn section_column(
             general_column(props, body, view.scroll, scale, theme).0,
             None,
         )),
-        PropertiesTab::Permissions => {
-            let section = PermsSection::new(props, (can_chown, None), view.perms);
+        PropertiesTab::Permissions => perms.with(props, view.perms, |section| {
             let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
             let cursor = view
                 .perms
                 .row
                 .and_then(|at| section.row_rect(&placed, at, scale, theme));
             Some((scrolled, cursor))
-        }
+        }),
         PropertiesTab::Attributes => {
             let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
             let attrs = props.attributes().visible();
@@ -3294,18 +3415,18 @@ fn section_column(
 /// scroll units, through `scroll`, answering whether it moved.
 ///
 /// `scroll` is the window's own column, the one `view.scroll` was read from;
-/// `can_chown` is the gate the draw took. A section that fits its body has
-/// nothing to scroll. A move reports the column and its bar.
+/// `perms` is what the draw took. A section that fits its body has nothing to
+/// scroll. A move reports the column and its bar.
 pub fn properties_scroll_wheel(
     scroll: &mut ScrollColumn,
     props: &Properties,
     view: PropertiesView,
-    can_chown: bool,
+    perms: PermsShown<'_>,
     frame: (Rect, Scale, &Theme),
     delta: (i32, i32),
     damage: &mut Region,
 ) -> bool {
-    let Some((scrolled, _)) = section_column(props, view, can_chown, frame) else {
+    let Some((scrolled, _)) = section_column(props, view, perms, frame) else {
         return false;
     };
     let Some(gutter) = scrolled.gutter else {
@@ -3331,12 +3452,12 @@ pub fn properties_scroll_pointer(
     scroll: &mut ScrollColumn,
     props: &Properties,
     view: PropertiesView,
-    can_chown: bool,
+    perms: PermsShown<'_>,
     frame: (Rect, Scale, &Theme),
     pointer: (Point, &InputEvent),
     damage: &mut Region,
 ) -> Option<bool> {
-    let (scrolled, _) = section_column(props, view, can_chown, frame)?;
+    let (scrolled, _) = section_column(props, view, perms, frame)?;
     let gutter = scrolled.gutter?;
     let (_, scale, theme) = frame;
     scroll.route(
@@ -3359,11 +3480,11 @@ pub fn properties_reveal(
     scroll: &mut ScrollColumn,
     props: &Properties,
     view: PropertiesView,
-    can_chown: bool,
+    perms: PermsShown<'_>,
     frame: (Rect, Scale, &Theme),
     damage: &mut Region,
 ) -> bool {
-    let Some((scrolled, Some(cursor))) = section_column(props, view, can_chown, frame) else {
+    let Some((scrolled, Some(cursor))) = section_column(props, view, perms, frame) else {
         return false;
     };
     let offset = scrolled.revealing(cursor);
@@ -3385,31 +3506,31 @@ pub fn properties_reveal(
 /// An editor takes the whole slot of its ownership row, so this is that
 /// slot — the one placement [`draw_properties_window`] draws it at, published
 /// so the host feeding that editor keys reports the rectangle it repaints
-/// instead of re-deriving this layout.
+/// instead of re-deriving this layout. `perms` is what the draw took.
 #[must_use]
 pub fn properties_owner_editor_rect(
     props: &Properties,
     view: PropertiesView,
-    window: Rect,
-    scale: Scale,
-    theme: &Theme,
+    perms: PermsShown<'_>,
+    (window, scale, theme): (Rect, Scale, &Theme),
     field: OwnerField,
 ) -> Option<Rect> {
     let body = PropertiesLayout::resolve(window, scale, theme).body?;
-    let section = PermsSection::new(props, (true, None), PermsCursor::default());
-    let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
-    let layout = placed
-        .into_iter()
-        .find_map(|(index, layout)| (index == OWNERSHIP).then_some(layout))?;
-    let group = &section.groups[OWNERSHIP];
-    let row = field.row()?;
-    let bounds = group.row_rect(row, layout, scale, theme)?;
-    let slot =
-        group
-            .rows()
-            .get(row)?
-            .slot_rect(FieldLayout::new(bounds, layout.column), scale, theme)?;
-    scrolled.view.to_window(slot)
+    perms.with(props, view.perms, |section| {
+        let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
+        let layout = placed
+            .into_iter()
+            .find_map(|(index, layout)| (index == OWNERSHIP).then_some(layout))?;
+        let group = &section.groups[OWNERSHIP];
+        let row = field.row()?;
+        let bounds = group.row_rect(row, layout, scale, theme)?;
+        let slot = group.rows().get(row)?.slot_rect(
+            FieldLayout::new(bounds, layout.column),
+            scale,
+            theme,
+        )?;
+        scrolled.view.to_window(slot)
+    })
 }
 
 /// What a key did to the Permissions section.
@@ -3459,11 +3580,15 @@ pub fn properties_permissions_key(
     let Some(body) = PropertiesLayout::resolve(window, scale, theme).body else {
         return unchanged;
     };
-    let mut section = PermsSection::new(props, controls.owner_gate(), view.perms);
-    let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
-    let mut drew = tairix_controls::damage::sink();
-    let keyed = section.key(&placed, view.perms, key, (scale, theme), &mut drew);
-    scrolled.view.report(&drew, damage);
+    let perms = controls.perms_shown();
+    let keyed = perms.with(props, view.perms, |section| {
+        let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
+        let mut drew = tairix_controls::damage::sink();
+        let keyed = section.key(&placed, view.perms, key, (scale, theme), &mut drew);
+        scrolled.view.report(&drew, damage);
+        keyed
+    });
+    perms.panel.forget();
     keyed
 }
 

@@ -1309,29 +1309,27 @@ where
             ..RamzipReclaimSummary::default()
         };
         let space_id = self.space_id;
-        for page in cold {
-            let mut ctx = VmContext {
-                space_id,
-                space: &mut self.space,
-                physmap: &self.physmap,
-                frames: self.frames,
-                sink,
-            };
-            // The owning task is the space itself (one task per space),
-            // so its tier task id is the space id.
-            match tier.compress_out(
-                pressure,
-                reclaimable_residue,
-                &mut ctx,
-                page,
-                space_id,
-                &template,
-                retire,
-            ) {
+        let mut ctx = VmContext {
+            space_id,
+            space: &mut self.space,
+            physmap: &self.physmap,
+            frames: self.frames,
+            sink,
+        };
+        // The owning task is the space itself (one task per space), so its
+        // tier task id is the space id.
+        tier.compress_out_batch(
+            pressure,
+            reclaimable_residue,
+            (&mut ctx, &cold),
+            space_id,
+            &template,
+            retire,
+            &mut |_, outcome| match outcome {
                 Ok(()) => summary.compressed += 1,
                 Err(_) => summary.refused += 1,
-            }
-        }
+            },
+        );
         summary
     }
 

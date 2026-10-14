@@ -426,7 +426,11 @@ stream, the meta-Huffman arrangement that gives each region of the picture
 its own five prefix codes, the colour cache, the LZ77 backward references
 with their two-dimensional distance mapping, and all four transforms —
 predictor with each of its fourteen predictors, cross colour, subtract
-green, and colour indexing with its pixel bundling.
+green, and colour indexing with its pixel bundling. Only the groups the
+entropy image names keep their codes: the stream describes every group up
+to the highest index named, and the rest are read only to pass them by, so
+the codes held follow the picture's blocks rather than the stream's
+length.
 
 `ALPH` carries a lossy picture's alpha channel and is complete at both
 compression methods and all four filtering methods. Its compressed method is
@@ -455,14 +459,19 @@ Five readings the specification leaves to the decoder:
   agree for a WEBP, where they may differ for a TIFF.
 - **Nothing is sized from an `ANMF`'s own declaration.** Its 24-bit frame
   extent is checked to lie inside the canvas, which allocates nothing, and
-  the frame is then decoded at the size its *payload* declares and refused
-  unless the two match. A tile's extent is not bounded by the picture it
+  the size its *payload's* bitstream declares is refused unless the two
+  match, before the frame is decoded — so a frame larger than its canvas is
+  refused from its header, by the decode and by `decode_peak_bytes` alike,
+  rather than decoded first. A tile's extent is not bounded by the picture it
   covers, and neither is a frame's.
-- **Which kind a file is comes from the file.** One carrying `ANIM` is an
-  animation, with that chunk's loop count (`0` meaning for ever) and the
-  retained-canvas stepping disposal forces. One without is a still picture —
-  the one-page case, exactly as a PNG is — because there is no loop count to
-  report and answering "for ever" would fabricate a declaration.
+- **The animation flag says which kind a file is.** One that sets it is an
+  animation, with the loop count its one `ANIM` declares before its first
+  frame (`0` meaning for ever) and the retained-canvas stepping disposal
+  forces; an animation without that declaration is refused rather than
+  answered as looping for ever, which would fabricate one. One that clears it
+  is a still picture — the one-page case, exactly as a PNG is — whose `ANIM`
+  is ignored, as the specification requires, and in which a frame is
+  refused.
 - **The canvas clears and disposes to fully transparent**, ignoring `ANIM`'s
   background colour. The specification makes that colour explicitly
   optional, and a straight-alpha decoder's job is to carry a file's
@@ -474,8 +483,8 @@ Five readings the specification leaves to the decoder:
   chunks actually found — so a set alpha flag with no alpha chunk decodes,
   and an alpha chunk with a clear flag decodes, rather than either being
   refused over a disagreement that costs nothing. The **animation** flag is
-  not a hint: it is what says whether the file is an animation at all, so it
-  and the chunks must agree, and an animation chunk under a clear flag is
+  not a hint: it is what says whether the file is an animation at all, so a
+  still bitstream under a set flag and a frame under a clear one are both
   refused. The reserved bits and reserved field values are refused either
   way.
 
@@ -873,10 +882,11 @@ sizing — the scale a JPEG decode picks, the page an icon decode picks, the
 buffers a PNG, GIF, BMP, TIFF or WebP decoder reserves — so the bound and the
 decode cannot drift apart, and the fuzz harness checks every decode it makes,
 valid or mutated, against it. Where a decoder's working set is not set by its
-picture alone — a lossless WebP's prefix codes grow with the stream, a
-JPEG-coded TIFF's units with the limits — the bound grows the same way and
-stands far above what an ordinary file needs (`plans/OPEN-DEFECTS.md` has the
-decoder fixes that would bring those down).
+picture alone — a JPEG-coded TIFF's units grow with the limits, and a
+lossless WebP's table of the groups its stream describes with the stream, to
+at most 65,536 entries — the bound grows the same way and stands far above
+what an ordinary file needs (`plans/OPEN-DEFECTS.md` has the decoder fixes
+that would bring the TIFF one down).
 
 ## API shape
 

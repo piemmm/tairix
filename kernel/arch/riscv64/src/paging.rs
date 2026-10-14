@@ -1181,6 +1181,10 @@ fn publish_table_update() {
 /// The single-page flush is this with `pages == 1`, so there is one local
 /// invalidation sequence on this port rather than two.
 pub(crate) fn invalidate_range_local(start_vaddr: u64, pages: usize) {
+    if fences_whole_space(pages) {
+        invalidate_all_local();
+        return;
+    }
     #[cfg(all(target_arch = "riscv64", target_os = "none"))]
     {
         let mut vaddr = start_vaddr;
@@ -1204,6 +1208,18 @@ pub(crate) fn invalidate_range_local(start_vaddr: u64, pages: usize) {
         // The host has no TLB to invalidate; a flush is vacuous.
         let _ = (start_vaddr, pages);
     }
+}
+
+/// Past this many pages one whole-space `sfence.vma` is cheaper than one a
+/// page: Linux's `tlb_flush_all_threshold` (`arch/riscv/mm/tlbflush.c`). It
+/// also bounds a sparse unmap's span, which would otherwise cost a fence per
+/// page of its gaps, on this hart and, through RFENCE, on the others.
+const RANGE_FENCE_CEILING: usize = 64;
+
+/// Whether fencing `pages` pages should fence the whole address space
+/// instead, locally and remotely alike.
+pub(crate) const fn fences_whole_space(pages: usize) -> bool {
+    pages > RANGE_FENCE_CEILING
 }
 
 /// Invalidate every cached translation on the calling hart.

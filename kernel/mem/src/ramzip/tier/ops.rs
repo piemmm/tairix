@@ -17,6 +17,10 @@ use crate::frame::MemoryClass;
 use crate::retire::Retire;
 use crate::vmm::MapFlags;
 
+/// How many pages a compression step takes out of every view at once: one
+/// remote shootdown and one snapshot retirement serve them all.
+const COMPRESS_BATCH: usize = 64;
+
 /// Whether opportunistic restores may run at all: normal pressure
 /// *and* free memory above the warm-up start watermark (hysteresis
 /// against the stop watermark is applied per page in the step loops).
@@ -61,21 +65,7 @@ fn frame_page<'a, P: PageTable>(
 
 impl Ramzip {
     /// Compress `page` of the context's address space into the tier
-    /// and free its frame.
-    ///
-    /// The full gate order (each refusal typed, the page untouched):
-    /// pressure handoff → poison check → thrash check → eligibility →
-    /// mapping lookup and flag defence → band cap → per-task share →
-    /// decompression floor. The page then leaves the page table, every
-    /// other CPU's TLB and `retire`'s view before a byte of it is read, so
-    /// no sibling thread can change it after it is sealed; only then is it
-    /// sealed and charged, and its frame scrubbed (zero-on-free) and
-    /// returned. A seal the tier refuses puts the page back exactly as it
-    /// was, in the page table and in `retire`.
-    ///
-    /// `reclaimable_residue` is the clean + transform cache bytes still
-    /// resident, from the caller's reclaim accounting: compression
-    /// waits for cheaper reclaim first.
+    /// and free its frame: [`Self::compress_out_batch`] of one page.
     ///
     /// # Errors
     ///
@@ -94,13 +84,108 @@ impl Ramzip {
         candidate: &PageCandidate,
         retire: &mut dyn Retire,
     ) -> Result<(), CompressRefusal> {
-        let (frame, flags) =
-            self.admit_compress(pressure, reclaimable_residue, ctx, page, task, *candidate)?;
-        let va = page.start().as_u64();
-        ctx.space.unmap(page).map_err(CompressRefusal::PageTable)?;
-        ctx.space.shoot_remote(va, 1);
-        retire.retire(va, 1);
+        let mut answered = None;
+        self.compress_out_batch(
+            pressure,
+            reclaimable_residue,
+            (ctx, core::slice::from_ref(&page)),
+            task,
+            candidate,
+            retire,
+            &mut |_, outcome| answered = Some(outcome),
+        );
+        answered.unwrap_or(Err(CompressRefusal::NotMapped))
+    }
 
+    /// Compress each of `pages` of the context's address space into the
+    /// tier and free its frame, answering each page's outcome through
+    /// `outcome` exactly once.
+    ///
+    /// The full gate order runs per page (each refusal typed, the page
+    /// untouched): pressure handoff → poison check → thrash check →
+    /// eligibility → mapping lookup and flag defence → band cap → per-task
+    /// share → decompression floor, the cap and the share counting a page
+    /// for each one admitted ahead of it and not yet sealed. Up to
+    /// `COMPRESS_BATCH` admitted pages then leave the page table, every
+    /// other CPU's TLB and `retire`'s view — one remote shootdown and one
+    /// retirement for them all — before a byte of any is read, so no
+    /// sibling thread can change one after it is sealed; only then is each
+    /// sealed and charged, and its frame scrubbed (zero-on-free) and
+    /// returned. A seal the tier refuses puts its page back exactly as it
+    /// was, in the page table and in `retire`.
+    ///
+    /// `reclaimable_residue` is the clean + transform cache bytes still
+    /// resident, from the caller's reclaim accounting: compression
+    /// waits for cheaper reclaim first.
+    // Each argument is a distinct input the gates or the views need.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compress_out_batch<P: PageTable>(
+        &mut self,
+        pressure: &MemoryPressure,
+        reclaimable_residue: usize,
+        (ctx, pages): (&mut VmContext<'_, P>, &[Page]),
+        task: u64,
+        candidate: &PageCandidate,
+        retire: &mut dyn Retire,
+        outcome: &mut dyn FnMut(Page, Result<(), CompressRefusal>),
+    ) {
+        for pages in pages.chunks(COMPRESS_BATCH) {
+            let Some(&filler) = pages.first() else {
+                continue;
+            };
+            let mut held = [(filler, crate::frame::Frame(0), MapFlags::empty()); COMPRESS_BATCH];
+            let mut count = 0;
+            for &page in pages {
+                let admitted = self
+                    .admit_compress(
+                        pressure,
+                        reclaimable_residue,
+                        ctx,
+                        page,
+                        task,
+                        *candidate,
+                        count,
+                    )
+                    .and_then(|(frame, flags)| {
+                        ctx.space
+                            .unmap(page)
+                            .map(|_| (frame, flags))
+                            .map_err(CompressRefusal::PageTable)
+                    });
+                match admitted {
+                    Ok((frame, flags)) => {
+                        held[count] = (page, frame, flags);
+                        count += 1;
+                    }
+                    Err(refusal) => outcome(page, Err(refusal)),
+                }
+            }
+            let held = &mut held[..count];
+            held.sort_unstable_by_key(|(page, _, _)| page.number());
+            let (Some(&(first, _, _)), Some(&(last, _, _))) = (held.first(), held.last()) else {
+                continue;
+            };
+            ctx.space
+                .shoot_remote(first.start().as_u64(), last.number() - first.number() + 1);
+            let mut runs = held
+                .chunk_by(|a, b| b.0.number() == a.0.number() + 1)
+                .map(|run| (run[0].0.start().as_u64(), run.len() as u64));
+            retire.retire_runs(&mut runs);
+            for &(page, frame, flags) in held.iter() {
+                outcome(page, self.seal_out(ctx, (page, frame, flags), task, retire));
+            }
+        }
+    }
+
+    /// Seal `page`, already out of every view, and release its frame; or put
+    /// it back where it was if the tier refuses it.
+    fn seal_out<P: PageTable>(
+        &mut self,
+        ctx: &mut VmContext<'_, P>,
+        (page, frame, flags): (Page, crate::frame::Frame, MapFlags),
+        task: u64,
+        retire: &mut dyn Retire,
+    ) -> Result<(), CompressRefusal> {
         if let Err(refusal) = self.seal_entry(ctx, page, frame, flags, task) {
             // Unmapping freed no table, so the page's walk needs nothing
             // allocated. Were it refused all the same, the frame is kept
@@ -184,7 +269,11 @@ impl Ramzip {
     /// touched, in the audited order: pressure handoff → poison →
     /// thrash → eligibility → mapping lookup and flag defence → band
     /// cap → per-task share → decompression floor → double-entry
-    /// bookkeeping defence. Every refusal is typed and counted.
+    /// bookkeeping defence. Every refusal is typed and counted. The cap
+    /// and the share count a page for each of the `held` admitted ahead of
+    /// this one and not yet charged.
+    // Each argument is a distinct input a gate reads.
+    #[allow(clippy::too_many_arguments)]
     fn admit_compress<P: PageTable>(
         &mut self,
         pressure: &MemoryPressure,
@@ -193,6 +282,7 @@ impl Ramzip {
         page: Page,
         task: u64,
         candidate: PageCandidate,
+        held: usize,
     ) -> Result<(crate::frame::Frame, MapFlags), CompressRefusal> {
         bump(&mut self.ledger.counters_mut().attempts);
         let band = pressure.sample();
@@ -224,14 +314,15 @@ impl Ramzip {
         // smaller than one page (the acceptance bound guarantees it),
         // so PAGE_SIZE is a sound, conservative bound for the cap, the
         // fair share, and the transient reserve cost alike.
+        let reserved = held.saturating_add(1).saturating_mul(PAGE_SIZE);
         let cap = self.caps.band_cap(band);
-        if self.ledger.footprint().saturating_add(PAGE_SIZE) > cap {
+        if self.ledger.footprint().saturating_add(reserved) > cap {
             bump(&mut self.ledger.counters_mut().rejected_cap);
             return Err(CompressRefusal::CapReached);
         }
         let share = self.caps.task_share(band);
         let task_stored = self.ledger.task_usage(task).stored_bytes;
-        if task_stored.saturating_add(PAGE_SIZE) > share {
+        if task_stored.saturating_add(reserved) > share {
             bump(&mut self.ledger.counters_mut().rejected_task_share);
             return Err(CompressRefusal::TaskShareReached);
         }

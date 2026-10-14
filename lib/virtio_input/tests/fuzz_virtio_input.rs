@@ -26,7 +26,9 @@ use tairix_virtio::{ChainView, MockHost, MockTransport, VirtioError};
 use tairix_virtio_input::{Report, VirtioInput};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
-const SMOKE_ITERATIONS: u64 = 20_000;
+/// The undefined-behaviour oracle needs each path once, not the search, so
+/// under it the sweep is a few dozen devices.
+const SMOKE_ITERATIONS: u64 = if cfg!(miri) { 32 } else { 20_000 };
 
 /// The configuration window (virtio 1.1 §5.8.4): `select`, `subsel`, `size`,
 /// five reserved bytes, then the answer union.

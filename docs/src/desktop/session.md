@@ -1817,6 +1817,15 @@ folds whatever the surface asks for into the loop's park through the same
 the question as it does at login. An idle lock screen asks for nothing and
 arms no timer.
 
+An event only owes the frame what it changed. `advance` draws everything
+owed once, into the lock's kept frame, re-deriving each owed rectangle
+under its own clip and marking only those, so a key-repeat burst costs one
+paint of the field rather than a new screen-sized frame and a whole-screen
+composite per key. A change of look, or of screen, redraws the frame whole.
+A frame the heap refuses at a new size leaves the lock `uncovered` and arms
+no wake of its own, so the unpresented frame cannot spin the loop; the
+loop's next wake draws it.
+
 Whether the row is offered at all is the session's attestation: it tells the
 bar through `DesktopShell::set_elevation_available` whether it runs on a
 console that has an elevation endpoint to unlock with. The bar refuses the

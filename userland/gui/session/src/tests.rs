@@ -1,5 +1,10 @@
 //! Headless unit tests for the desktop session glue.
 
+/// Every request this binary makes, metered per thread, so a test can have the
+/// heap refuse a buffer as an exhausted one would.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -10751,6 +10756,45 @@ fn a_lock_redraws_itself_over_a_screen_that_grew_beneath_it() {
     );
 }
 
+/// A lock the heap cannot redraw over a grown screen stays uncovered, so the
+/// embedder presents nothing, and asks for no wake of its own: the frame it
+/// owes cannot be presented, so a wake for it would spin the loop against the
+/// exhausted heap. The loop's next wake draws it.
+#[test]
+fn a_lock_refused_its_frame_over_a_grown_screen_stays_uncovered_without_spinning() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
+    let small = comp.mode();
+    assert!(comp.set_mode(DisplayMode {
+        width_px: small.width_px * 2,
+        height_px: small.height_px * 2,
+        stride_bytes: small.stride_bytes * 2,
+        format: small.format,
+    }));
+    let screenful = usize::try_from(small.stride_bytes * small.height_px).expect("a host size");
+
+    tairix_fuzzseed::meter::refusing_above(screenful, || {
+        lock.keep_topmost(&shell, &mut comp, None);
+    });
+
+    assert!(
+        lock.uncovered(&comp),
+        "the old frame covers the old screen only"
+    );
+    assert_eq!(
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
+        "and the refused frame arms no wake"
+    );
+    lock.keep_topmost(&shell, &mut comp, None);
+    assert!(
+        !lock.uncovered(&comp),
+        "the next wake covers the new screen"
+    );
+}
+
 /// A screensaver up over a lock stays above it, and holding that order is
 /// free: the lock sits directly beneath the screensaver rather than being
 /// raised over it and lowered back on every wake, which would recomposite the
@@ -10839,6 +10883,103 @@ fn repaint_while_locked_keeps_exactly_one_lock_window_and_stays_locked() {
         comp.window_count(),
         1,
         "a repaint never adds a second lock window"
+    );
+}
+
+fn lock_content(comp: &Compositor) -> tairix_wm::Surface {
+    comp.window(locked_window(comp))
+        .expect("live")
+        .content()
+        .expect("content is retained")
+        .clone()
+}
+
+/// A key-repeat burst at the lock owes the frame rather than painting it:
+/// nothing is drawn or damaged per key, the loop is asked to wake for the
+/// frame, and the frame draws the field alone, landing exactly the pixels a
+/// whole repaint would.
+#[test]
+fn a_burst_of_keys_at_the_lock_is_painted_once_at_the_frame_and_only_the_field() {
+    let shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
+    let _ = comp.composite();
+    let before = lock_content(&comp);
+    let mut unlocker = ScriptedUnlocker::refusing();
+
+    for ch in "hunter".chars() {
+        lock.handle(
+            &key_press(Key::Char(ch)),
+            LOCK_EVENT_NS,
+            &mut unlocker,
+            &shell,
+            &mut comp,
+        );
+    }
+    assert!(!comp.has_damage(), "no key paints or damages anything");
+    assert!(lock_content(&comp) == before, "the kept frame is untouched");
+    assert_eq!(
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE),
+        0,
+        "an owed frame wakes the loop for the next frame"
+    );
+
+    lock.advance(LOCK_EVENT_NS, &shell, &mut comp);
+    let drawn = comp.composite();
+    let block = tairix_greeter::panel_rect(comp.screen_rect(), comp.scale());
+    assert!(!drawn.is_empty(), "the frame draws what the keys changed");
+    assert!(
+        drawn
+            .rects()
+            .iter()
+            .all(|rect| block.intersection(rect) == *rect),
+        "and only within the prompt, never the whole screen: {:?}",
+        drawn.rects()
+    );
+    let partial = lock_content(&comp);
+    assert!(partial != before, "the typed characters are drawn");
+
+    lock.repaint(&shell, &mut comp);
+    assert!(
+        lock_content(&comp) == partial,
+        "a part repainted lands the pixels a whole repaint does"
+    );
+}
+
+/// A change of look behind a lock that repaints in parts would leave the
+/// untouched parts in the old look, so the next frame redraws it whole.
+#[test]
+fn a_lock_redraws_itself_whole_in_a_changed_look() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut lock = ScreenLock::new();
+    assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
+    let before = lock_content(&comp);
+    let switched = match shell.session().active_theme().appearance() {
+        Appearance::Dark => Appearance::Light,
+        Appearance::Light => Appearance::Dark,
+    };
+    shell.session_mut().set_appearance(switched);
+    assert!(shell.sync_theme(&mut comp));
+    let _ = comp.composite();
+
+    lock.advance(LOCK_EVENT_NS, &shell, &mut comp);
+
+    assert_eq!(
+        comp.composite().bounds(),
+        comp.screen_rect(),
+        "the whole lock is redrawn"
+    );
+    let mut fresh = ScreenLock::new();
+    let mut fresh_comp = compositor();
+    assert!(fresh_comp.set_theme(shell.session().active_theme().clone()));
+    assert!(fresh.engage(("ann", "ann"), &shell, &mut fresh_comp));
+    let restyled = lock_content(&comp);
+    assert!(restyled != before, "in the new look");
+    assert!(
+        restyled == lock_content(&fresh_comp),
+        "exactly as a lock put up in that look"
     );
 }
 
@@ -15108,20 +15249,25 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
         &mut comp,
     );
 
-    assert!(
-        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE) < WAITSET_TIMEOUT_NONE,
-        "the refusal asks for a frame"
+    assert_eq!(
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE),
+        0,
+        "the refusal owes its frame at once"
     );
     comp.composite();
     let mut at = LOCK_EVENT_NS;
+    lock.advance(at, &shell, &mut comp);
+    let mut repainted = comp.has_damage();
     let mut frames = 0u32;
-    let mut repainted = false;
     loop {
         let due = lock.park_deadline_ns(at, WAITSET_TIMEOUT_NONE);
         if due == WAITSET_TIMEOUT_NONE {
             break;
         }
-        assert!(due > 0, "a frame that is due now would spin the loop");
+        assert!(
+            due > 0,
+            "a drawn frame leaves none due now, which would spin the loop"
+        );
         assert_eq!(
             lock.park_deadline_ns(at, OTHER_PARK_NS),
             OTHER_PARK_NS.min(due),

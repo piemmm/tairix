@@ -200,6 +200,9 @@ the neighbourly filters are not offered.
 The histograms count the layer painted on, held to the selection, each pixel
 weighed by its opacity and its share of the selection
 (`histogram::Histogram`), worked out on the worker while the pane reads one.
+A histogram is a reading of the picture, so moving from one adjustment that
+reads it to another keeps it, and one being read when the adjustment moves
+lands on the next.
 
 The window has no menu bar. A secondary press anywhere opens its menu — Cut,
 Copy, Paste, Select all and Deselect, then File, Edit, Image, Layers, Colours,

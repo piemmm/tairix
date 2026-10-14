@@ -280,6 +280,12 @@ impl Properties {
         self.mode
     }
 
+    /// The node's structural kind, which the permission string's type
+    /// indicator is taken from.
+    pub(crate) const fn file_kind(&self) -> FileKind {
+        self.file_kind
+    }
+
     /// The mode's meaningful bits as a four-digit octal string (`0755`).
     #[must_use]
     pub fn mode_octal(&self) -> String {

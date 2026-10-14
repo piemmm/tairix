@@ -430,7 +430,9 @@ where
 
     /// [`get_or_build`](Self::get_or_build) for a caller holding `key` only in
     /// a borrowed form: `own` makes the key the entry is admitted under, and is
-    /// called only on a miss, so a hit builds no key at all.
+    /// called only on a miss, so a hit builds no key at all. A key `own` cannot
+    /// make — the heap refused what it owns — leaves the value unretained, as
+    /// any other refusal does.
     pub fn get_or_build_borrowed<Q, O, F>(
         &mut self,
         generation: &E,
@@ -441,7 +443,7 @@ where
     where
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
-        O: FnOnce() -> K,
+        O: FnOnce() -> Option<K>,
         F: FnOnce() -> Option<V>,
     {
         match self.prepare(generation, key) {
@@ -449,7 +451,11 @@ where
             Prepared::Hit => self.serve_hit(key),
             Prepared::Miss(policy) => {
                 let value = build()?;
-                self.admit(policy, own(), value)
+                let Some(owned) = own() else {
+                    self.accounting.record_refusal(policy.class());
+                    return Some(Served::Uncached(value));
+                };
+                self.admit(policy, owned, value)
             }
         }
     }
@@ -548,6 +554,50 @@ where
         self.enforce_pressure();
         if let Some(Served::Uncached(value)) = self.admit(policy, key, value) {
             self.discard(value);
+        }
+    }
+
+    /// [`retain`](Self::retain), never at the cost of the entry `beside` holds:
+    /// a value the cache could make room for only by evicting it is refused
+    /// instead, and answers whether it was kept.
+    ///
+    /// For a value derived from a retained one and drawn with it — an icon's
+    /// cast shadow beside its picture. Admitting it in place of its source
+    /// would cost the source's rebuild on its very next use, which then evicts
+    /// the derived value, and the pair would trade places every use.
+    ///
+    /// A `beside` the cache no longer holds refuses the value too: it is worth
+    /// nothing without what it was derived from.
+    pub fn retain_beside<Q>(&mut self, generation: &E, key: K, value: V, beside: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let policy = self.policy.filter(|_| !self.poisoned);
+        let Some(policy) = policy else {
+            self.discard(value);
+            return false;
+        };
+        self.enter_generation(generation);
+        self.enforce_pressure();
+        // Touched, so the eviction admission may run reaches it last.
+        let kept = self.entries.get(beside).map(|entry| {
+            entry
+                .charged_payload
+                .saturating_add(self.entry_metadata_bytes)
+        });
+        let Some(kept) = kept else {
+            self.accounting.record_refusal(policy.class());
+            self.discard(value);
+            return false;
+        };
+        match self.admit_keeping(policy, key, value, kept) {
+            Some(Served::Cached(_)) => true,
+            Some(Served::Uncached(value)) => {
+                self.discard(value);
+                false
+            }
+            None => false,
         }
     }
 
@@ -730,6 +780,18 @@ where
     /// insertion that follows infallible — and the caller treats it exactly as
     /// a build that yielded nothing.
     fn admit(&mut self, policy: CachePolicy, key: K, value: V) -> Option<Served<'_, V>> {
+        self.admit_keeping(policy, key, value, 0)
+    }
+
+    /// [`admit`](Self::admit), evicting no further than leaves `kept` bytes
+    /// charged: the most recently used entry, at that cost, survives.
+    fn admit_keeping(
+        &mut self,
+        policy: CachePolicy,
+        key: K,
+        value: V,
+        kept: usize,
+    ) -> Option<Served<'_, V>> {
         let _ = self.release(&key);
         let payload = value.payload_bytes();
         let cost = payload.saturating_add(self.entry_metadata_bytes);
@@ -745,6 +807,11 @@ where
             return Some(Served::Uncached(value));
         }
 
+        if kept.saturating_add(cost) > ceiling {
+            // No eviction leaves it room, so none is made for it.
+            self.accounting.record_refusal(policy.class());
+            return Some(Served::Uncached(value));
+        }
         if self.charged_bytes().saturating_add(cost) > ceiling {
             // Evict to the shrink watermark, or to the band's ceiling where
             // that is the tighter of the two.
@@ -753,7 +820,7 @@ where
             } else {
                 self.budget.low()
             };
-            self.evict_to(watermark.saturating_sub(cost));
+            self.evict_to(watermark.saturating_sub(cost).max(kept));
         }
         if self.charged_bytes().saturating_add(cost) > ceiling {
             self.accounting.record_refusal(policy.class());
@@ -1141,7 +1208,7 @@ mod tests {
                 "icon",
                 || {
                     owned += 1;
-                    alloc::string::String::from("icon")
+                    Some(alloc::string::String::from("icon"))
                 },
                 || Some(Block::of(64, 0xAA)),
             )
@@ -1160,6 +1227,27 @@ mod tests {
         assert_eq!(cache.peek(&1, "icon"), Some(&Block::of(64, 0xAA)));
         assert_eq!(cache.accounting().hits(), 1);
         assert_eq!(cache.accounting().misses(), 1);
+    }
+
+    /// A key the heap would not give leaves the value unretained and the
+    /// refusal counted, exactly as a budget refusal does.
+    #[test]
+    fn a_key_that_cannot_be_made_retains_nothing() {
+        let mut cache: ReclaimCache<alloc::string::String, Block, u64, BuildFastHash> =
+            ReclaimCache::new(
+                "test.cache",
+                candidate(Sensitivity::UserData),
+                CacheBudget::from_backing(64 * 1024),
+                leak_gauge(PressureBand::Normal),
+                leak_sink(),
+                BuildFastHash::new(),
+            );
+        let served = cache
+            .get_or_build_borrowed(&1, "icon", || None, || Some(Block::of(64, 0xAA)))
+            .expect("the value is still served");
+        assert!(!served.is_cached());
+        assert!(cache.is_empty());
+        assert_eq!(cache.accounting().refusals(), 1);
     }
 
     #[test]
@@ -1311,6 +1399,83 @@ mod tests {
         assert!(cache.get_or_build(&1, 7, || None).is_none());
         assert_eq!(cache.accounting().misses(), 1);
         assert_eq!(cache.len(), 0);
+    }
+
+    /// A cache holding, oldest first, a filler of `filler` bytes and the
+    /// entry `7` of `kept` bytes, the most recently used.
+    fn filled(filler: usize, kept: usize) -> ReclaimCache<u32, Block, u64, BuildFastHash> {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 1, Block::of(filler - METADATA, 1));
+        cache.retain(&1, 7, Block::of(kept - METADATA, 7));
+        assert_eq!(cache.len(), 2);
+        cache
+    }
+
+    /// A value admitted beside an entry evicts no further than leaves that
+    /// entry standing, where an ordinary admission evicting to the low
+    /// watermark would have taken it too.
+    #[test]
+    fn retain_beside_keeps_the_entry_it_is_beside() {
+        let budget = CacheBudget::from_backing(64 * 1024);
+        let (low, ceiling) = (budget.low(), budget.hard());
+        let shadow = (ceiling - low) / 2;
+        let (filler, kept) = (ceiling - low, low);
+
+        let mut plain = filled(filler, kept);
+        plain.retain(&1, 9, Block::of(shadow - METADATA, 9));
+        assert!(
+            plain.peek(&1, &7).is_none(),
+            "an ordinary admission takes it"
+        );
+
+        let mut beside = filled(filler, kept);
+        assert!(beside.retain_beside(&1, 9, Block::of(shadow - METADATA, 9), &7));
+        assert!(beside.peek(&1, &7).is_some(), "the entry stands");
+        assert!(beside.peek(&1, &9).is_some(), "beside the value");
+        assert!(
+            beside.peek(&1, &1).is_none(),
+            "the older filler went instead"
+        );
+        assert!(beside.charged_bytes() <= ceiling);
+    }
+
+    /// A value the cache could hold only by evicting the entry it is beside is
+    /// refused, and one beside an entry the cache does not hold is too.
+    #[test]
+    fn retain_beside_refuses_rather_than_displace_its_entry() {
+        let budget = CacheBudget::from_backing(64 * 1024);
+        let (low, ceiling) = (budget.low(), budget.hard());
+        let shadow = ceiling - low + METADATA;
+
+        let mut plain = filled(ceiling - low, low);
+        plain.retain(&1, 9, Block::of(shadow - METADATA, 9));
+        assert!(plain.peek(&1, &9).is_some() && plain.peek(&1, &7).is_none());
+
+        let mut beside = filled(ceiling - low, low);
+        let refusals = beside.accounting().refusals();
+        assert!(!beside.retain_beside(&1, 9, Block::of(shadow - METADATA, 9), &7));
+        assert!(beside.peek(&1, &7).is_some(), "the entry stands");
+        assert!(beside.peek(&1, &1).is_some(), "nothing was evicted for it");
+        assert!(beside.peek(&1, &9).is_none());
+        assert_eq!(beside.accounting().refusals(), refusals + 1);
+
+        assert!(!beside.retain_beside(&1, 10, Block::of(16, 1), &404));
+        assert!(beside.peek(&1, &10).is_none(), "nothing to stand beside");
+    }
+
+    /// A value no eviction could make room for is refused before any is made,
+    /// rather than emptying the cache and being refused after.
+    #[test]
+    fn a_value_too_large_to_ever_fit_evicts_nothing() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 1, Block::of(64, 1));
+        cache.retain(&1, 7, Block::of(1 << 20, 9));
+        assert!(
+            cache.peek(&1, &1).is_some(),
+            "the entry it could not displace"
+        );
+        assert_eq!(cache.accounting().evictions(), 0);
+        assert_eq!(cache.accounting().refusals(), 1);
     }
 
     #[test]

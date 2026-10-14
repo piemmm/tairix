@@ -3597,3 +3597,123 @@ fn a_still_gif_decode_holds_one_canvas_and_saves_nothing_for_a_frame_it_never_sh
     assert!(sequence.next_frame().expect("first frame").is_some());
     assert!(sequence.next_frame().expect("second frame").is_some());
 }
+
+/// A lossless stream whose entropy image names one high group keeps that
+/// group's codes alone: every group below it is read only to be passed by,
+/// so a small picture holds what its picture needs however many groups its
+/// stream goes on to describe, and the bound read beforehand says so.
+#[test]
+fn a_lossless_stream_keeps_only_the_groups_its_entropy_image_names() {
+    const NAMED: u32 = 4095;
+    let mut bits = WebpBits::new();
+    bits.put(u32::from(WEBP_LOSSLESS_SIGNATURE), 8);
+    bits.put(4 - 1, 14);
+    bits.put(4 - 1, 14);
+    bits.put(0, 1);
+    bits.put(0, 3);
+    // No transform, no colour cache, and one meta-prefix block of four.
+    bits.put(0, 1);
+    bits.put(0, 1);
+    bits.put(1, 1);
+    bits.put(0, 3);
+    // The entropy image: one pixel whose red and green name group NAMED.
+    bits.put(0, 1);
+    webp_lone(&mut bits, NAMED & 0xFF);
+    webp_lone(&mut bits, NAMED >> 8);
+    webp_lone(&mut bits, 0);
+    webp_lone(&mut bits, 0);
+    webp_lone(&mut bits, 0);
+    for _ in 0..NAMED {
+        webp_flat_group(&mut bits, [0, 0, 0, 0]);
+    }
+    let colour = [0x12, 0x34, 0x56, 0xFF];
+    webp_flat_group(&mut bits, colour);
+    let bytes = webp_riff(&[webp_chunk(*b"VP8L", &bits.bytes)]);
+    let limits = DecodeLimits::new(64, 64, 64 * 64, 1 << 16);
+
+    let image = decoded_within_bound(&bytes, &limits, FitBox::new(64, 64), || {
+        decode(&bytes, &limits)
+    })
+    .expect("the stream decodes");
+    let (_, held) = peak_of(|| decode(&bytes, &limits));
+
+    assert!(image
+        .pixels()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .all(|pixel| *pixel == colour));
+    assert!(
+        held < 256 * 1024,
+        "a 4x4 picture held {held} bytes for the {NAMED} groups its stream passed by"
+    );
+}
+
+/// A frame whose bitstream declares a size other than its rectangle is
+/// refused before it is decoded, by the decode and by the bound read
+/// beforehand alike, so a frame larger than its canvas costs nothing.
+/// An animation over a `canvas`-sided square canvas: `frames` copies of one
+/// frame at its corner, a `rect`-sided square holding a lossless
+/// `picture`-sided one.
+fn webp_animation(canvas: u32, rect: u32, picture: u32, frames: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    for value in [0u32, 0, rect - 1, rect - 1, 10] {
+        body.extend_from_slice(&value.to_le_bytes()[..3]);
+    }
+    body.push(0);
+    body.extend_from_slice(&webp_chunk(
+        *b"VP8L",
+        &webp_lossless(&mut Prng::new(7), picture, picture),
+    ));
+    let mut chunks = vec![
+        webp_chunk(*b"VP8X", &webp_extended(0x02, canvas, canvas)),
+        webp_chunk(*b"ANIM", &[0, 0, 0, 0, 0, 0]),
+    ];
+    chunks.extend(core::iter::repeat_n(webp_chunk(*b"ANMF", &body), frames));
+    webp_riff(&chunks)
+}
+
+#[test]
+fn an_animations_frame_list_is_reserved_once_however_many_frames_it_declares() {
+    let limits = DecodeLimits::new(8, 8, 64, 1 << 16);
+    let requests = |frames| {
+        let bytes = webp_animation(8, 8, 8, frames);
+        let (decoded, metering) = metered(|| decode(&bytes, &limits));
+        assert!(decoded.is_ok(), "{frames} frames: {:?}", decoded.err());
+        metering.allocations
+    };
+    assert_eq!(requests(2_000), requests(1));
+}
+
+#[test]
+fn an_animated_decode_hands_over_its_canvas_rather_than_a_copy() {
+    let canvas = 256u32;
+    let bytes = webp_animation(canvas, 2, 2, 1);
+    let limits = DecodeLimits::new(canvas, canvas, u64::from(canvas * canvas), 1 << 16);
+    let (decoded, held) = peak_of(|| decode(&bytes, &limits));
+    assert!(decoded.is_ok(), "{:?}", decoded.err());
+    let picture = u64::from(canvas * canvas) * 4;
+    assert!(
+        held < picture + picture / 2,
+        "held {held} bytes decoding a {picture}-byte canvas"
+    );
+}
+
+#[test]
+fn an_animation_frame_larger_than_its_rectangle_is_refused_before_decoding() {
+    let (canvas, declared) = (8u32, 64u32);
+    let bytes = webp_animation(canvas, canvas, declared, 1);
+    let limits = DecodeLimits::new(declared, declared, u64::from(declared * declared), 1 << 16);
+
+    assert_eq!(
+        decode_peak_bytes(&bytes, &limits, FitBox::new(declared, declared)),
+        Err(DecodeError::WebpFrameGeometryMismatch)
+    );
+    let (decoded, held) = peak_of(|| decode(&bytes, &limits));
+    assert_eq!(decoded.err(), Some(DecodeError::WebpFrameGeometryMismatch));
+    let frame = u64::from(declared) * u64::from(declared) * 4;
+    assert!(
+        held < frame,
+        "held {held} bytes refusing a {frame}-byte frame"
+    );
+}

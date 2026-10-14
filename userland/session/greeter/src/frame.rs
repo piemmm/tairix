@@ -10,7 +10,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DisplayMode};
 use tairix_cursor::PlacedCursor;
 use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 use tairix_geometry::Rect;
@@ -25,8 +25,8 @@ const PIXEL_BYTES: usize = 4;
 pub enum Present {
     /// Nothing changed, so nothing is presented.
     Nothing,
-    /// Present this sub-region of the frame.
-    Region(DamageRect),
+    /// Present these disjoint sub-regions of the frame.
+    Region(DamageList),
     /// Present the whole frame.
     Whole,
 }
@@ -36,32 +36,52 @@ impl Present {
     /// several changes hands the display one call rather than one per
     /// record.
     ///
-    /// Two regions become the rectangle containing both, which `mode`
-    /// resolves back to a whole present once it covers the screen — the one
-    /// definition of that question. A region whose origin will not convert
-    /// becomes the whole frame: presenting more than changed is wasteful,
-    /// presenting less shows stale pixels.
+    /// Two regions keep their rectangles apart, as many as a present names
+    /// ([`DamageList::fitted`] merging the pair that over-covers least beyond
+    /// that), so far-apart changes — a ribbon's strips across the screen —
+    /// present as what moved rather than as the box between them. A list
+    /// that comes to one rectangle covering the screen is the whole frame,
+    /// which `mode` decides — the one definition of that question.
     #[must_use]
     pub fn merged(self, other: Self, mode: &DisplayMode) -> Self {
         match (self, other) {
             (Self::Nothing, present) | (present, Self::Nothing) => present,
             (Self::Whole, _) | (_, Self::Whole) => Self::Whole,
             (Self::Region(mine), Self::Region(theirs)) => {
-                let (Some(mine), Some(theirs)) = (rect_of(mine), rect_of(theirs)) else {
-                    return Self::Whole;
-                };
-                match sub_screen_damage(&mine.union(&theirs), mode) {
-                    Some(region) => Self::Region(region),
-                    None => Self::Whole,
+                let both = mine.rects().iter().chain(theirs.rects()).copied();
+                match DamageList::fitted(both) {
+                    Some(list) if !covers_screen(&list, mode) => Self::Region(list),
+                    Some(_) => Self::Whole,
+                    None => Self::Nothing,
                 }
             }
         }
     }
+
+    /// The present of `clip`, a non-empty rectangle inside the screen.
+    fn of(clip: &Rect, mode: &DisplayMode) -> Self {
+        sub_screen_damage(clip, mode)
+            .and_then(|region| DamageList::new(&[region]).ok())
+            .map_or(Self::Whole, Self::Region)
+    }
+}
+
+/// Whether `list`, disjoint rectangles inside the screen of `mode`, covers
+/// all of it.
+fn covers_screen(list: &DamageList, mode: &DisplayMode) -> bool {
+    let area = |width: u32, height: u32| u64::from(width) * u64::from(height);
+    let covered: u64 = list
+        .rects()
+        .iter()
+        .map(|rect| area(rect.width_px, rect.height_px))
+        .sum();
+    covered >= area(mode.width_px, mode.height_px)
 }
 
 /// `damage` as a geometry rectangle, or `None` when its origin lies beyond
 /// the signed coordinate space a rectangle is expressed in.
-pub(crate) fn rect_of(damage: DamageRect) -> Option<Rect> {
+#[cfg(test)]
+pub(crate) fn rect_of(damage: tairix_abi::driver::display::DamageRect) -> Option<Rect> {
     Some(Rect::new(
         i32::try_from(damage.x).ok()?,
         i32::try_from(damage.y).ok()?,
@@ -166,10 +186,7 @@ impl Scanout {
             ground.width() == surface.width() && ground.height() == surface.height()
         });
         self.blit(surface, ground, cursor, clip, reveal);
-        match sub_screen_damage(&clip, &self.mode) {
-            Some(region) => Present::Region(region),
-            None => Present::Whole,
-        }
+        Present::of(&clip, &self.mode)
     }
 
     /// Fill the whole frame with black and present all of it.

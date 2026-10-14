@@ -214,6 +214,9 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = [
     "test-util",
     "svg",
 ] }
+# The shared metered allocator, through which a test has the heap refuse a
+# buffer as an exhausted one would.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 # The package is both the desktop-session glue library (above) and the `Run`
 # entry-point binary of the desktop session service (`plans/DISPLAY.md` D7c):

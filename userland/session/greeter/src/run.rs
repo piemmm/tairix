@@ -267,8 +267,8 @@ mod program {
         };
         match present {
             Present::Nothing => {}
-            Present::Region(region) => {
-                let _ = display.present_rects(frame, &[region]);
+            Present::Region(list) => {
+                let _ = display.present_rects(frame, list.rects());
             }
             Present::Whole => {
                 let _ = display.present(frame);

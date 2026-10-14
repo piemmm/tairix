@@ -18,13 +18,15 @@
 //! bitstream's own size *is* the canvas.
 //!
 //! **Nothing is sized from an `ANMF`'s own declaration.** Its frame extent
-//! is checked to lie inside the canvas, which allocates nothing, and the
-//! frame is then decoded at the size its payload declares and refused
-//! unless the two agree.
+//! is checked to lie inside the canvas, which allocates nothing, and the size
+//! its payload's bitstream declares is refused unless the two agree, before
+//! the frame is decoded.
 //!
-//! **Which kind a file is comes from the file.** One carrying `ANIM` is an
-//! animation; one without is a still picture, because there is no loop count
-//! to report and answering "for ever" would fabricate a declaration.
+//! **The animation flag says which kind a file is.** An animation declares
+//! its loop count in one `ANIM` before its first frame, and one that does not
+//! is refused rather than answered as looping for ever, which would fabricate
+//! a declaration. A still file's `ANIM` is ignored, as the specification
+//! requires, and a frame in one is refused.
 //!
 //! **The canvas clears and disposes to fully transparent.** The
 //! specification makes `ANIM`'s background colour explicitly optional, and a
@@ -37,9 +39,10 @@
 //! chunks actually found — so a set alpha flag with no alpha chunk decodes,
 //! and an alpha chunk with a clear flag decodes, rather than either being
 //! refused over a disagreement that costs nothing. The **animation** flag is
-//! not a hint: it is what says whether the file is an animation at all, so it
-//! and the chunks must agree. The reserved bits and reserved field values are
-//! refused either way.
+//! not a hint: it is what says whether the file is an animation at all, so a
+//! still bitstream under a set flag and a frame under a clear one are both
+//! refused. The reserved bits and reserved field values are refused either
+//! way.
 //!
 //! Colour profiles and metadata are read past: `ICCP`, `EXIF`, and `XMP `
 //! are skipped like any unknown chunk, because nothing in this crate
@@ -264,6 +267,7 @@ struct Chunk<'a> {
 }
 
 /// The chunks of one RIFF region, walked in order.
+#[derive(Clone)]
 struct Chunks<'a> {
     bytes: &'a [u8],
     pos: usize,
@@ -453,22 +457,33 @@ fn layout(bytes: &[u8]) -> Result<Layout<'_>, DecodeError> {
         .first()
         .is_some_and(|flags| flags & FLAG_ANIMATION != 0);
     let mut loop_count = None;
+    let mut announced = false;
     let mut frames: Vec<Frame> = Vec::new();
     while let Some(chunk) = chunks.next()? {
         match chunk.id {
-            ANIMATION => {
+            // A still file's `ANIM` is ignored, as the specification requires.
+            ANIMATION if animated => {
+                if announced {
+                    return Err(DecodeError::WebpInvalidChunkLayout);
+                }
                 let head = chunk
                     .payload
                     .get(..ANIMATION_LEN)
                     .ok_or(DecodeError::WebpTruncated)?;
                 let declared = crate::le_u16(head, 4).ok_or(DecodeError::WebpTruncated)?;
                 loop_count = (declared != 0).then(|| u32::from(declared));
+                announced = true;
             }
             ANIMATION_FRAME => {
+                if !announced {
+                    return Err(DecodeError::WebpInvalidChunkLayout);
+                }
                 if u32::try_from(frames.len()).unwrap_or(u32::MAX) >= MAX_ANIMATION_FRAMES {
                     return Err(DecodeError::WebpTooManyFrames);
                 }
-                if !fallible::reserve(&mut frames, 1) {
+                if frames.is_empty()
+                    && !fallible::reserve(&mut frames, frames_declared(chunks.clone()))
+                {
                     return Err(DecodeError::OutOfMemory);
                 }
                 frames.push(read_frame(chunk.payload, chunk.at, canvas)?);
@@ -496,6 +511,21 @@ fn layout(bytes: &[u8]) -> Result<Layout<'_>, DecodeError> {
         loop_count,
         frames,
     })
+}
+
+/// How many frames a walk standing just past its first frame chunk will
+/// hold: that one and those the `rest` of the chain declares, no more than a
+/// walk admits. A fault ends the count, and the walk itself reports it.
+fn frames_declared(mut rest: Chunks<'_>) -> usize {
+    let most = usize::try_from(MAX_ANIMATION_FRAMES).unwrap_or(usize::MAX);
+    let mut count = 1;
+    while count < most {
+        match rest.next() {
+            Ok(Some(chunk)) => count += usize::from(chunk.id == ANIMATION_FRAME),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    count
 }
 
 /// Undo the filtering an alpha chunk declares on one `row`, given the
@@ -645,26 +675,24 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
     }
 }
 
-/// An upper bound of the bytes a [`decode`] of `bytes` holds at once, read
-/// from its chunks and its bitstreams' headers: the frame list the
-/// container's walk collects, held twice while it regrows, then the picture
-/// — or, for an animation, the canvas and its copy beside the first frame,
+/// An upper bound of the bytes a [`decode`] of `bytes`, whose chunks read
+/// as `form`, holds at once, from its bitstreams' headers: the still
+/// picture, or an animation's frame list and canvas beside its first frame,
 /// decoded at its own size.
 ///
 /// # Errors
 ///
-/// What [`decode`] would refuse before decoding: a malformed container or
-/// bitstream header, or a size `limits` do not admit.
-pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
-    let listed = frame_list_bytes(bytes);
-    let held = match layout(bytes)? {
+/// What [`decode`] would refuse before decoding: a malformed bitstream
+/// header, or a size `limits` do not admit.
+fn peak_bytes(bytes: &[u8], form: &Layout<'_>, limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    match form {
         Layout::Still { canvas, picture } => {
             let geometry = picture.bitstream.geometry()?;
-            if let Some(canvas) = canvas {
+            if let Some(canvas) = *canvas {
                 check_canvas(geometry, canvas)?;
             }
             limits.check(geometry.0, geometry.1)?;
-            picture_peak(picture, geometry)
+            Ok(picture_peak(*picture, geometry))
         }
         Layout::Animation { canvas, frames, .. } => {
             limits.check(canvas.0, canvas.1)?;
@@ -674,27 +702,15 @@ pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, Dec
                 .ok_or(DecodeError::WebpTruncated)?;
             let picture = read_picture(region, first.picture.start)?;
             let geometry = picture.bitstream.geometry()?;
+            check_canvas(geometry, (first.rect.width, first.rect.height))?;
             limits.check(geometry.0, geometry.1)?;
+            let listed = (frames.capacity() as u64).saturating_mul(size_of::<Frame>() as u64);
             let canvas_bytes = u64::from(canvas.0) * u64::from(canvas.1) * RGBA_BYTES as u64;
-            picture_peak(picture, geometry).saturating_add(2 * canvas_bytes)
-        }
-    };
-    Ok(listed.saturating_add(held))
-}
-
-/// What the frame list a walk of `bytes` collects can hold at once: a record
-/// per frame chunk, twice over while the list regrows by one.
-fn frame_list_bytes(bytes: &[u8]) -> u64 {
-    let Ok(mut chunks) = Chunks::open(bytes) else {
-        return 0;
-    };
-    let mut frames = 0u64;
-    while let Ok(Some(chunk)) = chunks.next() {
-        if chunk.id == ANIMATION_FRAME {
-            frames += 1;
+            Ok(picture_peak(picture, geometry)
+                .saturating_add(canvas_bytes)
+                .saturating_add(listed))
         }
     }
-    frames.saturating_mul(2 * core::mem::size_of::<Frame>() as u64)
 }
 
 /// What decoding `picture`, of `width`×`height`, holds at once: its
@@ -753,16 +769,7 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
             canvas,
             loop_count,
             frames,
-        } => {
-            let mut animation = Animation::new(Chain::new(canvas, loop_count, frames, limits)?);
-            if !animation.step(bytes)? {
-                return Err(DecodeError::WebpNoFrames);
-            }
-            let pixels =
-                fallible::collected(animation.canvas().len(), animation.canvas().iter().copied())
-                    .ok_or(DecodeError::OutOfMemory)?;
-            Ok(RasterImage::from_parts(canvas.0, canvas.1, pixels))
-        }
+        } => Chain::new(canvas, loop_count, frames, limits)?.into_first_frame(bytes),
     }
 }
 
@@ -775,8 +782,16 @@ pub(crate) fn decode_fitted(
     limits: &DecodeLimits,
     fit: FitBox,
 ) -> Result<RasterImage, DecodeError> {
-    let Layout::Still { canvas, picture } = layout(bytes)? else {
-        return crate::reduce_held(decode(bytes, limits)?, fit);
+    let (canvas, picture) = match layout(bytes)? {
+        Layout::Still { canvas, picture } => (canvas, picture),
+        Layout::Animation {
+            canvas,
+            loop_count,
+            frames,
+        } => {
+            let first = Chain::new(canvas, loop_count, frames, limits)?.into_first_frame(bytes)?;
+            return crate::reduce_held(first, fit);
+        }
     };
     let geometry = picture.bitstream.geometry()?;
     if let Some(canvas) = canvas {
@@ -810,11 +825,14 @@ pub(crate) fn fitted_peak_bytes(
     limits: &DecodeLimits,
     fit: FitBox,
 ) -> Result<u64, DecodeError> {
-    let whole = peak_bytes(bytes, limits)?;
-    let Layout::Still { picture, .. } = layout(bytes)? else {
-        let canvas = probe(bytes)?;
-        let reduced = fit.reduction(canvas.0, canvas.1);
-        return Ok(whole.saturating_add(RowReducer::peak_bytes(canvas, reduced)));
+    let form = layout(bytes)?;
+    let whole = peak_bytes(bytes, &form, limits)?;
+    let picture = match form {
+        Layout::Still { picture, .. } => picture,
+        Layout::Animation { canvas, .. } => {
+            let reduced = fit.reduction(canvas.0, canvas.1);
+            return Ok(whole.saturating_add(RowReducer::peak_bytes(canvas, reduced)));
+        }
     };
     let geometry = picture.bitstream.geometry()?;
     let reduced = fit.reduction(geometry.0, geometry.1);
@@ -831,15 +849,8 @@ pub(crate) fn fitted_peak_bytes(
     let alpha = picture.alpha.map_or(0, |chunk| {
         alpha_peak(Some(chunk), width, height).saturating_add(row)
     });
-    Ok([
-        frame_list_bytes(bytes),
-        image,
-        row,
-        alpha,
-        RowReducer::peak_bytes(geometry, reduced),
-    ]
-    .into_iter()
-    .fold(0, u64::saturating_add))
+    let parts = [image, row, alpha, RowReducer::peak_bytes(geometry, reduced)];
+    Ok(parts.into_iter().fold(0, u64::saturating_add))
 }
 
 /// What [`open`] found: a still picture's geometry, or an animation ready to
@@ -908,6 +919,17 @@ impl Chain {
             canvas: fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?,
             pending: None,
         })
+    }
+
+    /// The first frame composited onto the canvas, which then becomes the
+    /// picture rather than being copied into one.
+    fn into_first_frame(mut self, bytes: &[u8]) -> Result<RasterImage, DecodeError> {
+        self.advance(bytes, 0)?;
+        Ok(RasterImage::from_parts(
+            self.width,
+            self.height,
+            self.canvas,
+        ))
     }
 
     /// The canvas byte range `rect`'s `row`-th row occupies, or `None` when
@@ -1004,7 +1026,9 @@ impl FrameSource for Chain {
             frame.picture.clone(),
         );
         let region = bytes.get(at.clone()).ok_or(DecodeError::WebpTruncated)?;
-        let decoded = read_picture(region, at.start)?.decode(&self.limits)?;
+        let picture = read_picture(region, at.start)?;
+        check_canvas(picture.bitstream.geometry()?, (rect.width, rect.height))?;
+        let decoded = picture.decode(&self.limits)?;
         if decoded.width() != rect.width || decoded.height() != rect.height {
             return Err(DecodeError::WebpFrameGeometryMismatch);
         }

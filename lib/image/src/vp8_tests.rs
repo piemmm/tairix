@@ -21,6 +21,13 @@ fn limits() -> DecodeLimits {
 }
 
 #[test]
+fn a_macroblocks_coding_decisions_are_held_in_bytes() {
+    // A row of them is held for its loop filter, one per sixteen pixels of
+    // width, and every value in one fits a byte.
+    assert!(core::mem::size_of::<super::Macroblock>() <= 24);
+}
+
+#[test]
 fn the_boolean_coder_round_trips_every_probability() {
     let mut rng = Prng::new(0x5EED_1234_ABCD_0001);
     for _ in 0..200 {

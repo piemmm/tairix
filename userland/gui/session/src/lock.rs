@@ -44,7 +44,8 @@
 //! failure, a broker that is not there, and a reply it cannot parse are all
 //! the same answer: still locked.
 
-use tairix_greeter::{AuthSurface, Backdrop, EventContext, Verifier};
+use tairix_controls::damage::{self, Repaint};
+use tairix_greeter::{AuthSurface, Backdrop, EventContext, Outcome, Verifier};
 use tairix_wm::{Compositor, InputEvent, Point, Rect, Scale, Surface, WindowId};
 
 use crate::shell::DesktopShell;
@@ -60,12 +61,31 @@ pub enum LockOutcome {
     Unlocked,
 }
 
-/// One engaged lock: its full-screen window, the surface drawn into it, and
-/// the screen it was drawn over.
+/// One engaged lock: its full-screen window, the surface drawn into it, the
+/// screen and look it was drawn in, what of its kept frame is stale, and
+/// whether the compositor refused the last attempt to draw it.
 struct Engaged {
     wm: WindowId,
     surface: AuthSurface,
     screen: Rect,
+    style: u64,
+    owed: Repaint,
+    refused: bool,
+}
+
+impl Engaged {
+    /// Fold what `outcome` changed into what the frame owes. A step that
+    /// moves only the strength a surface is blitted at owes nothing here:
+    /// the lock is always shown at full strength.
+    fn owe(&mut self, outcome: Outcome) {
+        if !outcome.paints() {
+            return;
+        }
+        match outcome.damage() {
+            Some(rect) => self.owed.add(rect),
+            None => self.owed = Repaint::Whole,
+        }
+    }
 }
 
 /// The session's screen lock.
@@ -129,6 +149,9 @@ impl ScreenLock {
             wm,
             surface,
             screen,
+            style: shell.style_generation(),
+            owed: Repaint::clean(),
+            refused: false,
         });
         true
     }
@@ -171,6 +194,9 @@ impl ScreenLock {
     ///
     /// Returns [`LockOutcome::Unlocked`] once the user has been verified, by
     /// which time the lock is already down.
+    ///
+    /// What the event changed is only owed to the frame: the next
+    /// [`advance`](Self::advance) draws it, once however many events owed it.
     pub fn handle(
         &mut self,
         event: &InputEvent,
@@ -199,40 +225,49 @@ impl ScreenLock {
             self.release(compositor);
             return LockOutcome::Unlocked;
         }
-        if outcome.redraw() {
-            self.repaint(shell, compositor);
-        }
+        engaged.owe(outcome);
         LockOutcome::Pending
     }
 
-    /// Step the locked surface's motion to `now_ns`, repainting it when the
-    /// step changed what it draws.
+    /// Step the locked surface's motion to `now_ns`, then draw what the frame
+    /// owes — that step's change and every event's since the last frame —
+    /// into the lock's kept frame, marking only the pixels that changed.
     ///
     /// The embedder calls this once a frame while locked, and parks until
     /// [`park_deadline_ns`](Self::park_deadline_ns). The surface is the same
     /// engine the login screen animates, so the lock animates with it rather
     /// than freezing whatever it was mid-way through. An unlocked screen, and
-    /// a surface with nothing in flight, do nothing here.
+    /// a surface with nothing in flight and nothing owed, do nothing here.
     pub fn advance(&mut self, now_ns: u64, shell: &DesktopShell, compositor: &mut Compositor) {
-        let redraw = self
-            .engaged
-            .as_mut()
-            .is_some_and(|engaged| engaged.surface.advance(now_ns).redraw());
-        if redraw {
-            self.repaint(shell, compositor);
-        }
+        let Some(engaged) = self.engaged.as_mut() else {
+            return;
+        };
+        let stepped = engaged.surface.advance(now_ns);
+        engaged.owe(stepped);
+        self.draw(shell, compositor);
     }
 
     /// `park_ns` shortened to the locked surface's next animation frame, or
-    /// left exactly as it is when the screen is unlocked or nothing is in
-    /// flight — an idle lock screen arms no timer.
+    /// to now while an event's change is still owed — the frame pacer then
+    /// holds the wake to the next frame — or left exactly as it is when the
+    /// screen is unlocked and nothing is in flight: an idle lock screen arms
+    /// no timer.
+    ///
+    /// A frame the compositor refused to give back is owed too, but arms
+    /// nothing: nothing is presented while it stands, so a wake of its own
+    /// would spin the loop against an exhausted heap. The loop's next wake
+    /// retries it.
     #[must_use]
     pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
         park_within(
             park_ns,
-            self.engaged
-                .as_ref()
-                .and_then(|engaged| engaged.surface.motion_due(now_ns)),
+            self.engaged.as_ref().and_then(|engaged| {
+                if engaged.owed.is_clean() || engaged.refused {
+                    engaged.surface.motion_due(now_ns)
+                } else {
+                    Some(0)
+                }
+            }),
         )
     }
 
@@ -261,23 +296,65 @@ impl ScreenLock {
             .is_some_and(|engaged| engaged.screen != compositor.screen_rect())
     }
 
-    /// Repaint the lock, so a theme switch or a resolution change behind it
-    /// redraws it at the right size in the appearance now in use.
+    /// Repaint the whole lock now, so a resolution change behind it redraws it
+    /// at the right size.
     ///
     /// A surface that cannot be built leaves the previous frame up rather
     /// than uncovering the session.
     pub fn repaint(&mut self, shell: &DesktopShell, compositor: &mut Compositor) {
-        let screen = compositor.screen_rect();
-        let scale = compositor.scale();
         let Some(engaged) = self.engaged.as_mut() else {
             return;
         };
-        if let Some(frame) = render_frame(&engaged.surface, screen, scale, shell) {
-            let _ = compositor.set_surface(engaged.wm, frame);
+        engaged.owed = Repaint::Whole;
+        self.draw(shell, compositor);
+        if let Some(engaged) = self.engaged.as_ref() {
+            let _ = compositor.raise(engaged.wm);
+        }
+    }
+
+    /// Draw what the kept frame owes, in the look the session wears now: the
+    /// whole frame when the screen or the look moved since it was painted,
+    /// else only the owed rectangles, each re-derived under its own clip.
+    ///
+    /// A frame the compositor cannot give back stays owed and leaves the
+    /// previous one up.
+    fn draw(&mut self, shell: &DesktopShell, compositor: &mut Compositor) {
+        let screen = compositor.screen_rect();
+        let scale = compositor.scale();
+        let theme = shell.session().active_theme();
+        let style = shell.style_generation();
+        let Some(engaged) = self.engaged.as_mut() else {
+            return;
+        };
+        if engaged.screen != screen || engaged.style != style {
+            engaged.owed = Repaint::Whole;
+        }
+        if engaged.owed.is_clean() {
+            return;
+        }
+        let bounds = window_bounds(screen);
+        let area = engaged.owed.area(screen.width, screen.height);
+        let surface = &engaged.surface;
+        let painted = compositor.repaint_window(
+            engaged.wm,
+            (screen.width, screen.height),
+            &area,
+            |frame, rects| {
+                damage::paint_parts(frame, rects, |frame| {
+                    let _ = surface.paint_into(frame, bounds, scale, theme, Backdrop::Desktop);
+                });
+            },
+        );
+        engaged.refused = !painted;
+        if !painted {
+            return;
+        }
+        if engaged.screen != screen {
             let _ = compositor.move_window(engaged.wm, screen.origin);
             engaged.screen = screen;
         }
-        let _ = compositor.raise(engaged.wm);
+        engaged.style = style;
+        engaged.owed = Repaint::clean();
     }
 
     /// Take the lock down after a successful verification.

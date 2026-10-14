@@ -2192,6 +2192,13 @@ the `Permission` arm of `render::properties_hit` returns the bit a click flips
 all read the one placement (`render::PermsSection`), so a click always lands
 on the box it depicts (§2.2). Only the file manager's window draws it.
 
+The window keeps its composed section (`render::PermsPanel`, reached through
+`PermsShown`) and composes it again only when what it shows changes: the
+node's type, mode and owning ids, the ownership gate, the open id editor and
+the keyboard cursor. A pointer moving over the window, a press and a repaint
+therefore read the kept section rather than building one each; a key, which
+moves the section's own focus, drops it to be composed afresh.
+
 The window opens wide enough to seat every flag whole: its width is the larger
 of its own floor and the access group's `natural_width`, so a wider type ladder
 is seated rather than cut. A window dragged narrower keeps every box and elides

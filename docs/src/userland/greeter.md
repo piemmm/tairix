@@ -168,9 +168,14 @@ A wake also drains a whole burst before it draws. Every waiting keyboard,
 pointer and touch record is applied and only *owes* the frame what it
 changed; the round's clock, lockout and ribbon steps owe theirs too, and the
 round then paints the surface at most once, composes what is owed once, and
-calls the display once with the union, because a paint is a whole surface, a
-present is a round trip to the display service, and a moving mouse or a
-repeating key delivers records far faster than a screen refreshes. A round
+calls the display once with what it composed, because a paint is a whole
+surface, a present is a round trip to the display service, and a moving
+mouse or a repeating key delivers records far faster than a screen
+refreshes. That call names up to eight disjoint rectangles
+(`DamageList::fitted`, merging the pair that over-covers least beyond
+that), so changes far apart — the ribbon's strips across the screen, a
+field and a clock — present as themselves rather than as the box between
+them, and only damage that covers the screen is a whole present. A round
 that changed nothing calls nothing; a verified secret stops the drain there
 and then, and what the records before it changed is presented before the
 fade begins.

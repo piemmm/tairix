@@ -287,8 +287,10 @@ pointer.
 Groups stacked down a surface are one **plate column** (`stack`): a gap above
 and beside each plate, every plate at its natural size, `stack::height` for
 what they need together, and `stack::column_width` for the column a plate
-needs. A column taller than its surface is laid out whole and shown through a
-`ScrollView`, so a plate the edge crosses is drawn cut rather than dropped. It
+needs. `stack::placements` yields the same placements without a list, for an
+owner with a fixed number of plates. A column taller than its surface is laid
+out whole and shown through a `ScrollView`, so a plate the edge crosses is
+drawn cut rather than dropped. It
 is the one placement the Settings panes, the storage cards and the file
 manager's Permissions section read, so none carries its own copy of the gaps.
 

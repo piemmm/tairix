@@ -72,17 +72,20 @@ usable RAM above it (Linux's default `lowmem_reserve_ratio`), at most a
 quarter of the zone. So ordinary allocations on a busy machine fill high
 memory before low, and never the last of the low.
 
-**A carve for a device that reaches only part of RAM searches below its
+**A carve for a device that reaches only part of RAM draws below its
 ceiling.** The zone the ceiling falls in is the highest the carve can use, so
-its reserve is the carve's own: `alloc_order_under_user` walks that zone's
-bitmap downward from the ceiling a word at a time and takes the highest
-aligned block below it, so a device reaching less keeps the memory beneath,
-because the lists are LIFO and address-blind. A zone lower still gives a block
-only while it keeps its own reserve. The carve fails only when no such block
-is free (`OutOfMemory`), or when no usable RAM lies below the ceiling at all
-(`OutOfRange`). The search costs a step per bitmap word and per free run it
-passes below the ceiling, paid only on a carve's set-up path, and a ceiling
-above every usable frame is an ordinary `alloc_order`. The claimed block is
+its reserve is the carve's own. A ceiling at that zone's end — and every
+discovered device reach is a zone boundary — leaves the whole zone eligible,
+so `alloc_order_under_user` takes the block from the zone's own lists in
+constant time, as an ordinary request falling to the zone would. A ceiling
+cutting through a zone instead walks that zone's bitmap downward from the
+ceiling a word at a time and takes the highest aligned block below it, so a
+device reaching less keeps the memory beneath, because the lists are LIFO and
+address-blind; that search costs a step per bitmap word and per free run it
+passes. A zone lower still gives a block only while it keeps its own
+reserve. The carve fails only when no such block is free (`OutOfMemory`), or
+when no usable RAM lies below the ceiling at all (`OutOfRange`), and a
+ceiling above every usable frame is an ordinary `alloc_order`. The claimed block is
 split out of the one free block enclosing it: population and eager merging
 keep every aligned all-free run inside one free block, so a run none encloses
 is refused as an invariant violation.
@@ -321,7 +324,10 @@ both views, and only then zeroes and frees the frame:
   The remote half is `CrossCpuTlbShootdown::shootdown_user_range` over that
   set — x86_64 raises the shootdown IPI at those CPUs alone, riscv64 issues
   one SBI RFENCE call per 64-hart window, and aarch64 owes nothing because its
-  local flush is already the broadcast `tlbi vaae1is`.
+  local flush is already the broadcast `tlbi vaae1is`. A range is invalidated
+  page by page only up to a ceiling — 33 pages on x86_64, 512 on aarch64, 64
+  on riscv64, Linux's values — and whole past it, so the span a batch below
+  shoots down costs no invalidation per page of its gaps.
 - **The snapshot.** The caller passes the `Retire` view the pages must leave
   (`SnapshotRetire` in `kernel/core`), which drops them under the registry's
   write lock; a copy holds the read lock for its whole length, so none is
@@ -329,9 +335,14 @@ both views, and only then zeroes and frees the frame:
   in place is suspended — it resolves nothing — until it is re-frozen.
 - **Batching.** `Retiring` holds up to 64 frames per step, so one remote
   shootdown and one snapshot write-lock cover the batch.
-- **Compress-out** takes the page out of both views *before* it reads it, so
-  no sibling write can land after the seal; a seal the tier refuses maps the
-  page back and restores it to the snapshot.
+- **Compress-out** takes its pages out of both views *before* it reads one,
+  so no sibling write can land after the seal; a seal the tier refuses maps
+  the page back and restores it to the snapshot. It works a batch of up to
+  64 cold pages at a time (`Ramzip::compress_out_batch`): each admitted page
+  is unmapped, then one remote shootdown over the batch's span and one
+  snapshot write-lock cover them all before any is sealed. Admission counts a
+  page of cap and of task share for every page admitted ahead in the batch
+  and not yet charged, so a batch admits no more than a page at a time would.
 - **Teardown** of a space active on no CPU issues no TLB maintenance at all
   (`AddressSpace::clear_lowest`): every CPU that ran it discarded its
   translations when it switched away.
@@ -1412,7 +1423,8 @@ ladder, and the frame allocator's `FreeMemorySource` binding.
   caches together stay at or under 1/4 of the heap and cache growth can
   never exhaust it). Growth runs to the *hard* limit; a forced shrink
   evicts down to the *low* watermark (3/4 of hard), never both on one
-  threshold.
+  threshold. A value no eviction could make room for is refused before
+  any is made, so one oversized build never empties the cache.
 - **Fail-closed accounting.** `CacheAccounting` keeps per-class byte
   ledgers with checked arithmetic (typed `AccountingError` on
   overflow/underflow, never wrapping), split into the entry *payloads*
@@ -2439,7 +2451,10 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   for the rest of its life — if a charge or discharge ever fails to
   balance. When it cannot admit a value it still returns a usable one
   (`Served::Uncached`), so a caller never has to handle "caching was
-  unavailable" and no path rasterises twice.
+  unavailable" and no path rasterises twice. A value derived from a
+  retained one and drawn with it is admitted `retain_beside` its source,
+  which evicts no further than leaves the source standing and refuses
+  rather than displace it.
 - **Notification, not polling.** The band is the `MemoryPressure` topic of
   the system-notice mechanism (`plans/NOTICE.md`, `abi/notice.md`),
   observed through a `WaitSourceKind::SystemNotice` wait-set member. The

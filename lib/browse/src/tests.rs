@@ -4,6 +4,11 @@
 //! the navigation and rendering logic is exercised without a kernel or a real
 //! VFS.
 
+/// Every request this binary makes, metered per thread, so a test can count
+/// what one call allocates.
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -7930,8 +7935,8 @@ use crate::render::{
     draw_properties_window, permission_cells, properties_attr_editor_rect, properties_hit,
     properties_owner_editor_rect, properties_permissions_key, properties_reveal,
     properties_scroll_pointer, properties_scroll_wheel, properties_window_extent, AttrAction,
-    Identity, OwnerField, PermsCursor, PermsKeyed, PropertiesControls, PropertiesFrame,
-    PropertiesTab, PropertiesTarget, PropertiesView, PERMISSION_BITS,
+    Identity, OwnerField, PermsCursor, PermsKeyed, PermsPanel, PermsShown, PropertiesControls,
+    PropertiesFrame, PropertiesTab, PropertiesTarget, PropertiesView, PERMISSION_BITS,
 };
 use crate::ScrollColumn;
 use tairix_controls::text::TextField;
@@ -7979,13 +7984,28 @@ fn props_identity() -> Identity<'static> {
 }
 
 /// The controls a window with nothing being typed into draws.
-fn resting<'a>(bar: &'a ScrollColumn, editor: &'a TextField) -> PropertiesControls<'a> {
+fn resting<'a>(
+    bar: &'a ScrollColumn,
+    editor: &'a TextField,
+    perms: &'a PermsPanel,
+) -> PropertiesControls<'a> {
     PropertiesControls {
         identity: props_identity(),
         can_chown: true,
         owner: None,
         attribute: editor,
         scrollbar: bar.scrollbar(),
+        perms,
+    }
+}
+
+/// What a window with nothing being typed into composes its Permissions
+/// section from, kept in `perms`.
+fn shown(perms: &PermsPanel, can_chown: bool) -> PermsShown<'_> {
+    PermsShown {
+        can_chown,
+        owner: None,
+        panel: perms,
     }
 }
 
@@ -8064,8 +8084,9 @@ fn scan_every_section(props: &Properties, window: Rect, editor: Rect) -> Scanned
 fn scan(props: &Properties, view: PropertiesView, window: Rect) -> Vec<(Point, PropertiesTarget)> {
     let theme = Theme::dark();
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let editor = TextField::new();
-    let controls = resting(&bar, &editor);
+    let controls = resting(&bar, &editor, &perms_panel);
     let mut found = Vec::new();
     for y in 0..i32::try_from(window.height).unwrap() {
         for x in 0..i32::try_from(window.width).unwrap() {
@@ -8147,12 +8168,13 @@ fn each_section_resolves_every_control_it_draws_and_nothing_else() {
 
     // A press outside the client resolves nothing.
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
     assert_eq!(
         properties_hit(
             &props,
             PropertiesView::default(),
-            resting(&bar, &empty),
+            resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -8164,10 +8186,14 @@ fn each_section_resolves_every_control_it_draws_and_nothing_else() {
 
 /// The controls a session without `CAP_FS_CHOWN` draws, with nothing being
 /// typed into.
-fn refused<'a>(bar: &'a ScrollColumn, editor: &'a TextField) -> PropertiesControls<'a> {
+fn refused<'a>(
+    bar: &'a ScrollColumn,
+    editor: &'a TextField,
+    perms: &'a PermsPanel,
+) -> PropertiesControls<'a> {
     PropertiesControls {
         can_chown: false,
-        ..resting(bar, editor)
+        ..resting(bar, editor, perms)
     }
 }
 
@@ -8180,6 +8206,7 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
     let window = props_window();
     let theme = Theme::dark();
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
     let view = PropertiesView {
         tab: PropertiesTab::Permissions,
@@ -8188,9 +8215,8 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
     let cell = properties_owner_editor_rect(
         &props,
         PropertiesView::default(),
-        window,
-        Scale::ONE,
-        &theme,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
         OwnerField::Uid,
     )
     .expect("the row fits the window it opens at");
@@ -8199,7 +8225,7 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
         properties_hit(
             &props,
             view,
-            resting(&bar, &empty),
+            resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -8211,7 +8237,7 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
         properties_hit(
             &props,
             view,
-            refused(&bar, &empty),
+            refused(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -8226,7 +8252,7 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
         properties_hit(
             &props,
             view,
-            refused(&bar, &empty),
+            refused(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -8246,11 +8272,12 @@ fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
     let window = props_window();
     let theme = Theme::dark();
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
     let typing = TextField::new().with_text("10");
     let editing = PropertiesControls {
         owner: Some((OwnerField::Uid, &typing)),
-        ..resting(&bar, &empty)
+        ..resting(&bar, &empty, &perms_panel)
     };
     let hit = |controls: PropertiesControls<'_>, at: Point| {
         properties_hit(
@@ -8266,18 +8293,16 @@ fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
     let uid = properties_owner_editor_rect(
         &props,
         PropertiesView::default(),
-        window,
-        Scale::ONE,
-        &theme,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
         OwnerField::Uid,
     )
     .expect("the row fits");
     let gid = properties_owner_editor_rect(
         &props,
         PropertiesView::default(),
-        window,
-        Scale::ONE,
-        &theme,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
         OwnerField::Gid,
     )
     .expect("the row fits");
@@ -8289,7 +8314,7 @@ fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
         "the other id still opens"
     );
     assert_eq!(
-        hit(resting(&bar, &empty), into(uid)),
+        hit(resting(&bar, &empty, &perms_panel), into(uid)),
         Some(PropertiesTarget::Owner(OwnerField::Uid))
     );
 }
@@ -8300,14 +8325,14 @@ fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
 fn scan_first_permission(props: &Properties, view: PropertiesView, window: Rect) -> Point {
     let theme = Theme::dark();
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
-    let controls = resting(&bar, &empty);
+    let controls = resting(&bar, &empty, &perms_panel);
     let column = properties_owner_editor_rect(
         props,
         PropertiesView::default(),
-        window,
-        Scale::ONE,
-        &theme,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
         OwnerField::Uid,
     )
     .expect("the section is seated at the window's own open size")
@@ -8364,6 +8389,7 @@ fn the_section_strip_walks_without_wrapping_past_either_end() {
 fn attributes_seen(props: &Properties, window: Rect, scroll: u64) -> Vec<usize> {
     let theme = Theme::dark();
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
     let view = PropertiesView {
         tab: PropertiesTab::Attributes,
@@ -8375,7 +8401,7 @@ fn attributes_seen(props: &Properties, window: Rect, scroll: u64) -> Vec<usize> 
         if let Some(PropertiesTarget::Attribute(index)) = properties_hit(
             props,
             view,
-            resting(&bar, &empty),
+            resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -8470,6 +8496,7 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
     // its own surface and offers no editor to type into.
     let tiny = Rect::new(0, 0, 20, 16);
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
     for tab in PropertiesTab::ALL {
         let view = PropertiesView {
@@ -8482,7 +8509,7 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
                     properties_hit(
                         &props,
                         view,
-                        resting(&bar, &empty),
+                        resting(&bar, &empty, &perms_panel),
                         tiny,
                         Scale::ONE,
                         &theme,
@@ -8503,7 +8530,7 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
             &mut scroll,
             &props,
             view,
-            true,
+            shown(&perms_panel, true),
             (tiny, Scale::ONE, &theme),
             (0, DETENT),
             &mut tairix_controls::damage::sink()
@@ -8515,9 +8542,8 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
         properties_owner_editor_rect(
             &props,
             PropertiesView::default(),
-            tiny,
-            Scale::ONE,
-            &theme,
+            shown(&perms_panel, true),
+            (tiny, Scale::ONE, &theme),
             OwnerField::Uid
         ),
         None
@@ -8526,6 +8552,7 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
 
 #[test]
 fn each_owning_id_carries_the_editor_it_opens_inside_the_client() {
+    let perms_panel = PermsPanel::default();
     let window = props_window();
     let theme = Theme::dark();
     let props = props_with(Attributes::Unsupported);
@@ -8533,9 +8560,8 @@ fn each_owning_id_carries_the_editor_it_opens_inside_the_client() {
         let rect = properties_owner_editor_rect(
             &props,
             PropertiesView::default(),
-            window,
-            Scale::ONE,
-            &theme,
+            shown(&perms_panel, true),
+            (window, Scale::ONE, &theme),
             field,
         )
         .expect("the row fits the window it opens at");
@@ -8556,18 +8582,16 @@ fn each_owning_id_carries_the_editor_it_opens_inside_the_client() {
     let uid = properties_owner_editor_rect(
         &props,
         PropertiesView::default(),
-        window,
-        Scale::ONE,
-        &theme,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
         OwnerField::Uid,
     )
     .expect("uid");
     let gid = properties_owner_editor_rect(
         &props,
         PropertiesView::default(),
-        window,
-        Scale::ONE,
-        &theme,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
         OwnerField::Gid,
     )
     .expect("gid");
@@ -8621,6 +8645,7 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
     let theme = Theme::dark();
     let window = props_window();
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new().with_placeholder("namespace.name = value");
     let props = props_with(some_attributes(3));
 
@@ -8649,23 +8674,35 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
         ..PropertiesView::default()
     };
 
-    let reading = paint(PropertiesFrame::Reading, general, resting(&bar, &empty));
+    let reading = paint(
+        PropertiesFrame::Reading,
+        general,
+        resting(&bar, &empty, &perms_panel),
+    );
     let refused = paint(
         PropertiesFrame::Refused("no such file"),
         general,
-        resting(&bar, &empty),
+        resting(&bar, &empty, &perms_panel),
     );
     let ready = paint(
         PropertiesFrame::Ready(&props),
         general,
-        resting(&bar, &empty),
+        resting(&bar, &empty, &perms_panel),
     );
     assert_ne!(reading, refused, "a refusal states its own reason");
     assert_ne!(ready, reading, "the fields replace the reading notice");
 
     // Each section draws its own content, so switching tab changes the body.
-    let on_perms = paint(PropertiesFrame::Ready(&props), perms, resting(&bar, &empty));
-    let on_attrs = paint(PropertiesFrame::Ready(&props), attrs, resting(&bar, &empty));
+    let on_perms = paint(
+        PropertiesFrame::Ready(&props),
+        perms,
+        resting(&bar, &empty, &perms_panel),
+    );
+    let on_attrs = paint(
+        PropertiesFrame::Ready(&props),
+        attrs,
+        resting(&bar, &empty, &perms_panel),
+    );
     assert_ne!(ready, on_perms);
     assert_ne!(ready, on_attrs);
     assert_ne!(on_perms, on_attrs);
@@ -8678,9 +8715,13 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
         paint(
             PropertiesFrame::Ready(&unsupported),
             attrs,
-            resting(&bar, &empty)
+            resting(&bar, &empty, &perms_panel)
         ),
-        paint(PropertiesFrame::Ready(&none), attrs, resting(&bar, &empty))
+        paint(
+            PropertiesFrame::Ready(&none),
+            attrs,
+            resting(&bar, &empty, &perms_panel)
+        )
     );
 
     // A degenerate client draws nothing and does not panic.
@@ -8689,7 +8730,7 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
         &mut tiny,
         PropertiesFrame::Ready(&props),
         general,
-        resting(&bar, &empty),
+        resting(&bar, &empty, &perms_panel),
         Scale::ONE,
         &theme,
         Rect::new(0, 0, 2, 2),
@@ -8705,6 +8746,7 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
     let theme = Theme::dark();
     let window = props_window();
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new().with_placeholder("namespace.name = value");
     let props = props_with(some_attributes(3));
     let perms = PropertiesView {
@@ -8729,8 +8771,8 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
         );
         surface.pixels().to_vec()
     };
-    let on_perms = paint(perms, resting(&bar, &empty));
-    let on_attrs = paint(attrs, resting(&bar, &empty));
+    let on_perms = paint(perms, resting(&bar, &empty, &perms_panel));
+    let on_attrs = paint(attrs, resting(&bar, &empty, &perms_panel));
 
     // Regression: an *idle* text field drew identically to the live one over
     // it, so a reader could not tell whether their keys were landing.
@@ -8739,7 +8781,7 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
         perms,
         PropertiesControls {
             owner: Some((OwnerField::Uid, &editor)),
-            ..resting(&bar, &empty)
+            ..resting(&bar, &empty, &perms_panel)
         },
     );
     assert_ne!(
@@ -8751,9 +8793,8 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
     let cell = properties_owner_editor_rect(
         &props,
         PropertiesView::default(),
-        window,
-        Scale::ONE,
-        &theme,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
         OwnerField::Uid,
     )
     .expect("the row fits the window it opens at");
@@ -8777,7 +8818,7 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
             attrs,
             PropertiesControls {
                 attribute: &typed,
-                ..resting(&bar, &empty)
+                ..resting(&bar, &empty, &perms_panel)
             },
         ),
         on_attrs
@@ -8790,7 +8831,7 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
             perms,
             PropertiesControls {
                 can_chown: false,
-                ..resting(&bar, &empty)
+                ..resting(&bar, &empty, &perms_panel)
             },
         ),
         on_perms
@@ -8808,10 +8849,10 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
                     detail: "Text document",
                     art: IconRequest::kind(IconKind::Text),
                 },
-                ..resting(&bar, &empty)
+                ..resting(&bar, &empty, &perms_panel)
             },
         ),
-        paint(general, resting(&bar, &empty)),
+        paint(general, resting(&bar, &empty, &perms_panel)),
         "the identity band is drawn from what the caller named"
     );
 }
@@ -8866,6 +8907,7 @@ fn an_unread_attribute_set_claims_nothing() {
 /// attribute list rather than losing a control, whatever it is resized to.
 #[test]
 fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
+    let perms_panel = PermsPanel::default();
     let theme = Theme::dark();
     let (w, h) = properties_window_extent(Scale::ONE, &theme);
     assert!(w > 0 && h > 0);
@@ -8876,9 +8918,8 @@ fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
     assert!(properties_owner_editor_rect(
         &full,
         PropertiesView::default(),
-        window,
-        Scale::ONE,
-        &theme,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
         OwnerField::Gid
     )
     .is_some());
@@ -8891,7 +8932,7 @@ fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
                 tab: PropertiesTab::Attributes,
                 ..PropertiesView::default()
             },
-            true,
+            shown(&perms_panel, true),
             (window, Scale::ONE, &theme),
             (0, DETENT),
             &mut tairix_controls::damage::sink()
@@ -8928,6 +8969,149 @@ fn perms_view() -> PropertiesView {
     }
 }
 
+/// The Permissions body of a window showing `props` under `controls`, painted
+/// through `draw_properties_window`.
+fn painted_perms(
+    props: &Properties,
+    controls: PropertiesControls<'_>,
+) -> Vec<tairix_raster::Pixel> {
+    let window = props_window();
+    let mut surface = Surface::new(window.width, window.height).expect("surface");
+    draw_properties_window(
+        &mut surface,
+        PropertiesFrame::Ready(props),
+        perms_view(),
+        controls,
+        Scale::ONE,
+        &Theme::dark(),
+        window,
+        &mut NoArtwork,
+    );
+    surface.pixels().to_vec()
+}
+
+/// Every pointer motion over a Properties window is routed to the section's
+/// bar, and a press is hit-tested, through the section the window keeps, so
+/// neither composes it again: each costs fewer allocations than the same
+/// motion or press over a section composed for it, by what composing costs.
+#[test]
+fn a_motion_or_press_over_a_kept_permissions_section_composes_nothing() {
+    let props = props_with(Attributes::Unsupported);
+    let window = props_window();
+    let theme = Theme::dark();
+    let kept = PermsPanel::default();
+    let at = Point::new(
+        tairix_geometry::to_i32(window.width / 2),
+        tairix_geometry::to_i32(window.height / 2),
+    );
+    let motion = tairix_input::InputEvent::PointerMoved { to: at };
+    let mut scroll = ScrollColumn::new();
+    let mut damage = tairix_controls::damage::sink();
+    let mut route = |panel: &PermsPanel| {
+        tairix_fuzzseed::meter::metered(|| {
+            properties_scroll_pointer(
+                &mut scroll,
+                &props,
+                perms_view(),
+                shown(panel, true),
+                (window, Scale::ONE, &theme),
+                (at, &motion),
+                &mut damage,
+            )
+        })
+        .1
+        .allocations
+    };
+    let _ = route(&kept);
+    let over_kept = route(&kept);
+    let over_fresh = route(&PermsPanel::default());
+    assert!(
+        over_kept < over_fresh,
+        "a motion over the kept section composes nothing ({over_kept} against {over_fresh})"
+    );
+
+    let bar = ScrollColumn::new();
+    let empty = TextField::new();
+    let press = |panel: &PermsPanel| {
+        tairix_fuzzseed::meter::metered(|| {
+            properties_hit(
+                &props,
+                perms_view(),
+                resting(&bar, &empty, panel),
+                window,
+                Scale::ONE,
+                &theme,
+                at,
+            )
+        })
+        .1
+        .allocations
+    };
+    let _ = press(&kept);
+    let on_kept = press(&kept);
+    let on_fresh = press(&PermsPanel::default());
+    assert!(
+        on_kept < on_fresh,
+        "nor does a press on it ({on_kept} against {on_fresh})"
+    );
+}
+
+/// The kept section is composed again whenever what it shows moved — the
+/// node's mode, its owning ids, the keyboard cursor, the text being typed into
+/// an id editor — so it always draws exactly what a fresh one would.
+#[test]
+fn a_kept_permissions_section_draws_what_a_fresh_one_would() {
+    let bar = ScrollColumn::new();
+    let empty = TextField::new();
+    let kept = PermsPanel::default();
+    let readable = props_with(Attributes::Unsupported);
+    let private = Properties::from_stat(
+        "notes.txt",
+        crate::entry::EntryKind::File,
+        &props_stat(FileKind::Regular, 0o600),
+    );
+    let first = painted_perms(&readable, resting(&bar, &empty, &kept));
+    let moved = painted_perms(&private, resting(&bar, &empty, &kept));
+    assert_ne!(first, moved, "a changed mode is drawn");
+    assert_eq!(
+        moved,
+        painted_perms(&private, resting(&bar, &empty, &PermsPanel::default()))
+    );
+
+    let ten = TextField::new().with_text("10");
+    let hundred = TextField::new().with_text("100");
+    let at_ten = painted_perms(
+        &private,
+        PropertiesControls {
+            owner: Some((OwnerField::Uid, &ten)),
+            ..resting(&bar, &empty, &kept)
+        },
+    );
+    let at_hundred = painted_perms(
+        &private,
+        PropertiesControls {
+            owner: Some((OwnerField::Uid, &hundred)),
+            ..resting(&bar, &empty, &kept)
+        },
+    );
+    assert_ne!(at_ten, at_hundred, "the typing is drawn as it moves");
+    assert_eq!(
+        at_hundred,
+        painted_perms(
+            &private,
+            PropertiesControls {
+                owner: Some((OwnerField::Uid, &hundred)),
+                ..resting(&bar, &empty, &PermsPanel::default())
+            },
+        )
+    );
+    assert_eq!(
+        painted_perms(&private, resting(&bar, &empty, &kept)),
+        moved,
+        "and its closing"
+    );
+}
+
 /// Each permission toggle's horizontal extent `(left, right)`, measured
 /// through the hit-test along one line through each class row — found down
 /// the column the section's controls begin at, so the probe costs a few
@@ -8939,15 +9123,15 @@ fn toggle_extents(
     theme: &Theme,
 ) -> BTreeMap<u32, (i32, i32)> {
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
-    let controls = resting(&bar, &empty);
+    let controls = resting(&bar, &empty, &perms_panel);
     let hit = |at: Point| properties_hit(props, perms_view(), controls, window, scale, theme, at);
     let column = properties_owner_editor_rect(
         props,
         PropertiesView::default(),
-        window,
-        scale,
-        theme,
+        shown(&perms_panel, true),
+        (window, scale, theme),
         OwnerField::Uid,
     )
     .expect("the section is seated")
@@ -9087,8 +9271,9 @@ fn perms_press(
 fn the_keyboard_reaches_every_control_the_pointer_does() {
     let props = props_with(Attributes::Unsupported);
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
-    let controls = resting(&bar, &empty);
+    let controls = resting(&bar, &empty, &perms_panel);
     let mut view = perms_view();
     let named = Key::Named;
 
@@ -9129,8 +9314,9 @@ fn the_keyboard_reaches_every_control_the_pointer_does() {
 fn the_permissions_cursor_walks_carries_and_steps_back_out() {
     let props = props_with(Attributes::Unsupported);
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
-    let controls = resting(&bar, &empty);
+    let controls = resting(&bar, &empty, &perms_panel);
     let mut view = perms_view();
     let press = |view: &mut PropertiesView, key| perms_press(&props, view, controls, key);
     let named = Key::Named;
@@ -9198,7 +9384,7 @@ fn the_permissions_cursor_walks_carries_and_steps_back_out() {
     assert!(!view.perms.holds());
 
     // A refused session reaches its ownership rows, and opens nothing there.
-    let locked = refused(&bar, &empty);
+    let locked = refused(&bar, &empty, &perms_panel);
     let mut view = PropertiesView {
         perms: PermsCursor {
             row: Some((1, 0)),
@@ -9216,7 +9402,7 @@ fn the_permissions_cursor_walks_carries_and_steps_back_out() {
     let typing = TextField::new().with_text("10");
     let editing = PropertiesControls {
         owner: Some((OwnerField::Uid, &typing)),
-        ..resting(&bar, &empty)
+        ..resting(&bar, &empty, &perms_panel)
     };
     for key in [
         named(NamedKey::Down),
@@ -9235,8 +9421,9 @@ fn the_permissions_cursor_walks_carries_and_steps_back_out() {
 fn the_permissions_cursor_reports_what_it_repaints() {
     let props = props_with(Attributes::Unsupported);
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
-    let controls = resting(&bar, &empty);
+    let controls = resting(&bar, &empty, &perms_panel);
     let theme = Theme::dark();
     let window = props_window();
     let key = |view: PropertiesView, key: Key| {
@@ -9288,6 +9475,7 @@ fn the_permissions_cursor_reports_what_it_repaints() {
 #[test]
 fn a_press_on_the_gutter_scrolls_the_attribute_list_and_repaints_its_rows() {
     use tairix_input::{InputEvent, PointerButton};
+    let perms_panel = PermsPanel::default();
 
     let theme = Theme::dark();
     let window = props_window();
@@ -9313,7 +9501,7 @@ fn a_press_on_the_gutter_scrolls_the_attribute_list_and_repaints_its_rows() {
                 &mut scroll,
                 &props,
                 view,
-                true,
+                shown(&perms_panel, true),
                 (window, Scale::ONE, &theme),
                 (Point::new(x, y), &press),
                 &mut damage,
@@ -9336,6 +9524,7 @@ fn a_press_on_the_gutter_scrolls_the_attribute_list_and_repaints_its_rows() {
     for y in 0..i32::try_from(window.height).unwrap() {
         let at = Point::new(12, y);
         let bar = ScrollColumn::new();
+        let perms_panel = PermsPanel::default();
         let empty = TextField::new();
         let view = PropertiesView {
             tab: PropertiesTab::Attributes,
@@ -9345,7 +9534,7 @@ fn a_press_on_the_gutter_scrolls_the_attribute_list_and_repaints_its_rows() {
         if let Some(PropertiesTarget::Attribute(_)) = properties_hit(
             &props,
             view,
-            resting(&bar, &empty),
+            resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,
@@ -9372,13 +9561,14 @@ fn shortest_props_window(theme: &Theme) -> Rect {
 fn props_frame(props: &Properties, view: PropertiesView, window: Rect) -> Surface {
     let theme = Theme::dark();
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
     let mut surface = Surface::new(window.width, window.height).expect("surface");
     draw_properties_window(
         &mut surface,
         PropertiesFrame::Ready(props),
         view,
-        resting(&bar, &empty),
+        resting(&bar, &empty, &perms_panel),
         Scale::ONE,
         &theme,
         window,
@@ -9393,6 +9583,7 @@ fn props_frame(props: &Properties, view: PropertiesView, window: Rect) -> Surfac
 /// shifted up, every fact the edges cross drawn whole and cut there.
 #[test]
 fn the_general_section_scrolls_its_facts_in_a_short_window() {
+    let perms_panel = PermsPanel::default();
     let theme = Theme::dark();
     let window = shortest_props_window(&theme);
     let props = props_with(some_attributes(0));
@@ -9403,7 +9594,7 @@ fn the_general_section_scrolls_its_facts_in_a_short_window() {
         &mut scroll,
         &props,
         view,
-        true,
+        shown(&perms_panel, true),
         (window, Scale::ONE, &theme),
         (0, DETENT),
         &mut damage
@@ -9453,8 +9644,9 @@ fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
     let window = shortest_props_window(&theme);
     let props = props_with(Attributes::Unsupported);
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
-    let controls = resting(&bar, &empty);
+    let controls = resting(&bar, &empty, &perms_panel);
     let mut scroll = ScrollColumn::new();
     let mut view = perms_view();
     let key = |view: &mut PropertiesView, scroll: &mut ScrollColumn, key: Key| {
@@ -9473,7 +9665,7 @@ fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
             scroll,
             &props,
             *view,
-            true,
+            shown(&perms_panel, true),
             (window, Scale::ONE, &theme),
             &mut tairix_controls::damage::sink(),
         );
@@ -9490,9 +9682,14 @@ fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
         "the group id, the section's last row"
     );
     assert!(view.scroll > 0, "the body scrolled to follow the cursor");
-    let cell =
-        properties_owner_editor_rect(&props, view, window, Scale::ONE, &theme, OwnerField::Gid)
-            .expect("the row the cursor reached shows");
+    let cell = properties_owner_editor_rect(
+        &props,
+        view,
+        shown(&perms_panel, true),
+        (window, Scale::ONE, &theme),
+        OwnerField::Gid,
+    )
+    .expect("the row the cursor reached shows");
     let control = Scale::ONE.scale_length(theme.metrics().control_height);
     assert_eq!(cell.height, control, "whole, not cut");
     assert_eq!(
@@ -9523,12 +9720,13 @@ fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
 /// How far the Permissions section can scroll in `window`: the offset a
 /// wheel turn far past the end settles on.
 fn scroll_bottom(props: &Properties, window: Rect) -> u64 {
+    let perms_panel = PermsPanel::default();
     let mut scroll = ScrollColumn::new();
     properties_scroll_wheel(
         &mut scroll,
         props,
         perms_view(),
-        true,
+        shown(&perms_panel, true),
         (window, Scale::ONE, &Theme::dark()),
         (0, DETENT * 1000),
         &mut tairix_controls::damage::sink(),
@@ -9541,6 +9739,7 @@ fn scroll_bottom(props: &Properties, window: Rect) -> u64 {
 /// row at all.
 #[test]
 fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
+    let perms_panel = PermsPanel::default();
     let theme = Theme::dark();
     let window = shortest_props_window(&theme);
     let props = props_with(some_attributes(20));
@@ -9554,7 +9753,7 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
         &mut scroll,
         &props,
         view,
-        true,
+        shown(&perms_panel, true),
         (window, Scale::ONE, &theme),
         &mut tairix_controls::damage::sink()
     ));
@@ -9573,7 +9772,7 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
             &mut scroll,
             &props,
             revealed,
-            true,
+            shown(&perms_panel, true),
             (window, Scale::ONE, &theme),
             &mut tairix_controls::damage::sink()
         ),
@@ -9581,6 +9780,7 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
     );
     // The gutter sits along the band's trailing edge; nothing there is a row.
     let bar = ScrollColumn::new();
+    let perms_panel = PermsPanel::default();
     let empty = TextField::new();
     let row_y = (0..i32::try_from(window.height).unwrap())
         .find(|&y| {
@@ -9588,7 +9788,7 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
                 properties_hit(
                     &props,
                     revealed,
-                    resting(&bar, &empty),
+                    resting(&bar, &empty, &perms_panel),
                     window,
                     Scale::ONE,
                     &theme,
@@ -9604,7 +9804,7 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
         properties_hit(
             &props,
             revealed,
-            resting(&bar, &empty),
+            resting(&bar, &empty, &perms_panel),
             window,
             Scale::ONE,
             &theme,

@@ -84,26 +84,26 @@ const Y2_BLOCK: usize = 24;
 /// Whole-macroblock luma and chroma modes, in the order the trees name them.
 /// The first is the mode every other arm falls through to, so only the
 /// three that branch are named.
-const V_PRED: usize = 1;
-const H_PRED: usize = 2;
-const TM_PRED: usize = 3;
-const B_PRED: usize = 4;
+const V_PRED: u8 = 1;
+const H_PRED: u8 = 2;
+const TM_PRED: u8 = 3;
+const B_PRED: u8 = 4;
 
 /// Subblock modes, in the order the tree names them.
-const B_DC_PRED: usize = 0;
-const B_TM_PRED: usize = 1;
-const B_VE_PRED: usize = 2;
-const B_HE_PRED: usize = 3;
-const B_LD_PRED: usize = 4;
-const B_RD_PRED: usize = 5;
-const B_VR_PRED: usize = 6;
-const B_VL_PRED: usize = 7;
-const B_HD_PRED: usize = 8;
-const B_HU_PRED: usize = 9;
+const B_DC_PRED: u8 = 0;
+const B_TM_PRED: u8 = 1;
+const B_VE_PRED: u8 = 2;
+const B_HE_PRED: u8 = 3;
+const B_LD_PRED: u8 = 4;
+const B_RD_PRED: u8 = 5;
+const B_VR_PRED: u8 = 6;
+const B_VL_PRED: u8 = 7;
+const B_HD_PRED: u8 = 8;
+const B_HU_PRED: u8 = 9;
 
 /// The subblock mode a whole-macroblock mode implies for a neighbour's
 /// context (RFC 6386 §11.3).
-const MODE_TO_BMODE: [usize; 4] = [B_DC_PRED, B_VE_PRED, B_HE_PRED, B_TM_PRED];
+const MODE_TO_BMODE: [u8; 4] = [B_DC_PRED, B_VE_PRED, B_HE_PRED, B_TM_PRED];
 
 /// The value an absent above row predicts from.
 const ABOVE_ABSENT: u8 = 127;
@@ -112,9 +112,9 @@ const ABOVE_ABSENT: u8 = 127;
 const LEFT_ABSENT: u8 = 129;
 
 /// Token values the coefficient tree names.
-const DCT_0: usize = 0;
-const DCT_CAT1: usize = 5;
-const DCT_EOB: usize = 11;
+const DCT_0: u8 = 0;
+const DCT_CAT1: u8 = 5;
+const DCT_EOB: u8 = 11;
 
 /// The node the coefficient tree's end-of-block branch sits above, which a
 /// read following a zero coefficient starts below.
@@ -763,14 +763,14 @@ impl<'a> Bool<'a> {
     }
 
     /// Walk `tree` from node `start`, answering the leaf value reached.
-    fn tree(&mut self, tree: &[i8], probs: &[u8], start: usize) -> usize {
+    fn tree(&mut self, tree: &[i8], probs: &[u8], start: usize) -> u8 {
         let mut node = start;
         for _ in 0..tree.len() {
             let probability = probs.get(node >> 1).copied().unwrap_or(128);
             let branch = node + usize::try_from(self.bit(probability)).unwrap_or(0);
             match tree.get(branch).copied().unwrap_or(0) {
                 next if next > 0 => node = usize::try_from(next).unwrap_or(0),
-                leaf => return usize::try_from(-i32::from(leaf)).unwrap_or(0),
+                leaf => return u8::try_from(-i32::from(leaf)).unwrap_or(0),
             }
         }
         0
@@ -940,13 +940,13 @@ impl Quant {
 /// One macroblock's coding decisions.
 #[derive(Clone)]
 struct Macroblock {
-    segment: usize,
+    segment: u8,
     skip: bool,
     /// The whole-macroblock luma mode, [`B_PRED`] when the subblocks carry
     /// their own.
-    ymode: usize,
-    uvmode: usize,
-    bmodes: [usize; BLOCK_COEFFS],
+    ymode: u8,
+    uvmode: u8,
+    bmodes: [u8; BLOCK_COEFFS],
 }
 
 /// Whether each of a macroblock's blocks decoded a non-zero coefficient,
@@ -1138,7 +1138,7 @@ pub(crate) fn frame_peak_bytes(width: u32) -> u64 {
         plane(chroma, CHROMA_HELD + 8),
     ];
     let per_column =
-        size_of::<Macroblock>() + size_of::<bool>() + size_of::<Nonzero>() + 4 * size_of::<usize>();
+        size_of::<Macroblock>() + size_of::<bool>() + size_of::<Nonzero>() + 4 * size_of::<u8>();
     let state = [
         (columns as u64).saturating_mul(per_column as u64),
         (MAX_PARTITIONS * size_of::<Bool<'static>>()) as u64,
@@ -1314,8 +1314,8 @@ struct Frame {
     left: Nonzero,
     /// The subblock-mode context of the row above, one entry per luma
     /// subblock column.
-    above_modes: Vec<usize>,
-    left_modes: [usize; 4],
+    above_modes: Vec<u8>,
+    left_modes: [u8; 4],
 }
 
 /// The rows the loop filter and the colour conversion still need: the
@@ -1442,9 +1442,9 @@ impl Frame {
         let segment = if header.segmentation.enabled && header.segmentation.update_map {
             let probs = header.segmentation.probs;
             if reader.bit(probs[0]) != 0 {
-                2 + usize::try_from(reader.bit(probs[2])).unwrap_or(0)
+                2 + u8::from(reader.bit(probs[2]) != 0)
             } else {
-                usize::try_from(reader.bit(probs[1])).unwrap_or(0)
+                u8::from(reader.bit(probs[1]) != 0)
             }
         } else {
             0
@@ -1464,8 +1464,8 @@ impl Frame {
                         .copied()
                         .unwrap_or(B_DC_PRED);
                     let probs = KF_BMODE_PROBS
-                        .get(above)
-                        .and_then(|row| row.get(left))
+                        .get(usize::from(above))
+                        .and_then(|row| row.get(usize::from(left)))
                         .unwrap_or(&KF_BMODE_PROBS[0][0]);
                     let mode = reader.tree(&BMODE_TREE, probs, 0);
                     bmodes[row * 4 + column_in_mb] = mode;
@@ -1477,7 +1477,10 @@ impl Frame {
                 self.left_modes[row] = left;
             }
         } else {
-            let implied = MODE_TO_BMODE.get(ymode).copied().unwrap_or(B_DC_PRED);
+            let implied = MODE_TO_BMODE
+                .get(usize::from(ymode))
+                .copied()
+                .unwrap_or(B_DC_PRED);
             bmodes = [implied; BLOCK_COEFFS];
             self.left_modes = [implied; 4];
             for offset in 0..4 {
@@ -1535,7 +1538,10 @@ impl Frame {
         factors: &[Dequant; SEGMENTS],
         coeffs: &mut [[i16; BLOCK_COEFFS]; MB_BLOCKS],
     ) -> bool {
-        let factor = factors.get(block.segment).copied().unwrap_or_default();
+        let factor = factors
+            .get(usize::from(block.segment))
+            .copied()
+            .unwrap_or_default();
         let mut nonzero = [false; MB_BLOCKS];
         let has_y2 = block.ymode != B_PRED;
         let mut any = false;
@@ -1682,9 +1688,9 @@ fn read_block(
             continue;
         }
         let magnitude = if token < DCT_CAT1 {
-            i32::try_from(token).unwrap_or(0)
+            i32::from(token)
         } else {
-            let category = token - DCT_CAT1;
+            let category = usize::from(token - DCT_CAT1);
             let extra = CATEGORY_PROBS
                 .get(category)
                 .map_or(0, |bits| extra_bits(reader, bits));
@@ -1854,14 +1860,7 @@ fn add_residual(plane: &mut Plane, x0: isize, y0: isize, coeffs: &[i16; BLOCK_CO
 /// Predict a whole 16x16 or 8x8 block from its above row and left column.
 /// `has_above` says whether a macroblock row lies above it, which the plane
 /// cannot: it holds one macroblock row.
-fn predict_block(
-    plane: &mut Plane,
-    x0: isize,
-    y0: isize,
-    size: isize,
-    mode: usize,
-    has_above: bool,
-) {
+fn predict_block(plane: &mut Plane, x0: isize, y0: isize, size: isize, mode: u8, has_above: bool) {
     let has_left = x0 > 0;
     match mode {
         V_PRED => {
@@ -1928,14 +1927,7 @@ fn predict_block(
 /// `above` holds the eight samples above the subblock — its own four
 /// followed by the four above and to the right — and `corner` the sample
 /// above and to the left of both.
-fn predict_subblock(
-    plane: &mut Plane,
-    x0: isize,
-    y0: isize,
-    mode: usize,
-    above: [u8; 8],
-    corner: u8,
-) {
+fn predict_subblock(plane: &mut Plane, x0: isize, y0: isize, mode: u8, above: [u8; 8], corner: u8) {
     let left = [
         plane.get(x0 - 1, y0),
         plane.get(x0 - 1, y0 + 1),
@@ -2015,7 +2007,7 @@ fn predict_subblock(
 /// left column round to the right of the above row.
 fn predict_diagonal(
     block: &mut [[u8; 4]; 4],
-    mode: usize,
+    mode: u8,
     above: [u8; 8],
     edge: &[u8; 9],
     left: [u8; 4],
@@ -2070,7 +2062,7 @@ fn predict_diagonal(
 /// run at roughly 27 degrees from an axis.
 fn predict_shallow_diagonal(
     block: &mut [[u8; 4]; 4],
-    mode: usize,
+    mode: u8,
     above: [u8; 8],
     edge: &[u8; 9],
     left: [u8; 4],
@@ -2239,7 +2231,7 @@ impl Frame {
             let inner = subblocks || coded;
             let mut level = header
                 .segmentation
-                .filter_level(header.filter_level, block.segment);
+                .filter_level(header.filter_level, usize::from(block.segment));
             if header.deltas.enabled {
                 level += header.deltas.intra;
                 if subblocks {

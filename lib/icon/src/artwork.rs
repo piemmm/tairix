@@ -787,16 +787,21 @@ enum ArtView<'a> {
 }
 
 impl ArtView<'_> {
-    /// The key this names, built: what a miss retains its slot under.
-    fn to_key(self) -> ArtworkKey {
-        match self {
-            Self::Asset(path) => ArtworkKey::Asset(String::from(path)),
+    /// The key this names, built: what a miss retains its slot under, or
+    /// `None` when the heap refuses the text it owns — a draw on a starved
+    /// machine falls a tier rather than aborting.
+    fn to_key(self) -> Option<ArtworkKey> {
+        Some(match self {
+            Self::Asset(path) => ArtworkKey::Asset(copied(path)?),
             Self::Raster(kind) => ArtworkKey::Raster(kind),
             Self::Vector(kind) => ArtworkKey::Vector(kind),
-            Self::Bundle(dir) => ArtworkKey::Bundle(String::from(dir)),
+            Self::Bundle(dir) => ArtworkKey::Bundle(copied(dir)?),
             Self::Program { name, home } => ArtworkKey::Program {
-                name: String::from(name),
-                home: home.map(String::from),
+                name: copied(name)?,
+                home: match home {
+                    Some(home) => Some(copied(home)?),
+                    None => None,
+                },
             },
             Self::Builtin(kind) => ArtworkKey::Builtin(kind),
             Self::Folder(drawn) => ArtworkKey::Folder(drawn.to_sample()),
@@ -805,11 +810,11 @@ impl ArtView<'_> {
                 stamp,
                 reading,
             } => ArtworkKey::Thumbnail(Thumbnail {
-                path: String::from(path),
+                path: copied(path)?,
                 stamp,
                 reading,
             }),
-        }
+        })
     }
 
     fn is_thumbnail_class(self) -> bool {
@@ -819,6 +824,14 @@ impl ArtView<'_> {
             _ => false,
         }
     }
+}
+
+/// `text` copied into a string of its own, or `None` when the heap refuses it.
+fn copied(text: &str) -> Option<String> {
+    let mut owned = String::new();
+    owned.try_reserve_exact(text.len()).ok()?;
+    owned.push_str(text);
+    Some(owned)
 }
 
 /// The cache slot a decode is retained in: the artwork, the pixel side, and
@@ -839,12 +852,12 @@ struct SlotView<'a> {
 }
 
 impl SlotView<'_> {
-    fn to_key(self) -> SlotKey {
-        SlotKey {
-            art: self.art.to_key(),
+    fn to_key(self) -> Option<SlotKey> {
+        Some(SlotKey {
+            art: self.art.to_key()?,
             side: self.side,
             shadow: self.shadow,
-        }
+        })
     }
 
     /// The shadow this picture's slot casts as `cast` says.
@@ -1076,8 +1089,10 @@ impl ArtworkCache {
     /// The shadow is cast once per picture, side and cast, in this process,
     /// from the picture's own coverage, and retained beside it as an entry of
     /// its own — so a frame composites a mask and never blurs, and pressure
-    /// may take a shadow without taking its picture. A shadow that cannot be
-    /// cast or kept is withheld for this draw
+    /// may take a shadow without taking its picture. A shadow never takes its
+    /// picture's place: one the cache could hold only by evicting the picture
+    /// is refused, and one the band leaves no room for beside it is not cast
+    /// at all. A shadow that cannot be cast or kept is withheld for this draw
     /// ([`IconPicture::shadow_withheld`]) and asked for again next time, so a
     /// draw site neither blurs it itself nor loses it for good.
     pub fn shadowed(
@@ -1092,16 +1107,19 @@ impl ArtworkCache {
             return self.picture(slot, mask);
         };
         let shadow = slot.shadow(cast);
-        if self.entries.find(&(), &shadow as &dyn SlotLookup).is_none() {
+        if self.entries.find(&(), &shadow as &dyn SlotLookup).is_none()
+            && self.has_room_for(slot, cast)
+        {
             // Only a cast shadow is kept: a picture not retained, or memory that
             // could not be had, is asked about again rather than remembered.
-            if let Some((cast_mask, _)) = self
+            if let Some(((cast_mask, _), key)) = self
                 .borrow_slot(slot)
                 .and_then(|picture| cast_shadow(picture.surface(), cast))
+                .zip(shadow.to_key())
             {
-                let key = shadow.to_key();
                 let cached = CachedArtwork::new(Some(Artwork::new(cast_mask)), &key.art);
-                self.entries.retain(&(), key, cached);
+                self.entries
+                    .retain_beside(&(), key, cached, &slot as &dyn SlotLookup);
             }
         }
         let picture = self.picture(slot, mask)?;
@@ -1268,10 +1286,14 @@ impl ArtworkCache {
                 // A thumbnail-class tier draws the tier below until it lands,
                 // so that one is wanted too.
                 None if slot.art.is_thumbnail_class() => {
-                    resolver.prefetch(&slot.art.to_key(), side);
+                    if let Some(key) = slot.art.to_key() {
+                        resolver.prefetch(&key, side);
+                    }
                 }
                 None => {
-                    resolver.prefetch(&slot.art.to_key(), side);
+                    if let Some(key) = slot.art.to_key() {
+                        resolver.prefetch(&key, side);
+                    }
                     return;
                 }
             }
@@ -1289,9 +1311,9 @@ impl ArtworkCache {
         let served = self.entries.get_or_build_borrowed(
             &(),
             &slot as &dyn SlotLookup,
-            || built_key.take().unwrap_or_else(|| slot.to_key()),
+            || built_key.take().or_else(|| slot.to_key()),
             || {
-                let key = slot.to_key();
+                let key = slot.to_key()?;
                 let cached = match resolver.resolve(&key.art, slot.side) {
                     Resolved::Done(artwork) => Some(CachedArtwork::new(artwork, &key.art)),
                     Resolved::Pending => {
@@ -1305,8 +1327,9 @@ impl ArtworkCache {
         );
         let built = match served {
             Some(Served::Uncached(artwork)) => {
-                let key = built_key.take().unwrap_or_else(|| slot.to_key());
-                resolver.declined(&key.art, slot.side);
+                if let Some(key) = built_key.take().or_else(|| slot.to_key()) {
+                    resolver.declined(&key.art, slot.side);
+                }
                 Slot::Uncached(artwork.artwork)
             }
             Some(served) if served.artwork().is_some() => Slot::Served,
@@ -1317,6 +1340,25 @@ impl ArtworkCache {
         } else {
             built
         }
+    }
+
+    /// Whether the band leaves room for the shadow `cast` casts beside the
+    /// picture `slot` holds: what decides whether casting it is worth a blur.
+    fn has_room_for(&self, slot: SlotView<'_>, cast: ShadowCast) -> bool {
+        let Some(picture) = self.entries.peek(&(), &slot as &dyn SlotLookup) else {
+            return false;
+        };
+        let Some(surface) = picture.artwork().map(Artwork::surface) else {
+            return false;
+        };
+        let shadow = cast
+            .extent(surface.width(), surface.height())
+            .and_then(|(width, height)| usize::try_from(u64::from(width) * u64::from(height)).ok())
+            .and_then(|pixels| pixels.checked_mul(size_of::<tairix_raster::Pixel>()));
+        shadow.is_some_and(|shadow| {
+            self.entries
+                .holds(2, picture.payload_bytes().saturating_add(shadow))
+        })
     }
 
     /// Borrow a built slot's artwork back out of the cache.

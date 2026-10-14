@@ -24,7 +24,7 @@ use tairix_wallpaper::StarfieldOptions;
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, Surface, WindowId};
 
 use super::seed_from;
-use tairix_theme::motion::{seconds, SceneClock};
+use tairix_theme::motion::SceneClock;
 
 /// Stars per million screen pixels at the field's own density, and the bounds
 /// the count is kept in; a denser or sparser field scales all three, so every
@@ -119,9 +119,10 @@ pub(super) struct Starfield {
     calm: bool,
     /// Surge into warp and back, rather than only cruising.
     warp: bool,
-    started_ns: u64,
-    last_ns: u64,
-    due_ns: u64,
+    clock: SceneClock,
+    /// When the first frame is due, until it is drawn: nothing covers the
+    /// screen before it, so it waits for no scene frame as the rest do.
+    opening_ns: Option<u64>,
 }
 
 impl Starfield {
@@ -158,9 +159,8 @@ impl Starfield {
             pixel: f64::from(scale.scale_length(1_000)) / 1_000.0,
             calm,
             warp: options.warp,
-            started_ns: now_ns,
-            last_ns: now_ns,
-            due_ns: now_ns,
+            clock: SceneClock::new(now_ns, false),
+            opening_ns: Some(now_ns),
         };
         if !(fallible::reserve(&mut field.stars, count)
             && fallible::reserve(&mut field.streaks, count)
@@ -177,27 +177,31 @@ impl Starfield {
     }
 
     /// When the next frame is due.
-    pub(super) const fn due_ns(&self) -> u64 {
-        self.due_ns
+    pub(super) fn due_ns(&self) -> u64 {
+        self.opening_ns
+            .or_else(|| self.clock.due_ns())
+            .unwrap_or(u64::MAX)
     }
 
     /// Fly the field on to `now_ns` and draw the frame, if one is due.
+    ///
+    /// The flight is the scene clock's motion, so a late wake carries the
+    /// field, its turn and its place in the warp cycle a few frames on
+    /// together, never to the wall clock.
     pub(super) fn advance(&mut self, now_ns: u64, wm: WindowId, compositor: &mut Compositor) {
-        if now_ns < self.due_ns {
+        let opening = self.opening_ns.is_some_and(|due| now_ns >= due);
+        if !opening && !self.clock.frame_due(now_ns) {
             return;
         }
-        let step = now_ns
-            .saturating_sub(self.last_ns)
-            .min(SceneClock::MOST_FRAMES * SceneClock::FRAME_NS);
-        self.last_ns = now_ns;
-        self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
-        let flight = seconds(now_ns.saturating_sub(self.started_ns));
+        self.opening_ns = None;
+        let before = self.clock.moved();
+        let flight = self.clock.advance(now_ns);
         let (speed, roll) = match (self.calm, self.warp) {
             (true, _) => (CRUISE_SPEED, 0.0),
             (false, false) => (CRUISE_SPEED, ROLL_RATE * flight),
             (false, true) => (speed_at(flight), ROLL_RATE * flight),
         };
-        self.fly(speed * seconds(step), speed, roll);
+        self.fly(speed * (flight - before), speed, roll);
 
         // A field this dense has stars all over the screen, so its damage is
         // the box around them: far more rectangles than any present carries.

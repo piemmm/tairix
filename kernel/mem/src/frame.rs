@@ -811,6 +811,11 @@ impl FrameAllocatorState {
 
     /// Take the highest free `2^order`-or-smaller block below `ceiling` in
     /// the zone it falls in, of exactly `order` when `exact`.
+    ///
+    /// A ceiling at the zone's end — every discovered device reach is a zone
+    /// boundary — leaves the whole zone eligible, so its own lists serve the
+    /// block in constant time, as an unconstrained request is served; only a
+    /// ceiling cutting through the zone searches the bitmap.
     fn take_highest_under(
         &mut self,
         order: u32,
@@ -818,7 +823,25 @@ impl FrameAllocatorState {
         exact: bool,
         class: MemoryClass,
     ) -> Result<Option<(usize, u32)>, AllocError> {
-        let floor = self.zones[zone_of(&self.zones, ceiling - 1)].start;
+        let z = zone_of(&self.zones, ceiling - 1);
+        let zone_end = self
+            .zones
+            .get(z + 1)
+            .map_or(self.base_frame + self.span, |next| next.start);
+        if ceiling >= zone_end {
+            let source = if exact {
+                self.zone_source(z, order, false).map(|from| (from, order))
+            } else {
+                self.zone_largest(z, order, false)
+            };
+            return source
+                .map(|(from, got)| {
+                    self.take_front(z, from, got, class)
+                        .map(|start| (start, got))
+                })
+                .transpose();
+        }
+        let floor = self.zones[z].start;
         let Some((start, got)) = self
             .largest_free_run_under(order, ceiling, floor)
             .filter(|&(_, got)| !exact || got == order)
@@ -1417,10 +1440,13 @@ impl FrameAllocator {
     /// [`Self::alloc_order_user`] for a device that reaches only part of
     /// RAM: every frame of the block lies below `ceiling` when one is given.
     ///
-    /// The block is the highest one below the ceiling, so a device reaching
-    /// less keeps the memory beneath it. A ceiling above every usable frame
-    /// constrains nothing and costs nothing; one inside RAM costs a search
-    /// of the bitmap below it, a step per word and per free run it passes.
+    /// A ceiling above every usable frame constrains nothing and costs
+    /// nothing. One at a zone's end — every discovered device reach is a zone
+    /// boundary — is served from the zones below it in constant time, as an
+    /// unconstrained request is. One cutting through a zone takes the highest
+    /// block below it there, so a device reaching less keeps the memory
+    /// beneath it, at the cost of a search of that zone's bitmap below the
+    /// ceiling, a step per word and per free run it passes.
     ///
     /// # Errors
     ///
@@ -2414,6 +2440,29 @@ mod tests {
         let zoned = FrameAllocator::with_dma_reaches(&map, &[LOW_REACH]).unwrap();
         let frame = carve_after_churn(&zoned).expect("the zone below the limit is kept");
         assert!(frame.start() < ceiling);
+    }
+
+    /// A carve whose ceiling is a zone's end — a discovered device's reach —
+    /// is served from that zone's own lists, exactly as an ordinary draw that
+    /// falls to the zone is, rather than by searching the bitmap below the
+    /// ceiling under the allocator's lock.
+    #[test]
+    fn a_ceiling_at_a_zone_end_is_served_from_the_zones_lists() {
+        let map = map_between(32, 128);
+        let carved = FrameAllocator::with_dma_reaches(&map, &[LOW_REACH]).unwrap();
+        let carve = carved
+            .alloc_order_under_user(MemoryClass::Dma, 0, Some(PhysAddr::new(64 * MIB)))
+            .unwrap();
+        let drawn = FrameAllocator::with_dma_reaches(&map, &[LOW_REACH]).unwrap();
+        for _ in 0..2 {
+            assert!(drawn.alloc_order(MemoryClass::Kernel, MAX_ORDER).is_ok());
+        }
+        let fallen = drawn.alloc_order(MemoryClass::Kernel, 0).unwrap();
+        assert!(
+            fallen.start().as_u64() < 64 * MIB,
+            "the ordinary draw fell to the low zone"
+        );
+        assert_eq!(carve, fallen);
     }
 
     #[test]

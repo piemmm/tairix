@@ -196,9 +196,14 @@ coverage (`tairix_raster::cast_shadow`), retained in a slot of its own — the
 picture's key and side with the cast — beside the picture it was cast from, so
 a frame blits a mask and never blurs.
 A shadow is cast in this process from pixels already retained, so no resolver
-is handed one. Only a cast mask is kept: one that cannot be cast or kept is
-withheld for that draw (`IconPicture::shadow_withheld`) — the tile then draws
-none rather than blurring itself — and asked for again next time.
+is handed one. Only a cast mask is kept, and never in its picture's place: it
+is admitted beside the picture (`ReclaimCache::retain_beside`), and one the
+band leaves no room for beside it is not cast at all, so a tight cache never
+trades a tile's picture for its shadow and decodes the picture again next
+frame. One that cannot be cast or kept is withheld for that draw
+(`IconPicture::shadow_withheld`) — the tile then draws none rather than
+blurring itself — and asked for again next time. Every key a miss retains is
+built fallibly, so a heap that refuses its text falls the draw a tier.
 
 A bundle is keyed by its *directory*, not by the asset its manifest names, so
 the manifest read is paid once per bundle and a bundle that declares no icon

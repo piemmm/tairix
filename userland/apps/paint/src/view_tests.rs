@@ -3097,6 +3097,38 @@ fn levels_read_a_histogram_and_auto_stretches_what_it_holds() {
     assert_eq!(window.colour(0, 0)[0], 0, "the darkest grey is black");
 }
 
+/// A histogram is a reading of the picture, whichever adjustment reads it, so
+/// moving from Levels to Curves keeps it rather than asking a worker for it
+/// again.
+#[test]
+fn moving_between_adjustments_that_read_a_histogram_keeps_it() {
+    let mut window = greys();
+    let histogram = window.act(Action::Adjust(filter_index("Levels")));
+    window.run_worker(histogram);
+    let held = window.view.histogram().cloned();
+    assert!(held.is_some());
+
+    let curves = window.act(Action::Adjust(filter_index("Curves")));
+
+    assert_eq!(window.view.histogram().cloned(), held, "the reading stands");
+    assert!(curves.request.is_none(), "and nothing is worked out again");
+}
+
+/// Moving on while a worker reads the histogram leaves its job to land on the
+/// adjustment now open, rather than abandoning it and asking for another.
+#[test]
+fn a_histogram_being_read_when_the_adjustment_moves_lands_on_the_next() {
+    let mut window = greys();
+    let reading = window.act(Action::Adjust(filter_index("Levels")));
+
+    let curves = window.act(Action::Adjust(filter_index("Curves")));
+    assert!(curves.request.is_none(), "the one job out is waited for");
+    let landed = window.run_worker(reading);
+
+    assert!(window.view.histogram().is_some(), "it lands on Curves");
+    assert!(landed.request.is_none(), "and is not asked for again");
+}
+
 #[test]
 fn an_eyedropper_takes_the_colour_beneath_the_preview() {
     let canvas = Canvas::new(10, 10, Kind::Rgba, Sample::Rgba([30, 20, 10, 255])).expect("fits");

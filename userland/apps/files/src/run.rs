@@ -141,8 +141,8 @@ mod program {
         open_with_scroll_pointer, open_with_scroll_wheel, properties_reveal,
         properties_scroll_pointer, properties_scroll_wheel, render_into, scroll_pointer,
         scroll_wheel, AttrAction, Frame, Identity, OpenWithAction, OwnerField, PermsCursor,
-        PropertiesControls, PropertiesFrame, PropertiesTab, PropertiesTarget, PropertiesView,
-        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        PermsPanel, PermsShown, PropertiesControls, PropertiesFrame, PropertiesTab,
+        PropertiesTarget, PropertiesView, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_manifest, blank_documents, browser_floor,
@@ -461,6 +461,8 @@ mod program {
         /// Where the Permissions section's keyboard cursor rests, if the
         /// section has taken the keyboard from the strip.
         perms: PermsCursor,
+        /// The Permissions section as last composed, kept between events.
+        section: PermsPanel,
         /// What the identity band says beneath the name. Held rather than
         /// formatted per frame, and refreshed when a read lands.
         detail: String,
@@ -519,6 +521,7 @@ mod program {
                 owner: self.owner.as_ref().map(|ed| (ed.field, &ed.editor)),
                 attribute: &self.editor,
                 scrollbar: self.scroll.scrollbar(),
+                perms: &self.section,
             }
         }
 
@@ -7722,6 +7725,7 @@ mod program {
                 owner: None,
                 tab: PropertiesTab::default(),
                 perms: PermsCursor::default(),
+                section: PermsPanel::default(),
                 detail: PropertiesWindow::detail_for(kind, None),
                 can_chown,
             })),
@@ -7832,7 +7836,7 @@ mod program {
                         &mut win.scroll,
                         props,
                         view,
-                        win.can_chown,
+                        perms_shown(win.can_chown, win.owner.as_ref(), &win.section),
                         (window, scale, theme),
                         (*dx, *dy),
                         damage,
@@ -7844,6 +7848,21 @@ mod program {
             _ => {}
         }
         (Repaint::Nothing, false)
+    }
+
+    /// What a Properties window's Permissions section is composed from, taken
+    /// from its fields alone so it can stand beside a borrow of its scroll
+    /// column.
+    fn perms_shown<'a>(
+        can_chown: bool,
+        owner: Option<&'a OwnerEditor>,
+        section: &'a PermsPanel,
+    ) -> PermsShown<'a> {
+        PermsShown {
+            can_chown,
+            owner: owner.map(|ed| (ed.field, &ed.editor)),
+            panel: section,
+        }
     }
 
     /// Scroll the section on show the least that shows its keyboard cursor,
@@ -7859,7 +7878,7 @@ mod program {
                 &mut win.scroll,
                 props,
                 view,
-                win.can_chown,
+                perms_shown(win.can_chown, win.owner.as_ref(), &win.section),
                 (window, scale, theme),
                 damage,
             ),
@@ -7890,9 +7909,8 @@ mod program {
                     tairix_browse::render::properties_owner_editor_rect(
                         props,
                         win.view(),
-                        window,
-                        scale,
-                        theme,
+                        win.controls().perms_shown(),
+                        (window, scale, theme),
                         field,
                     )
                 })
@@ -8047,7 +8065,7 @@ mod program {
                     &mut win.scroll,
                     props,
                     view,
-                    win.can_chown,
+                    perms_shown(win.can_chown, win.owner.as_ref(), &win.section),
                     (window, scale, theme),
                     (point, &input),
                     damage,

@@ -1084,6 +1084,14 @@ fn the_kernel_extent_mask_defaults_to_every_gigapage() {
 }
 
 #[test]
+fn a_range_past_the_ceiling_invalidates_the_whole_domain_and_one_at_it_does_not() {
+    assert!(!invalidates_whole_domain(1));
+    assert!(!invalidates_whole_domain(RANGE_INVALIDATION_CEILING));
+    assert!(invalidates_whole_domain(RANGE_INVALIDATION_CEILING + 1));
+    assert!(invalidates_whole_domain(usize::MAX));
+}
+
+#[test]
 fn the_tlbi_operand_carries_the_va_field_and_nothing_above_it() {
     // A low address: `VA[63:56]` is zero, so the naive shift and the masked
     // one agree — which is why the missing mask went unnoticed while the

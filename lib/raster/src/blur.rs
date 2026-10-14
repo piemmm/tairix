@@ -111,6 +111,22 @@ impl ShadowCast {
         self.radius.saturating_mul(SOFTEN_PASSES)
     }
 
+    /// The size of the mask [`cast_shadow`] casts from a `width` × `height`
+    /// picture: the picture, dropped and spread by the reach either side.
+    /// `None` where that overflows.
+    #[must_use]
+    pub fn extent(self, width: u32, height: u32) -> Option<(u32, u32)> {
+        let reach = self.reach();
+        let span = |side: u32, drop: u32| {
+            reach
+                .saturating_sub(drop)
+                .checked_add(side)?
+                .checked_add(drop)?
+                .checked_add(reach)
+        };
+        Some((span(width, self.drop_x)?, span(height, self.drop_y)?))
+    }
+
     /// Where a [`cast_shadow`] mask's origin lies from the picture's: up and
     /// left by the reach, less the drop.
     #[must_use]
@@ -136,14 +152,7 @@ pub fn cast_shadow(picture: &Surface, cast: ShadowCast) -> Option<(Surface, (i32
     let reach = cast.reach();
     let left = reach.saturating_sub(cast.drop_x);
     let top = reach.saturating_sub(cast.drop_y);
-    let width = left
-        .checked_add(picture.width())?
-        .checked_add(cast.drop_x)?
-        .checked_add(reach)?;
-    let height = top
-        .checked_add(picture.height())?
-        .checked_add(cast.drop_y)?
-        .checked_add(reach)?;
+    let (width, height) = cast.extent(picture.width(), picture.height())?;
     let across = usize::try_from(width).ok()?;
     let down = usize::try_from(height).ok()?;
     let count = across.checked_mul(down)?;

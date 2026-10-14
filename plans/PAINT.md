@@ -384,7 +384,7 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   and Rec. 601 luma of the layer painted on, each pixel weighted by its opacity
   and by how much the selection chooses it, and its mean in linear light;
   worked out on the worker while the pane reads one and the picture has moved
-  since. A plot is drawn against its tallest level between black and white, so
+  since — not when the adjustment does, which reads the same picture. A plot is drawn against its tallest level between black and white, so
   a spike of clipped pixels does not flatten the rest.
 - **Levels** (PT20) for the composite and for each channel, a channel's mapping
   before the composite's: input black, grey and white handles on a track

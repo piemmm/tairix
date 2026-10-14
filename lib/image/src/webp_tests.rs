@@ -399,6 +399,52 @@ fn an_animation_chunk_under_a_clear_flag_is_refused() {
 }
 
 #[test]
+fn a_frame_under_a_clear_flag_is_refused_even_before_a_still_picture() {
+    let bytes = riff(&[
+        chunk(*b"VP8X", &extended(0, 4, 4)),
+        chunk(
+            *b"ANMF",
+            &frame((0, 0), (4, 4), 40, 1, &[lossless(4, 4, [0; 4])]),
+        ),
+        lossless(4, 4, [1, 2, 3, 4]),
+    ]);
+    assert_eq!(probe(&bytes), Err(DecodeError::WebpInvalidChunkLayout));
+}
+
+#[test]
+fn a_still_files_animation_control_is_ignored_however_short() {
+    let bytes = riff(&[
+        chunk(*b"VP8X", &extended(0, 4, 4)),
+        chunk(*b"ANIM", &[0, 0]),
+        lossless(4, 4, [1, 2, 3, 4]),
+    ]);
+    expect_flat(&bytes, 4, 4, [1, 2, 3, 4]);
+}
+
+#[test]
+fn an_animation_must_declare_its_loop_count_once_before_its_first_frame() {
+    let body = || {
+        chunk(
+            *b"ANMF",
+            &frame((0, 0), (4, 4), 40, 1, &[lossless(4, 4, [0; 4])]),
+        )
+    };
+    let header = || chunk(*b"VP8X", &extended(0x02, 4, 4));
+    let control = |loop_count| chunk(*b"ANIM", &animation(loop_count));
+    for (case, chunks) in [
+        ("none", vec![header(), body()]),
+        ("after a frame", vec![header(), body(), control(1)]),
+        ("twice", vec![header(), control(1), control(2), body()]),
+    ] {
+        assert_eq!(
+            probe(&riff(&chunks)),
+            Err(DecodeError::WebpInvalidChunkLayout),
+            "{case}"
+        );
+    }
+}
+
+#[test]
 fn an_alpha_chunk_beside_a_lossless_bitstream_is_refused() {
     // A lossless stream carries its own alpha channel, so the two are two
     // answers to one question.

@@ -882,3 +882,11 @@ fn every_root_installs_the_published_direct_map() {
     // and refuses rather than publishing a map nothing carries.
     assert!(!install_boot_physmap(&POOL, GIB));
 }
+
+#[test]
+fn a_range_past_the_ceiling_fences_the_whole_space_and_one_at_it_does_not() {
+    assert!(!fences_whole_space(1));
+    assert!(!fences_whole_space(RANGE_FENCE_CEILING));
+    assert!(fences_whole_space(RANGE_FENCE_CEILING + 1));
+    assert!(fences_whole_space(usize::MAX));
+}

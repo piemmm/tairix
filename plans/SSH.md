@@ -533,13 +533,10 @@ It becomes the right answer the moment a second user-space service owns a
 per-principal resource; the condition is recorded here so the decision is
 revisited on evidence rather than re-argued.
 
-**Left open, recorded not buried.** `accept` still finds the next
-unaccepted child by scanning the whole table, so a server accepting *n*
-connections pays O(n²) and a spurious `accept` pays a full scan — the one
-remaining "cost follows the table" path, and the one `sshd` will be the
-first to feel. It is a second index's worth of design (a per-listener FIFO
-inside the `Proto::Listen` variant) rather than part of this conversion,
-so it is `plans/OPEN-DEFECTS.md` D145 with S5 as its re-check trigger.
+`accept` takes the oldest pending child from its listener's queue, which
+the children link by handle (`plans/OPEN-DEFECTS.md` D145), so no listener
+path follows the table either: a server accepting *n* connections pays
+O(n), and a spurious `accept` nothing.
 
 **S0c — `lib/sandbox` had no long-lived worker (done).**
 `host::ParserSandbox::request` is one-shot request→reply and `worker::serve`

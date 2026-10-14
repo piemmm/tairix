@@ -1,6 +1,6 @@
 use alloc::vec;
 
-use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
 use tairix_cursor::{CursorImage, PlacedCursor, Shape, VectorCursor};
 use tairix_geometry::{Point, Rect};
 use tairix_raster::{Color, Pixel, Surface};
@@ -48,12 +48,26 @@ fn cursor(size: u32, colour: Color) -> CursorImage {
 
 /// A region present of exactly that rectangle.
 fn region(x: u32, y: u32, width_px: u32, height_px: u32) -> Present {
-    Present::Region(DamageRect {
-        x,
-        y,
-        width_px,
-        height_px,
-    })
+    Present::Region(
+        DamageList::new(&[DamageRect {
+            x,
+            y,
+            width_px,
+            height_px,
+        }])
+        .expect("a rectangle"),
+    )
+}
+
+/// The one rectangle a region present names.
+fn only(present: Present) -> DamageRect {
+    let Present::Region(list) = present else {
+        panic!("a sub-screen rectangle is a region present, got {present:?}");
+    };
+    let [rect] = list.rects() else {
+        panic!("one rectangle, got {list:?}");
+    };
+    *rect
 }
 
 /// The four bytes frame `frame` holds for pixel `(x, y)` of `mode`.
@@ -155,9 +169,7 @@ fn a_damaged_region_copies_only_itself() {
     let damage = Rect::new(1, 1, 2, 1);
 
     let present = scanout.compose(&numbered(&mode), None, None, Some(damage), u8::MAX);
-    let Present::Region(region) = present else {
-        panic!("a sub-screen rectangle is a region present, got {present:?}");
-    };
+    let region = only(present);
     assert_eq!((region.x, region.y), (1, 1));
     assert_eq!((region.width_px, region.height_px), (2, 1));
 
@@ -207,9 +219,7 @@ fn a_damage_outside_the_screen_is_clipped_not_a_panic() {
 
     let straddling = Rect::new(3, 2, 8, 8);
     let present = scanout.compose(&numbered(&mode), None, None, Some(straddling), u8::MAX);
-    let Present::Region(region) = present else {
-        panic!("the overlap is a region present, got {present:?}");
-    };
+    let region = only(present);
     assert_eq!((region.width_px, region.height_px), (1, 1));
     assert_eq!(at(scanout.frame(), &mode, 3, 2), [12, 13, 14, 255]);
 }
@@ -225,9 +235,7 @@ fn a_negative_origin_is_clipped_to_the_screen() {
         Some(Rect::new(-4, -4, 6, 6)),
         u8::MAX,
     );
-    let Present::Region(region) = present else {
-        panic!("the overlap is a region present, got {present:?}");
-    };
+    let region = only(present);
     assert_eq!((region.x, region.y), (0, 0));
     assert_eq!((region.width_px, region.height_px), (2, 2));
     assert_eq!(at(scanout.frame(), &mode, 0, 0), [1, 2, 3, 255]);
@@ -344,25 +352,40 @@ fn a_whole_present_swallows_whatever_it_meets() {
     assert_eq!(Present::Whole.merged(Present::Whole, &mode), Present::Whole);
 }
 
+/// Two changes apart on the screen present apart, rather than as the box
+/// between them: a ribbon's strips at opposite edges cost their own pixels.
 #[test]
-fn two_regions_merge_into_the_one_rectangle_that_contains_both() {
+fn two_regions_apart_present_apart() {
     let mode = padded_mode(DisplayFormat::Rgba8888);
-    assert_eq!(
-        region(0, 0, 1, 1).merged(region(2, 1, 1, 1), &mode),
-        region(0, 0, 3, 2)
-    );
-    assert_eq!(
-        region(2, 1, 1, 1).merged(region(0, 0, 1, 1), &mode),
-        region(0, 0, 3, 2),
-        "merging is the same rectangle either way round"
-    );
+    let rect = |x, y| DamageRect {
+        x,
+        y,
+        width_px: 1,
+        height_px: 1,
+    };
+    for (first, second) in [((0, 0), (2, 1)), ((2, 1), (0, 0))] {
+        let merged = region(first.0, first.1, 1, 1).merged(region(second.0, second.1, 1, 1), &mode);
+        let Present::Region(list) = merged else {
+            panic!("still a region present, got {merged:?}");
+        };
+        let mut rects = list.rects().to_vec();
+        rects.sort_unstable_by_key(|rect| (rect.y, rect.x));
+        assert_eq!(rects, [rect(0, 0), rect(2, 1)], "either way round");
+    }
 }
 
+/// Rows whose box spans the screen are still only the rows; rows that tile
+/// it are the whole screen.
 #[test]
-fn regions_that_together_cover_the_screen_merge_into_a_whole_present() {
+fn regions_merge_into_a_whole_present_only_when_they_cover_the_screen() {
     let mode = padded_mode(DisplayFormat::Rgba8888);
-    assert_eq!(
+    assert_ne!(
         region(0, 0, 4, 1).merged(region(0, 2, 4, 1), &mode),
+        Present::Whole,
+        "the middle row did not change"
+    );
+    assert_eq!(
+        region(0, 0, 4, 2).merged(region(0, 2, 4, 1), &mode),
         Present::Whole
     );
 }

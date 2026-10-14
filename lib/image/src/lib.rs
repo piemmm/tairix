@@ -1576,9 +1576,10 @@ pub fn decode_fitted_as(
 ///
 /// Each format is costed through its own decoder's sizing: a JPEG at the
 /// scale its decode chooses, an icon by the page it chooses. Where a
-/// decoder's working set is not set by its picture alone — a lossless WebP's
-/// prefix codes, a JPEG-coded TIFF's units — the bound grows with the stream
-/// or the limits instead, and stands far above what an ordinary file needs.
+/// decoder's working set is not set by its picture alone — a JPEG-coded
+/// TIFF's units, or the table of groups a lossless WebP's stream describes,
+/// at most 65,536 entries — the bound grows with the limits or the stream
+/// instead, and stands far above what an ordinary file needs.
 ///
 /// # Errors
 ///

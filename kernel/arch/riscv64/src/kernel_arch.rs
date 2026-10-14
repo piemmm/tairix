@@ -426,9 +426,11 @@ impl RiscvArch {
     /// `cpus` names but the caller, one SBI RFENCE call per hart window.
     ///
     /// The firmware returns only once those harts have fenced, so the call is
-    /// the acknowledge. A range the call cannot express, or a call the
-    /// firmware refuses, becomes a whole-address-space fence of every hart:
-    /// a remote fence is never skipped, since the caller frees what it covers.
+    /// the acknowledge. A range too long to fence page by page
+    /// ([`crate::paging::fences_whole_space`]) or one the call cannot express
+    /// is fenced whole, and a call the firmware refuses becomes a
+    /// whole-address-space fence of every hart: a remote fence is never
+    /// skipped, since the caller frees what it covers.
     fn fence_remote<I>(&self, cpus: I, start_vaddr: u64, page_count: usize)
     where
         I: Iterator<Item = CpuId>,
@@ -441,11 +443,14 @@ impl RiscvArch {
             let harts = cpus
                 .filter(|&cpu| cpu != me)
                 .filter_map(|cpu| self.hartid_of(cpu));
-            let (start, size) =
+            let (start, size) = if crate::paging::fences_whole_space(page_count) {
+                WHOLE_SPACE
+            } else {
                 usize::try_from(start_vaddr & !(crate::paging::PAGE_SIZE as u64 - 1))
                     .ok()
                     .zip(page_count.checked_mul(crate::paging::PAGE_SIZE))
-                    .unwrap_or(WHOLE_SPACE);
+                    .unwrap_or(WHOLE_SPACE)
+            };
             for (mask, base) in crate::sbi::hart_windows(harts) {
                 if !crate::sbi::remote_sfence_vma(mask, base, start, size).is_success() {
                     let (start, size) = WHOLE_SPACE;

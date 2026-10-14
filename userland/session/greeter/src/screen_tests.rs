@@ -302,11 +302,15 @@ fn covers(present: Present, rect: Rect) -> bool {
     match present {
         Present::Nothing => false,
         Present::Whole => true,
-        Present::Region(region) => {
-            let Some(region) = rect_of(region) else {
-                return false;
-            };
-            region.union(&rect) == region
+        Present::Region(list) => {
+            let area = |rect: Rect| u64::from(rect.width) * u64::from(rect.height);
+            let covered: u64 = list
+                .rects()
+                .iter()
+                .filter_map(|part| rect_of(*part))
+                .map(|part| area(part.intersection(&rect)))
+                .sum();
+            covered == area(rect)
         }
     }
 }
@@ -982,11 +986,9 @@ fn a_keystroke_presents_only_what_it_changed() {
     input(&mut login, &key(NamedKey::Enter), 0);
 
     let step = input(&mut login, &typed('x'), 0);
-    let Present::Region(region) = step.present else {
-        panic!("a keystroke touches the field, not the screen: {step:?}");
-    };
-    assert!(region.width_px < mode().width_px);
-    assert!(region.height_px < mode().height_px);
+    let region = presented(step);
+    assert!(region.width < mode().width_px);
+    assert!(region.height < mode().height_px);
 }
 
 #[test]
@@ -1054,12 +1056,16 @@ fn the_pointer_is_drawn_over_the_surface_and_only_where_it_sits() {
     }
 }
 
-/// The region `step` presented, or a failure naming what came instead.
+/// The rectangle every part `step` presented lies in, or a failure naming
+/// what came instead.
 fn presented(step: Drawn) -> Rect {
-    let Present::Region(region) = step.present else {
+    let Present::Region(list) = step.present else {
         panic!("a sub-screen change is a region present, got {step:?}");
     };
-    rect_of(region).expect("a region on the screen")
+    list.rects()
+        .iter()
+        .map(|part| rect_of(*part).expect("a region on the screen"))
+        .fold(Rect::EMPTY, |bounds, part| bounds.union(&part))
 }
 
 #[test]
@@ -1165,18 +1171,13 @@ fn a_run_of_moves_merges_into_one_present_covering_every_one_of_them() {
     let expected = cursor_rect(&image, start.0, start.1)
         .union(&cursor_rect(&image, from.0, from.1))
         .intersection(&login.screen());
-    let Present::Region(region) = merged else {
+    let Present::Region(list) = merged else {
         panic!("a run across the backdrop is one sub-screen region, got {merged:?}");
     };
-    assert_eq!(
-        Rect::new(
-            i32::try_from(region.x).expect("on screen"),
-            i32::try_from(region.y).expect("on screen"),
-            region.width_px,
-            region.height_px,
-        ),
-        expected
-    );
+    let [region] = list.rects() else {
+        panic!("the overlapping steps merge into one rectangle, got {list:?}");
+    };
+    assert_eq!(rect_of(*region), Some(expected));
 }
 
 #[test]

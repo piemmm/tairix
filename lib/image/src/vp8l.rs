@@ -434,11 +434,12 @@ fn build_prefix_code(
         return Err(DecodeError::WebpLosslessInvalidCode);
     }
     let first = u32::try_from(store.len()).map_err(|_| DecodeError::OutOfMemory)?;
-    if !fallible::reserve(store, total) {
+    let base = store.len();
+    // Amortised, so a stream of tens of thousands of codes regrows the store
+    // a logarithmic number of times rather than once a code.
+    if !fallible::grow_to(store, base + total, 0) {
         return Err(DecodeError::OutOfMemory);
     }
-    let base = store.len();
-    store.resize(base + total, 0);
     let ordered = store.get_mut(base..).ok_or(DecodeError::OutOfMemory)?;
     order_symbols(written, &table, ordered)?;
     Ok(PrefixCode { table, first, lone })
@@ -512,14 +513,20 @@ fn entropy_coded_image(
 ) -> Result<Vec<u32>, DecodeError> {
     let count = pixel_count(width, height)?;
     let cache_bits = read_cache_bits(bits)?;
-    let codes = read_groups(bits, cache_bits, 1)?;
+    let codes = read_groups(bits, cache_bits, &[true])?;
     let mut pixels = fallible::filled(count, 0u32).ok_or(DecodeError::OutOfMemory)?;
     decode_pixels(bits, &codes, None, cache_bits, width, &mut pixels)?;
     Ok(pixels)
 }
 
-/// Read `groups` meta-Huffman groups of prefix codes.
-fn read_groups(bits: &mut Bits<'_>, cache_bits: u32, groups: u32) -> Result<Codes, DecodeError> {
+/// Read one meta-Huffman group of prefix codes per entry of `kept`, keeping
+/// those it marks, in order, and reading the rest only to pass them by.
+///
+/// A group nothing names still sits in the stream before the ones after it,
+/// so it is read; keeping it would let a stream that names one high index
+/// hold every group below it, its memory following the stream rather than
+/// the picture.
+fn read_groups(bits: &mut Bits<'_>, cache_bits: u32, kept: &[bool]) -> Result<Codes, DecodeError> {
     let cache_entries = if cache_bits == 0 {
         0
     } else {
@@ -535,9 +542,11 @@ fn read_groups(bits: &mut Bits<'_>, cache_bits: u32, groups: u32) -> Result<Code
     ];
     let widest = usize::try_from(green_alphabet).unwrap_or(usize::MAX);
     let mut scratch = Scratch::new(widest)?;
-    let total = usize::try_from(groups)
-        .ok()
-        .and_then(|groups| groups.checked_mul(CODES_PER_GROUP))
+    let total = kept
+        .iter()
+        .filter(|&&keep| keep)
+        .count()
+        .checked_mul(CODES_PER_GROUP)
         .ok_or(DecodeError::OutOfMemory)?;
     let mut codes = Codes {
         codes: Vec::new(),
@@ -546,10 +555,16 @@ fn read_groups(bits: &mut Bits<'_>, cache_bits: u32, groups: u32) -> Result<Code
     if !fallible::reserve(&mut codes.codes, total) {
         return Err(DecodeError::OutOfMemory);
     }
-    for _ in 0..groups {
+    for &keep in kept {
+        let symbols = codes.symbols.len();
         for &alphabet in &alphabets {
             let code = read_prefix_code(bits, alphabet, &mut scratch, &mut codes.symbols)?;
-            codes.codes.push(code);
+            if keep {
+                codes.codes.push(code);
+            }
+        }
+        if !keep {
+            codes.symbols.truncate(symbols);
         }
     }
     Ok(codes)
@@ -1227,31 +1242,36 @@ fn header(bits: &mut Bits<'_>) -> Result<(u32, u32), DecodeError> {
 
 /// An upper bound of the bytes decoding a `width`×`height` lossless stream
 /// from `input_len` bytes holds at once: the pixels; the transform images,
-/// the transform list and the palette; the entropy image beside its group
-/// indices; and the prefix codes of as many groups as the stream has the
-/// bits to describe, whose symbol store a regrowth holds twice. One more
-/// group's codes cover the sub-image being read, beside the colour cache and
-/// the code-length scratch.
+/// the transform list and the palette; the entropy image, which becomes its
+/// group indices in place; the prefix codes of the groups it names, at most
+/// one a block, whose symbol store an amortised regrowth holds three times
+/// over; and a flag and a renumbering for every group up to the highest it
+/// names, as many as the stream has the bits to describe. One more group's
+/// codes cover the sub-image being read or a group being passed by, beside
+/// the colour cache and the code-length scratch.
 pub(crate) fn peak_ceiling(width: u32, height: u32, input_len: usize) -> u64 {
     use core::mem::size_of;
     let word = size_of::<u32>() as u64;
     let pixels = u64::from(width) * u64::from(height);
     // Transform and entropy images sample blocks at least four pixels a side.
-    let sampled = u64::from(width.div_ceil(4)) * u64::from(height.div_ceil(4)) * word;
+    let blocks = u64::from(width.div_ceil(4)) * u64::from(height.div_ceil(4));
+    let sampled = blocks * word;
     let described = (input_len as u64).saturating_mul(8) / MIN_GROUP_BITS as u64;
-    let groups = u64::from(MAX_GROUPS).min(described).saturating_add(1);
+    let named = u64::from(MAX_GROUPS).min(described).saturating_add(1);
+    let kept = named.min(blocks.max(1)).saturating_add(1);
     let green = u64::from(LITERAL_CODES + LENGTH_CODES + (1 << MAX_CACHE_BITS));
     let group_symbols = green + 3 * u64::from(LITERAL_CODES) + u64::from(DISTANCE_CODES);
     let group = (CODES_PER_GROUP * size_of::<PrefixCode>()) as u64
-        + 2 * group_symbols * size_of::<u16>() as u64;
+        + 3 * group_symbols * size_of::<u16>() as u64;
     let transforms = (2 * MAX_TRANSFORMS * size_of::<Transform>()) as u64;
     let palette = 2 * 256 * word;
     let cache = (1u64 << MAX_CACHE_BITS) * word;
     [
-        4 * sampled,
+        3 * sampled,
         transforms,
         palette,
-        groups.saturating_mul(group),
+        kept.saturating_mul(group),
+        named.saturating_mul(size_of::<bool>() as u64 + word),
         cache,
         green,
     ]
@@ -1334,26 +1354,14 @@ fn spatially_coded_image(
     let transforms = read_transforms(bits, &mut coded_width, height)?;
     let packed = pixel_count(coded_width, height)?;
     let cache_bits = read_cache_bits(bits)?;
-    let meta = read_meta(bits, coded_width, height)?;
-    let groups = meta.as_ref().map_or(Ok(1), |meta| {
-        let highest = meta.groups.iter().copied().max().unwrap_or(0);
-        if highest >= MAX_GROUPS {
-            return Err(DecodeError::WebpLosslessInvalidCode);
+    let mut meta = read_meta(bits, coded_width, height)?;
+    let codes = match meta.as_mut() {
+        Some(meta) => {
+            let kept = named_groups(meta, bits.remaining())?;
+            read_groups(bits, cache_bits, &kept)?
         }
-        let groups = highest + 1;
-        // A sparse entropy image can name a high group while spending
-        // almost nothing, so the count is held to what the remaining bits
-        // could actually describe.
-        if usize::try_from(groups)
-            .ok()
-            .and_then(|groups| groups.checked_mul(MIN_GROUP_BITS))
-            .is_none_or(|needed| needed > bits.remaining())
-        {
-            return Err(DecodeError::WebpLosslessTruncated);
-        }
-        Ok(groups)
-    })?;
-    let codes = read_groups(bits, cache_bits, groups)?;
+        None => read_groups(bits, cache_bits, &[true])?,
+    };
     // Sized to the restored picture rather than the coded one, so the
     // colour-indexing transform has the room to widen each row in place.
     let mut pixels = fallible::filled(count.max(packed), 0u32).ok_or(DecodeError::OutOfMemory)?;
@@ -1371,6 +1379,47 @@ fn spatially_coded_image(
     Ok(pixels)
 }
 
+/// Which of the groups up to the highest `meta` names it names at all, with
+/// `meta`'s indices renumbered to count only those, as the codes kept for
+/// them are stored.
+///
+/// A sparse entropy image can name a high group while spending almost
+/// nothing, so the groups up to it are held to what the `remaining` bits of
+/// the stream could actually describe.
+fn named_groups(meta: &mut Meta, remaining: usize) -> Result<Vec<bool>, DecodeError> {
+    let highest = meta.groups.iter().copied().max().unwrap_or(0);
+    if highest >= MAX_GROUPS {
+        return Err(DecodeError::WebpLosslessInvalidCode);
+    }
+    let groups = usize::try_from(highest + 1).map_err(|_| DecodeError::OutOfMemory)?;
+    if groups
+        .checked_mul(MIN_GROUP_BITS)
+        .is_none_or(|needed| needed > remaining)
+    {
+        return Err(DecodeError::WebpLosslessTruncated);
+    }
+    let mut kept = fallible::filled(groups, false).ok_or(DecodeError::OutOfMemory)?;
+    for &group in &meta.groups {
+        if let Some(slot) = usize::try_from(group).ok().and_then(|at| kept.get_mut(at)) {
+            *slot = true;
+        }
+    }
+    let mut compact = fallible::filled(groups, 0u32).ok_or(DecodeError::OutOfMemory)?;
+    let mut next = 0u32;
+    for (slot, &named) in compact.iter_mut().zip(&kept) {
+        *slot = next;
+        next += u32::from(named);
+    }
+    for group in &mut meta.groups {
+        *group = usize::try_from(*group)
+            .ok()
+            .and_then(|at| compact.get(at))
+            .copied()
+            .ok_or(DecodeError::WebpLosslessInvalidCode)?;
+    }
+    Ok(kept)
+}
+
 /// Read the meta-prefix arrangement, or `None` where one group covers the
 /// whole picture.
 fn read_meta(bits: &mut Bits<'_>, width: u32, height: u32) -> Result<Option<Meta>, DecodeError> {
@@ -1380,10 +1429,11 @@ fn read_meta(bits: &mut Bits<'_>, width: u32, height: u32) -> Result<Option<Meta
     let block_bits = 2 + bits.read(3)?;
     let stride = blocks(width, block_bits);
     let rows = blocks(height, block_bits);
-    let image = entropy_coded_image(bits, stride, rows)?;
+    let mut groups = entropy_coded_image(bits, stride, rows)?;
     // A group index is the entropy image's red and green bytes together.
-    let groups = fallible::collected(image.len(), image.iter().map(|pixel| (pixel >> 8) & 0xFFFF))
-        .ok_or(DecodeError::OutOfMemory)?;
+    for pixel in &mut groups {
+        *pixel = (*pixel >> 8) & 0xFFFF;
+    }
     Ok(Some(Meta {
         groups,
         bits: block_bits,

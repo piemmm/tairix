@@ -2194,9 +2194,14 @@ pub(crate) fn invalidate_page_inner_shareable(vaddr: u64) {
 /// invalidation sequence on this port rather than two. A bounded range —
 /// the kernel-heap teardown batch — costs one `tlbi` per page and one
 /// synchronisation, which beats both a per-page barrier pair and the
-/// whole-domain [`invalidate_all_inner_shareable`] sledgehammer.
+/// whole-domain [`invalidate_all_inner_shareable`] sledgehammer; a range
+/// past [`RANGE_INVALIDATION_CEILING`] is that sledgehammer instead.
 pub(crate) fn invalidate_range_inner_shareable(start_vaddr: u64, pages: usize) {
     if pages == 0 {
+        return;
+    }
+    if invalidates_whole_domain(pages) {
+        invalidate_all_inner_shareable();
         return;
     }
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -2227,6 +2232,19 @@ pub(crate) fn invalidate_range_inner_shareable(start_vaddr: u64, pages: usize) {
         // The host has no TLB to invalidate; a flush is vacuous.
         let _ = start_vaddr;
     }
+}
+
+/// Past this many pages one whole-domain invalidation is cheaper than a
+/// `tlbi` each, every one a broadcast each PE must answer: Linux's
+/// `MAX_DVM_OPS` (`arch/arm64/include/asm/tlbflush.h`). It also bounds a
+/// sparse unmap's span, which would otherwise cost a broadcast per page of
+/// its gaps.
+const RANGE_INVALIDATION_CEILING: usize = 512;
+
+/// Whether invalidating `pages` pages should invalidate the whole domain
+/// instead.
+const fn invalidates_whole_domain(pages: usize) -> bool {
+    pages > RANGE_INVALIDATION_CEILING
 }
 
 /// Invalidate every stage-1 EL1&0 translation on every PE in the

@@ -77,6 +77,9 @@ tairix-log = { path = "../log", version = "=0.0.0" }
 # The neutral `AppInfoHeader` fixture builder the open-with decode tests need,
 # so they carry no copy of the manifest header's field list.
 tairix-abi = { path = "../abi", version = "=0.0.0", features = ["test-util"] }
+# The shared metered allocator, which counts what a pointer motion over a
+# kept Permissions section allocates.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
 
 [lints]
 workspace = true

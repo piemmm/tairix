@@ -62,17 +62,26 @@ pub fn place(
     theme: &Theme,
     height: impl Fn(usize) -> u32,
 ) -> Vec<(usize, Rect)> {
+    placements(bounds, count, scale, theme, height).collect()
+}
+
+/// [`place`] without the list: each plate's placement in turn, for an owner
+/// with a fixed number of plates and nowhere it needs them held.
+pub fn placements(
+    bounds: Rect,
+    count: usize,
+    scale: Scale,
+    theme: &Theme,
+    height: impl Fn(usize) -> u32,
+) -> impl Iterator<Item = (usize, Rect)> {
     let gap = gap(scale, theme);
     let width = plate_width(bounds.width, scale, theme);
-    let mut top = bounds.top().saturating_add(to_i32(gap));
-    let mut placed = Vec::with_capacity(count);
-    for index in 0..count {
+    let left = bounds.left().saturating_add(to_i32(gap));
+    let first = bounds.top().saturating_add(to_i32(gap));
+    (0..count).scan(first, move |top, index| {
         let plate = height(index);
-        placed.push((
-            index,
-            Rect::new(bounds.left().saturating_add(to_i32(gap)), top, width, plate),
-        ));
-        top = top.saturating_add(to_i32(plate.saturating_add(gap)));
-    }
-    placed
+        let placed = Rect::new(left, *top, width, plate);
+        *top = top.saturating_add(to_i32(plate.saturating_add(gap)));
+        Some((index, placed))
+    })
 }

@@ -1356,6 +1356,50 @@ fn a_shadow_that_cannot_be_cast_is_withheld_and_not_remembered() {
     assert_eq!(c.charged_bytes(), charged, "no refusal is kept");
 }
 
+/// A shadow with no room beside its picture is withheld, never retained in
+/// the picture's place: the tile keeps its picture, and drawing it again reads,
+/// decodes, casts and evicts nothing. The shadow here fits the cache alone, so
+/// an admission free to evict would have taken the picture to hold it.
+#[test]
+fn a_shadow_never_pushes_its_own_picture_out_of_the_cache() {
+    use tairix_raster::ShadowCast;
+
+    let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+    gauge.report(PressureBand::Normal);
+    let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+    let mut c = artwork_cache("test.icon-artwork", 1, 4096, gauge, sink);
+    let mut reader = CountingReader::new();
+    let mut ras = SquareRasteriser;
+    let request = IconRequest::kind(IconKind::Refresh);
+    let cast = ShadowCast {
+        drop_x: 0,
+        drop_y: 1,
+        radius: 2,
+    };
+    let (width, height) = cast.extent(18, 18).expect("small");
+    let alone =
+        usize::try_from(width * height * 4).expect("small") + crate::ARTWORK_ENTRY_METADATA_BYTES;
+    assert!(alone < 4096, "the shadow alone fits the cache");
+    let mut draw = |c: &mut ArtworkCache, reader: &mut CountingReader| {
+        let picture = c
+            .shadowed(
+                &mut InlineArtwork::new(reader, &mut ras),
+                request,
+                18,
+                Some(cast),
+            )
+            .expect("the picture is served");
+        assert!(picture.shadow_withheld(), "with its shadow withheld");
+    };
+    draw(&mut c, &mut reader);
+    let (charged, reads) = (c.charged_bytes(), reader.reads);
+    for _ in 0..4 {
+        draw(&mut c, &mut reader);
+    }
+    assert_eq!(reader.reads, reads, "the picture is never read again");
+    assert_eq!(c.charged_bytes(), charged, "and nothing trades places");
+}
+
 /// A shadowed picture is the same picture, casting the soft shadow its own
 /// coverage casts from where the cast says; the shadow is cast once and then
 /// served from the cache, so a frame composites a mask and never blurs.

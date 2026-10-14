@@ -191,8 +191,13 @@ enum Holder {
     /// Produced by a [`Listener`] and not yet claimed with
     /// [`Accept`](SocketRequest::Accept): no event is delivered, so the
     /// client never sees data for a connection it has not taken, and its
-    /// received bytes buffer in the bounded [`Tcb`].
-    Pending,
+    /// received bytes buffer in the bounded [`Tcb`]. Queued on its listener
+    /// between the children completed just before and just after it, so an
+    /// accept takes the oldest without searching the table.
+    Pending {
+        earlier: Option<SocketId>,
+        later: Option<SocketId>,
+    },
     /// The client's, from an active [`Connect`](SocketRequest::Connect) or
     /// an `Accept`.
     Client,
@@ -228,9 +233,18 @@ enum Proto {
     /// to the same principal; the [`Listener`] carries the SYN-flood
     /// defence (bounded half-open backlog, stateless SYN cookies on
     /// overflow) and is boxed so a non-listening entry stays small.
-    Listen(Box<Listener>),
+    Listen(Box<Listening>),
     /// An ICMP/`ICMPv6` echo socket (the `ping` path).
     Echo(EchoState),
+}
+
+/// A passive listener and the ends of the queue its pending children form,
+/// oldest first: the children link each other, so the queue costs the
+/// listener two handles however many it holds.
+struct Listening {
+    listener: Listener,
+    oldest: Option<SocketId>,
+    newest: Option<SocketId>,
 }
 
 /// One open socket, owned by exactly one principal.
@@ -557,7 +571,7 @@ impl SocketService {
             .sockets
             .iter()
             .filter_map(|entry| match &entry.proto {
-                Proto::Listen(listener) => Some(listener.stats()),
+                Proto::Listen(listening) => Some(listening.listener.stats()),
                 _ => None,
             })
             .fold(self.retired_defence, fold_defence);
@@ -1012,8 +1026,8 @@ impl SocketService {
         let index = self.owned_index(owner, socket)?;
         let mut tx = FrameBatch::new();
         if matches!(self.sockets[index].proto, Proto::Stream(Some(_))) {
+            self.release_holder(index, Holder::Closed);
             if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
-                conn.holder = Holder::Closed;
                 let _ = conn.tcb.close(now);
             }
             self.settle_stream(index);
@@ -1023,39 +1037,28 @@ impl SocketService {
             tx = self.pump_stream(interfaces, index, now);
             self.reap_if_done(index);
         } else if matches!(self.sockets[index].proto, Proto::Listen(_)) {
-            // Closing a listener drops it and abandons any connection it had
-            // completed but the client never accepted (an unclaimed child on
-            // the same port): the client is walking away from the port, so
-            // those connections have no owner to serve them.
-            let family = self.sockets[index].family;
-            let port = self.sockets[index].local_port;
-            let listener_owner = self.sockets[index].owner;
+            // Closing a listener drops it and abandons every connection it
+            // had completed but the client never accepted — its queue: the
+            // client is walking away from the port, so those connections
+            // have no owner to serve them.
+            let mut abandoned = None;
             // Keep its defence totals: the stack-wide counters must not
             // fall when a listener goes away.
-            if let Proto::Listen(listener) = &self.sockets[index].proto {
-                self.retired_defence = fold_defence(self.retired_defence, listener.stats());
+            if let Proto::Listen(listening) = &self.sockets[index].proto {
+                abandoned = listening.oldest;
+                self.retired_defence =
+                    fold_defence(self.retired_defence, listening.listener.stats());
             }
             self.remove_at(index);
-            // Highest position first, so each `swap_remove` only ever moves
-            // an entry from beyond the one being dropped and no unvisited
-            // match can be carried over a position already passed. A scan
-            // is right here where it is wrong on the demux path above: this
-            // is the owner closing its own listener, not something a remote
-            // peer can drive.
-            let abandoned: Vec<usize> = self
-                .sockets
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| {
-                    e.owner == listener_owner
-                        && e.family == family
-                        && e.local_port == port
-                        && matches!(&e.proto, Proto::Stream(Some(c)) if c.holder == Holder::Pending)
-                })
-                .map(|(i, _)| i)
-                .collect();
-            for position in abandoned.into_iter().rev() {
-                self.remove_at(position);
+            while let Some(child) = abandoned.and_then(|id| self.by_id.get(&id).copied()) {
+                abandoned = match &self.sockets[child].proto {
+                    Proto::Stream(Some(conn)) => match conn.holder {
+                        Holder::Pending { later, .. } => later,
+                        Holder::Client | Holder::Closed => None,
+                    },
+                    _ => None,
+                };
+                self.remove_at(child);
             }
         } else {
             let family = self.sockets[index].family;
@@ -1176,7 +1179,11 @@ impl SocketService {
             );
         };
         self.unindex_entry(index);
-        self.sockets[index].proto = Proto::Listen(Box::new(Listener::new(local_port, config)));
+        self.sockets[index].proto = Proto::Listen(Box::new(Listening {
+            listener: Listener::new(local_port, config),
+            oldest: None,
+            newest: None,
+        }));
         self.index_entry(index);
         self.reaccount(index);
         emit(
@@ -1229,23 +1236,14 @@ impl SocketService {
                 Errno::OutOfRange,
             );
         }
-        let family = self.sockets[lindex].family;
-        let local_port = self.sockets[lindex].local_port;
-        // The oldest unaccepted child of this listener owned by the caller.
-        let Some(child) = self.sockets.iter().position(|e| {
-            e.owner == owner
-                && e.family == family
-                && e.local_port == local_port
-                && matches!(&e.proto, Proto::Stream(Some(c)) if c.holder == Holder::Pending)
-        }) else {
+        // The oldest child this listener completed and nobody has accepted.
+        let Some(child) = self.oldest_pending(lindex) else {
             // Nothing ready — a non-error "try again" the client waits on.
             return Err(Errno::WouldBlock);
         };
         let child_id = self.sockets[child].id;
         self.sockets[child].deliver_port = deliver_port;
-        if let Proto::Stream(Some(conn)) = &mut self.sockets[child].proto {
-            conn.holder = Holder::Client;
-        }
+        self.release_holder(child, Holder::Client);
         emit(
             audit,
             Level::Info,
@@ -1608,7 +1606,8 @@ impl SocketService {
         };
         let mut emitted: Vec<OutSeg> = Vec::new();
         let mut cookies_engaged = false;
-        if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
+        if let Proto::Listen(listening) = &mut self.sockets[lindex].proto {
+            let listener = &mut listening.listener;
             let before = listener.stats().cookies_sent;
             listener.on_segment(destination, peer, seg, now, secret, |_peer, out| {
                 emitted.push((out.meta, out.payload.to_vec(), out.gso_size, out.ecn));
@@ -1636,8 +1635,8 @@ impl SocketService {
         now: Duration64,
     ) -> FrameBatch {
         let mut emitted: Vec<PeerOutSeg> = Vec::new();
-        if let Proto::Listen(listener) = &mut self.sockets[lindex].proto {
-            listener.advance(now, |peer, out| {
+        if let Proto::Listen(listening) = &mut self.sockets[lindex].proto {
+            listening.listener.advance(now, |peer, out| {
                 emitted.push((
                     peer.addr,
                     out.meta,
@@ -1694,8 +1693,8 @@ impl SocketService {
             let Some(buffer) = NetworkSettings::connection_buffer_bytes(remaining) else {
                 break;
             };
-            let conn = match &mut self.sockets[lindex].proto {
-                Proto::Listen(listener) => listener.accept(),
+            let (conn, earlier) = match &mut self.sockets[lindex].proto {
+                Proto::Listen(listening) => (listening.listener.accept(), listening.newest),
                 _ => break,
             };
             let Some(conn) = conn else {
@@ -1743,7 +1742,10 @@ impl SocketService {
                     peer,
                     iface,
                     notified: Notified::Nothing,
-                    holder: Holder::Pending,
+                    holder: Holder::Pending {
+                        earlier,
+                        later: None,
+                    },
                     read_shutdown: false,
                     room_owed: false,
                 }))),
@@ -1754,6 +1756,7 @@ impl SocketService {
             if child.is_err() {
                 break;
             }
+            self.queue_newest(lindex, id);
             self.owe(lindex);
         }
     }
@@ -1802,7 +1805,7 @@ impl SocketService {
             .iter()
             .filter_map(|e| match &e.proto {
                 Proto::Stream(Some(c)) => c.tcb.next_deadline(),
-                Proto::Listen(l) => l.next_deadline(),
+                Proto::Listen(l) => l.listener.next_deadline(),
                 _ => None,
             })
             .min_by_key(|d| (d.secs(), d.subsec_nanos()))
@@ -2208,13 +2211,16 @@ impl SocketService {
                     tx.extend(interfaces.leave_multicast_all(ip_from_parts(family, group), now));
                 }
             }
-            Proto::Stream(Some(conn)) => {
-                conn.holder = Holder::Closed;
-                conn.tcb.abort(now);
+            Proto::Stream(Some(_)) => {
+                self.release_holder(position, Holder::Closed);
+                if let Proto::Stream(Some(conn)) = &mut self.sockets[position].proto {
+                    conn.tcb.abort(now);
+                }
                 tx = self.pump_stream(interfaces, position, now);
             }
-            Proto::Listen(listener) => {
-                self.retired_defence = fold_defence(self.retired_defence, listener.stats());
+            Proto::Listen(listening) => {
+                self.retired_defence =
+                    fold_defence(self.retired_defence, listening.listener.stats());
             }
             Proto::Stream(None) | Proto::Echo(_) => {}
         }
@@ -2476,7 +2482,9 @@ impl SocketService {
             // The boxed allocation, then the connection's own buffers,
             // which `committed_bytes` deliberately excludes it from.
             Proto::Stream(Some(conn)) => size_of::<StreamConn>() + conn.tcb.committed_bytes(),
-            Proto::Listen(listener) => size_of::<Listener>() + listener.committed_bytes(),
+            Proto::Listen(listening) => {
+                size_of::<Listening>() + listening.listener.committed_bytes()
+            }
         };
         PER_SOCKET_OVERHEAD.saturating_add(widen(transport))
     }
@@ -2702,6 +2710,47 @@ impl SocketService {
             assert_eq!(self.owned.get(&who), Some(&want), "owner usage");
         }
         assert_eq!(self.bytes_total, total, "stack byte total");
+        self.assert_queues_agree();
+    }
+
+    /// Every listener's queue runs from its oldest to its newest through
+    /// pending children of that listener alone, linked both ways, and every
+    /// pending child is on exactly one queue.
+    #[cfg(test)]
+    fn assert_queues_agree(&self) {
+        let pending = |entry: &SocketEntry| match &entry.proto {
+            Proto::Stream(Some(conn)) => match conn.holder {
+                Holder::Pending { earlier, later } => Some((earlier, later)),
+                Holder::Client | Holder::Closed => None,
+            },
+            _ => None,
+        };
+        let mut queued = 0usize;
+        for listener in &self.sockets {
+            let Proto::Listen(listening) = &listener.proto else {
+                continue;
+            };
+            let (mut previous, mut next) = (None, listening.oldest);
+            while let Some(id) = next {
+                let child = &self.sockets[*self.by_id.get(&id).expect("queued child indexed")];
+                let (earlier, later) = pending(child).expect("a queued child is pending");
+                assert_eq!(earlier, previous, "queue back link");
+                assert_eq!(
+                    (child.owner, child.family, child.local_port),
+                    (listener.owner, listener.family, listener.local_port),
+                    "a queued child belongs to its listener"
+                );
+                queued += 1;
+                assert!(queued <= self.sockets.len(), "queue cycle");
+                (previous, next) = (Some(id), later);
+            }
+            assert_eq!(previous, listening.newest, "queue newest");
+        }
+        let pending_children = self.sockets.iter().filter(|e| pending(e).is_some()).count();
+        assert_eq!(
+            queued, pending_children,
+            "every pending child is queued once"
+        );
     }
 
     /// Push `entry` onto the table and index it, returning its position.
@@ -2757,6 +2806,7 @@ impl SocketService {
     /// other socket changes position and only its `by_id` row is repaired
     /// — every other index is keyed to a handle, not a position.
     fn remove_at(&mut self, index: usize) {
+        self.unqueue(index);
         self.unlist(index);
         self.unindex_entry(index);
         self.bytes_total = self
@@ -2819,6 +2869,86 @@ impl SocketService {
             }
         }
         Err(Errno::AddressInUse)
+    }
+
+    /// Queue the pending child `id`, created behind the newest of the
+    /// listener at `lindex`, as that listener's newest.
+    fn queue_newest(&mut self, lindex: usize, id: SocketId) {
+        let Proto::Listen(listening) = &mut self.sockets[lindex].proto else {
+            return;
+        };
+        let earlier = listening.newest.replace(id);
+        listening.oldest.get_or_insert(id);
+        if let Some(earlier) = earlier {
+            self.link_pending(earlier, |links| links.1 = Some(id));
+        }
+    }
+
+    /// The table position of the oldest pending child of the listener at
+    /// `lindex`.
+    fn oldest_pending(&self, lindex: usize) -> Option<usize> {
+        let Proto::Listen(listening) = &self.sockets[lindex].proto else {
+            return None;
+        };
+        self.by_id.get(&listening.oldest?).copied()
+    }
+
+    /// Hand the stream at `index` to `holder`, taking it off its listener's
+    /// queue first if it was waiting there.
+    fn release_holder(&mut self, index: usize, holder: Holder) {
+        self.unqueue(index);
+        if let Proto::Stream(Some(conn)) = &mut self.sockets[index].proto {
+            conn.holder = holder;
+        }
+    }
+
+    /// Take the socket at `index` off its listener's queue if it is a pending
+    /// child, joining the children either side of it.
+    fn unqueue(&mut self, index: usize) {
+        let (earlier, later) = match &mut self.sockets[index].proto {
+            Proto::Stream(Some(conn)) => match &mut conn.holder {
+                Holder::Pending { earlier, later } => (earlier.take(), later.take()),
+                Holder::Client | Holder::Closed => return,
+            },
+            _ => return,
+        };
+        if let Some(earlier) = earlier {
+            self.link_pending(earlier, |links| links.1 = later);
+        }
+        if let Some(later) = later {
+            self.link_pending(later, |links| links.0 = earlier);
+        }
+        let (family, port) = (self.sockets[index].family, self.sockets[index].local_port);
+        let Some(listener) = self.demux_index(family, port) else {
+            return;
+        };
+        if let Proto::Listen(listening) = &mut self.sockets[listener].proto {
+            if earlier.is_none() {
+                listening.oldest = later;
+            }
+            if later.is_none() {
+                listening.newest = earlier;
+            }
+        }
+    }
+
+    /// Apply `relink` to the `(earlier, later)` neighbours of the pending
+    /// child `id`.
+    fn link_pending(
+        &mut self,
+        id: SocketId,
+        relink: impl FnOnce(&mut (Option<SocketId>, Option<SocketId>)),
+    ) {
+        let Some(&at) = self.by_id.get(&id) else {
+            return;
+        };
+        if let Proto::Stream(Some(conn)) = &mut self.sockets[at].proto {
+            if let Holder::Pending { earlier, later } = &mut conn.holder {
+                let mut links = (*earlier, *later);
+                relink(&mut links);
+                (*earlier, *later) = links;
+            }
+        }
     }
 
     /// The table position of the socket inbound traffic for local `port`
@@ -3283,3 +3413,7 @@ fn emit(audit: &dyn Sink, level: Level, id: EventId, message: &str, fields: &[Fi
         },
     );
 }
+
+#[cfg(test)]
+#[path = "socket_queue_tests.rs"]
+mod queue_tests;

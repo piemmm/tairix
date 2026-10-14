@@ -291,6 +291,128 @@ fn purge_space_drops_entries_and_rebalances_the_ledger() {
     );
 }
 
+/// What a batch's view retirements came to: how many holds, and the runs.
+#[derive(Default)]
+struct CountedRetire {
+    holds: usize,
+    runs: Vec<(u64, u64)>,
+}
+
+impl Retire for CountedRetire {
+    fn retire(&mut self, base: u64, pages: u64) {
+        self.holds += 1;
+        self.runs.push((base, pages));
+    }
+
+    fn retire_runs(&mut self, runs: &mut dyn Iterator<Item = (u64, u64)>) {
+        self.holds += 1;
+        self.runs.extend(runs);
+    }
+
+    fn restore(&mut self, _page: Page, _frame: Frame, _flags: MapFlags) {}
+}
+
+std::thread_local! {
+    static SHOT_DOWN: core::cell::RefCell<Vec<(u64, usize)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+fn record_shootdown(base: u64, pages: usize) {
+    SHOT_DOWN.with(|shot| shot.borrow_mut().push((base, pages)));
+}
+
+static RECORDED: crate::retire::RecordedRemote = crate::retire::RecordedRemote(record_shootdown);
+
+/// A space active on another CPU too, whose remote shootdowns are recorded.
+fn shared_with_another_cpu(env: &mut Env) {
+    let cpus = crate::retire::ActiveCpus::new(2).expect("one word allocates");
+    cpus.enter(1);
+    env.space
+        .attach_tlb(crate::retire::SpaceTlb::new(cpus, Some(&RECORDED)));
+    SHOT_DOWN.with(|shot| shot.borrow_mut().clear());
+}
+
+/// Cold pages leave every view a batch at a time: one remote shootdown over
+/// the batch's span and one retirement hold for its runs, however many pages
+/// it carries and in whatever order the clock found them, rather than an IPI
+/// round and a registry hold per page.
+#[test]
+fn a_batch_is_shot_down_and_retired_once_for_all_its_pages() {
+    let mut env = env!();
+    shared_with_another_cpu(&mut env);
+    let mut ramzip = tier(&env);
+    env.press_to(PressureBand::Moderate);
+    let mut pages: Vec<Page> = (30..35)
+        .chain(10..20)
+        .map(|n| env.map_page(n, 0x40))
+        .collect();
+    pages.rotate_left(3);
+    let pressure = &env.pressure;
+    let mut retire = CountedRetire::default();
+    let mut accepted = 0;
+    let mut ctx = ctx!(env);
+    ramzip.compress_out_batch(
+        pressure,
+        0,
+        (&mut ctx, &pages),
+        TASK,
+        &PageCandidate::cold_anonymous(),
+        &mut retire,
+        &mut |_, outcome| accepted += usize::from(outcome.is_ok()),
+    );
+
+    assert_eq!(accepted, pages.len(), "every page sealed");
+    let va = |n: u64| page_at(n).start().as_u64();
+    assert_eq!(
+        SHOT_DOWN.with(|shot| shot.borrow().clone()),
+        [(va(10), 25)],
+        "one shootdown over the span"
+    );
+    assert_eq!(retire.holds, 1, "one retirement hold");
+    assert_eq!(retire.runs, [(va(10), 10), (va(30), 5)]);
+}
+
+/// A batch admits exactly what compressing a page at a time would: the
+/// per-task share and the cap count a page for each page admitted ahead in
+/// the batch and not yet charged, so a share with room for one page admits
+/// one of four, never all four on the strength of an empty ledger.
+#[test]
+fn a_batch_admits_what_one_page_at_a_time_would() {
+    let mut env = env!();
+    // A machine so small the hard cap is two pages, and one task's share one.
+    let mut ramzip = tier_with_caps(RamzipCaps::from_physical(32 * 1024));
+    let pages: Vec<Page> = (20..24).map(|n| env.map_page(n, 1)).collect();
+    env.press_to(PressureBand::Moderate);
+    let pressure = &env.pressure;
+    let mut verdicts = Vec::new();
+    let mut ctx = ctx!(env);
+    ramzip.compress_out_batch(
+        pressure,
+        0,
+        (&mut ctx, &pages),
+        TASK,
+        &PageCandidate::cold_anonymous(),
+        &mut Unpublished,
+        &mut |page, outcome| verdicts.push((page.number(), outcome)),
+    );
+    verdicts.sort_unstable_by_key(|(page, _)| *page);
+    assert_eq!(
+        verdicts,
+        [
+            (20, Ok(())),
+            (21, Err(CompressRefusal::TaskShareReached)),
+            (22, Err(CompressRefusal::TaskShareReached)),
+            (23, Err(CompressRefusal::TaskShareReached)),
+        ]
+    );
+    for &page in &pages[1..] {
+        assert!(
+            env.space.translate(page).is_some(),
+            "a refused page stays mapped"
+        );
+    }
+}
+
 #[test]
 fn compress_and_fault_round_trip_restores_exact_bytes_and_flags() {
     let mut env = env!();
