@@ -139,9 +139,15 @@ pub(super) fn outdoors(
         albedo: Vec3::splat(climate.albedo),
         eye: Vec3::ZERO,
     };
+    let clouds = stage.densities.clouds;
     let low = decks(dice, cover);
     let low = if low.iter().any(Option::is_some) {
-        Some(Cloudbank::new(low, LOW_FINEST, toward, air.ground())?)
+        Some(Cloudbank::new(
+            low,
+            (LOW_FINEST, clouds.low),
+            toward,
+            air.ground(),
+        )?)
     } else {
         None
     };
@@ -151,7 +157,7 @@ pub(super) fn outdoors(
         let deck = cirrus(dice, cover == Cover::Cirrus);
         Some(Cloudbank::new(
             [Some(deck), None],
-            HIGH_FINEST,
+            (HIGH_FINEST, clouds.high),
             toward,
             air.ground(),
         )?)
@@ -285,9 +291,9 @@ struct Form {
     scale: (f64, f64),
     stretch: (f64, f64),
     billow: (f64, f64),
-    /// Extinction per metre through the body of its clouds: for water,
-    /// 3·LWC / (2·ρ·r) of the liquid water it holds as droplets of effective
-    /// radius r (Stephens, 1978).
+    /// Extinction per metre: for water a kilometre above its base, 3·LWC /
+    /// (2·ρ·r) of the liquid water a fraction of the adiabatic it holds there
+    /// as droplets of effective radius r (Stephens, 1978); for ice throughout.
     thickness: (f64, f64),
     medium: Medium,
 }
@@ -318,8 +324,8 @@ const CUMULUS: Form = Form {
     scale: (1800.0, 3400.0),
     stretch: (1.0, 1.3),
     billow: (300.0, 450.0),
-    // 0.3–0.8 g/m³ of droplets 9 µm in radius.
-    thickness: (0.05, 0.13),
+    // 0.9–1.2 g/m³ of droplets 10–14 µm in radius: a core 50–150 deep.
+    thickness: (0.096, 0.18),
     medium: DROPLETS,
 };
 /// Small, flat heaps under a mackerel sky.
@@ -331,8 +337,9 @@ const HUMILIS: Form = Form {
     scale: (1500.0, 2600.0),
     stretch: (1.0, 1.3),
     billow: (260.0, 380.0),
-    // 0.2–0.4 g/m³ of droplets 7 µm in radius.
-    thickness: (0.043, 0.086),
+    // 0.8–1.1 g/m³ of droplets 11–15 µm in radius, in heaps half a
+    // kilometre deep: 15–30 deep.
+    thickness: (0.08, 0.15),
     medium: DROPLETS,
 };
 /// A broken sheet of lumpy cloud, more cloud than sky.
@@ -344,8 +351,8 @@ const STRATOCUMULUS: Form = Form {
     scale: (2500.0, 5000.0),
     stretch: (1.0, 1.6),
     billow: (380.0, 560.0),
-    // 0.15–0.4 g/m³ of droplets 9 µm in radius.
-    thickness: (0.025, 0.067),
+    // 0.4–0.8 g/m³ of droplets 13–17 µm in radius: a sheet 10–25 deep.
+    thickness: (0.035, 0.092),
     medium: DROPLETS,
 };
 /// Heaps grown into towers.
@@ -357,8 +364,9 @@ const CONGESTUS: Form = Form {
     scale: (2200.0, 4200.0),
     stretch: (1.0, 1.3),
     billow: (420.0, 680.0),
-    // 0.5–1.2 g/m³ of droplets 11 µm in radius.
-    thickness: (0.068, 0.16),
+    // 0.8–1.5 g/m³ of droplets 11–16 µm in radius: towers some hundreds
+    // deep.
+    thickness: (0.075, 0.2),
     medium: DROPLETS,
 };
 /// A grey ceiling.
@@ -370,8 +378,8 @@ const STRATUS: Form = Form {
     scale: (3000.0, 6000.0),
     stretch: (1.0, 1.4),
     billow: (600.0, 900.0),
-    // 0.15–0.35 g/m³ of droplets 8 µm in radius.
-    thickness: (0.028, 0.066),
+    // 0.3–0.6 g/m³ of droplets 12–18 µm in radius: a ceiling 20–60 deep.
+    thickness: (0.025, 0.075),
     medium: DROPLETS,
 };
 /// A middle layer of small billows.
@@ -383,8 +391,9 @@ const ALTOCUMULUS: Form = Form {
     scale: (2500.0, 4500.0),
     stretch: (2.0, 3.0),
     billow: (220.0, 320.0),
-    // 0.05–0.25 g/m³ of droplets 6 µm in radius.
-    thickness: (0.0125, 0.0625),
+    // 0.3–0.6 g/m³ of droplets 7–10 µm in radius, in billows a few hundred
+    // metres deep: 2–8 deep.
+    thickness: (0.045, 0.13),
     medium: DROPLETS,
 };
 /// A thin grey middle sheet above an overcast.
@@ -396,8 +405,9 @@ const ALTOSTRATUS: Form = Form {
     scale: (3000.0, 6000.0),
     stretch: (1.5, 2.5),
     billow: (400.0, 600.0),
-    // 0.05–0.15 g/m³ of droplets 6 µm in radius.
-    thickness: (0.0125, 0.0375),
+    // 0.1–0.3 g/m³ of droplets 9–12 µm in radius: a veil 2–9 deep the sun
+    // shows through as through ground glass.
+    thickness: (0.0125, 0.05),
     medium: DROPLETS,
 };
 /// A mackerel sky: rows of small, high billows.
@@ -409,8 +419,9 @@ const MACKEREL: Form = Form {
     scale: (1500.0, 3000.0),
     stretch: (2.0, 4.0),
     billow: (150.0, 240.0),
-    // 0.05–0.12 g/m³ of droplets 5 µm in radius.
-    thickness: (0.015, 0.036),
+    // 0.1–0.3 g/m³ of droplets 6–9 µm in radius, in cloudlets a few hundred
+    // metres deep: 1–4 deep.
+    thickness: (0.017, 0.075),
     medium: DROPLETS,
 };
 /// A sky of cirrus: thin sheets and streaks of ice high above everything,

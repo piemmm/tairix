@@ -143,42 +143,51 @@ through the air and the cloud, and the sky above, cosine-weighted — so water
 by moonlight glows only as much as moonlight lights it, and at sunset with
 sunset's colour.
 
-Cirrus is ice: its sunlight is scattered once exactly by rough ice crystals'
-phase (asymmetry 0.75, Yang et al. 2013); the light scattered again and
-again is Hillaire's isotropic series over the deck as its mean extinction
-lays it out by height, scaled by `1 − g`; and the sky's light and the
-ground's are scattered in by the share of the phase each hemisphere sends
-the eye. Its bank's shadow dims the light the lower bank is lit by, and both
-shade the ground.
+A deck's clouds stand where its weather lays them (`cloud::form`). Over each
+footprint an envelope rises from a flat base — steep-sided domes for heaps, a
+plateau for sheets — as deep as the broad field of cloud about it has grown
+it, and falls away beyond the footprint's edge; bubbles push its surface out
+into turrets on turrets at four scales, as thermals rising through a heap
+swell it, each settling to its mean where a footprint is too coarse to see
+it, and fine wisps fray its edge. A deck's footprints cover the share of the
+sky its cover names, its weather field's quantile placing their edge. Water
+holds extinction rising with the two-thirds power of the height above its
+base, as adiabatic liquid water and its droplets' growth have it (Stephens
+1978), so a heap is thinnest at its base and densest high in its body, its
+columns tens to some hundreds of optical depths deep; ice holds it evenly.
 
-Water cloud scatters the sun once exactly, through a droplet phase of a
-forward lobe and a small backward one; every further order of its light is
-the δ-Eddington two-stream solution (Joseph, Wiscombe and Weinman 1976,
-`slab`). A deck's extinction is through the body of its clouds, each kind's
-from the liquid water it holds and its droplets' size, 3·LWC / (2·ρ·r)
-(Stephens 1978), so a cumulus is as opaque as real ones are. The cloud's
-light grids hold its optical depth toward the sun, straight up, and away
-from it and level away from it to the cloud's own far side. The
-sun's light is solved in a slab facing its beam, as deep as the beam's way
-in and as thick as the cloud runs on behind it, for a deck of heaps, and in
-the cloud's column, through which it diffuses down whatever way it fell in,
-for a deck of sheets. A sample seen directly measures its depth down to its
-base, and behind it wherever it is lit as a heap, by short taps out to its
-cloud's far side, which the grids' cells are too coarse to place. The sky's light and the ground's are
-solved in the column, entering by the nearest face the sky lights, the
-ground's as sunlit as it looks from the cloud's floor through the bank's own
-shadow. The light the cloud scatters toward the eye is each diffuse field's
-mean and its first moment, through the full phase's asymmetry. A thin cloud
-thus takes little but its single scattering, a heap's sunlit side shines and
-its base greys, its shaded side is lit by the sky and by what of the sun
-diffuses through it, and a lossless slab sends back or through all the sun
-it takes in, to a percent.
+Cloud scatters the sun once exactly, through its phase: water's a forward
+lobe (g 0.9) and a twentieth's backward one (g −0.3), ice's rough crystals'
+(g 0.75, Yang et al. 2013). The light it scatters again and again is solved
+in light volumes about the eye (`cloud::light`), levels each twice the last's
+breadth in as many voxels. Photons are followed through the bank's own cloud,
+never the voxels' average of it — the sun's entering the bank's top along its
+beam, the sky's from above — meeting it where it truly stands, drawn against
+each voxel's bound of the extinction and kept as often as the cloud there has
+it (Woodcock et al. 1965); they scatter isotropically through the extinction
+scaled by `1 − g`, the similarity principle (van de Hulst 1980), and off the
+ground as its albedo has it. So a heap traps its light as its own thickness
+has it however coarse the voxels: averaged over voxels broader than itself it
+would be spread thin and let the light go, a far field of cumulus reading
+less than half as bright as it is. Each voxel holds the diffuse light's
+fluence and net flux, the tracks photons lay through it, and the optical
+depth toward the sun swept from the sunward face; each level's floor the sky
+it leaves open and the light its cloud sheds down. A sample's light is its
+single scattering, what of the sun the phase's forward peak carries on
+scattered once more, and the diffuse light's fluence and flux through the
+full phase's asymmetry. Toward the sun a sample looks through its own billows
+in short taps, out to a voxel's breadth of clear air past its cloud, and
+through the rest of the bank by the volumes' depth: its billows shade their
+neighbours, and a cloud shades the clouds behind it. Against a brute-force
+path tracer through the same cloud, near heaps read within a few percent and
+far ones some 15–20% dark, the volumes' coarser voxels blurring the light
+just inside a far cloud's surface.
 
-A ray seen directly strides on to where a cloud's uneroded billows stand,
-then steps through them a pixel's footprint or two at a time, its edges cut
-by finer reads of the wisps as far as that footprint resolves them, each
-finer one settling to what it leaves on average; the nearest of its looks
-toward the sun read the edges as finely, so a billow shades its neighbour.
+A ray seen directly strides on to where a bounding read says cloud may stand,
+then steps through it a pixel's footprint or two at a time, further within a
+cloud's body as its depth below the surface and its extinction allow, its
+edges cut by finer reads of the wisps as far as that footprint resolves them,
+each finer one settling to what it leaves on average.
 
 ## Lands
 
@@ -937,9 +946,10 @@ gaps do. The point is drawn where the share of the air's sunlight its sample
 was drawn with has been gathered along the ray, so a far stretch dimmed by the
 near one counts for as little as it shows. The same holds for the air beneath
 the clouds: each stretch of it up to a cloud, or to where the ray leaves the
-highest bank, is judged at one such point against the banks' shadows, so the
-air under an overcast is grey to the horizon rather than lit as a clear day's
-haze, and sunlight between clouds shows as shafts.
+highest bank, is judged at four points stratified through its sunlit air
+against the banks' shadows, so the air under an overcast is grey to the
+horizon rather than lit as a clear day's haze, and sunlight between clouds
+shows as shafts with no more noise than a pixel's samples smooth.
 
 A pixel's samples are drawn through a Gaussian reconstruction filter of half
 a pixel's deviation, cut off at three deviations: each offset is the inverse

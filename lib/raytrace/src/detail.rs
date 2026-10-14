@@ -2,10 +2,12 @@
 //!
 //! A [`Detail`] picks a table of densities — how many objects a scene may
 //! hold, how many trees each kind of wood may stand, how its radiosity
-//! records and its caustics are laid — that composing and gathering read,
-//! and nothing else.
+//! records and its caustics are laid, how finely its cloud's light is
+//! solved — that composing and gathering read, and nothing else.
 //! The land, the eye, the hour and the weather are drawn apart from all of
 //! it, so a seed shows the same place at either.
+
+use crate::cloud::Resolution;
 
 /// How much a scene sets out.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -57,6 +59,16 @@ pub(crate) struct Densities {
     /// How far about the eye a land's dried, cracked mud is laid.
     pub(crate) mud: f64,
     pub(crate) bounds: Bounds,
+    pub(crate) clouds: Clouds,
+}
+
+/// How finely the light within a scene's cloud is solved: its low and
+/// middle decks', and the cirrus's high above them, whose streaks are thin
+/// enough to be solved far more coarsely.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Clouds {
+    pub(crate) low: Resolution,
+    pub(crate) high: Resolution,
 }
 
 /// How far from the eye a farmed land's hedges, fences and hedgerow trees
@@ -238,6 +250,18 @@ const SIMPLE: Densities = Densities {
         vines: 250.0,
         pats: 80.0,
     },
+    clouds: Clouds {
+        low: Resolution {
+            cells: 96,
+            finest: 4000.0,
+            tracks: 160.0,
+        },
+        high: Resolution {
+            cells: 48,
+            finest: 30_000.0,
+            tracks: 60.0,
+        },
+    },
 };
 
 const MAXIMUM: Densities = Densities {
@@ -298,5 +322,17 @@ const MAXIMUM: Densities = Densities {
         crops: 180.0,
         vines: 600.0,
         pats: 200.0,
+    },
+    clouds: Clouds {
+        low: Resolution {
+            cells: 160,
+            finest: 4000.0,
+            tracks: 320.0,
+        },
+        high: Resolution {
+            cells: 64,
+            finest: 30_000.0,
+            tracks: 120.0,
+        },
     },
 };

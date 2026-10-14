@@ -67,7 +67,8 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   couple of thousand of their beams or a few thousand of their pyramids'
   nodes, 48 steps of a stone's wear, a few rows of a stream's flow, a few rows
   of a radiosity record's hemisphere, a few rows of a cloud
-  level's weather, of its grid of the sun's depth or of its shadow, each
+  level's weather or bands, of its light's voxels, a slice of its sweep
+  toward the sun, a few batches of its photons or a pass of its fields, each
   level's maps reserved whole and written as their rows are filled.
 
 ## Tests
@@ -149,7 +150,12 @@ meeting with no seam, every level's bands holding its cloud and a march
 standing over the cell beneath each point on every level, far cloud lit by the
 sun at its own place and shading the ground from a low sun, an overcast grey to
 the horizon, and a point drawn along the air falling as its sunlight is
-gathered; a bridge's deck and a row of arches keeping trees off the strip
+gathered; a deck's footprints covering its share of the sky and a heap
+deeper the broader its field; a cloud's light the same however many cores
+solve it, no cloud denser than its voxel's bound, the light under a thin veil
+the sky's and the lit ground's own, a thick overcast letting down what
+diffuses through a lossless slab as deep, and a heap's top lying the deeper
+in the shadow of a deck above it; a bridge's deck and a row of arches keeping trees off the strip
 beneath them, a strip claimed with no gap at its edges, a narrow slanting
 river wet in every cell it crosses, and woods with nothing beneath them still
 casting their shade; a seed showing the same place at either detail, `Simple` standing

@@ -58,7 +58,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT40 | One land generator, the tracer's and WinterSun's: the land's stages renderer-neutral, keyed by place and seam-free, in crates WinterSun builds its realm's land with at *Maximum* | planned |
 | RT41 | Local adaptation, a gentle photographic HDR: a sky seen from a dark room or over a dark wood keeps its detail and the room its shadows, only the range a display cannot hold compressed, and a scene one exposure holds left exactly as it is | done |
 | RT42 | Lights as measured: the sun at its true size with its limb darkened, bent by the standard atmosphere; the full moon at its true size, brightness and colour; Allen's stars with Tycho-2's colours; lamps in lumens and candelas; the dusk and night still lifes under the open sky; cirrus lit as ice | done |
-| RT43 | Water clouds lit by multiple scattering that holds for thin cloud too, in place of the octave, powder and ambient approximations | done |
+| RT43 | Cloud lit by the light itself: the sun scattered once exactly through the phase, every further order by photons followed through the bank's own cloud into light volumes about the eye, so a far heap reads as bright as a near one | done |
 | RT44 | Cloud to the horizon: decks over the Earth's curve, mapped in levels about the eye out to as far as they can be seen, the air beneath them shaded by them, each place lit by the sun as it stands there | done |
 | RT45 | No primitive stand-ins: every limb's foot flares into the roots it grows out of, every break torn, every end tapered, cut or broken as the real thing's is, every leaf and flower worn as the real one is — trees, snags, stumps, fallen trunks and their root plates, the snowman's carrot and sticks, saguaro ribs, spines and areoles, a palm's and a shrub's foot, a reed's tip and plume, a reedmace's spike, a lily's pads and flowers and a crowfoot's flower | done |
 | RT46 | Cumulus as they are: heaps as tall as they are broad, fluffy, detailed at every scale a pixel shows, a thick one dark underneath its sunlit top | in progress |
@@ -1034,30 +1034,37 @@ Every light out of doors comes of a published measurement, nothing tuned
   lx. The dusk crystals and the night garden stand under the weather's own
   dusk and full moon; the studio alone keeps a room's walls for its sky.
 - Water's glow is scaled by the light measured falling on the scene's level.
-- Cirrus is ice in a high bank of its own: single scattering by its phase,
-  Hillaire's series for the rest, the sky and ground in by the phase's share,
-  its shadow on the bank beneath.
+- Cirrus is ice in a high bank of its own, lit as the low bank is (RT43)
+  through rough crystals' phase; its shadow dims the bank beneath.
 
-- Water decks (RT43, `slab`): the sun scattered once exactly through a
-  droplet phase of a forward lobe (g 0.9) and a twentieth's backward one
-  (g −0.3); every further order by the δ-Eddington two-stream solution, its
-  albedo 0.99998 and asymmetry the lobes' mean. The light grids hold the
-  cloud's optical depth toward the sun, straight up, away from it and level
-  away from it (the last two in steps growing from 10 m, to the cloud's far
-  side where clear air opens past it). The sun's light is solved in a slab
-  facing its beam, as deep as its way in and as thick as the cloud runs on
-  behind, for a heap; and in its column, through which the light diffuses
-  down whatever way it fell in, for a sheet — by the deck's form
-  (`HEAPED`). A sample seen directly takes its depths behind it and down to
-  its base by short taps to its own cloud's far side (`Reader::own_depth`),
-  the grids answering past the last. The sky's light and the ground's are
-  solved in the column, entering by its nearest face the sky lights, the
-  ground's as sunlit as it looks from the floor through the bank's own
-  shadow (`Level::ground`). The scattered light toward the eye is each
-  diffuse field's mean and first moment through the full phase's
-  asymmetry. Energy holds to a percent in a lossless slab, a thin cloud
-  takes little but its single scattering, a shaded side greys under the
-  sky's light, and nothing overflows however thick the cloud.
+- Cloud light (RT43, `cloud::light`): the sun scattered once exactly
+  through the phase — water's forward lobe (g 0.9) and a twentieth's
+  backward one (g −0.3), albedo 0.99998; ice's 0.75 — and what of it the
+  phase's forward peak carries on scattered once more; every further order
+  from light volumes about the eye, levels each twice the last's breadth in
+  as many voxels (`Resolution`: 96 a side, the finest 4 km either way, at
+  *Simple*; 160 at *Maximum*). Photons follow the bank's own cloud, read at
+  a 16 m footprint (`FOOTPRINT`), by delta tracking against each voxel's
+  bound — the bands of the weather cells under its column and the
+  extinction law (`Cloudbank::stands_over`, `densest`) — a band check
+  skipping air no cell can hold cloud in (`may_stand`). The sun's enter the
+  top along its beam, the sky's from above, through the similarity
+  principle's scaled extinction, off the ground by its albedo, in rounds
+  until each voxel holding cloud has `tracks` voxels' track or 16 rounds
+  have gone (`MOST_ROUNDS`). Track tallies are exact integers, so the light
+  is the same however many cores solve it. Toward the sun a sample looks
+  through its own billows by taps out to a voxel's breadth of clear air,
+  the volumes' depth answering past that: cloud-on-cloud shadow.
+- Against a brute-force path tracer through the same cloud (96 samples a
+  pixel): near heaps within 3%, the field 0.83 of it, far heaps 0.79–0.84,
+  the gap the voxels' hold on the light just inside a far cloud's surface
+  (192 a side gives 0.86–0.92); the cloud averaged over the voxels for its
+  photons read 0.43. Under a thin veil the light is the sky's and the lit
+  ground's own to 8%; a thick overcast lets down a lossless slab's diffusion
+  transmission to 30%. Per-voxel photon noise is some 10%.
+- Cost: Farmland at 960×540, *Simple*, 24 threads, prepares in 5.3–5.9 s
+  against 4.6 s with the voxels' average for its photons; tracing is
+  unchanged.
 
 ## RT44 — Cloud to the horizon
 
@@ -1117,55 +1124,38 @@ is gathered; and a resolved sum keeping only the octaves its footprint holds.
 
 ## RT46 — Cumulus as they are
 
-Fair-weather cumulus (Farmland, seed 4, the sun 67° up) read as smooth,
-globular blobs, not fluffy, not detailed enough, and pale underneath, where
-a thick heap with the sun above it is darker under than on top. The ground
-truth is a Monte Carlo of the light through a cube of droplet cloud, the
-model's own phase and albedo: under that sun a cube 80 optical depths deep
-sends from its base 0.12 of a white plate's light and from its top 0.56; one
-30 deep 0.28 and 0.35; one 10 deep glows brighter beneath than above.
+Fair-weather cumulus are to read as heaps as tall as they are broad, fluffy
+and detailed at every scale a pixel shows, a thick one dark underneath its
+sunlit top (`cloud::form`).
 
-Corrected:
+Done:
 
-- *Opacity.* A deck's `thickness` is the extinction through the body of its
-  clouds, where the eroded billows stand at their median density (`CORE`),
-  each form's from its liquid water and droplets, 3·LWC / (2·ρ·r) (Stephens,
-  1978); a cumulus field's cloudy columns run a median of about 17 optical
-  depths.
-- *Heaps and sheets.* A deck's form says whether its clouds are lit through
-  the slab facing the sun or through their column (`HEAPED`); the depths
-  away from the sun and level away from it end at clear air past the cloud
-  (`OUTWARD_GAP`).
-- *A base in its slab.* A sample seen directly takes its depth behind it
-  and down to its base by short taps to its own cloud's far side
-  (`Reader::own_depth`), which the grids' coarse cells would blur into the
-  clear air beneath, setting a base deep in its slab where the light is
-  brighter. The slab's base matches the Monte Carlo to a few percent for
-  clouds 30–80 deep.
-- *The ground in its shade.* A base is lit by the ground as sunlit as it
-  looks from the floor through the bank's own shadow (`Level::ground`).
-- *Detail.* Finer reads of the wisps' texture cut the edges to a metre or
-  two as far as the footprint resolves them (`FINER`); a ray seen directly
-  strides to the billows' bounds and steps through them a pixel or two at a
-  time (`SHARP`); its nearest taps toward the sun read the edges as finely.
+- *Heaps.* A footprint is where a deck's weather field passes the quantile
+  its cover names (`normal_quantile`), so its footprints cover that share of
+  the sky. Over it an envelope rises from a flat base — a heap's steep-sided
+  dome, a sheet's plateau (`PROFILE`) — as deep as the field's broadest
+  octaves have grown it, falling away beyond its edge (`FALL`).
+- *Turrets on turrets.* Bubbles at four scales push the envelope out
+  (`BUBBLES`): unions of spheres swelling from tiled cells, each scale
+  settling to its mean where a footprint is too coarse to see it; wisps fray
+  the edge (`FRAYING`).
+- *Opacity.* Water's extinction rises with the two-thirds power of the
+  height above its base (`ADIABATIC`), a deck's `thickness` taken a
+  kilometre up: cumulus columns a median of some 30 optical depths, a tenth
+  past 140.
+- *Lit by the light itself* (RT43): bases grey beneath sunlit tops, and near
+  heaps as bright as a brute-force path tracer through them.
 
 Remaining:
 
-- *Too shallow.* Most columns are about 700 m deep, their depth growing
-  with the local cover, and only their lower part holds cloud: lenses a few
-  hundred metres thick where fair-weather cumulus stand 0.5–2 km, as tall as
-  they are broad, 30–150 optical depths deep — which is what darkens a thick
-  heap's base beneath its sunlit top. The heap's profile is to be rebuilt: a
-  flat base, a body rising into domes.
-- *Globular.* The billows are large lobes eroded at their edges; cumulus are
-  rounded turrets on turrets, each sunlit on one side and shaded on the
-  other, so the turrets are to be built up at several scales, not only
-  carved, and shaded by the resolved taps.
-- *Pale bases.* Bases in the scene still send a third to two-fifths of
-  their tops' light; once the heaps stand tall, they are to be held to the
-  Monte Carlo and to photographs.
-- *The slab's top.* A finite heap's top sends 0.35–0.56 of a white plate
-  where the endless slab says 0.8–0.96, the rest leaking from its sides.
+- *Spires.* A small footprint the field's finer octaves alone lift past its
+  edge still rises most of its deck's depth: a straight-sided spire
+  (Farmland, seed 4, top left). A heap's height is to follow its own
+  breadth.
+- *Surface light.* Just inside a heap's sunlit surface the diffuse light
+  varies within a transport mean free path, some 60 m, which the finest
+  voxels (83 m at *Simple*) hold only in part: near turrets show more in
+  outline than in shading.
 - *The clear sky.* The atmosphere's zenith at noon is 0.065 of the ground's
   sunlight over π, where clear skies measure about 0.12 and Preetham's model
   0.3; it sets how bright cloud reads against the sky, so it is to be

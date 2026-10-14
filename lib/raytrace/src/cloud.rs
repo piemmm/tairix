@@ -1,74 +1,56 @@
 //! Volumetric cloud: heaped cumulus, a broken sheet of stratocumulus, a field
 //! of altocumulus, or high streaks of cirrus, marched through as the medium
-//! it is.
+//! it is and lit by the light followed through it.
 //!
 //! A cloudbank is up to two decks of cloud over the round Earth, as far as
 //! any of it can be seen. Each deck has a weather map — how much of each
-//! column it covers, and where its base and top lie there, so no two clouds
-//! sit at the same height — and its density within a column is a vertical
-//! profile, flat beneath and heaped above, times a billowing noise, eroded at
-//! its edges by a finer one (Schneider, "The Real-time Volumetric
-//! Cloudscapes of Horizon: Zero Dawn", 2015), read again at finer scales as
-//! far as a ray's footprint resolves them, each finer one settling to what it
-//! leaves on average. Both noises are Perlin–Worley textures that tile, built
-//! once per scene, so a sample reads them rather than evaluating them.
-//!
+//! column it covers, and where its base and top lie there — over which its
+//! clouds stand as `form` lays them: heaps or sheets on flat bases, pushed out
+//! into turrets on turrets, their water's extinction rising with height.
 //! Heights are taken over the Earth's curve about its centre below the eye,
 //! as the air's are, so a deck seen low down runs on to the horizon. Its maps
 //! are laid in levels about the eye, each twice the last's breadth in as many
-//! columns (Losasso and Hoppe, "Geometry Clipmaps", 2004): a column spans
-//! about as many pixels far off as near, each level's weather is drawn only
-//! as finely as its columns hold, and each level's rim is blended into the
-//! next's, so no seam shows where they meet.
+//! columns (Losasso and Hoppe, "Geometry Clipmaps", 2004), each level's
+//! weather drawn only as finely as its columns hold and its rim blended into
+//! the next's, so no seam shows where they meet.
 //!
 //! A ray gathers what the cloud scatters toward it step by step, each step's
 //! light integrated exactly over the step (Hillaire, "Physically Based Sky,
-//! Atmosphere and Cloud Rendering in Frostbite", 2016), and strides across
-//! the air above and below the heights each weather cell bounds its cloud
-//! to. A ray seen directly strides on to where a cloud's uneroded billows
-//! stand, then steps through them a pixel's footprint or two at a time. The
-//! sun's light at a step is dimmed by the cloud toward the sun — a grid of
-//! that optical depth, and short taps for the billows' own shadows, the
-//! nearest through the edges as finely as the ray sees them — and scattered
-//! once exactly, by droplets' phase function. The light scattered again and
-//! again is the δ-Eddington two-stream solution (`slab`): the sun's in a slab
-//! facing its beam, as deep as its way in and as thick as the cloud runs on
-//! behind it to its far side, for a heap, and in the cloud's column for a
-//! sheet, as its deck's form has it; the sky's and the ground's in the
-//! column, entering by its nearest face the sky lights — each as deep as
-//! grids of the cloud's optical depth away from the sun, straight up and
-//! level away from it have them. So a cloud too thin to scatter light twice
-//! is lit by little more than its single scattering, a heap's sunlit side is
-//! bright and its base grey, and its shaded side takes the sky's light and
-//! what the sun's diffuses through it. Each step's sunlight has crossed the
-//! air to its own place at the angle the sun stands there, so a deck still
-//! above the Earth's shadow at dusk is lit red from beneath, and cloud far
-//! off toward a set sun is lit after the cloud overhead has gone grey.
-//!
-//! Cirrus is ice, its sunlight scattered once exactly, by rough ice
-//! crystals' phase function; the light scattered again and again is
-//! Hillaire's isotropic series over the deck as its mean extinction lays it
-//! out by height, scaled by the similarity principle for how far forward ice
-//! throws it; and the sky's light and the ground's are scattered in by the
-//! share of the phase each hemisphere sends the eye.
+//! Atmosphere and Cloud Rendering in Frostbite", 2016), striding across the
+//! air above and below the heights each weather cell bounds its cloud to, and
+//! for a ray seen directly through a cloud's edges a pixel's footprint or two
+//! at a time. A step's light is the sun's scattered once exactly by the
+//! cloud's phase, through the optical depth toward the sun that short taps
+//! through its own edges and the bank's light (`light`) beyond them hold — so
+//! a cloud shades its own turrets and every cloud behind it; the sunlight its
+//! forward peak carries on, scattered once more; and the diffuse light the
+//! photons followed through the bank laid down there, its fluence and its
+//! net flux through the full phase. Each step's sunlight has crossed the air
+//! to its own place at the angle the sun stands there, so a deck still above
+//! the Earth's shadow at dusk is lit red from beneath, and cloud far off
+//! toward a set sun is lit after the cloud overhead has gone grey.
+
+mod form;
+mod light;
 
 use alloc::vec::Vec;
-use core::f64::consts::{PI, SQRT_2, TAU};
+use core::f64::consts::{PI, SQRT_2};
 use core::ops::Range;
 
 use tairix_parallel::JobRunner;
-use tairix_util::{fallible, mathf};
+use tairix_util::mathf;
 
-use crate::atmosphere::{every_order, GROUND};
+use crate::atmosphere::GROUND;
 use crate::band;
-use crate::heightfield::bilinear;
 use crate::lanes::Corners;
-use crate::noise::{cell, fbm2_resolved, hash3, noise2, resolved, smoothstep};
-use crate::sample::{mix32, unit, GOLDEN_RATIO};
+use crate::noise::smoothstep;
 use crate::shape::{quadratic, reciprocal};
-use crate::slab::{self, Depth, Medium};
-use crate::vector::{cell_of, real, single, Ray, Vec3};
+use crate::vector::{cell_of, real, Ray, Vec3};
 use crate::walk::Walk;
+
+use form::{band_over, weather, Blend, Column, Edges, Textures, EMPTY_BAND};
+use light::Lights;
+pub(crate) use light::Resolution;
 
 /// How a deck of cloud is formed.
 #[derive(Copy, Clone, Debug)]
@@ -87,7 +69,9 @@ pub(crate) struct Deck {
     pub(crate) scale: f64,
     pub(crate) stretch: f64,
     pub(crate) heading: f64,
-    /// Extinction per metre through the body of its clouds.
+    /// Extinction per metre through its cloud: for water, a kilometre above
+    /// its base, its liquid water rising evenly with height and its
+    /// extinction with that water's two-thirds power; for ice, throughout.
     pub(crate) thickness: f64,
     /// The breadth of the billows its clouds are made of, and how many times
     /// longer they are drawn out along `heading`: streaks of ice.
@@ -107,81 +91,41 @@ pub(crate) enum Matter {
     Ice,
 }
 
-/// Texels along each edge of the billowing noise, and of the finer one.
-const SHAPE_SIDE: usize = 64;
-const DETAIL_SIDE: usize = 32;
+/// How a cloud's matter scatters: the share of what it meets it scatters,
+/// and the mean cosine it scatters through.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Scattering {
+    pub(crate) albedo: f64,
+    pub(crate) asymmetry: f64,
+}
 
-const _: () = assert!(SHAPE_SIDE.is_power_of_two() && DETAIL_SIDE.is_power_of_two());
-/// Cells along each side of a level's weather map, of its grid of the sun's
-/// optical depth, and of the shadow it casts: multiples of four, so a
+/// Cells along each side of a level's weather map: a multiple of four, so a
 /// level's square lies on whole cells of the next and its columns on every
 /// other one of the next's.
 const WEATHER_CELLS: usize = 384;
-const LIGHT_CELLS: usize = 96;
-const SHADOW_CELLS: usize = 256;
-/// The layers of what a level's floor holds of the sky overhead.
-const BENEATH_LAYERS: usize = 5;
-const _: () = assert!(
-    WEATHER_CELLS.is_multiple_of(4)
-        && LIGHT_CELLS.is_multiple_of(4)
-        && SHADOW_CELLS.is_multiple_of(4)
-);
-/// Layers up the grid of the sun's optical depth.
-const LIGHT_LAYERS: usize = 20;
-/// Rows a core fills in a unit of that grid, and of the shadow, each of
-/// whose points marches toward the sun: some milliseconds' work through two
-/// decks.
-const LIGHT_ROWS: usize = 6;
-const SHADOW_ROWS: usize = 1;
-/// Steps taken toward the sun building that grid, and across the bank for
-/// the ground's shadow.
-const LIGHT_STEPS: u32 = 24;
-/// The rings and the spokes about a point of the floor that the ground
-/// beneath is read at, each ring an equal share of what a face looking
-/// straight down receives from it; and the rows of that grid a core fills in
-/// a unit.
-const GROUND_RINGS: u32 = 4;
-const GROUND_SPOKES: u32 = 8;
-const GROUND_ROWS: usize = 2;
+const _: () = assert!(WEATHER_CELLS.is_multiple_of(4));
 /// The share of a level's half-breadth over which its rim is blended into
-/// the next level's.
+/// the next level's, its weather's and its light's alike.
 const RIM: f64 = 0.125;
-/// The most levels a bank is laid in.
+/// The most levels a bank's weather is laid in.
 const MOST_LEVELS: usize = 8;
 /// Heights the sunlight reaching the bank is tabulated at, and cosines of
 /// the sun's angle from the vertical over those the bank's places see.
 pub(crate) const SUNLIGHT_LEVELS: usize = 48;
 pub(crate) const SUN_COSINES: usize = 33;
 
-/// How far apart the finer noise's features lie, over the billows'.
-const DETAIL_SCALE: f64 = 0.2;
-/// The wisps' cellular octaves: the cells along a period of their texture,
-/// the weight of each and its seed's salt, the finest last.
-const WISP_FINEST: f64 = 16.0;
-const WISP_OCTAVES: [(f64, f64, u32); 3] =
-    [(4.0, 0.625, 5), (8.0, 0.25, 6), (WISP_FINEST, 0.125, 7)];
-/// The finer reads of the wisps' texture a sharp edge is cut by beyond its
-/// own octaves: how many times finer each is read, how much it adds, and
-/// where in the texture it starts, so no two line up.
-const FINER: [(f64, f64, Vec3); 2] = [
-    (4.13, 0.34, Vec3::new(11.3, 5.7, 23.1)),
-    (16.9, 0.17, Vec3::new(3.9, 17.2, 8.6)),
-];
-/// How many quantiles of the finer noise a coarse march's erosion is the
-/// mean over.
-const WISP_QUANTILES: usize = 16;
-/// How deep the finer noise bites into a cloud's edge.
-const EROSION: f64 = 0.62;
-/// The density the eroded billows stand at through the body of a cloud, the
-/// median of what they hold inside it: where a deck's extinction is its
-/// `thickness`, so a cumulus is as opaque as its droplets make one.
-const CORE: f64 = 0.2;
-/// The looks toward the sun a fine sample takes through its own billows, as
-/// fractions of a billow's breadth, the first [`RESOLVED_TAPS`] through its
-/// edges as finely as it is seen; past the last, the grid of optical depth
-/// answers for the rest of the bank.
-const TAPS: [f64; 9] = [0.004, 0.012, 0.03, 0.1, 0.3, 0.7, 1.5, 3.0, 6.0];
+/// The looks toward the sun a fine sample of water cloud takes through its
+/// own billows, as fractions of a billow's breadth, the first
+/// [`RESOLVED_TAPS`] through its edges as finely as it is seen; past the
+/// last, each tap a stretch longer than the last by [`TAP_GROWTH`], on until
+/// clear air a voxel of the bank's light deep opens past its own cloud, so the
+/// light answers only for cloud beyond it, or until so much cloud is crossed
+/// that no sun gets through, or so far has been looked.
+const TAPS: [f64; 4] = [0.004, 0.012, 0.03, 0.1];
 const RESOLVED_TAPS: usize = 3;
+const TAP_GROWTH: f64 = 1.5;
+const UNLIT: f64 = 8.0;
+const FARTHEST_TAP: f64 = 4.0;
 
 /// The most steps a ray takes through the bank, seen directly and seen
 /// otherwise; and the transmittance below which what lies beyond is hidden.
@@ -198,116 +142,45 @@ const SHARPEST: f64 = 0.5;
 const JUMPS_A_LEVEL: usize = 4 * WEATHER_CELLS;
 const OPAQUE: f64 = 0.015;
 /// A step through a deck, as a share of its billows, seen directly and seen
-/// otherwise: fine enough that no edge shows where a step fell. Clear air
-/// between clouds, within the heights they can reach, is stepped through as
-/// finely, since a stride through it would step over a cloud's thinner edges.
+/// otherwise: fine enough that no edge shows where a step fell. A coarse
+/// march's steps are as long as the footprint its edges are read at. Clear
+/// air between clouds, within the heights they can reach, is stepped through
+/// as finely, since a stride through it would step over a cloud's thinner
+/// edges.
 const FINE_SHARE: f64 = 0.06;
-const COARSE_SHARE: f64 = 0.25;
+const COARSE_SHARE: f64 = form::AVERAGED;
 /// How far off a step has doubled in length, as a pixel's view of the cloud
 /// has widened.
 const STRETCH: f64 = 20_000.0;
+/// Within a cloud's body, past its edges, a ray seen directly steps on as
+/// far as a share of how deep within the surface it stands, which turrets
+/// can bend no closer, and no further than so much optical depth.
+const WITHIN_SHARE: f64 = 0.3;
+const STEP_DEPTH: f64 = 0.25;
 
 /// The asymmetry of rough ice crystals' scattering of visible light (Yang
 /// et al., "Spectrally consistent scattering, absorption, and polarization
 /// properties of atmospheric ice crystals", 2013), whose phase has no halo.
 const ICE_ASYMMETRY: f64 = 0.75;
-/// Heights through the bank ice's multiple scattering is tabulated at; the
-/// columns sampled at each for its mean extinction; and the directions and
-/// steps along each it is gathered over.
-const SCATTER_LEVELS: usize = 16;
-const SCATTER_COLUMNS: u32 = 256;
-const SCATTER_DIRECTIONS: u32 = 64;
-const SCATTER_STEPS: u32 = 16;
-/// Elevations, from straight down to straight up, the share of ice's phase
-/// the sky above sends a way is tabulated at; and the steps out from that
-/// way the share is integrated over.
-const HEMISPHERE: usize = 33;
-const HEMISPHERE_STEPS: u32 = 512;
 
-/// A texture of noise that repeats along each axis, a power of two texels
-/// on a side.
-#[derive(Clone, Debug)]
-struct Tile {
-    side: usize,
-    texels: Vec<u8>,
-}
+/// Cloud droplets' phase: its forward lobe's asymmetry and the share a
+/// backward lobe takes, and that backward lobe's asymmetry.
+const DROPLET_LOBES: (f64, f64) = (0.9, 0.05);
+const BACK_LOBE: f64 = -0.3;
+/// How cloud droplets scatter: almost all the light they meet, through the
+/// mean cosine of their phase's lobes.
+const DROPLETS: Scattering = Scattering {
+    albedo: 0.99998,
+    asymmetry: (1.0 - DROPLET_LOBES.1) * DROPLET_LOBES.0 + DROPLET_LOBES.1 * BACK_LOBE,
+};
+/// Ice crystals, scattering almost all they meet as rough crystals do.
+const ICE: Scattering = Scattering {
+    albedo: 0.99998,
+    asymmetry: ICE_ASYMMETRY,
+};
 
-impl Tile {
-    fn new(side: usize) -> Option<Self> {
-        Some(Self {
-            side,
-            texels: fallible::filled(side.checked_mul(side)?.checked_mul(side)?, 0)?,
-        })
-    }
-
-    /// The most the texture holds anywhere, which no read of it passes.
-    fn peak(&self) -> f64 {
-        f64::from(self.texels.iter().copied().max().unwrap_or(u8::MAX)) / 255.0
-    }
-
-    /// The mean of its texels.
-    fn mean(&self) -> f64 {
-        let sum: usize = self.texels.iter().map(|&texel| usize::from(texel)).sum();
-        real(sum) / (255.0 * real(self.texels.len().max(1)))
-    }
-
-    /// The texture read trilinearly at `p`, in texels, wrapping.
-    fn at(&self, p: Vec3) -> f64 {
-        let (side, mask) = (self.side, self.side - 1);
-        let wrap = |value: f64| {
-            let (whole, fraction) = cell(value);
-            (usize::try_from(whole).unwrap_or(0) & mask, fraction)
-        };
-        let ((x, fx), (y, fy), (z, fz)) = (wrap(p.x), wrap(p.y), wrap(p.z));
-        let (x1, y1, z1) = ((x + 1) & mask, (y + 1) & mask, (z + 1) & mask);
-        let texel = |x: usize, y: usize, z: usize| {
-            f64::from(
-                self.texels
-                    .get((z * side + y) * side + x)
-                    .copied()
-                    .unwrap_or(0),
-            )
-        };
-        let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
-        let face = |z: usize| {
-            lerp(
-                lerp(texel(x, y, z), texel(x1, y, z), fx),
-                lerp(texel(x, y1, z), texel(x1, y1, z), fx),
-                fy,
-            )
-        };
-        lerp(face(z), face(z1), fz) / 255.0
-    }
-}
-
-/// One column of a deck's weather map: how much the deck covers there, and
-/// where its cloud's base and top lie.
-#[derive(Copy, Clone, Debug, Default)]
-struct Column {
-    cover: f32,
-    base: f32,
-    top: f32,
-}
-
-impl Column {
-    fn lerp(self, other: Self, t: f64) -> Self {
-        let mix = |a: f32, b: f32| single(f64::from(a) + (f64::from(b) - f64::from(a)) * t);
-        Self {
-            cover: mix(self.cover, other.cover),
-            base: mix(self.base, other.base),
-            top: mix(self.top, other.top),
-        }
-    }
-}
-
-/// A band of heights no cloud stands in.
-const EMPTY_BAND: (f32, f32) = (f32::INFINITY, f32::NEG_INFINITY);
-
-/// One level of a bank's maps: a square about the eye, and over it each
-/// deck's weather and the heights its cloud can stand between there; the
-/// optical depth of the bank's cloud toward the sun, straight up, and level
-/// away from the sun; what of the sunlight the bank above lets through; and
-/// the shadow the bank casts.
+/// One level of a bank's weather: a square about the eye, and over it each
+/// deck's weather and the heights its cloud can stand between there.
 #[derive(Clone, Debug)]
 struct Level {
     /// Half its breadth, either way of the bank's middle.
@@ -315,30 +188,12 @@ struct Level {
     /// Each deck's map and its cells' bands, empty for a deck the bank lacks.
     weather: [Vec<Column>; 2],
     bands: [Vec<(f32, f32)>; 2],
-    light: Vec<f32>,
-    away: Vec<f32>,
-    column: Vec<f32>,
-    shade: Vec<f32>,
-    /// Empty with no bank above.
-    overhead: Vec<f32>,
-    shadow: Vec<f32>,
-    /// Over each point of its shadow's grid, how sunlit the ground beneath
-    /// looks from the floor, so a cloud's base is lit by a ground its own
-    /// shadow darkens.
-    ground: Vec<f32>,
-    /// Over each point of its shadow's grid, what its column does to the sky
-    /// overhead, a layer each: how much of the clear sky it leaves open; the
-    /// light it sheds down from its base per unit of the sun's at its top,
-    /// of the sky's above it, and of the ground's below it; and the cosine
-    /// of the sun's angle from the vertical at its top.
-    beneath: [Vec<f32>; BENEATH_LAYERS],
 }
 
 impl Level {
     /// A level `half` either way, its maps reserved whole and written as
     /// their rows are filled, so no unit of building fills more than its own
-    /// rows; `None` when the heap will not hold them. The overhead is
-    /// reserved once a bank above is known to need it.
+    /// rows; `None` when the heap will not hold them.
     fn new(half: f64, decks: &[Option<Deck>; 2]) -> Option<Self> {
         let maps = |deck: &Option<Deck>| room(deck.is_some(), points(WEATHER_CELLS));
         let banded = |deck: &Option<Deck>| room(deck.is_some(), WEATHER_CELLS * WEATHER_CELLS);
@@ -346,98 +201,14 @@ impl Level {
             half,
             weather: [maps(&decks[0])?, maps(&decks[1])?],
             bands: [banded(&decks[0])?, banded(&decks[1])?],
-            light: room(true, LIGHT_POINTS)?,
-            away: room(true, LIGHT_POINTS)?,
-            column: room(true, LIGHT_POINTS)?,
-            shade: room(true, LIGHT_POINTS)?,
-            overhead: Vec::new(),
-            shadow: room(true, points(SHADOW_CELLS))?,
-            ground: room(true, points(SHADOW_CELLS))?,
-            beneath: [
-                room(true, points(SHADOW_CELLS))?,
-                room(true, points(SHADOW_CELLS))?,
-                room(true, points(SHADOW_CELLS))?,
-                room(true, points(SHADOW_CELLS))?,
-                room(true, points(SHADOW_CELLS))?,
-            ],
         })
     }
 }
-
-/// What a point of a level's light grid holds as it is filled: the optical
-/// depth of the bank's cloud toward the sun, away from it, straight up, and
-/// level away from it; and what of the sunlight the bank above lets
-/// through.
-#[derive(Copy, Clone, Debug)]
-struct Lit {
-    sun: f64,
-    away: f64,
-    column: f64,
-    shade: f64,
-    kept: f64,
-}
-
-impl Default for Lit {
-    fn default() -> Self {
-        Self {
-            sun: 0.0,
-            away: 0.0,
-            column: 0.0,
-            shade: 0.0,
-            kept: 1.0,
-        }
-    }
-}
-
-/// The level way away from the sun, `sun` the unit way toward it: any level
-/// way with the sun overhead.
-fn shade_way(sun: Vec3) -> Vec3 {
-    let level = Vec3::new(-sun.x, 0.0, -sun.z);
-    if level.length() > 1e-6 {
-        level.normalized()
-    } else {
-        Vec3::new(1.0, 0.0, 0.0)
-    }
-}
-
-/// The slabs of its column a point of water cloud stands in: as a deck is,
-/// through which the sun's light diffuses down whatever way it fell in; and
-/// for the sky's light and the ground's, as deep as the nearest of the
-/// cloud's faces the sky lights — its top, its sunward side or its shaded
-/// side — and running on beneath as deep as the column does.
-#[derive(Copy, Clone, Debug)]
-struct Slabs {
-    column: Depth,
-    sky: Depth,
-}
-
-/// How heaped a deck's clouds are where they begin to be lit as heaps are,
-/// through the slab facing the sun, rather than as sheets, through their
-/// column, and are lit wholly so.
-const HEAPED: (f64, f64) = (0.35, 0.75);
-
-/// How far a deck's clouds, as heaped as `heap`, are lit as sheets rather
-/// than as heaps.
-fn sheeted(heap: f64) -> f64 {
-    1.0 - smoothstep(HEAPED.0, HEAPED.1, heap)
-}
-
-/// How far from a point a cloud's far side is looked for, and the first
-/// step taken toward it, each step after the last longer by `OUTWARD_GROWTH`.
-const OUTWARD_REACH: f64 = 32_000.0;
-const OUTWARD_FIRST: f64 = 10.0;
-const OUTWARD_GROWTH: f64 = 1.25;
-/// The clear air past a cloud's far side that ends it: wider than a hole
-/// its edges' erosion leaves, narrower than the gaps between heaps.
-const OUTWARD_GAP: f64 = 200.0;
 
 /// The vertices of a square grid of `cells` a side.
 const fn points(cells: usize) -> usize {
     (cells + 1) * (cells + 1)
 }
-
-/// The points of a level's light grid, layer on layer.
-const LIGHT_POINTS: usize = points(LIGHT_CELLS) * LIGHT_LAYERS;
 
 /// Room reserved for `length` values when `held`, and none otherwise;
 /// `None` when the heap will not hold it.
@@ -517,14 +288,6 @@ fn about<T: Copy>(values: &[T], points: usize, (u, v): (f64, f64)) -> Option<([T
     ))
 }
 
-/// Layer `layer` of `values`, a grid `points` a side laid layer on layer,
-/// read bilinearly at `(u, v)`; `None` off it.
-fn plane(values: &[f32], points: usize, layer: usize, (u, v): (f64, f64)) -> Option<f64> {
-    let first = layer.checked_mul(points * points)?;
-    let (corners, across) = about(values.get(first..)?, points, (u, v))?;
-    Some(bilinear(corners.map(f64::from), across))
-}
-
 /// Whether cell `(column, row)` of a level's weather map lies within the
 /// next finer level's square.
 fn inner((column, row): (usize, usize)) -> bool {
@@ -541,13 +304,8 @@ enum Stage {
     /// by level, then row.
     Weather(usize, usize),
     Bands(usize, usize),
-    /// Each level's light, then each level's shadow, then how sunlit each
-    /// level's ground looks from its floor, once every shadow is cast: from
-    /// the coarsest in.
-    Light(usize, usize),
-    Shadow(usize, usize),
-    Ground(usize, usize),
-    Scatter,
+    /// The light within the bank, once it is lit.
+    Light,
     Done,
 }
 
@@ -556,28 +314,21 @@ impl Stage {
     /// unit: each unit some milliseconds' work.
     const fn extent(self) -> (usize, usize) {
         match self {
-            Self::Shape(_) => (SHAPE_SIDE, 1),
-            Self::Detail(_) => (DETAIL_SIDE, 4),
+            Self::Shape(_) => (form::SHAPE_SIDE, 1),
+            Self::Detail(_) => (form::DETAIL_SIDE, 4),
             Self::Weather(..) => (WEATHER_CELLS + 1, 8),
             Self::Bands(..) => (WEATHER_CELLS, 16),
-            Self::Light(..) => (LIGHT_LAYERS * (LIGHT_CELLS + 1), LIGHT_ROWS),
-            Self::Shadow(..) => (SHADOW_CELLS + 1, SHADOW_ROWS),
-            Self::Ground(..) => (SHADOW_CELLS + 1, GROUND_ROWS),
-            Self::Scatter | Self::Done => (1, 1),
+            Self::Light | Self::Done => (1, 1),
         }
     }
 
     /// The next row the stage fills.
     const fn row(self) -> usize {
         match self {
-            Self::Shape(row)
-            | Self::Detail(row)
-            | Self::Weather(_, row)
-            | Self::Bands(_, row)
-            | Self::Light(_, row)
-            | Self::Shadow(_, row)
-            | Self::Ground(_, row) => row,
-            Self::Scatter | Self::Done => 0,
+            Self::Shape(row) | Self::Detail(row) | Self::Weather(_, row) | Self::Bands(_, row) => {
+                row
+            }
+            Self::Light | Self::Done => 0,
         }
     }
 
@@ -588,37 +339,22 @@ impl Stage {
             Self::Detail(_) => Self::Detail(row),
             Self::Weather(level, _) => Self::Weather(level, row),
             Self::Bands(level, _) => Self::Bands(level, row),
-            Self::Light(level, _) => Self::Light(level, row),
-            Self::Shadow(level, _) => Self::Shadow(level, row),
-            Self::Ground(level, _) => Self::Ground(level, row),
-            Self::Scatter | Self::Done => self,
+            Self::Light | Self::Done => self,
         }
     }
 
     /// The stage after this one in a bank of `levels` levels.
     fn after(self, levels: usize) -> Self {
-        let coarsest = |stage: fn(usize, usize) -> Self| {
-            levels
-                .checked_sub(1)
-                .map_or(Self::Scatter, |level| stage(level, 0))
-        };
         match self {
             Self::Shape(_) => Self::Detail(0),
-            Self::Detail(_) => coarsest(Self::Weather),
+            Self::Detail(_) => levels
+                .checked_sub(1)
+                .map_or(Self::Light, |level| Self::Weather(level, 0)),
             Self::Weather(level, _) => Self::Bands(level, 0),
             Self::Bands(level, _) => level
                 .checked_sub(1)
-                .map_or_else(|| coarsest(Self::Light), |finer| Self::Weather(finer, 0)),
-            Self::Light(level, _) => level
-                .checked_sub(1)
-                .map_or_else(|| coarsest(Self::Shadow), |finer| Self::Light(finer, 0)),
-            Self::Shadow(level, _) => level
-                .checked_sub(1)
-                .map_or_else(|| coarsest(Self::Ground), |finer| Self::Shadow(finer, 0)),
-            Self::Ground(level, _) => level
-                .checked_sub(1)
-                .map_or(Self::Scatter, |finer| Self::Ground(finer, 0)),
-            Self::Scatter | Self::Done => Self::Done,
+                .map_or(Self::Light, |finer| Self::Weather(finer, 0)),
+            Self::Light | Self::Done => Self::Done,
         }
     }
 }
@@ -633,19 +369,11 @@ pub(crate) struct Lighting {
     pub(crate) cosines: (f64, f64),
     /// The true unit direction toward the sun those angles are taken from.
     pub(crate) toward: Vec3,
-    /// The sky's light on a cloud's upper side; and the ground's on its
-    /// underside, as the sun lights the open ground and as the sky lights
-    /// all of it.
+    /// The sky's light, as even over the sky above a cloud.
     pub(crate) above: Vec3,
-    pub(crate) below: (Vec3, Vec3),
-}
-
-impl Lighting {
-    /// The ground's light on a cloud's underside where the ground beneath
-    /// looks `sunlit` as sunlit as the open ground.
-    fn ground(&self, sunlit: f64) -> Vec3 {
-        self.below.0 * sunlit + self.below.1
-    }
+    /// The sun's irradiance on the open level ground, and the ground's
+    /// albedo, which gives it back to the clouds' undersides.
+    pub(crate) ground: (Vec3, f64),
 }
 
 /// What a ray meets of a bank: the light its cloud sends back along the ray,
@@ -681,20 +409,8 @@ pub(crate) struct Cloudbank {
     /// Each deck's heading, as its cosine and sine, and its fibre's
     /// reciprocal.
     headings: [(f64, f64, f64); 2],
-    shape: Tile,
-    detail: Tile,
-    /// The most the billows reach, once their texture is built.
-    peak: f64,
-    /// The wisps' texture's mean, once it is built, and the wisps a read
-    /// resolving every finer read of them takes, at evenly spaced quantiles:
-    /// the erosion a march too coarse to resolve the wisps takes the mean of.
-    wisp_mean: f64,
-    wisps: [f32; WISP_QUANTILES],
-    /// What ice scatters again and again at each height, per unit of the
-    /// sunlight there; and for each way toward the eye, the share of ice's
-    /// phase the sky above sends it.
-    scatter: [f32; SCATTER_LEVELS],
-    downward: [f32; HEMISPHERE],
+    textures: Textures,
+    lights: Lights,
     lighting: Option<Lighting>,
     stage: Stage,
 }
@@ -702,14 +418,21 @@ pub(crate) struct Cloudbank {
 impl Cloudbank {
     /// A bank of `decks` lit from the unit `sun` over an Earth whose centre
     /// lies `ground` metres below the scene's level, its finest level
-    /// spanning no more than `most` either way of the eye; to be stood about
-    /// the eye before it is built. `None` when the heap will not hold its
+    /// spanning no more than `most` either way of the eye and its light
+    /// solved as finely as `resolution` has it; to be stood about the eye
+    /// and lit before it is built. `None` when the heap will not hold its
     /// textures.
-    pub(crate) fn new(decks: [Option<Deck>; 2], most: f64, sun: Vec3, ground: f64) -> Option<Self> {
+    pub(crate) fn new(
+        decks: [Option<Deck>; 2],
+        (most, resolution): (f64, Resolution),
+        sun: Vec3,
+        ground: f64,
+    ) -> Option<Self> {
         let (mut floor, mut ceiling) = (f64::INFINITY, f64::NEG_INFINITY);
         for deck in decks.iter().flatten() {
             floor = floor.min(deck.base - deck.base_spread);
-            ceiling = ceiling.max(deck.base + deck.base_spread + deck.depth.1);
+            // Its turrets reach as far as a billow and a half above its tops.
+            ceiling = ceiling.max(deck.base + deck.base_spread + deck.depth.1 + 2.0 * deck.billow);
         }
         let floor = floor.max(0.0);
         if floor >= ceiling || !(most > 0.0 && ground > 0.0) {
@@ -734,13 +457,8 @@ impl Cloudbank {
                     )
                 })
             }),
-            shape: Tile::new(SHAPE_SIDE)?,
-            detail: Tile::new(DETAIL_SIDE)?,
-            peak: 1.0,
-            wisp_mean: 0.5,
-            wisps: [0.5; WISP_QUANTILES],
-            scatter: [0.0; SCATTER_LEVELS],
-            downward: [0.0; HEMISPHERE],
+            textures: Textures::new()?,
+            lights: Lights::new(resolution),
             lighting: None,
             stage: Stage::Shape(0),
         })
@@ -770,6 +488,10 @@ impl Cloudbank {
             half *= 2.0;
         }
         self.levels = levels;
+        let mut lights = core::mem::take(&mut self.lights);
+        let laid = lights.lay(self);
+        self.lights = lights;
+        laid?;
         self.stage = Stage::Shape(0);
         Some(())
     }
@@ -794,40 +516,6 @@ impl Cloudbank {
         )
     }
 
-    /// The wisps at `texel` of their texture, each of the [`FINER`] reads
-    /// added about the texture's mean as far as `kept` resolves it.
-    fn wisp_at(&self, texel: Vec3, kept: [f64; FINER.len()]) -> f64 {
-        let mut wisp = self.detail.at(texel);
-        for (&(times, share, start), kept) in FINER.iter().zip(kept) {
-            if kept > 0.0 {
-                wisp += share * kept * (self.detail.at(texel * times + start) - self.wisp_mean);
-            }
-        }
-        wisp.clamp(0.0, 1.0)
-    }
-
-    /// The wisps as a read resolving every finer read of them takes them, at
-    /// `N` evenly spaced quantiles over their texture's texels.
-    fn sharp_quantiles<const N: usize>(&self) -> [f32; N] {
-        let side = self.detail.side;
-        let mut counts = [0usize; 256];
-        for index in 0..side * side * side {
-            let texel = Vec3::new(
-                real(index % side) + 0.5,
-                real(index / side % side) + 0.5,
-                real(index / (side * side)) + 0.5,
-            );
-            let level = mathf::round_i32(self.wisp_at(texel, [1.0; FINER.len()]) * 255.0);
-            if let Some(count) = usize::try_from(level)
-                .ok()
-                .and_then(|level| counts.get_mut(level))
-            {
-                *count += 1;
-            }
-        }
-        quantiles(&counts)
-    }
-
     /// The heights between which the bank lies.
     pub(crate) const fn span(&self) -> (f64, f64) {
         (self.floor, self.ceiling)
@@ -847,42 +535,40 @@ impl Cloudbank {
         )
     }
 
-    /// Light the bank as `lighting` has it.
+    /// Light the bank as `lighting` has it, before its light is built.
     pub(crate) fn light_by(&mut self, lighting: Lighting) {
         self.lighting = Some(lighting);
     }
 
-    /// Build the next unit of the bank across `runner`, its sunlight already
-    /// dimmed by the bank `above` it; whether it is built, or `None` when the
-    /// heap will not hold it.
+    /// Whether the bank is lit.
+    pub(crate) const fn lit(&self) -> bool {
+        self.lighting.is_some()
+    }
+
+    /// Build the next unit of the bank across `runner`, its sunlight dimmed
+    /// by the bank `above` it; whether it is built, or `None` when the heap
+    /// will not hold it.
     pub(crate) fn step(&mut self, runner: &dyn JobRunner, above: Option<&Self>) -> Option<bool> {
         let stage = self.stage;
+        if stage == Stage::Light {
+            let mut lights = core::mem::take(&mut self.lights);
+            let solved = lights.step(self, runner, above);
+            self.lights = lights;
+            if solved? {
+                self.stage = Stage::Done;
+            }
+            return Some(self.stage == Stage::Done);
+        }
         let (rows, per) = stage.extent();
         let start = stage.row();
         let end = (start + per * runner.width().max(1)).min(rows);
+        let seed = self.seed();
         match stage {
-            Stage::Shape(_) => {
-                let seed = self.seed();
-                fill_tile(&mut self.shape, start..end, runner, &|p| billows(p, seed));
-                if end >= rows {
-                    self.peak = self.shape.peak();
-                }
-            }
-            Stage::Detail(_) => {
-                let seed = self.seed() ^ 0xd37a;
-                fill_tile(&mut self.detail, start..end, runner, &|p| wisps(p, seed));
-                if end >= rows {
-                    self.wisp_mean = self.detail.mean();
-                    self.wisps = self.sharp_quantiles();
-                }
-            }
+            Stage::Shape(_) => self.textures.fill_shape(start..end, runner, seed),
+            Stage::Detail(_) => self.textures.fill_detail(start..end, runner, seed ^ 0xd37a),
             Stage::Weather(level, _) => self.fill_weather(level, start..end, runner),
             Stage::Bands(level, _) => self.fill_bands(level, start..end, runner),
-            Stage::Light(level, _) => self.fill_light(level, start..end, runner, above)?,
-            Stage::Shadow(level, _) => self.fill_shadow(level, start..end, runner)?,
-            Stage::Ground(level, _) => self.fill_ground(level, start..end, runner)?,
-            Stage::Scatter => self.fill_scatter(),
-            Stage::Done => {}
+            Stage::Light | Stage::Done => {}
         }
         self.stage = if end >= rows {
             stage.after(self.levels.len())
@@ -897,7 +583,7 @@ impl Cloudbank {
     pub(crate) fn units(&self) -> (f64, f64) {
         let mut stage = Stage::Shape(0);
         let (mut done, mut total) = (0.0, 0.0);
-        while stage != Stage::Done {
+        while stage != Stage::Light {
             let (rows, per) = stage.extent();
             let units = real(rows) / real(per);
             if stage == self.stage.at(0) {
@@ -906,14 +592,12 @@ impl Cloudbank {
             total += units;
             stage = stage.after(self.levels.len());
         }
-        (
-            if self.stage == Stage::Done {
-                total
-            } else {
-                done
-            },
-            total,
-        )
+        let (lit, lighting) = self.lights.units();
+        match self.stage {
+            Stage::Light => (total + lit, total + lighting),
+            Stage::Done => (total + lighting, total + lighting),
+            _ => (done, total + lighting),
+        }
     }
 
     /// The seed the bank's textures are drawn from: its first deck's.
@@ -923,6 +607,94 @@ impl Cloudbank {
             .flatten()
             .next()
             .map_or(1, |deck| deck.seed)
+    }
+
+    /// How its cloud scatters: as its first deck's matter does.
+    fn medium(&self) -> Matter {
+        self.decks
+            .iter()
+            .flatten()
+            .next()
+            .map_or(Matter::Water, |deck| deck.matter)
+    }
+
+    /// The breadth of its finest deck's billows.
+    fn finest_billow(&self) -> f64 {
+        self.decks
+            .iter()
+            .flatten()
+            .map(|deck| deck.billow)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Its matter's scattering.
+    fn scattering(&self) -> Scattering {
+        match self.medium() {
+            Matter::Water => DROPLETS,
+            Matter::Ice => ICE,
+        }
+    }
+
+    /// Where each deck's cloud can stand over the square from `low` to
+    /// `high`, `(x, z)` each: between the lowest and the highest of the
+    /// bands of the weather cells under it, on every level any of it is read
+    /// from; empty for a deck with none there.
+    fn stands_over(&self, low: (f64, f64), high: (f64, f64)) -> [(f64, f64); 2] {
+        let mut stands = [(f64::INFINITY, f64::NEG_INFINITY); 2];
+        let (cx, cz) = self.centre;
+        // As the levels' squares measure it, its nearest and farthest from
+        // the middle: each level holding the one is read over some of it.
+        let nearest = (cx.clamp(low.0, high.0) - cx)
+            .abs()
+            .max((cz.clamp(low.1, high.1) - cz).abs());
+        let farthest = [low.0 - cx, high.0 - cx, low.1 - cz, high.1 - cz]
+            .into_iter()
+            .fold(0.0, |most: f64, offset| most.max(offset.abs()));
+        let last = WEATHER_CELLS - 1;
+        for level in &self.levels {
+            if nearest >= level.half {
+                continue;
+            }
+            let size = 2.0 * level.half / real(WEATHER_CELLS);
+            let cell = |value: f64, from: f64| cell_of((value - from) / size).0.min(last);
+            let (west, south) = (cx - level.half, cz - level.half);
+            let (columns, rows) = (
+                cell(low.0, west)..=cell(high.0, west),
+                cell(low.1, south)..=cell(high.1, south),
+            );
+            for (bands, stand) in level.bands.iter().zip(&mut stands) {
+                for row in rows.clone() {
+                    let along = row * WEATHER_CELLS;
+                    let cells = bands.get(along + columns.start()..=along + columns.end());
+                    for &(lowest, highest) in cells.into_iter().flatten() {
+                        stand.0 = stand.0.min(f64::from(lowest));
+                        stand.1 = stand.1.max(f64::from(highest));
+                    }
+                }
+            }
+            // A level holding all of it leaves the coarser ones none to read.
+            if farthest < level.half {
+                break;
+            }
+        }
+        stands
+    }
+
+    /// The most extinction any of its cloud holds between heights `low` and
+    /// `high`, each deck's standing as `stands` has it: however its turrets
+    /// lie, no denser than its whole density risen from the lowest base to
+    /// the top of the span.
+    fn densest(&self, stands: &[(f64, f64); 2], (low, high): (f64, f64)) -> f64 {
+        self.decks
+            .iter()
+            .zip(stands)
+            .map(|(deck, &(lowest, highest))| match deck {
+                Some(deck) if high > lowest && low < highest => {
+                    form::extinction(deck, high.min(highest) - lowest)
+                }
+                _ => 0.0,
+            })
+            .sum()
     }
 
     /// Level `index`'s weather rows `rows`, its rim blended into the next
@@ -969,11 +741,18 @@ impl Cloudbank {
 
     /// Level `index`'s bands over its weather cells' rows `rows`.
     fn fill_bands(&mut self, index: usize, rows: Range<usize>, runner: &dyn JobRunner) {
-        let (decks, peak) = (self.decks, self.peak);
+        let decks = self.decks;
+        let reach = decks.map(|deck| deck.map_or(0.0, |deck| self.textures.reach(&deck)));
         let Some(Level { weather, bands, .. }) = self.levels.get_mut(index) else {
             return;
         };
-        for ((deck, map), cells) in decks.iter().zip(weather.iter()).zip(bands.iter_mut()) {
+        let points = WEATHER_CELLS + 1;
+        for (((deck, map), cells), reach) in decks
+            .iter()
+            .zip(weather.iter())
+            .zip(bands.iter_mut())
+            .zip(reach)
+        {
             let Some(deck) = deck else {
                 continue;
             };
@@ -981,359 +760,56 @@ impl Cloudbank {
                 continue;
             };
             band::for_each(runner, cells, (rows.start, WEATHER_CELLS), &|row, band| {
+                let at = |column: usize, row: usize| {
+                    map.get(row * points + column).copied().unwrap_or_default()
+                };
                 for (column, slot) in band.iter_mut().enumerate() {
-                    *slot = band_over(deck, map, (column, row), peak);
+                    let corners = [
+                        at(column, row),
+                        at(column + 1, row),
+                        at(column, row + 1),
+                        at(column + 1, row + 1),
+                    ];
+                    *slot = band_over(deck, corners, reach);
                 }
             });
-        }
-    }
-
-    /// Level `index`'s light grid rows `rows`, counted up through its
-    /// layers: at each point, its own cloud's optical depth toward the sun,
-    /// straight up and level away from the sun, and what of the sunlight the
-    /// bank `above` lets through, its rim blended into the next coarser
-    /// level's; `None` when the heap will not hold them. Kept apart, since
-    /// cloud above dims the sunlight a cloud's scattering takes in, and adds
-    /// nothing to the slab its own column stands for.
-    fn fill_light(
-        &mut self,
-        index: usize,
-        rows: Range<usize>,
-        runner: &dyn JobRunner,
-        above: Option<&Self>,
-    ) -> Option<()> {
-        let points = LIGHT_CELLS + 1;
-        let mut values = fallible::filled(rows.len() * points, Lit::default())?;
-        {
-            let reader = Reader { bank: self };
-            let level = self.levels.get(index)?;
-            let next = self.levels.get(index + 1);
-            let up = (self.ceiling - self.floor) / real(LIGHT_LAYERS - 1);
-            let shaded = shade_way(self.sun);
-            band::for_each(runner, &mut values, (rows.start, points), &|row, band| {
-                let (layer, j) = (row / points, row % points);
-                let altitude = self.floor + real(layer) * up;
-                for (i, slot) in band.iter_mut().enumerate() {
-                    let (x, z) = vertex_of(self.centre, level.half, (i, j), LIGHT_CELLS);
-                    let point = Vec3::new(x, self.height_at(altitude, (x, z)), z);
-                    let mut lit = Lit {
-                        sun: reader.toward_sun(point, LIGHT_STEPS),
-                        away: reader.outward(point, -self.sun),
-                        column: reader.toward(point, Vec3::UP, LIGHT_STEPS),
-                        shade: reader.outward(point, shaded),
-                        kept: above.map_or(1.0, |high| high.shadow(point, self.sun)),
-                    };
-                    let rimmed = rim(LIGHT_CELLS, (i, j));
-                    if let Some(next) = next.filter(|_| rimmed > 0.0) {
-                        let place = coarse_place(LIGHT_CELLS, (i, j));
-                        let blend = |held: &mut f64, grid: &[f32]| {
-                            if let Some(coarse) = plane(grid, points, layer, place) {
-                                *held += (coarse - *held) * rimmed;
-                            }
-                        };
-                        blend(&mut lit.sun, &next.light);
-                        blend(&mut lit.away, &next.away);
-                        blend(&mut lit.column, &next.column);
-                        blend(&mut lit.shade, &next.shade);
-                        blend(&mut lit.kept, &next.overhead);
-                    }
-                    *slot = lit;
-                }
-            });
-        }
-        let level = self.levels.get_mut(index)?;
-        let write = |grid: &mut Vec<f32>, field: fn(&Lit) -> f64, empty: f32| {
-            for (slot, lit) in rows_of(grid, rows.clone(), points, empty)?
-                .iter_mut()
-                .zip(&values)
-            {
-                *slot = single(field(lit));
-            }
-            Some(())
-        };
-        write(&mut level.light, |lit| lit.sun, 0.0)?;
-        write(&mut level.away, |lit| lit.away, 0.0)?;
-        write(&mut level.column, |lit| lit.column, 0.0)?;
-        write(&mut level.shade, |lit| lit.shade, 0.0)?;
-        if above.is_some() {
-            if level.overhead.capacity() == 0 {
-                level.overhead = room(true, LIGHT_POINTS)?;
-            }
-            write(&mut level.overhead, |lit| lit.kept, 1.0)?;
-        }
-        Some(())
-    }
-
-    /// Level `index`'s rows `rows` of how sunlit the ground beneath looks
-    /// from the floor over each point of its shadow's grid, every level's
-    /// shadow being cast.
-    fn fill_ground(
-        &mut self,
-        index: usize,
-        rows: Range<usize>,
-        runner: &dyn JobRunner,
-    ) -> Option<()> {
-        let points = SHADOW_CELLS + 1;
-        let mut values = fallible::filled(rows.len() * points, 1.0f32)?;
-        {
-            let level = self.levels.get(index)?;
-            band::for_each(runner, &mut values, (rows.start, points), &|j, band| {
-                for (i, slot) in band.iter_mut().enumerate() {
-                    let at = vertex_of(self.centre, level.half, (i, j), SHADOW_CELLS);
-                    *slot = single(self.ground_seen(at, self.floor));
-                }
-            });
-        }
-        let level = self.levels.get_mut(index)?;
-        for (slot, value) in rows_of(&mut level.ground, rows, points, 1.0)?
-            .iter_mut()
-            .zip(values)
-        {
-            *slot = value;
-        }
-        Some(())
-    }
-
-    /// How sunlit the ground looks from `height` above `(x, z)`: what of the
-    /// sun the bank lets reach it, its mean over the ground below as a face
-    /// looking straight down receives it.
-    fn ground_seen(&self, (x, z): (f64, f64), height: f64) -> f64 {
-        let mut sum = 0.0;
-        for ring in 0..GROUND_RINGS {
-            let share = (f64::from(ring) + 0.5) / f64::from(GROUND_RINGS);
-            let out = height * mathf::sqrt(share / (1.0 - share));
-            for spoke in 0..GROUND_SPOKES {
-                let around =
-                    TAU * (f64::from(spoke) + 0.5 * f64::from(ring % 2)) / f64::from(GROUND_SPOKES);
-                sum += self.sunlit(Vec3::new(
-                    x + out * mathf::cos(around),
-                    0.0,
-                    z + out * mathf::sin(around),
-                ));
-            }
-        }
-        sum / f64::from(GROUND_RINGS * GROUND_SPOKES)
-    }
-
-    /// Level `index`'s shadow map rows `rows`: what of the sun's light
-    /// crosses the whole bank to each point of its floor, its rim blended
-    /// into the next coarser level's.
-    fn fill_shadow(
-        &mut self,
-        index: usize,
-        rows: Range<usize>,
-        runner: &dyn JobRunner,
-    ) -> Option<()> {
-        let points = SHADOW_CELLS + 1;
-        let medium = self.medium();
-        // Each point's shadow, then what it holds of the sky overhead.
-        let mut values = fallible::filled(rows.len() * points * (1 + BENEATH_LAYERS), 1.0f32)?;
-        {
-            let reader = Reader { bank: self };
-            let level = self.levels.get(index)?;
-            let next = self.levels.get(index + 1);
-            band::for_each(
-                runner,
-                &mut values,
-                (rows.start, points * (1 + BENEATH_LAYERS)),
-                &|j, band| {
-                    for (i, slot) in band.chunks_mut(1 + BENEATH_LAYERS).enumerate() {
-                        let (x, z) = vertex_of(self.centre, level.half, (i, j), SHADOW_CELLS);
-                        let point = Vec3::new(x, self.height_at(self.floor, (x, z)), z);
-                        let mut held = [0.0; 1 + BENEATH_LAYERS];
-                        held[0] = mathf::exp(-reader.toward_sun(point, LIGHT_STEPS * 2));
-                        held[1..].copy_from_slice(&reader.overhead_sky(point, medium));
-                        let rimmed = rim(SHADOW_CELLS, (i, j));
-                        if let Some(next) = next.filter(|_| rimmed > 0.0) {
-                            let place = coarse_place(SHADOW_CELLS, (i, j));
-                            if let Some(coarse) = plane(&next.shadow, points, 0, place) {
-                                held[0] += (coarse - held[0]) * rimmed;
-                            }
-                            for (value, layer) in held[1..].iter_mut().zip(&next.beneath) {
-                                if let Some(coarse) = plane(layer, points, 0, place) {
-                                    *value += (coarse - *value) * rimmed;
-                                }
-                            }
-                        }
-                        for (out, value) in slot.iter_mut().zip(held) {
-                            *out = single(value);
-                        }
-                    }
-                },
-            );
-        }
-        let level = self.levels.get_mut(index)?;
-        let layers = core::iter::once(&mut level.shadow).chain(level.beneath.iter_mut());
-        for (layer, map) in layers.enumerate() {
-            let held = rows_of(map, rows.clone(), points, 0.0)?;
-            for (slot, cell) in held.iter_mut().zip(values.chunks(1 + BENEATH_LAYERS)) {
-                *slot = cell[layer];
-            }
-        }
-        Some(())
-    }
-
-    /// What its cloud is made of, which scatters what light it sheds: its
-    /// first deck's.
-    fn medium(&self) -> Medium {
-        match self.decks.iter().flatten().next().map(|deck| deck.matter) {
-            Some(Matter::Ice) => ICE,
-            _ => DROPLETS,
         }
     }
 
     /// What the bank does to the sky over `point`, below its ceiling: how
     /// much of the clear sky straight overhead it leaves open, and the light
-    /// its cloud sheds down from its base there of its own, less what of the
-    /// sky's light passes it unscattered, which its open share stands for. A
-    /// clear sky's, and none, above it or before it is lit.
+    /// its cloud scatters down from its base there. A clear sky's, and none,
+    /// above it or before it is lit.
     pub(crate) fn beneath(&self, point: Vec3) -> (f64, Vec3) {
-        let (Some(lighting), Some(level)) = (self.lighting.as_ref(), self.level_over(point)) else {
+        let Some(lighting) = self.lighting.as_ref() else {
             return (1.0, Vec3::ZERO);
         };
         if self.altitude(point) >= self.ceiling {
             return (1.0, Vec3::ZERO);
         }
-        let place = place_on(self.centre, level.half, (point.x, point.z), SHADOW_CELLS);
-        let read = |layer: usize, none: f64| {
-            level
-                .beneath
-                .get(layer)
-                .and_then(|map| plane(map, SHADOW_CELLS + 1, 0, place))
-                .unwrap_or(none)
-        };
-        let open = read(0, 1.0).clamp(0.0, 1.0);
-        let sun = sunlight_at(lighting, 1.0, read(4, 1.0));
-        let shed = sun * read(1, 0.0)
-            + lighting.above * (read(2, 0.0) - open).max(0.0)
-            + lighting.ground(self.ground_lit(point)) * read(3, 0.0);
-        (open, shed.max(Vec3::ZERO))
-    }
-
-    /// How sunlit the ground beneath `point` looks from the bank's floor.
-    fn ground_lit(&self, point: Vec3) -> f64 {
-        self.level_over(point)
-            .and_then(|level| {
-                let place = place_on(self.centre, level.half, (point.x, point.z), SHADOW_CELLS);
-                plane(&level.ground, SHADOW_CELLS + 1, 0, place)
-            })
-            .unwrap_or(1.0)
-    }
-
-    /// What ice scatters again and again at each height through the bank,
-    /// per unit of the sunlight there: Hillaire's isotropic series, its
-    /// scattering scaled by `1 − g` for how far forward ice throws its light,
-    /// over the bank laid out as its mean extinction by height and endless
-    /// across. Nothing where the bank holds no ice.
-    fn fill_scatter(&mut self) {
-        let Some(half) = self.levels.first().map(|finest| finest.half) else {
-            return;
-        };
-        if !self
-            .decks
-            .iter()
-            .flatten()
-            .any(|deck| deck.matter == Matter::Ice)
-        {
-            return;
-        }
-        self.downward = downward_shares();
-        let reader = Reader { bank: self };
-        let (floor, span) = (self.floor, self.ceiling - self.floor);
-        let level_height = |level: usize| floor + span * real(level) / real(SCATTER_LEVELS - 1);
-        let scale = 1.0 - ICE_ASYMMETRY;
-        let mut mean = [0.0f64; SCATTER_LEVELS];
-        for (level, slot) in mean.iter_mut().enumerate() {
-            let height = level_height(level);
-            let mut total = 0.0;
-            for column in 0..SCATTER_COLUMNS {
-                // Columns spread evenly over the finest level: one coordinate
-                // in even steps, the other in the golden ratio's.
-                let u = (f64::from(column) + 0.5) / f64::from(SCATTER_COLUMNS);
-                let (_, v) = cell(f64::from(column) * GOLDEN_RATIO);
-                let (x, z) = (
-                    self.centre.0 + half * (2.0 * u - 1.0),
-                    self.centre.1 + half * (2.0 * v - 1.0),
-                );
-                let point = Vec3::new(x, self.height_at(height, (x, z)), z);
-                if let Some(sample) = reader.density(point, Edges::Averaged) {
-                    if sample.matter == Matter::Ice {
-                        total += sample.density * sample.thickness;
-                    }
-                }
-            }
-            *slot = scale * total / f64::from(SCATTER_COLUMNS);
-        }
-        let profile = Profile::new(mean, (self.floor, self.ceiling));
-        // The longest way through the shell the deck lies in, grazing its
-        // floor.
-        let breadth = 2.0
-            * mathf::sqrt(
-                (self.ceiling - self.floor) * (self.ceiling + self.floor + 2.0 * self.ground),
-            );
-        let sun = self.sun;
-        let isotropic = 1.0 / (4.0 * PI);
-        let mut scatter = [0.0f32; SCATTER_LEVELS];
-        for (level, slot) in scatter.iter_mut().enumerate() {
-            let height = level_height(level);
-            let (mut second, mut transfer) = (0.0, 0.0);
-            for index in 0..SCATTER_DIRECTIONS {
-                // Directions spread evenly over the sphere by their rise
-                // alone, the slab the same whichever way across it they head.
-                let rise = 1.0 - 2.0 * (f64::from(index) + 0.5) / f64::from(SCATTER_DIRECTIONS);
-                let length = if rise > 1e-6 {
-                    (self.ceiling - height) / rise
-                } else if rise < -1e-6 {
-                    (height - self.floor) / -rise
-                } else {
-                    breadth
-                }
-                .min(breadth);
-                let step = length / f64::from(SCATTER_STEPS);
-                let mut kept = 1.0;
-                for sample in 0..SCATTER_STEPS {
-                    let at = height + rise * (f64::from(sample) + 0.5) * step;
-                    let through = mathf::exp(-profile.at(at) * step);
-                    let gathered = kept * (1.0 - through);
-                    second += gathered * profile.sunlit(at, sun, breadth) * isotropic;
-                    transfer += gathered;
-                    kept *= through;
-                }
-            }
-            let mean = 1.0 / f64::from(SCATTER_DIRECTIONS);
-            *slot = single(every_order(second * mean, transfer * mean));
-        }
-        self.scatter = scatter;
-    }
-
-    /// The ice's scattering again and again `height` of the way from the
-    /// bank's floor to its ceiling, per unit of sunlight.
-    fn scattered(&self, height: f64) -> f64 {
-        along(
-            &self.scatter,
-            height.clamp(0.0, 1.0) * real(SCATTER_LEVELS - 1),
-        )
-    }
-
-    /// The share of ice's phase the sky above sends a ray leaving its cloud
-    /// along the unit `out`: the rest the ground below sends.
-    fn sent_down(&self, out: Vec3) -> f64 {
-        along(
-            &self.downward,
-            f64::midpoint(out.y.clamp(-1.0, 1.0), 1.0) * real(HEMISPHERE - 1),
-        )
+        let (open, [sunlit, skylit]) = self.lights.beneath(self, (point.x, point.z));
+        let floor = Vec3::new(
+            point.x,
+            self.height_at(self.floor, (point.x, point.z)),
+            point.z,
+        );
+        let cosine = self.cosine(floor, self.floor, lighting.toward);
+        let shed =
+            tint(sunlight_at(lighting, 0.0, cosine)) * sunlit + tint(lighting.above) * skylit;
+        (open.clamp(0.0, 1.0), (shed * (1.0 / PI)).max(Vec3::ZERO))
     }
 
     /// What of the sun's light toward the unit `toward` reaches `point` past
-    /// the bank: the shadow at the floor where the way toward the sun rises
-    /// through it, or at the point itself within the bank. Nothing is
-    /// shaded where the Earth stands in that way, the air answering for it.
+    /// the bank: the light's own depth at the floor where the way toward the
+    /// sun rises through it, or at the point itself within the bank. Nothing
+    /// is shaded where the Earth stands in that way, the air answering for
+    /// it.
     pub(crate) fn shadow(&self, point: Vec3, toward: Vec3) -> f64 {
         let altitude = self.altitude(point);
         if altitude >= self.ceiling {
             return 1.0;
         }
-        let at = if altitude < self.floor {
+        let (at, height) = if altitude < self.floor {
             let course = self.course_from(point, altitude, toward);
             let Some((_, rise)) = course.crossings(self.floor) else {
                 return 1.0;
@@ -1344,16 +820,13 @@ impl Cloudbank {
             {
                 return 1.0;
             }
-            point + toward * rise
+            (point + toward * rise, self.floor)
         } else {
-            point
+            (point, altitude)
         };
-        self.level_over(at)
-            .and_then(|level| {
-                let place = place_on(self.centre, level.half, (at.x, at.z), SHADOW_CELLS);
-                plane(&level.shadow, SHADOW_CELLS + 1, 0, place)
-            })
-            .unwrap_or(1.0)
+        self.lights
+            .depth(self, (at.x, height, at.z))
+            .map_or(1.0, |depth| mathf::exp(-depth))
     }
 
     /// What of its own sunlight the bank lets reach `point`.
@@ -1382,12 +855,7 @@ impl Cloudbank {
         } else {
             (COARSE_SHARE, COARSE_STEPS)
         };
-        let billow = self
-            .decks
-            .iter()
-            .flatten()
-            .map(|deck| deck.billow)
-            .fold(f64::INFINITY, f64::min);
+        let billow = self.finest_billow();
         // A step through cloud: a share of its finest billows, longer far off
         // where a pixel spans more of it, and longer still where the steps
         // left would not otherwise reach the bank's far side.
@@ -1407,8 +875,9 @@ impl Cloudbank {
         let (mut kept, mut light) = (1.0, Vec3::ZERO);
         let (mut depth, mut weight) = (0.0, 0.0);
         // Whether a ray seen directly is stepping finely through a cloud's
-        // billows, and how far it has stepped since it last met cloud.
-        let (mut finely, mut cleared) = (false, 0.0);
+        // billows, how far it has stepped since it last met cloud, and how far
+        // its last sample says it may step on within the cloud's body.
+        let (mut finely, mut cleared, mut room) = (false, 0.0, 0.0);
         while t < leave && steps < most {
             let stride = within(t, steps + 1).min(leave - t);
             if t >= over.until {
@@ -1430,10 +899,11 @@ impl Cloudbank {
             steps += 1;
             // Striding on to where the billows stand, then stepping finely
             // from the stride's start, so their edge is never stepped over.
-            if let (Some(_), false) = (spread, finely) {
+            if let (Some(spread), false) = (spread, finely) {
                 let ahead = origin + dir * (t + stride);
+                let bound = Edges::Bounding(spread * (t + stride));
                 if reader
-                    .density_at(ahead, self.altitude(ahead), Edges::Bounding)
+                    .density_at(ahead, self.altitude(ahead), bound)
                     .is_some()
                 {
                     (finely, cleared) = (true, 0.0);
@@ -1443,7 +913,7 @@ impl Cloudbank {
                 continue;
             }
             let step = spread.map_or(stride, |spread| {
-                (SHARP * spread * t).max(SHARPEST).min(stride)
+                (SHARP * spread * t).max(SHARPEST).max(room).min(stride)
             });
             let at = t + step * jitter;
             let point = origin + dir * at;
@@ -1451,15 +921,19 @@ impl Cloudbank {
             let edges = spread.map_or(Edges::Averaged, |spread| Edges::Resolved(spread * at));
             let Some(sample) = reader
                 .density_at(point, altitude, edges)
-                .filter(|sample| sample.density > 1e-4)
+                .filter(|sample| sample.extinction > 1e-7)
             else {
                 cleared += step;
                 finely &= cleared <= stride;
+                room = 0.0;
                 t += step;
                 continue;
             };
             cleared = 0.0;
-            let extinction = sample.density * sample.thickness;
+            let extinction = sample.extinction;
+            room = (WITHIN_SHARE * sample.within)
+                .min(STEP_DEPTH / extinction.max(1e-12))
+                .max(0.0);
             let height = ((altitude - self.floor) * per_height).clamp(0.0, 1.0);
             let source = self.source(
                 (lighting, &glance),
@@ -1489,11 +963,11 @@ impl Cloudbank {
     fn glance(&self, dir: Vec3) -> Glance {
         let cos = dir.dot(self.sun);
         Glance {
-            cos,
-            droplets: dual_phase(cos, DROPLET_LOBES.0, DROPLET_LOBES.1),
-            ice: henyey_greenstein(cos, ICE_ASYMMETRY),
-            downward: self.sent_down(-dir),
-            rise: -dir.y,
+            out: -dir,
+            phase: match self.medium() {
+                Matter::Water => dual_phase(cos, DROPLET_LOBES.0, DROPLET_LOBES.1),
+                Matter::Ice => henyey_greenstein(cos, ICE_ASYMMETRY),
+            },
         }
     }
 
@@ -1501,6 +975,13 @@ impl Cloudbank {
     /// `glance` has it, per unit of its optical depth: read at `point`,
     /// `altitude` above the scene's level and `height` of the way from the
     /// bank's floor to its ceiling, its edges taken as `edges` has them.
+    ///
+    /// The sun's light scattered once, exactly, through the phase; what of it
+    /// the phase's forward peak carries on unscattered by the scaled
+    /// extinction the photons were followed through, scattered once more
+    /// evenly by the rest of the phase; and the diffuse light, its fluence
+    /// and its net flux through the full phase's asymmetry, so cloud seen
+    /// toward where its diffuse light runs is the brighter.
     fn source(
         &self,
         (lighting, glance): (&Lighting, &Glance),
@@ -1508,48 +989,28 @@ impl Cloudbank {
         (sample, edges): (&Sample, Edges),
     ) -> Vec3 {
         let reader = Reader { bank: self };
-        let optical = reader.optical_depth(point, edges, sample.billow);
+        let at = (point.x, altitude, point.z);
+        let optical = reader.optical_depth(point, altitude, edges, sample);
         let cosine = self.cosine(point, altitude, lighting.toward);
-        let sun = sunlight_at(lighting, height, cosine) * reader.overhead_at(point, altitude);
-        let below = lighting.ground(self.ground_lit(point));
-        match sample.matter {
-            Matter::Water => {
-                let once = sun * (glance.droplets * mathf::exp(-optical));
-                let billowed = (edges, sample.billow);
-                let slabs =
-                    reader.slabs((point, altitude), optical, reader.beneath(point, billowed));
-                // A heap is lit through the slab facing the beam, as deep as
-                // the beam's way in and as thick as the cloud runs on behind
-                // it, so the sun falls square on it.
-                let heaped = || {
-                    let beam = Depth {
-                        below_top: optical,
-                        whole: optical + reader.behind(point, billowed),
-                    };
-                    slab::sunlit(DROPLETS, beam, (sun, 1.0)).scattered(DROPLETS, -glance.cos)
-                };
-                let decked = || {
-                    slab::sunlit(DROPLETS, slabs.column, (sun, cosine.max(0.0)))
-                        .scattered(DROPLETS, glance.rise)
-                };
-                let sheet = sheeted(sample.heap);
-                let lit = if sheet >= 1.0 {
-                    decked()
-                } else if sheet <= 0.0 {
-                    heaped()
-                } else {
-                    heaped().lerp(decked(), sheet)
-                };
-                let sky = slab::skylit(DROPLETS, slabs.sky, (lighting.above, below));
-                once + lit + sky.scattered(DROPLETS, glance.rise)
-            }
-            Matter::Ice => {
-                let sunward = glance.ice * mathf::exp(-optical)
-                    + (1.0 - ICE_ASYMMETRY) * self.scattered(height);
-                let sky = lighting.above * glance.downward + below * (1.0 - glance.downward);
-                sun * sunward + sky
-            }
-        }
+        let sunlight = sunlight_at(lighting, height, cosine);
+        let sun = sunlight * self.lights.above(self, at);
+        let scattering = self.scattering();
+        let g = scattering.asymmetry;
+        let (direct, carried) = (mathf::exp(-optical), mathf::exp(-(1.0 - g) * optical));
+        let once = sun * (glance.phase * direct);
+        let peak = sun * ((1.0 - g) / (4.0 * PI) * (carried - direct).max(0.0));
+        let reading = self.lights.reading(self, at).unwrap_or_default();
+        let [sunlit, skylit] = reading.fluence.map(|fluence| fluence.max(0.0));
+        let (sun_tint, sky_tint) = (tint(sunlight), tint(lighting.above));
+        let mean = sunlit + skylit;
+        let diffuse = (sun_tint * sunlit + sky_tint * skylit) * (1.0 / (4.0 * PI));
+        let first = if mean > 0.0 {
+            let rising = (3.0 * g * reading.flux.dot(glance.out)).clamp(-mean, mean);
+            (sun_tint * sunlit + sky_tint * skylit) * (rising / (mean * 4.0 * PI))
+        } else {
+            Vec3::ZERO
+        };
+        (once + peak + diffuse + first) * scattering.albedo
     }
 
     /// `point`'s height above the scene's level over the Earth's curve.
@@ -1648,6 +1109,26 @@ impl Cloudbank {
         self.levels.get(self.finest((point.x, point.z))?)
     }
 
+    /// Whether any deck's cloud can stand `altitude` above the scene's level
+    /// over `(x, z)`, as the band of the weather cell beneath has it.
+    fn may_stand(&self, (x, z): (f64, f64), altitude: f64) -> bool {
+        let Some(level) = self.finest((x, z)).and_then(|index| self.levels.get(index)) else {
+            return false;
+        };
+        let size = 2.0 * level.half / real(WEATHER_CELLS);
+        let cell = |offset: f64| {
+            cell_of((offset + level.half) / size)
+                .0
+                .min(WEATHER_CELLS - 1)
+        };
+        let at = cell(z - self.centre.1) * WEATHER_CELLS + cell(x - self.centre.0);
+        level.bands.iter().any(|bands| {
+            bands
+                .get(at)
+                .is_some_and(|&(low, high)| (f64::from(low)..=f64::from(high)).contains(&altitude))
+        })
+    }
+
     /// The walk across level `level`'s weather map of a ray from `origin`
     /// along the unit `dir`, from `t` along it.
     fn walk(&self, level: usize, origin: Vec3, dir: Vec3, t: f64) -> Walk {
@@ -1711,6 +1192,16 @@ impl Cloudbank {
     }
 }
 
+/// `light` as a colour of unit luminance: nothing where it holds none.
+fn tint(light: Vec3) -> Vec3 {
+    let luminance = light.luminance();
+    if luminance > 1e-30 {
+        light * (1.0 / luminance)
+    } else {
+        Vec3::ZERO
+    }
+}
+
 /// How the height above the scene's level of a ray runs along it: its
 /// origin's height, the origin's offset from the Earth's centre along the
 /// ray, and the scene's level's distance from that centre.
@@ -1732,120 +1223,6 @@ impl Course {
         )
     }
 }
-
-/// A bank's ice by height, its extinction scaled for how far forward ice
-/// throws its light, laid out as a slab endless across.
-struct Profile {
-    floor: f64,
-    ceiling: f64,
-    /// How far apart its levels lie.
-    gap: f64,
-    /// The extinction at each level, evenly spaced floor to ceiling, and the
-    /// depth of the slab beneath each.
-    levels: [f64; SCATTER_LEVELS],
-    beneath: [f64; SCATTER_LEVELS],
-}
-
-impl Profile {
-    fn new(levels: [f64; SCATTER_LEVELS], (floor, ceiling): (f64, f64)) -> Self {
-        let gap = (ceiling - floor) / real(SCATTER_LEVELS - 1);
-        let mut beneath = [0.0; SCATTER_LEVELS];
-        for index in 1..SCATTER_LEVELS {
-            beneath[index] =
-                beneath[index - 1] + f64::midpoint(levels[index - 1], levels[index]) * gap;
-        }
-        Self {
-            floor,
-            ceiling,
-            gap,
-            levels,
-            beneath,
-        }
-    }
-
-    /// Where `height` lies among the levels, and how far toward the next.
-    fn place(&self, height: f64) -> (usize, f64) {
-        let place = ((height - self.floor) / self.gap).clamp(0.0, real(SCATTER_LEVELS - 1));
-        let index = cell_of(place).0.min(SCATTER_LEVELS - 2);
-        (index, place - real(index))
-    }
-
-    /// The extinction at `height`, nought beyond the slab.
-    fn at(&self, height: f64) -> f64 {
-        if !(self.floor..=self.ceiling).contains(&height) {
-            return 0.0;
-        }
-        let (index, along) = self.place(height);
-        self.levels[index] + (self.levels[index + 1] - self.levels[index]) * along
-    }
-
-    /// The slab's optical depth beneath `height`, exact for its extinction
-    /// changing evenly between levels.
-    fn depth(&self, height: f64) -> f64 {
-        let (index, along) = self.place(height);
-        let (low, high) = (self.levels[index], self.levels[index + 1]);
-        self.beneath[index] + self.gap * along * (low + 0.5 * (high - low) * along)
-    }
-
-    /// What of the sunlight from the unit `sun` reaches `height` through the
-    /// slab: down through what lies above, or up through what lies below for
-    /// a sun beneath its level, never along more of it than `breadth` holds.
-    fn sunlit(&self, height: f64, sun: Vec3, breadth: f64) -> f64 {
-        let (below, total) = (self.depth(height), self.depth(self.ceiling));
-        let column = if sun.y >= 0.0 { total - below } else { below };
-        let slant = sun.y.abs().max((self.ceiling - self.floor) / breadth);
-        mathf::exp(-column / slant)
-    }
-}
-
-/// For each way a ray can leave ice toward the eye, straight down to
-/// straight up, the share of ice's phase that light travelling down sends
-/// along it: integrated over the circles about the way out, each by the
-/// part of it whose light comes from above.
-fn downward_shares() -> [f32; HEMISPHERE] {
-    let mut shares = [0.0; HEMISPHERE];
-    for (index, slot) in shares.iter_mut().enumerate() {
-        let rise = 2.0 * real(index) / real(HEMISPHERE - 1) - 1.0;
-        let level = mathf::sqrt((1.0 - rise * rise).max(0.0));
-        let mut share = 0.0;
-        for step in 0..HEMISPHERE_STEPS {
-            // Angles packed toward the way out, where the phase peaks.
-            let t = (f64::from(step) + 0.5) / f64::from(HEMISPHERE_STEPS);
-            let angle = PI * t * t;
-            let (sin, cos) = (mathf::sin(angle), mathf::cos(angle));
-            let (highest, lowest) = (rise * cos + level * sin, rise * cos - level * sin);
-            let arc = if highest < 0.0 {
-                TAU
-            } else if lowest >= 0.0 {
-                0.0
-            } else {
-                TAU - 2.0 * mathf::acos((-rise * cos / (level * sin)).clamp(-1.0, 1.0))
-            };
-            let width = 2.0 * PI * t / f64::from(HEMISPHERE_STEPS);
-            share += henyey_greenstein(cos, ICE_ASYMMETRY) * arc * sin * width;
-        }
-        *slot = single(share.clamp(0.0, 1.0));
-    }
-    shares
-}
-
-/// Cloud droplets' phase: its forward lobe's asymmetry and the share a
-/// backward lobe takes, and that backward lobe's asymmetry.
-const DROPLET_LOBES: (f64, f64) = (0.9, 0.05);
-const BACK_LOBE: f64 = -0.3;
-/// How cloud droplets scatter: almost all the light they meet, through the
-/// mean cosine of their phase's lobes.
-const DROPLETS: Medium = Medium {
-    albedo: 0.99998,
-    asymmetry: (1.0 - DROPLET_LOBES.1) * DROPLET_LOBES.0 + DROPLET_LOBES.1 * BACK_LOBE,
-};
-
-/// Ice crystals as a medium, scattering almost all they meet as rough
-/// crystals do.
-const ICE: Medium = Medium {
-    albedo: 0.99998,
-    asymmetry: ICE_ASYMMETRY,
-};
 
 /// A blend of a forward and a backward Henyey–Greenstein lobe.
 fn dual_phase(cos: f64, g: f64, back: f64) -> f64 {
@@ -1889,17 +1266,6 @@ fn sunlight_at(lighting: &Lighting, height: f64, cosine: f64) -> Vec3 {
     )
 }
 
-/// `table` read at `place`, counted in entries from its first: linearly
-/// between the two about it, and held at its ends.
-fn along(table: &[f32], place: f64) -> f64 {
-    interpolated(
-        table.len(),
-        place,
-        |index| table.get(index).map_or(0.0, |&value| f64::from(value)),
-        |a, b, t| a + (b - a) * t,
-    )
-}
-
 /// The table of `count` entries `at` reads, at `place` counted in entries
 /// from its first: blended by `lerp` between the two about it, and held at
 /// its ends.
@@ -1933,53 +1299,20 @@ pub(crate) fn sunlight_places(
     })
 }
 
-/// What a sample of the bank holds at a point.
+/// What a sample of the bank holds at a point: its extinction per metre;
+/// the breadth of the billows of the deck holding the most of it; and how far
+/// the place lies within every deck's surface it lies within, in metres.
 struct Sample {
-    density: f64,
-    /// Extinction per metre at full density, of the deck it lies in.
-    thickness: f64,
+    extinction: f64,
     billow: f64,
-    heap: f64,
-    matter: Matter,
+    within: f64,
 }
 
-/// How a ray meets a bank's sun: the cosine of the angle between them; the
-/// phases at which droplets and ice scatter sunlight back along the ray; the
-/// share of the ice's skylight the sky above sends it; and how steeply the
-/// light sent back along it rises.
+/// How a ray meets a bank's sun: the unit way back toward the eye, and the
+/// phase at which its matter scatters sunlight back along the ray.
 struct Glance {
-    cos: f64,
-    droplets: f64,
-    ice: f64,
-    downward: f64,
-    rise: f64,
-}
-
-/// A point among a deck's weather columns: the four about it, and how far
-/// east and north across them it lies; each field blended only as it is
-/// read.
-struct Blend {
-    corners: [Column; 4],
-    across: (f64, f64),
-}
-
-impl Blend {
-    /// The deck's `field` at the point.
-    fn at(&self, field: fn(&Column) -> f32) -> f64 {
-        bilinear(
-            self.corners.map(|corner| f64::from(field(&corner))),
-            self.across,
-        )
-    }
-
-    /// The deck's whole column at the point.
-    fn column(&self) -> Column {
-        Column {
-            cover: single(self.at(|corner| corner.cover)),
-            base: single(self.at(|corner| corner.base)),
-            top: single(self.at(|corner| corner.top)),
-        }
-    }
+    out: Vec3,
+    phase: f64,
 }
 
 /// The weather cell a march stands over: the heights each deck's cloud
@@ -2047,26 +1380,16 @@ struct Reader<'a> {
     bank: &'a Cloudbank,
 }
 
-/// How a read of the cloud takes its edges: not at all, the billows standing
-/// uneroded, which bound it; on average, as a march too coarse for them
-/// takes them; or resolved to a footprint so many metres across, each
-/// octave finer than it settled to what it leaves on average.
-#[derive(Copy, Clone, Debug, PartialEq)]
-enum Edges {
-    Bounding,
-    Averaged,
-    Resolved(f64),
-}
-
 impl Reader<'_> {
-    /// The densest cloud of any deck at `point`, its edges taken as `edges`
-    /// has them; `None` where there is none.
+    /// The cloud at `point`, its edges taken as `edges` has them; `None`
+    /// where there is none.
     fn density(&self, point: Vec3, edges: Edges) -> Option<Sample> {
         self.density_at(point, self.bank.altitude(point), edges)
     }
 
-    /// The densest cloud of any deck at `point`, `altitude` above the scene's
-    /// level; `None` where there is none.
+    /// The cloud at `point`, `altitude` above the scene's level: every deck's
+    /// extinction there, with the billows of the deck holding the most;
+    /// `None` where there is none.
     fn density_at(&self, point: Vec3, altitude: f64, edges: Edges) -> Option<Sample> {
         let bank = self.bank;
         let level = bank.level_over(point)?;
@@ -2074,7 +1397,7 @@ impl Reader<'_> {
         // The billows are read over the deck as it lies along the Earth's
         // curve.
         let lying = Vec3::new(point.x, altitude, point.z);
-        let mut best: Option<Sample> = None;
+        let mut held: Option<(Sample, f64)> = None;
         for ((slot, deck), map) in bank.decks.iter().enumerate().zip(&level.weather) {
             let Some(deck) = deck else {
                 continue;
@@ -2083,545 +1406,91 @@ impl Reader<'_> {
                 continue;
             };
             let column = Blend { corners, across };
-            let cover = column.at(|corner| corner.cover);
-            if cover <= 0.0 {
-                continue;
-            }
-            let (base, top) = (
-                column.at(|corner| corner.base),
-                column.at(|corner| corner.top),
-            );
-            if altitude <= base || altitude >= top {
-                continue;
-            }
-            let within = (altitude - base) / (top - base);
             let grained = bank.grained(slot, deck, lying);
-            let shape = bank
-                .shape
-                .at(grained * (real(SHAPE_SIDE) / (deck.billow * 8.0)));
-            let billows = remap(shape, threshold(cover, within, deck.heap), 1.0)
-                * smoothstep(0.0, 0.04, within);
-            if billows <= 0.0 {
+            let Some(cloud) =
+                form::cloud(deck, &bank.textures, (&column, altitude), grained, edges)
+            else {
                 continue;
-            }
-            // Ragged wisps at a cloud's base, round billows at its top; a
-            // march too coarse to resolve them takes what they leave on
-            // average, never the billows uneroded.
-            let eroded = |wisp: f64| {
-                let bite = EROSION * (wisp + (1.0 - 2.0 * wisp) * within.min(1.0));
-                remap(billows, bite, 1.0)
             };
-            let averaged = || {
-                bank.wisps
-                    .iter()
-                    .map(|&wisp| eroded(f64::from(wisp)))
-                    .sum::<f64>()
-                    / real(WISP_QUANTILES)
+            let own = cloud.extinction;
+            let (total, billow, most, within) = match held {
+                Some((sample, most)) if most >= own => (
+                    sample.extinction + own,
+                    sample.billow,
+                    most,
+                    sample.within.min(cloud.within),
+                ),
+                Some((sample, _)) => (
+                    sample.extinction + own,
+                    deck.billow,
+                    own,
+                    sample.within.min(cloud.within),
+                ),
+                None => (own, deck.billow, own, cloud.within),
             };
-            let density = match edges {
-                Edges::Bounding => billows,
-                Edges::Averaged => averaged(),
-                Edges::Resolved(footprint) => {
-                    let span = deck.billow * 8.0 * DETAIL_SCALE;
-                    let finest = span / WISP_FINEST;
-                    let kept = resolved(footprint, finest);
-                    let finer = FINER.map(|(times, ..)| resolved(footprint, finest / times));
-                    let sharp = if kept > 0.0 {
-                        eroded(bank.wisp_at(grained * (real(DETAIL_SIDE) / span), finer))
-                    } else {
-                        0.0
-                    };
-                    if kept >= 1.0 {
-                        sharp
-                    } else {
-                        sharp * kept + averaged() * (1.0 - kept)
-                    }
-                }
-            };
-            if density > best.as_ref().map_or(0.0, |held| held.density) {
-                best = Some(Sample {
-                    density,
-                    thickness: deck.thickness / CORE,
-                    billow: deck.billow,
-                    heap: deck.heap,
-                    matter: deck.matter,
-                });
-            }
+            held = Some((
+                Sample {
+                    extinction: total,
+                    billow,
+                    within,
+                },
+                most,
+            ));
         }
-        best
+        held.map(|(sample, _)| sample)
     }
 
-    /// The optical depth toward the sun from `point`, its edges read as
-    /// `edges` has them: the grid's, and for a resolved sample short taps
-    /// through its own billows, the nearest through its edges as finely.
-    fn optical_depth(&self, point: Vec3, edges: Edges, billow: f64) -> f64 {
-        let sun = self.bank.sun;
-        if !matches!(edges, Edges::Resolved(_)) {
-            return self.light_at(point);
-        }
-        let (depth, reached, _) = self.taps((point, sun), (edges, billow), false);
-        depth + self.light_at(point + sun * reached)
-    }
-
-    /// The optical depth from `point`, in cloud, to its cloud's far side away
-    /// from the sun, its edges and billows read as `billowed` has them.
-    fn behind(&self, point: Vec3, billowed: (Edges, f64)) -> f64 {
-        let away = |at: Vec3| {
-            let altitude = self.bank.altitude(at);
-            self.bank
-                .level_over(at)
-                .and_then(|level| self.layered(&level.away, level, at, altitude))
+    /// The optical depth toward the sun from `point`, `altitude` above the
+    /// scene's level, its edges read as `edges` has them: for a resolved
+    /// sample short taps through its own billows, the nearest through its
+    /// edges as finely, and the bank's light past the last; else the bank's
+    /// light alone.
+    fn optical_depth(&self, point: Vec3, altitude: f64, edges: Edges, sample: &Sample) -> f64 {
+        let bank = self.bank;
+        let depth = |at: Vec3, altitude: f64| {
+            bank.lights
+                .depth(bank, (at.x, altitude, at.z))
                 .unwrap_or(0.0)
         };
-        self.own_depth((point, -self.bank.sun), billowed, &away)
-    }
-
-    /// The optical depth from `point`, in cloud, down to its cloud's base,
-    /// its edges and billows read as `billowed` has them.
-    fn beneath(&self, point: Vec3, billowed: (Edges, f64)) -> f64 {
-        let down = |at: Vec3| {
-            self.column_at(at, self.bank.altitude(at))
-                .map_or(0.0, |(above, whole)| (whole - above).max(0.0))
+        // Ice is too thin for its own streaks to shade it more finely than the
+        // bank's light does.
+        let (Edges::Resolved(footprint), Matter::Water) = (edges, bank.medium()) else {
+            return depth(point, altitude);
         };
-        self.own_depth((point, -Vec3::UP), billowed, &down)
-    }
-
-    /// The optical depth from `point`, in cloud, along the unit `way` to its
-    /// cloud's far side, its edges read as `edges` has them: for a resolved
-    /// sample short taps out to clear air past it, `grid` answering for a
-    /// cloud running on past the last, which the grid's coarse cells would
-    /// blur into the clear air beside it; else `grid`'s.
-    fn own_depth(
-        &self,
-        (point, way): (Vec3, Vec3),
-        (edges, billow): (Edges, f64),
-        grid: &dyn Fn(Vec3) -> f64,
-    ) -> f64 {
-        if !matches!(edges, Edges::Resolved(_)) {
-            return grid(point);
-        }
-        match self.taps((point, way), (edges, billow), true) {
-            (depth, _, true) => depth,
-            (depth, reached, false) => depth + grid(point + way * reached),
-        }
-    }
-
-    /// The optical depth along the unit `way` from a resolved sample at
-    /// `point`, its billows `billow` broad, in short taps out, the nearest
-    /// through its edges as `edges` has them; where the taps reached; and,
-    /// when only its `own` cloud is wanted, whether clear air opened past it
-    /// before they ended.
-    fn taps(
-        &self,
-        (point, way): (Vec3, Vec3),
-        (edges, billow): (Edges, f64),
-        own: bool,
-    ) -> (f64, f64, bool) {
-        let (mut depth, mut last, mut clear) = (0.0, 0.0, 0.0);
-        for (tap, fraction) in TAPS.into_iter().enumerate() {
-            let reach = billow * fraction;
-            let at = point + way * f64::midpoint(last, reach);
+        let (sun, billow) = (bank.sun, sample.billow);
+        let margin = bank.lights.breadth(bank, (point.x, point.z));
+        let (mut tapped, mut last, mut clear, mut tap) = (0.0, 0.0, 0.0, 0);
+        let mut reach = billow * TAPS[0];
+        loop {
+            let at = point + sun * f64::midpoint(last, reach);
+            // Each tap stands for its stretch, so it resolves no more finely.
             let read = if tap < RESOLVED_TAPS {
-                edges
+                Edges::Resolved(footprint.max(reach - last))
             } else {
                 Edges::Averaged
             };
-            if let Some(sample) = self.density(at, read) {
-                depth += sample.density * sample.thickness * (reach - last);
-                clear = 0.0;
-            } else {
-                clear += reach - last;
-                if own && clear >= OUTWARD_GAP {
-                    return (depth, reach, true);
-                }
-            }
-            last = reach;
-        }
-        (depth, last, false)
-    }
-
-    /// The light grid's depth of the bank's own cloud toward the sun at
-    /// `point`.
-    fn light_at(&self, point: Vec3) -> f64 {
-        let altitude = self.bank.altitude(point);
-        self.bank
-            .level_over(point)
-            .and_then(|level| self.layered(&level.light, level, point, altitude))
-            .unwrap_or(0.0)
-    }
-
-    /// What of the sunlight the bank above lets through to `point`,
-    /// `altitude` above the scene's level: all of it with none above.
-    fn overhead_at(&self, point: Vec3, altitude: f64) -> f64 {
-        self.bank
-            .level_over(point)
-            .and_then(|level| self.layered(&level.overhead, level, point, altitude))
-            .unwrap_or(1.0)
-    }
-
-    /// `values`, one of `level`'s grids laid out as its light grid's points
-    /// are, read trilinearly at `point`, `altitude` above the scene's level;
-    /// `None` off it, or where it is empty.
-    fn layered(&self, values: &[f32], level: &Level, point: Vec3, altitude: f64) -> Option<f64> {
-        let bank = self.bank;
-        let place = place_on(bank.centre, level.half, (point.x, point.z), LIGHT_CELLS);
-        let high = ((altitude - bank.floor) / (bank.ceiling - bank.floor) * real(LIGHT_LAYERS - 1))
-            .clamp(0.0, real(LIGHT_LAYERS - 1) - 1e-6);
-        let (layer, rise) = cell_of(high);
-        let points = LIGHT_CELLS + 1;
-        let beneath = plane(values, points, layer, place)?;
-        let above = plane(values, points, (layer + 1).min(LIGHT_LAYERS - 1), place)?;
-        Some(beneath + (above - beneath) * rise)
-    }
-
-    /// The optical depth of the cloud from `point` toward the sun, out of
-    /// the bank, in `steps` steps.
-    fn toward_sun(&self, point: Vec3, steps: u32) -> f64 {
-        self.toward(point, self.bank.sun, steps)
-    }
-
-    /// The optical depth of the cloud from `point` along the unit `way`, out
-    /// of the bank, in `steps` even steps.
-    fn toward(&self, point: Vec3, way: Vec3, steps: u32) -> f64 {
-        let Some((_, leave)) = self.bank.crossing(point, way) else {
-            return 0.0;
-        };
-        let step = leave / f64::from(steps.max(1));
-        let mut depth = 0.0;
-        for index in 0..steps {
-            let at = point + way * ((f64::from(index) + 0.5) * step);
-            if let Some(sample) = self.density(at, Edges::Averaged) {
-                depth += sample.density * sample.thickness * step;
-            }
-        }
-        depth
-    }
-
-    /// The optical depth along the unit `way` from `point` of the cloud it
-    /// lies in, or else of the next it meets, out to that cloud's far side:
-    /// in steps growing from a few metres, so a side close by is found as
-    /// surely as one far off, and ending where clear air opens past it, so a
-    /// field of heaps is not taken for one deck.
-    fn outward(&self, point: Vec3, way: Vec3) -> f64 {
-        let bank = self.bank;
-        let (mut from, mut step, mut depth, mut clear) = (0.0, OUTWARD_FIRST, 0.0, 0.0);
-        while from < OUTWARD_REACH {
-            let at = point + way * (from + 0.5 * step);
-            let altitude = bank.altitude(at);
-            // Out of the bank's shell and heading on out, it meets no more.
-            if (altitude < bank.floor && way.y <= 0.0) || (altitude > bank.ceiling && way.y >= 0.0)
-            {
-                break;
-            }
-            match self.density_at(at, altitude, Edges::Averaged) {
+            match self.density(at, read) {
                 Some(sample) => {
-                    depth += sample.density * sample.thickness * step;
+                    tapped += sample.extinction * (reach - last);
                     clear = 0.0;
                 }
-                None if depth > 0.0 => {
-                    clear += step;
-                    if clear >= OUTWARD_GAP {
-                        break;
-                    }
-                }
-                None => {}
+                None => clear += reach - last,
             }
-            from += step;
-            step *= OUTWARD_GROWTH;
-        }
-        depth
-    }
-
-    /// Where `point`, `altitude` above the scene's level, lies in its cloud's
-    /// column: the optical depth above it, and the column's whole.
-    fn column_at(&self, point: Vec3, altitude: f64) -> Option<(f64, f64)> {
-        let bank = self.bank;
-        let level = bank.level_over(point)?;
-        let above = self.layered(&level.column, level, point, altitude)?;
-        let whole = self.layered(&level.column, level, point, bank.floor)?;
-        Some((above, whole.max(above)))
-    }
-
-    /// What the column over `point` on the bank's floor does to the sky
-    /// overhead, as [`Level::beneath`] holds it: the two-stream solution's
-    /// downward light at the column's base, flux-weighted over the sky
-    /// beneath it, per unit of each light that enters the column.
-    fn overhead_sky(&self, point: Vec3, medium: Medium) -> [f64; BENEATH_LAYERS] {
-        let bank = self.bank;
-        let whole = self
-            .column_at(point, bank.floor)
-            .map_or(0.0, |(_, whole)| whole);
-        let top = Vec3::new(
-            point.x,
-            bank.height_at(bank.ceiling, (point.x, point.z)),
-            point.z,
-        );
-        let cosine = bank.cosine(top, bank.ceiling, bank.sun);
-        if whole <= 0.0 {
-            return [1.0, 0.0, 1.0, 0.0, cosine];
-        }
-        let base = Depth {
-            below_top: whole,
-            whole,
-        };
-        let down = |diffuse: slab::Diffuse| diffuse.mean.x - diffuse.rising.x * (2.0 / 3.0);
-        let shed_sun = down(slab::sunlit(medium, base, (Vec3::ONE, cosine.max(0.0))))
-            * self.overhead_at(top, bank.ceiling);
-        let shed_sky = down(slab::skylit(medium, base, (Vec3::ONE, Vec3::ZERO)));
-        let shed_ground = down(slab::skylit(medium, base, (Vec3::ZERO, Vec3::ONE)));
-        [mathf::exp(-whole), shed_sun, shed_sky, shed_ground, cosine]
-    }
-
-    /// Where `point`, `altitude` above the scene's level, lies in the slabs
-    /// of its cloud's column: `optical` deep toward the sun and `beneath`
-    /// deep above its base.
-    fn slabs(&self, (point, altitude): (Vec3, f64), optical: f64, beneath: f64) -> Slabs {
-        let (above, _) = self.column_at(point, altitude).unwrap_or((0.0, 0.0));
-        let shade = self
-            .bank
-            .level_over(point)
-            .and_then(|level| self.layered(&level.shade, level, point, altitude))
-            .unwrap_or(0.0);
-        let exposed = above.min(optical).min(shade);
-        Slabs {
-            column: Depth {
-                below_top: above,
-                whole: above + beneath,
-            },
-            sky: Depth {
-                below_top: exposed,
-                whole: exposed + beneath,
-            },
-        }
-    }
-}
-
-/// A deck's column at `(x, z)`, its weather drawn only as finely as columns
-/// `spacing` apart hold: how much it covers, and its base and top.
-fn weather(deck: &Deck, (x, z): (f64, f64), spacing: f64) -> Column {
-    let (cos, sin) = (mathf::cos(deck.heading), mathf::sin(deck.heading));
-    let along = (x * cos + z * sin) / (deck.scale * deck.stretch);
-    let across = (-x * sin + z * cos) / deck.scale;
-    // Its features across the wind are its narrowest.
-    let footprint = spacing / deck.scale;
-    // Pushed about by a slower field, so the cover gathers in drifts.
-    let (u, v) = (
-        along + 0.5 * noise2(along * 0.3, across * 0.3, deck.seed ^ 0x51),
-        across + 0.5 * noise2(along * 0.3 + 3.1, across * 0.3 + 1.7, deck.seed ^ 0x93),
-    );
-    let field = fbm2_resolved(u, v, deck.seed, (5, 0.55, 2.02), footprint);
-    let drift = fbm2_resolved(
-        u * 0.23,
-        v * 0.23,
-        deck.seed ^ 0x77,
-        (3, 0.5, 2.0),
-        footprint * 0.23,
-    );
-    // How much of the sky a column holds: the deck's cover on the whole, more
-    // or less where the drifts gather it.
-    let cover = (deck.cover + 0.55 * field + 0.35 * drift).clamp(0.0, 1.0);
-    let drift = 0.5 + 0.5 * drift;
-    let lift =
-        noise2(x / 5_000.0, z / 5_000.0, deck.seed ^ 0xba5e) * resolved(spacing / 5_000.0, 1.0);
-    let base = deck.base + deck.base_spread * lift;
-    // Deeper where the cover is thickest: the heaps grow tall at the middle
-    // of a field of cloud.
-    let grown = smoothstep(0.2, 1.0, cover);
-    let depth = deck.depth.0 + (deck.depth.1 - deck.depth.0) * grown * (0.6 + 0.4 * drift);
-    Column {
-        cover: single(cover),
-        base: single(base),
-        top: single(base + depth),
-    }
-}
-
-/// How much billow a cloud needs at height fraction `within` of its column
-/// to stand there, where the column is `cover` covered: at the base, what the
-/// cover leaves; higher up, more, so only the strongest billows rise into
-/// domes and turrets, and those of a heaped deck highest.
-fn threshold(cover: f64, within: f64, heap: f64) -> f64 {
-    let rise = within * within * steepness(heap);
-    (1.0 - cover) + cover * rise
-}
-
-/// How fast a deck `heap` heaped raises its threshold with the square of
-/// the height up a column.
-fn steepness(heap: f64) -> f64 {
-    1.5 - 0.5 * heap
-}
-
-/// The greatest height fraction up a column `cover` covered at which
-/// billows reaching `peak` can stand, the `threshold` rising past them above
-/// it; `None` where they stand nowhere up it.
-fn highest(cover: f64, heap: f64, peak: f64) -> Option<f64> {
-    let room = 1.0 - (1.0 - peak) / cover;
-    (cover > 0.0 && room > 0.0).then(|| mathf::sqrt(room / steepness(heap)).min(1.0))
-}
-
-/// The heights between which `deck`'s cloud over the weather cell whose
-/// south-west corner is `(column, row)` of `weather` can stand, its billows
-/// reaching no higher than `peak`: bilinear between the corners, its cover,
-/// base and top lie within theirs. Rounded out to whole metres, which single
-/// precision holds exactly; empty where no cloud can stand.
-fn band_over(
-    deck: &Deck,
-    weather: &[Column],
-    (column, row): (usize, usize),
-    peak: f64,
-) -> (f32, f32) {
-    let points = WEATHER_CELLS + 1;
-    let at = |column: usize, row: usize| {
-        weather
-            .get(row * points + column)
-            .copied()
-            .unwrap_or_default()
-    };
-    let corners = [
-        at(column, row),
-        at(column + 1, row),
-        at(column, row + 1),
-        at(column + 1, row + 1),
-    ];
-    let values = |field: fn(&Column) -> f32| corners.map(|corner| f64::from(field(&corner)));
-    let greatest = |values: [f64; 4]| values.into_iter().fold(f64::NEG_INFINITY, f64::max);
-    let Some(within) = highest(greatest(values(|corner| corner.cover)), deck.heap, peak) else {
-        return EMPTY_BAND;
-    };
-    let bases = values(|corner| corner.base);
-    let lowest = bases.into_iter().fold(f64::INFINITY, f64::min);
-    let high = greatest(bases) + (greatest(values(|corner| corner.top)) - lowest) * within;
-    (single(mathf::floor(lowest)), single(mathf::ceil(high)))
-}
-
-/// The values a histogram of bytes, `counts` of each, holds at `N` evenly
-/// spaced quantiles, each the middle of an equally likely share: what a read
-/// stands for where it cannot be resolved.
-fn quantiles<const N: usize>(counts: &[usize; 256]) -> [f32; N] {
-    let total = counts.iter().sum::<usize>().max(1);
-    let mut quantiles = [0.0; N];
-    let (mut value, mut below) = (0usize, 0usize);
-    for (index, slot) in quantiles.iter_mut().enumerate() {
-        // The middle of the index-th share: (2i + 1) / 2N of them.
-        let wanted = (2 * index + 1) * total / (2 * N);
-        while value < 255 && below + counts[value] <= wanted {
-            below += counts[value];
-            value += 1;
-        }
-        *slot = single(f64::from(u8::try_from(value).unwrap_or(u8::MAX)) / 255.0);
-    }
-    quantiles
-}
-
-/// `value` rescaled from `low..high` to `0..1`, clamped below.
-fn remap(value: f64, low: f64, high: f64) -> f64 {
-    ((value - low) / (high - low).max(1e-9)).clamp(0.0, 1.0)
-}
-
-/// A cloud's billows at texel `p` of a tiling texture: inverted cellular
-/// noise at three scales over a softer gradient noise.
-fn billows(p: Vec3, seed: u32) -> f64 {
-    let period = real(SHAPE_SIDE);
-    let worley =
-        |cells: f64, salt: u32| 1.0 - worley_tiled(p * (cells / period), cells, seed ^ salt);
-    let cellular = 0.625 * worley(4.0, 1) + 0.25 * worley(8.0, 2) + 0.125 * worley(16.0, 3);
-    let soft = 0.5 + 0.5 * perlin_tiled(p * (4.0 / period), 4.0, seed ^ 4);
-    remap(soft, -(1.0 - cellular), 1.0).clamp(0.0, 1.0)
-}
-
-/// The fine wisps that erode a cloud's edge, at texel `p` of a tiling
-/// texture.
-fn wisps(p: Vec3, seed: u32) -> f64 {
-    let period = real(DETAIL_SIDE);
-    WISP_OCTAVES
-        .iter()
-        .map(|&(cells, weight, salt)| {
-            weight * (1.0 - worley_tiled(p * (cells / period), cells, seed ^ salt))
-        })
-        .sum()
-}
-
-/// Worley's cellular noise that repeats every `period` cells: the distance
-/// to the nearest feature point, about `0.0..1.0`.
-fn worley_tiled(p: Vec3, period: f64, seed: u32) -> f64 {
-    let whole = |value: f64| mathf::floor(value);
-    let (cx, cy, cz) = (whole(p.x), whole(p.y), whole(p.z));
-    let wrap = |value: f64| {
-        let tiled = value - mathf::floor(value / period) * period;
-        mathf::round_i32(tiled).cast_unsigned()
-    };
-    let mut nearest = f64::INFINITY;
-    for dz in -1..=1 {
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                let (x, y, z) = (cx + f64::from(dx), cy + f64::from(dy), cz + f64::from(dz));
-                let key = hash3(wrap(x), wrap(y), wrap(z), seed);
-                let feature = Vec3::new(
-                    x + unit(key),
-                    y + unit(mix32(key ^ 1)),
-                    z + unit(mix32(key ^ 2)),
-                );
-                let offset = feature - p;
-                nearest = nearest.min(offset.dot(offset));
+            last = reach;
+            if tapped > UNLIT {
+                return tapped;
             }
+            if clear >= margin || last >= FARTHEST_TAP * billow {
+                break;
+            }
+            tap += 1;
+            reach = TAPS
+                .get(tap)
+                .map_or(last * TAP_GROWTH, |&fraction| billow * fraction);
         }
+        let end = point + sun * last;
+        tapped + depth(end, bank.altitude(end))
     }
-    mathf::sqrt(nearest).min(1.0)
-}
-
-/// Gradient noise that repeats every `period` lattice cells: about
-/// `-1.0..1.0`.
-fn perlin_tiled(p: Vec3, period: f64, seed: u32) -> f64 {
-    let (cx, cy, cz) = (mathf::floor(p.x), mathf::floor(p.y), mathf::floor(p.z));
-    let (fx, fy, fz) = (p.x - cx, p.y - cy, p.z - cz);
-    let wrap = |value: f64| {
-        let tiled = value - mathf::floor(value / period) * period;
-        mathf::round_i32(tiled).cast_unsigned()
-    };
-    let corner = |dx: f64, dy: f64, dz: f64| {
-        let key = hash3(wrap(cx + dx), wrap(cy + dy), wrap(cz + dz), seed);
-        let gradient = Vec3::new(
-            unit(key) * 2.0 - 1.0,
-            unit(mix32(key ^ 1)) * 2.0 - 1.0,
-            unit(mix32(key ^ 2)) * 2.0 - 1.0,
-        );
-        gradient.dot(Vec3::new(fx - dx, fy - dy, fz - dz))
-    };
-    let fade = |t: f64| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
-    let (u, v, w) = (fade(fx), fade(fy), fade(fz));
-    let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
-    let x00 = lerp(corner(0.0, 0.0, 0.0), corner(1.0, 0.0, 0.0), u);
-    let x10 = lerp(corner(0.0, 1.0, 0.0), corner(1.0, 1.0, 0.0), u);
-    let x01 = lerp(corner(0.0, 0.0, 1.0), corner(1.0, 0.0, 1.0), u);
-    let x11 = lerp(corner(0.0, 1.0, 1.0), corner(1.0, 1.0, 1.0), u);
-    1.2 * lerp(lerp(x00, x10, v), lerp(x01, x11, v), w)
-}
-
-/// Fill layers `layers` of `tile` with `value` at each texel's centre.
-fn fill_tile(
-    tile: &mut Tile,
-    layers: Range<usize>,
-    runner: &dyn JobRunner,
-    value: &(dyn Fn(Vec3) -> f64 + Sync),
-) {
-    let side = tile.side;
-    let per_layer = side * side;
-    let Some(texels) = tile
-        .texels
-        .get_mut(layers.start * per_layer..layers.end * per_layer)
-    else {
-        return;
-    };
-    band::for_each(runner, texels, (layers.start, per_layer), &|layer, band| {
-        for (index, texel) in band.iter_mut().enumerate() {
-            let p = Vec3::new(
-                real(index % side) + 0.5,
-                real(index / side) + 0.5,
-                real(layer) + 0.5,
-            );
-            let level = mathf::round_i32(value(p).clamp(0.0, 1.0) * 255.0);
-            *texel = u8::try_from(level).unwrap_or(u8::MAX);
-        }
-    });
 }
 
 #[cfg(test)]

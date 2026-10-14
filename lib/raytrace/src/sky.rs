@@ -12,6 +12,11 @@ use crate::noise::smoothstep;
 use crate::stars::Starfield;
 use crate::vector::Vec3;
 
+/// The points along each stretch of air beneath the clouds its shade is
+/// judged at, for each sample of a ray: shadows a cloud casts through the air
+/// show as shafts with no more noise than a pixel's samples smooth.
+const AIR_POINTS: u32 = 4;
+
 /// A gradient from the horizon to the zenith: the walls of the room a
 /// studio's pieces stand in.
 #[derive(Clone, Debug)]
@@ -86,37 +91,12 @@ pub(crate) struct Seeing {
 impl Sky {
     /// Build the next unit of the sky across `runner` — the atmosphere's
     /// tables, then the high bank's and the low bank's, each aimed along the
-    /// sunlight the air bends to it — and once all are built, light the
-    /// banks by the air; whether the sky is done, or `None` when the heap
-    /// will not hold it.
+    /// sunlight the air bends to it and lit by the air before its light is
+    /// solved; whether the sky is done, or `None` when the heap will not
+    /// hold it.
     pub(crate) fn build(&mut self, runner: &dyn JobRunner) -> Option<bool> {
         if let Dome::Air(atmosphere) = &mut self.dome {
             if !atmosphere.step(runner) {
-                return Some(false);
-            }
-        }
-        if let Dome::Air(atmosphere) = &self.dome {
-            for bank in [self.high.as_mut(), self.low.as_mut()]
-                .into_iter()
-                .flatten()
-            {
-                let (floor, ceiling) = bank.span();
-                let height = f64::midpoint(floor, ceiling);
-                let toward = atmosphere.air().sun;
-                bank.aim(
-                    atmosphere
-                        .arriving(height, toward)
-                        .map_or(toward, |arriving| arriving.dir),
-                );
-            }
-        }
-        if let Some(high) = self.high.as_mut() {
-            if !high.step(runner, None)? {
-                return Some(false);
-            }
-        }
-        if let Some(low) = self.low.as_mut() {
-            if !low.step(runner, self.high.as_ref())? {
                 return Some(false);
             }
         }
@@ -129,24 +109,39 @@ impl Sky {
                 .map_or(Vec3::ZERO, |arriving| {
                     arriving.kept * air.solar * (arriving.dir.y.max(0.0) * arriving.stretch)
                 });
-            let below = (
-                air.albedo * ground * (1.0 / core::f64::consts::PI),
-                air.albedo * atmosphere.ambient(),
-            );
             for bank in [self.high.as_mut(), self.low.as_mut()]
                 .into_iter()
                 .flatten()
             {
-                let cosines = bank.sun_cosines(air.sun);
-                let sunlight = sunlight_places(bank.span(), cosines)
-                    .map(|(height, cosine)| atmosphere.sunlight(height, cosine) * air.solar);
-                bank.light_by(Lighting {
-                    sunlight: fallible::collected(SUNLIGHT_LEVELS * SUN_COSINES, sunlight)?,
-                    cosines,
-                    toward: air.sun,
-                    above: atmosphere.ambient(),
-                    below,
-                });
+                let (floor, ceiling) = bank.span();
+                let toward = air.sun;
+                bank.aim(
+                    atmosphere
+                        .arriving(f64::midpoint(floor, ceiling), toward)
+                        .map_or(toward, |arriving| arriving.dir),
+                );
+                if !bank.lit() {
+                    let cosines = bank.sun_cosines(air.sun);
+                    let sunlight = sunlight_places(bank.span(), cosines)
+                        .map(|(height, cosine)| atmosphere.sunlight(height, cosine) * air.solar);
+                    bank.light_by(Lighting {
+                        sunlight: fallible::collected(SUNLIGHT_LEVELS * SUN_COSINES, sunlight)?,
+                        cosines,
+                        toward: air.sun,
+                        above: atmosphere.ambient(),
+                        ground: (ground, air.albedo.luminance()),
+                    });
+                }
+            }
+        }
+        if let Some(high) = self.high.as_mut() {
+            if !high.step(runner, None)? {
+                return Some(false);
+            }
+        }
+        if let Some(low) = self.low.as_mut() {
+            if !low.step(runner, self.high.as_ref())? {
+                return Some(false);
             }
         }
         Some(true)
@@ -177,9 +172,9 @@ impl Sky {
     /// which dims the cloud and adds its own glow; behind the last, whatever
     /// of the clear sky's light the cloud lets through. The air beneath the
     /// clouds, out to where the ray leaves the highest of them, is lit by
-    /// what of the sun they let through, judged at one point of each stretch
-    /// drawn as the stretch's sunlit air gathers its light: so an overcast
-    /// horizon is grey, and shafts of sunlight show between clouds.
+    /// what of the sun they let through, judged at points of each stretch
+    /// stratified as the stretch's sunlit air gathers its light: so an
+    /// overcast horizon is grey, and shafts of sunlight show between clouds.
     pub(crate) fn radiance(&self, origin: Vec3, dir: Vec3, seeing: Seeing) -> Vec3 {
         let spread = if seeing.fine { seeing.spread } else { None };
         let met = |bank: Option<&Cloudbank>| {
@@ -211,8 +206,19 @@ impl Sky {
         // keeps of the light beyond.
         let shaded = |before: &Scattered, reached: f64, to: f64| {
             let between = sight.between(to);
-            let at = origin + dir * sight.drawn((reached, to), seeing.air);
-            let (open, glow) = self.beneath(at);
+            // Shafts of sunlight between clouds: the stretch's share of sunlit
+            // air, the sky it sees and the glow it is lit by, each judged at
+            // points stratified along it as its sunlit air gathers its light.
+            let (mut sun, mut open, mut glow) = (0.0, 0.0, Vec3::ZERO);
+            for point in 0..AIR_POINTS {
+                let u = (f64::from(point) + seeing.air) / f64::from(AIR_POINTS);
+                let at = origin + dir * sight.drawn((reached, to), u);
+                let (overhead, shed) = self.beneath(at);
+                sun += self.sunlit(at);
+                open += overhead;
+                glow += shed;
+            }
+            let share = 1.0 / f64::from(AIR_POINTS);
             let stretch = Scattered {
                 sun: (between.sun - before.sun).max(Vec3::ZERO),
                 sky: (between.sky - before.sky).max(Vec3::ZERO),
@@ -220,10 +226,10 @@ impl Sky {
                 kept: between.kept,
             };
             let air = stretch.lit_by(Lit {
-                sun: Vec3::splat(self.sunlit(at)),
+                sun: Vec3::splat(sun * share),
                 sky: 1.0,
-                open,
-                glow,
+                open: open * share,
+                glow: glow * share,
             });
             (air, between)
         };

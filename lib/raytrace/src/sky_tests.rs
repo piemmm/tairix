@@ -7,7 +7,7 @@ use tairix_util::mathf;
 use super::{Dome, Gradient, Seeing, Sky};
 use crate::atmosphere::{Air, Atmosphere};
 use crate::body;
-use crate::cloud::{Cloudbank, Deck, Lighting, Matter, SUNLIGHT_LEVELS, SUN_COSINES};
+use crate::cloud::{Cloudbank, Deck, Lighting, Matter, Resolution, SUNLIGHT_LEVELS, SUN_COSINES};
 use crate::stars::Starfield;
 use crate::vector::Vec3;
 
@@ -125,20 +125,28 @@ fn by_night_the_stars_are_points_over_the_moonlit_air_and_none_below_the_horizon
     }
 }
 
+/// Light solved coarsely enough for a test to build a bank quickly.
+const COARSE: Resolution = Resolution {
+    cells: 16,
+    finest: 4000.0,
+    tracks: 16.0,
+};
+
 /// A bank of one deck of `form`, stood about the eye at the scene's middle,
-/// built, and lit evenly from the sun above.
+/// lit evenly from the sun above, and built.
 fn bank(deck: Deck) -> Cloudbank {
     let sun = Vec3::new(0.2, 0.9, 0.3).normalized();
-    let mut bank = Cloudbank::new([Some(deck), None], 12_000.0, sun, LEVEL).expect("fits");
+    let mut bank =
+        Cloudbank::new([Some(deck), None], (12_000.0, COARSE), sun, LEVEL).expect("fits");
     bank.stand(Vec3::ZERO).expect("levels fit");
-    while !bank.step(&tairix_parallel::SERIAL, None).expect("held") {}
     bank.light_by(Lighting {
         sunlight: alloc::vec![Vec3::splat(20.0); SUNLIGHT_LEVELS * SUN_COSINES],
-        cosines: (-1.0, 1.0),
+        cosines: bank.sun_cosines(sun),
         toward: sun,
         above: Vec3::new(0.6, 0.8, 1.2),
-        below: (Vec3::ZERO, Vec3::splat(0.3)),
+        ground: (Vec3::splat(5.0), 0.3),
     });
+    while !bank.step(&tairix_parallel::SERIAL, None).expect("held") {}
     bank
 }
 
@@ -162,8 +170,13 @@ fn day(elevation: f64) -> Air {
 /// An open sky of `air` under a bank of `deck`, stood about the eye, built
 /// and lit by the air.
 fn under(air: Air, deck: Deck) -> Sky {
-    let mut low =
-        Cloudbank::new([Some(deck), None], 28_000.0, air.sun, air.ground()).expect("fits");
+    let mut low = Cloudbank::new(
+        [Some(deck), None],
+        (28_000.0, COARSE),
+        air.sun,
+        air.ground(),
+    )
+    .expect("fits");
     low.stand(air.eye).expect("levels fit");
     let mut sky = Sky {
         dome: Dome::Air(Atmosphere::new(air).expect("tables fit")),
@@ -298,10 +311,16 @@ fn the_nearer_bank_hides_the_farther_and_both_shade_the_ground() {
         (under - under_both).max_element().abs() < 1e-3 * under.max_element(),
         "the ceiling hides the cirrus above it: {under:?} {under_both:?}"
     );
-    assert!(
-        (seen(&high) - seen(&room())).length() > 1e-6,
-        "cirrus alone is seen"
-    );
+    let shows = (0..40u32)
+        .filter(|&step| {
+            let around = f64::from(step) * 2.399_963;
+            let dir =
+                Vec3::new(0.4 * mathf::cos(around), 0.9, 0.4 * mathf::sin(around)).normalized();
+            let look = |sky: &Sky| sky.radiance(Vec3::ZERO, dir, CLOSE);
+            (look(&high) - look(&room())).length() > 1e-6
+        })
+        .count();
+    assert!(shows > 5, "cirrus alone is seen along {shows} of 40 rays");
     for step in 0..50u32 {
         let at = Vec3::new(f64::from(step) * 150.0 - 3750.0, 0.0, 400.0);
         let (one, other, together) = (

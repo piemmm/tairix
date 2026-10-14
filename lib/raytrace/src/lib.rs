@@ -73,7 +73,6 @@ mod scene;
 mod shade;
 mod shape;
 mod sky;
-mod slab;
 mod snow;
 mod snowman;
 mod solid;
