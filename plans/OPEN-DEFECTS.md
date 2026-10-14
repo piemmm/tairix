@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 371 open, 633 closed, 1004 total.
+**closed**, and a partial fix stays **open**. 372 open, 633 closed, 1005 total.
 
-### Open (371)
+### Open (372)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -399,6 +399,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1008 | machine settings are replaced in place: `configure` (`system.conf`, `network.conf`), `applib` (`ProgramLibrary/library.conf`) and `timed` (`Time/state`) truncate the live file and rewrite it with no sync and no rename, so a crash or power loss mid-write leaves it empty or torn, while init, confd and the account engine replace theirs through a temporary and a rename (init and the account engine sync it first), each with its own copy of that sequence | **medium, durability**; found scoping D997; not absorbed. The fix is one shared replace-a-document primitive in `lib/rt` (write a sibling temporary, sync it, rename it over the original, sync again), used by every writer, with a test that interrupts a replace between truncate and write. `userland/apps/configure/src/run.rs` `replace_document`; `userland/apps/applib/src/run.rs`; `userland/system/timed/src/run.rs`; `userland/system/init/src/run.rs`; `userland/system/confd/src/store.rs`; `kernel/tairix-kernel/src/user_admin_backing.rs` |
 | D1009 | the Pi images' root volume is a fixed 64 MiB whatever the card holds: `ROOT_PART_SECTORS`'s rustdoc says the installer grows the layout on first boot, but the installer is a six-line placeholder and nothing enlarges the partition or calls `ARXFS::grow`, so every account's files, the applications and D997's reserve share 64 MiB | **medium, capacity**; found scoping D997; not absorbed. The fix grows the root partition to the medium on first boot, then the volume through `ARXFS::grow`, with a QEMU vertical booting a disk larger than its image; the rustdoc is corrected with it. `tools/mkimage/src/lib.rs` `ROOT_PART_SECTORS`; `drivers/filesystem/arxfs/src/lib.rs` `grow`; `userland/system/installer` |
 | D1010 | `kernel/core/src/fs/path.rs` carries a raw NUL byte in a test literal (`parse_link_target`'s NUL-bearing case) where the `\0` escape was meant, so a search that sniffs for binary content skips the whole file, hiding `ROOT_TEMPLATE` and `resolve_machine_alias` from a tree grep; the D999 census needed `grep -a` to find them | **low, maintainability**; found scoping D999; not absorbed; the only raw NUL in tracked `.rs`, `.md` and `.toml` files. The fix writes the escape, and a check refusing control bytes in tracked source is its regression test. `kernel/core/src/fs/path.rs` |
+| D1011 | `kernel/tairix-kernel/README.md` still documents `published_memory_map()` and `publish_memory_map`, which `1d6d23511` deleted, and tells a bring-up observer to build its own per-device DMA `FrameAllocator` from the firmware memory map: the second owner of the kernel allocator's frames that D995 removed. The same passage names `src/arch_wrapper.rs`, which is `src/x86_64/arch_wrapper.rs` | **low, stale docs**; noticed reviewing the merge of `1d6d23511`; logged rather than absorbed, by the user's decision for this merge. The fix deletes the bullet, leaving `published_irq_table()` and `published_irq_controller()` as the accessors, states that an observer's DMA pool draws on the kernel's own frame allocator (`installed_spawn_services().frames()`), and corrects the path. `kernel/tairix-kernel/README.md` "Published boot-state accessors" |
 
 
 ### Closed (633)
