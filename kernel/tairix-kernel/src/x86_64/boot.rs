@@ -873,13 +873,6 @@ fn try_boot(
     unsafe {
         crate::x86_64::panic_ctx::publish_arch(Arc::as_ptr(&arch_arc));
     }
-    // Publish a clone of the firmware memory map into the bin-crate's
-    // set-once slot before it is moved into the `kernel_core` hand-off,
-    // so a driver-bring-up observer can build a per-device DMA
-    // `FrameAllocator` from the same firmware description without
-    // re-borrowing the `pub(crate)` `KernelState`.
-    crate::x86_64::arch_wrapper::publish_memory_map(&memory_map);
-
     let scheduler_config = SchedulerConfig::defaults_for(1);
     let boot_info: BootInfo<'static, BinArch> = BootInfo::new(
         /* boot_cpu       = */ 0,

@@ -42,7 +42,7 @@ pub mod publish;
 #[cfg(freestanding)]
 pub use boot::{boot, try_boot, BootError, RiscvBinArch};
 #[cfg(freestanding)]
-pub use publish::{published_dtb, published_memory_map};
+pub use publish::published_dtb;
 
 // A vertical that runs the full boot before its scenario binds its device's
 // line on the table and controller that boot published: the trap dispatch is

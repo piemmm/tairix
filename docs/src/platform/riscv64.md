@@ -71,8 +71,9 @@ paging off; step 3 turns the Sv39 identity MMU on before any
 allocator/scheduler work. Because the map is identity (physical ==
 virtual) and covers the whole canonical lower half, every physical
 address the board uses — the kernel image, the firmware DTB, the PLIC,
-the `virt` MMIO window, and the per-device DMA regions the
-device-bring-up verticals carve — keeps its address under translation.
+the `virt` MMIO window, and the DMA buffers the device-bring-up
+verticals draw from the kernel's allocator — keeps its address under
+translation.
 RAM above that half is reached through the direct physical map instead,
 which lives in the upper half and is what every kernel path that touches
 a *frame* resolves through. The boot heap is
@@ -653,19 +654,16 @@ wrapper crate (not in the production `boot_riscv64` pipeline, which
 never carries a test-observer side channel, and not in the HAL-only arch
 port, which must not name `kernel/mem` — `AGENTS.md` §17.2 / §5.4.5):
 
-- `publish_memory_map` / `published_memory_map` — a `'static` clone of
-  the firmware `BootMemoryMap`, published by the `riscv64_boot::boot`
-  wrapper (via the production `boot_riscv64::build_boot_memory_map`)
-  before it delegates to `boot_riscv64::boot`, which moves its own copy
-  into the `kernel_core` hand-off — so a vertical can carve a per-device
-  DMA pool from high RAM without re-borrowing the kernel state.
 - `publish_dtb` / `published_dtb` — the flattened-device-tree pointer
   (`a1`), so a vertical can walk the `virtio_mmio` slots, the PLIC base,
   and each device's `interrupts` cell when it builds the MMIO transport
   and the external-IRQ path.
 
-Both slots are one-shot (`AGENTS.md` §2.1) and the accessors expose no
-writable surface (`AGENTS.md` §2.4). The external-interrupt path is
+No memory map is published: a vertical's DMA draws on the kernel's own
+frame allocator (`installed_spawn_services().frames()`), never on a second
+allocator built over frames the kernel already owns. The slot is one-shot
+(`AGENTS.md` §2.1) and the accessor exposes no writable surface
+(`AGENTS.md` §2.4). The external-interrupt path is
 **not** a test-only slot: the production boot pipeline builds the
 controller the firmware device tree describes — the AIA (an APLIC and the
 hart's IMSIC file) where it has one, else the single-context S-mode PLIC —
@@ -693,8 +691,7 @@ crate (`AGENTS.md` §2.2); only the arch-specific bring-up differs
 
 The riscv64 bring-up (`imp_mmio`):
 
-1. Reads `published_dtb` / `published_memory_map` (see *Boot-state
-   publication*) and carves a per-device DMA region from the top of RAM.
+1. Reads `published_dtb` (see *Boot-state publication*).
 2. Builds the `virt`-board virtio-MMIO bus via the public
    `tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb` constructor (the MMIO
    analogue of `tairix_pci::mechanism_one`; the concrete bus
@@ -707,7 +704,8 @@ The riscv64 bring-up (`imp_mmio`):
    dispatch (PLIC claim → `IrqTable::fire` → complete → wake) and
    `sie.SEIE` are already installed by the boot pipeline, so the vertical
    installs no dispatch of its own and calls no `init_traps`.
-4. Mints a `KernelVirtioHost` over the carved DMA pool and runs the
+4. Mints a `KernelVirtioHost` over a DMA pool drawing on the kernel's own
+   frame allocator and runs the
    shared `drive_driver_lifecycle` (`load → reload → device round-trip →
    unload`).
 

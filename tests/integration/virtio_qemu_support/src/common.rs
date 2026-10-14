@@ -38,16 +38,16 @@ use tairix_drv_storage_virtio_blk::VirtioBlk;
 use tairix_drvhost::{
     DriverEntry, DriverSpawner, Host, HostConfig, ImageSource, SpawnContext, SpawnRegisterError,
 };
-use tairix_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-use tairix_kernel_mem::{PhysAddr, PAGE_SIZE};
 use tairix_virtio::{Transport, VirtioHost};
 use tairix_virtio_input::VirtioInput;
 
 /// Upper bound of the boot identity map both arches build
 /// (`DirectPhysMap::identity(IDENTITY_LIMIT)`): the bottom 4 GiB. Every
-/// frame the per-device DMA allocator yields must fall below it so it is
-/// reachable through that identity map. The x86_64 boot maps `0..4 GiB`;
-/// the riscv64 `virt` board's RAM (`0x8000_0000..`) sits well inside it.
+/// frame a DMA pool draws from the kernel's allocator must fall below it to
+/// be reachable through that identity map, so the verticals give their
+/// guests less RAM than that; a frame past it fails the pool closed. The
+/// x86_64 boot maps `0..4 GiB`; the riscv64 `virt` board's RAM
+/// (`0x8000_0000..`) sits well inside it.
 pub const IDENTITY_LIMIT: u64 = 0x1_0000_0000;
 
 /// `EventId(4004)` — `AuditEvent::BootCompleted`. The arch boot harness
@@ -213,46 +213,6 @@ impl DriverSpawner for FixedSpawner {
     ) -> Result<DriverHandle, SpawnRegisterError> {
         (self.entry)(ctx.host).map_err(SpawnRegisterError::Register)
     }
-}
-
-/// Carve the top `pages` of the highest identity-mapped Usable region of
-/// `src` into a single-region [`BootMemoryMap`] for the per-device DMA
-/// allocator.
-///
-/// The carved sub-region sits at the very top of RAM, away from the low
-/// frames the boot pipeline and kernel heap consume, so the per-device
-/// [`FrameAllocator`](tairix_kernel_mem::FrameAllocator) never hands out
-/// a frame the live kernel is using. It is bounded below
-/// [`IDENTITY_LIMIT`] so every frame it yields is reachable through the
-/// identity map. Both arch scenarios carve identically.
-#[must_use]
-pub fn carve_dma_map(src: &BootMemoryMap, pages: usize) -> Option<BootMemoryMap> {
-    let need = (pages as u64).checked_mul(PAGE_SIZE as u64)?;
-    let mut best_end: Option<u64> = None;
-    for r in src.regions() {
-        if r.kind != RegionKind::Usable {
-            continue;
-        }
-        let end = r.end()?.as_u64();
-        let start = r.start.as_u64();
-        if end > IDENTITY_LIMIT {
-            continue;
-        }
-        if end.saturating_sub(start) < need {
-            continue;
-        }
-        best_end = Some(best_end.map_or(end, |b| b.max(end)));
-    }
-    let end = best_end?;
-    let carve_end = end & !(PAGE_SIZE as u64 - 1);
-    let carve_start = carve_end.checked_sub(need)?;
-    let mut m = BootMemoryMap::new();
-    m.push(MemoryRegion {
-        kind: RegionKind::Usable,
-        start: PhysAddr::new(carve_start),
-        length: need,
-    });
-    Some(m)
 }
 
 /// Read the flattened device tree's total size from its header

@@ -5,10 +5,9 @@
 //! exactly one riscv64 boot orchestration in the workspace — the same one the production `tairix-kernel` binary runs. This
 //! module re-exports the production [`RiscvBinArch`] / [`BootError`] /
 //! [`try_boot`] and adds the single test-only affordance the verticals
-//! need on top of it: publishing the firmware [`BootMemoryMap`] + DTB
-//! pointer to the device-bring-up observers ([`crate::publish`]) before
-//! delegating to the production [`boot`](tairix_kernel::riscv64::boot::boot),
-//! which moves the map into the `kernel_core` hand-off.
+//! need on top of it: publishing the DTB pointer to the device-bring-up
+//! observers ([`crate::publish`]) before delegating to the production
+//! [`boot`](tairix_kernel::riscv64::boot::boot).
 //!
 //! Keeping the publish affordance here (not in the production pipeline)
 //! is the discipline: the production kernel never carries a
@@ -22,10 +21,8 @@ pub use tairix_kernel::riscv64::boot::{try_boot, BootError, RiscvBinArch};
 /// Boot the riscv64 `virt`-board vertical and forward to the production
 /// kernel pipeline.
 ///
-/// Publishes the firmware [`BootMemoryMap`](tairix_kernel_mem::BootMemoryMap)
-/// and the DTB pointer for the virtio-MMIO / framebuffer device-bring-up
-/// observers ([`crate::publish`]) — which need them after the pipeline
-/// has moved the map into the `kernel_core` hand-off — then delegates to
+/// Publishes the DTB pointer for the virtio-MMIO / framebuffer
+/// device-bring-up observers ([`crate::publish`]), then delegates to
 /// [`tairix_kernel::riscv64::boot::boot`].
 ///
 /// `heap` is the consuming vertical's own `#[global_allocator]`, which the
@@ -50,13 +47,6 @@ pub fn boot(
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
 ) -> ! {
-    // Publish before delegating, while the map can still be observed:
-    // the production pipeline moves it into the hand-off. A build
-    // failure here is non-fatal — the production boot recomputes the
-    // same map and fails closed on the identical cause; the observers then simply see no published map.
-    if let Ok(map) = tairix_kernel::riscv64::boot::build_boot_memory_map(dtb) {
-        crate::publish::publish_memory_map(&map);
-    }
     crate::publish::publish_dtb(dtb);
     tairix_kernel::riscv64::boot::boot(hartid, dtb, heap, log_sink, audit_sink, log_level)
 }

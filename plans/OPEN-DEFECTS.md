@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 356 open, 632 closed, 988 total.
+**closed**, and a partial fix stays **open**. 356 open, 633 closed, 989 total.
 
 ### Open (356)
 
@@ -386,7 +386,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D994 | a stale `commit_park` can consume the wake token meant for a task's next park and so hang it for good: CPU A parks task T on lock L1 (`settle` marks it Parked) and takes an interrupt before `commit_park`; meanwhile L1's releaser readies T onto CPU B, T claims L1, registers on L2 and parks, and L2's releaser, seeing T Running, leaves a token; A then resumes, its `commit_park` swaps that token out and `deliver_wake` drops it because T is not Parked, so T commits its L2 park with no token and sleeps with L2 designated to it | **high, correctness**; found tracing the Pi 4 boot stall (it is not D968: this hang never clears). The window is a few instructions wide but the interrupt only has to outlast a handoff, which heavy lock contention makes reachable. The fix is to tie a token to the park it answers (each park's sequence carried by its wake, a `commit_park` consuming only its own), with a loom model of the two-CPU interleaving above as its regression. `kernel/sched/api/src/park.rs` `deliver_wake`, `commit_park`, `unpark_task`; `kernel/sched/eevdf/src/scheduler.rs` `settle` |
 
 
-### Closed (632)
+### Closed (633)
 
 | ID | Subject |
 |---|---|
@@ -1022,6 +1022,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D990 | the boot RAM self-test paid a full barrier per sampled page: each sampled word was written, cleaned with `dc civac` and completed by its own `dsb sy`, twice, so 7.4 GB took ~3.6 million serialised DRAM round trips (1.19 s on the Pi 4, before the other cores start). Sampled cells are now driven 64 at a time and flushed under one barrier (`WordWindow::flush_words` over `PhysMap::clean_invalidate_each`, which aarch64 completes with one `dsb sy`; the default delegates to each port's `clean_invalidate`), with the same cells, both polarities and DRAM-observing reads; the address pass flushes its markers as one batch. The stale 'zeroes / verifies every usable byte' wording is corrected. `a_window_flushes_its_samples_a_batch_per_barrier`, `a_stuck_cell_past_the_first_batch_is_named` |
 | D991 | `devmgr` re-ran matching only when node ids changed, so a consumer held for its supplier stayed unbound when the supplier began serving (a flag on the supplier's own node, no id change) until some unrelated tree change, and on a quiet tree never loaded — the settle deadline then declared readiness without it; the reaction now also compares which roles each node serves (`HwNode::served_roles`, `AutoloadState::serving`). `a_consumer_held_for_its_supplier_loads_once_the_supplier_serves` |
 | D992 | `drvhost` copied every verified driver image into its load record, where only the record's own `Drop` read it, to wipe it: a bundle-sized allocation, copy and volatile wipe per driver load for nothing (reload re-fetches). The copy and the record's `Drop` are deleted. `a_load_retains_no_copy_of_the_image` (over a new `Metering::retained`) |
+| D995 | the riscv64 virtio-MMIO and the virtio-PCI QEMU harnesses built a second frame allocator over the top 1 MiB of the firmware memory map, frames the kernel's own allocator also owned (it keeps its per-frame metadata at the top of the highest run and hands out its highest frames first), so kernel bookkeeping wrote into the harness allocator's free lists; it passed only while those writes missed them, and `tairix-test-virtio-blk-mmio-riscv64` and `tairix-test-input-virtio-mmio-qemu-riscv64` failed `VirtioBlk::open`/`VirtioInput::open` with `AllocError::InvariantViolation` once they did not. Both harnesses now draw DMA frames from the kernel's live allocator (`installed_spawn_services().frames()`), and the double-owning `carve_dma_map` and the firmware memory-map publication it alone used (the x86_64 port's `publish_memory_map`/`published_memory_map`, the riscv64 scenario crate's twin) are deleted. Regression: those two verticals, which fail before and pass after |
 
 ## Scope
 

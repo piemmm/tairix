@@ -6192,7 +6192,6 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
- "tairix-kernel-mem",
  "tairix-log",
  "tairix-sync",
 ]

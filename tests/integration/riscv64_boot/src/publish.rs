@@ -3,66 +3,27 @@
 //!
 //! The riscv64 virtio-MMIO QEMU verticals run as freestanding bins that
 //! re-use the [`crate::boot`] pipeline and hijack the boot hart on
-//! `AuditEvent::BootCompleted`. At that point they need two pieces of
-//! state the boot pipeline already computed but otherwise moves into
-//! the kernel-core hand-off:
+//! `AuditEvent::BootCompleted`. At that point they need the
+//! flattened-device-tree pointer the boot pipeline otherwise consumes, to
+//! walk the `virtio_mmio` slots, the PLIC base, and each device's
+//! `interrupts` cell. Their DMA draws on the kernel's own frame allocator,
+//! never on a second one built over the firmware map.
 //!
-//! * the firmware [`BootMemoryMap`] — to carve a per-device DMA pool
-//!   from high RAM without re-borrowing the `pub(crate)` kernel state,
-//!   and
-//! * the flattened-device-tree pointer — to walk the `virtio_mmio`
-//!   slots, the PLIC base, and each device's `interrupts` cell.
-//!
-//! Both are exposed through set-once slots ([`OnceCell`]): the boot
-//! pipeline publishes once, before the map is moved into the hand-off,
-//! and any observer reads an immutable `'static` view. A second publish
-//! is rejected by the `OnceCell` (one-shot publish);
-//! the accessors expose no writable surface.
-//!
-//! These slots used to live in the arch crate. They moved here with the
-//! boot pipeline when the arch port became a pure Arch HAL
-//! implementation: publishing the firmware
-//! `BootMemoryMap` requires naming `kernel/mem`, which the arch port no
-//! longer does.
+//! The pointer is exposed through a set-once slot ([`OnceCell`]): the boot
+//! pipeline publishes once and any observer reads an immutable `'static`
+//! view. A second publish is rejected by the `OnceCell` (one-shot publish);
+//! the accessor exposes no writable surface.
 
-use tairix_kernel_mem::BootMemoryMap;
 use tairix_sync::once::OnceCell;
-
-/// Set-once slot for a clone of the firmware [`BootMemoryMap`] the boot
-/// pipeline assembled.
-static MEMORY_MAP_SLOT: OnceCell<BootMemoryMap> = OnceCell::new();
 
 /// Set-once slot for the flattened-device-tree pointer (`a1`) OpenSBI
 /// handed the boot hart.
 static DTB_PTR_SLOT: OnceCell<u64> = OnceCell::new();
 
-/// Publish a clone of the firmware [`BootMemoryMap`] into the set-once
-/// slot.
-///
-/// Called once from [`crate::boot::try_boot`] with the assembled map,
-/// before the original is moved into the `kernel_core` hand-off. A
-/// second call is a no-op (`OnceCell::set` rejects it); the boot
-/// pipeline only ever calls this once, so the discarded `Err` cannot
-/// mask a real defect (one-shot publish).
-pub fn publish_memory_map(map: &BootMemoryMap) {
-    let _ = MEMORY_MAP_SLOT.set(map.clone());
-}
-
-/// Read the [`BootMemoryMap`] published by [`publish_memory_map`].
-///
-/// Returns `None` until the boot pipeline has published the map. The
-/// returned reference is to the `'static` slot-owned clone; the
-/// accessor exposes no writable surface.
-#[must_use]
-pub fn published_memory_map() -> Option<&'static BootMemoryMap> {
-    MEMORY_MAP_SLOT.get().unwrap_or_default()
-}
-
 /// Publish the flattened-device-tree pointer into the set-once slot.
 ///
 /// Called once from [`crate::boot::try_boot`] with the verbatim `a1`
-/// hand-off value. A second call is a no-op, matching the
-/// one-shot-publish discipline of [`publish_memory_map`].
+/// hand-off value. A second call is a no-op (one-shot publish).
 pub fn publish_dtb(dtb: u64) {
     let _ = DTB_PTR_SLOT.set(dtb);
 }

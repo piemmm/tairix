@@ -24,9 +24,6 @@ path = "src/lib.rs"
 # The single riscv64 boot pipeline (`boot_riscv64`) this crate re-exports
 # and delegates to.
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
-# `publish` clones + serves the firmware `BootMemoryMap` through a
-# set-once slot for the device-bring-up observers.
-tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
 # The `FreeListAllocator` type the consuming vertical's own
 # `#[global_allocator]` is handed through to the production pipeline.
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }

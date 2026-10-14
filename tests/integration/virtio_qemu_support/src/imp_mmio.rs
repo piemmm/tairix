@@ -21,18 +21,14 @@ use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use tairix_drv_bus_virtio::MmioTransport;
 use tairix_fdt::Fdt;
 use tairix_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, Trigger};
-use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, HostPageTable, MmioMap, VirtAddr,
-};
+use tairix_kernel_mem::{AddressSpace, DirectPhysMap, DmaPool, HostPageTable, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{
     first_virtio_slot, provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost,
 };
 use tairix_log::{Event, EventId, Level, Sink};
-use tairix_test_riscv64_boot::{
-    controller, published_dtb, published_irq_table, published_memory_map,
-};
+use tairix_test_riscv64_boot::{controller, published_dtb, published_irq_table};
 use tairix_virtio::transport_mmio::COMPATIBLE;
 use tairix_virtio::{PoolId, VirtioHost};
 
@@ -57,7 +53,7 @@ pub use tairix_log::{
 pub use tairix_test_riscv64_boot::boot;
 
 use crate::common::{
-    carve_dma_map, drive_driver_lifecycle, dtb_total_size, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
+    drive_driver_lifecycle, dtb_total_size, QemuEnv, ScenarioConfig, IDENTITY_LIMIT,
 };
 
 use tairix_itest_finisher::fail_point;
@@ -100,13 +96,6 @@ const TASK: ProcessId = ProcessId(0x5b2);
 
 /// Capacity, in pages, of each per-device DMA window.
 const POOL_PAGES: usize = 64;
-
-/// Pages carved from high RAM for the per-device DMA allocator. Sized
-/// like the x86_64 vertical: the direct-driving pool plus the transient
-/// pool the `.rxe` load mints, with slack. At 4 KiB pages this is 1 MiB,
-/// carved from the very top of RAM, comfortably above the firmware
-/// device-tree blob OpenSBI leaves near the top.
-const CARVE_PAGES: usize = 256;
 
 /// Base virtual address of each minted DMA window (bookkeeping only; the
 /// driver reaches buffers through the identity map, so this address only
@@ -282,15 +271,12 @@ where
     let Some(dtb_ptr) = published_dtb() else {
         env.fail("no published DTB");
     };
-    let Some(memmap) = published_memory_map() else {
-        env.fail("no published memory map");
-    };
 
     // 1. Form a `&[u8]` over the exact device-tree blob.
     // SAFETY: `dtb_ptr` is the verbatim OpenSBI `a1` the boot pipeline
     // published; it addresses a valid flattened device tree that lives
-    // for the life of the guest, and the carved DMA region is taken from
-    // the top of RAM, clear of the blob.
+    // for the life of the guest, its frames reserved from the allocator the
+    // DMA pool below draws on.
     let dtb_len = unsafe { dtb_total_size(dtb_ptr) };
     // SAFETY: as above; `dtb_len` is the blob's self-described size.
     let dtb_bytes = unsafe { core::slice::from_raw_parts(dtb_ptr as *const u8, dtb_len) };
@@ -298,13 +284,15 @@ where
         env.fail("DTB parse");
     };
 
-    // 2. Per-device DMA: carve high frames + the boot identity map.
-    let Some(dma_map) = carve_dma_map(memmap, CARVE_PAGES) else {
-        env.fail("no carveable DMA region");
+    // 2. Per-device DMA: the kernel's frames, reached through the boot
+    //    identity map.
+    // The kernel's own allocator owns every RAM frame it did not reserve,
+    // so the DMA pool draws from it: a second allocator over any of its
+    // frames would hand out memory the kernel is also using.
+    let Some(services) = tairix_kernel_core::installed_spawn_services() else {
+        env.fail("no live frame allocator");
     };
-    let Ok(frames) = FrameAllocator::new(&dma_map) else {
-        env.fail("frame allocator build");
-    };
+    let frames = services.frames();
     // SAFETY: the boot code identity-maps this window and never unmaps it.
     let phys = unsafe { DirectPhysMap::identity(IDENTITY_LIMIT) }
         .expect("the boot direct map addresses its window");
@@ -354,7 +342,7 @@ where
         space,
         VirtAddr::new(POOL_VBASE),
         POOL_PAGES,
-        &frames,
+        frames,
         &phys,
         DmaCoherence::Snooped,
     ) else {
