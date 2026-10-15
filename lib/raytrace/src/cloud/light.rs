@@ -22,9 +22,17 @@
 //! ground as its albedo has it, until it leaves by the top. The track it
 //! lays through a voxel is that voxel's share of the diffuse light's
 //! fluence, the track's direction its share of the net flux, and what leaves
-//! by the floor having scattered is the light the bank sheds below.
-//! Every tally is an exact integer, so the light comes out the same however
-//! many cores follow the photons, in whatever order.
+//! by the floor having scattered is the light the bank sheds below. A voxel's
+//! bound is none where the weather over it leaves no room for cloud, so a
+//! photon crosses clear air without reading it.
+//!
+//! Where the bank holds heaps, each level within its resolution's reach holds
+//! its light again in fine cells within every voxel holding cloud, each
+//! voxel's track shared out among the fine cells it crosses, so the light just
+//! inside a heap's surface is held as finely as its turrets shade it. A read
+//! takes the fine cells about it where they are held and the voxels for the
+//! rest. Every tally is an exact integer, so the light comes out the same
+//! however many cores follow the photons, in whatever order.
 
 use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
@@ -35,7 +43,7 @@ use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use super::form::Edges;
-use super::{sunlight_at, Cloudbank, Reader, RIM};
+use super::{sunlight_at, Cloudbank, Holding, Reader, RIM};
 use crate::band;
 use crate::noise::smoothstep;
 use crate::sample::{mix32, unit};
@@ -52,6 +60,16 @@ pub(crate) struct Resolution {
     /// lit by: photons are followed through a level a round at a time until
     /// they have laid so much.
     pub(crate) tracks: f64,
+    /// How many times finer than its voxels each level no broader than
+    /// `reach` either way of the eye holds its diffuse light, within its
+    /// voxels holding cloud, every fine cell lit by as much track as a
+    /// voxel, where the bank holds heaps and a fine cell spans a pixel: the
+    /// light just inside a heap's surface varies within a transport mean free
+    /// path, which the voxels hold only in part, while past the reach its
+    /// cloud stands low over the horizon behind miles of air, and its voxels
+    /// hold its light.
+    pub(crate) fine: usize,
+    pub(crate) reach: f64,
 }
 
 /// The tallest a voxel stands, so even a coarse level holds a cloud's base,
@@ -96,9 +114,27 @@ const LEAST_WEIGHT: f64 = 1.0 / 32.0;
 const DEEPEST: f64 = 50.0;
 const DEPTH_SCALE: f64 = DEEPEST / 65_535.0;
 /// Rows of voxels a core fills in a unit: of voxelling, a voxel some tenths
-/// of a microsecond; and of a field's pass, some nanoseconds.
+/// of a microsecond; and of a field's pass, some nanoseconds. And rows of a
+/// level's columns it finds what the weather holds over, a column up to a
+/// microsecond.
 const VOXEL_ROWS: usize = 24;
 const FIELD_ROWS: usize = 256;
+const STAND_ROWS: usize = 8;
+/// Cells of one tally a core lays at nought in a unit: a megabyte of fresh
+/// memory.
+const TALLY_CELLS: usize = 1 << 17;
+/// The layers one word of a column's layer bits holds.
+const LAYER_BITS: usize = u64::BITS as usize;
+
+/// How heaped a bank's most heaped deck must stand for its light to be held
+/// finely: a heap's turrets shade one another down to the scale the fine
+/// cells hold, while a sheet's relief is a third of a heap's, and an
+/// overcast that fills every voxel of its layers would spend the fine
+/// light's photons on a grey ceiling.
+const HEAPED: f64 = 0.5;
+/// Blocks of fine cells a core makes a field over in a unit, and in a band.
+const FIELD_BLOCKS: usize = 2048;
+const BAND_BLOCKS: usize = 64;
 
 /// Voxel columns along each side of a cell of a level's floor, over which the
 /// light its cloud sheds below and the sky it leaves open are taken: a point
@@ -127,7 +163,9 @@ const FIELD_PASSES: usize = FLUENCES * PASSES + FLUXES * (1 + 3 * SMOOTHINGS[1])
 const _: () = assert!(PASSES == 1 + 3 * SMOOTHINGS[0]);
 
 /// The shape of a level: its half breadth either way of the bank's middle,
-/// its voxels along each side and up, and a voxel's breadth and height.
+/// its voxels along each side and up, a voxel's breadth and height, and how
+/// many times finer than its voxels it holds its light where cloud stands,
+/// one where it holds it in its voxels alone.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 struct Grid {
     half: f64,
@@ -135,11 +173,22 @@ struct Grid {
     layers: usize,
     breadth: f64,
     height: f64,
+    fine: usize,
 }
 
 impl Grid {
     const fn voxels(self) -> usize {
         self.cells * self.cells * self.layers
+    }
+
+    /// The fine cells a voxel holding cloud is held as.
+    const fn fine_cells(self) -> usize {
+        self.fine * self.fine * self.fine
+    }
+
+    /// The words a column's layers take a bit each of.
+    const fn layer_words(self) -> usize {
+        self.layers.div_ceil(LAYER_BITS)
     }
 
     const fn rows(self) -> usize {
@@ -159,46 +208,58 @@ impl Grid {
         )
     }
 
-    /// Where `(x, altitude, z)` lies among the voxels' middles, counted in
-    /// voxels from the first and clamped onto them; `None` off the square.
-    fn place(self, bank: &Cloudbank, (x, altitude, z): (f64, f64, f64)) -> Option<(f64, f64, f64)> {
+    /// Where `(x, altitude, z)` lies among the middles of cells `per` to a
+    /// voxel along each axis, counted in those cells from the first and
+    /// clamped onto them; `None` off the square.
+    fn place_in(
+        self,
+        bank: &Cloudbank,
+        (x, altitude, z): (f64, f64, f64),
+        per: usize,
+    ) -> Option<(f64, f64, f64)> {
         let (east, north) = (x - bank.centre.0 + self.half, z - bank.centre.1 + self.half);
         let span = 2.0 * self.half;
         if !((0.0..span).contains(&east) && (0.0..span).contains(&north)) {
             return None;
         }
-        let last = |count: usize| real(count.saturating_sub(1));
+        let (fine, last) = (real(per), |count: usize| {
+            real((count * per).saturating_sub(1))
+        });
         Some((
-            (east / self.breadth - 0.5).clamp(0.0, last(self.cells)),
-            ((altitude - bank.floor) / self.height - 0.5).clamp(0.0, last(self.layers)),
-            (north / self.breadth - 0.5).clamp(0.0, last(self.cells)),
+            (east / self.breadth * fine - 0.5).clamp(0.0, last(self.cells)),
+            ((altitude - bank.floor) / self.height * fine - 0.5).clamp(0.0, last(self.layers)),
+            (north / self.breadth * fine - 0.5).clamp(0.0, last(self.cells)),
         ))
+    }
+
+    /// Where `at` lies among the voxels' middles.
+    fn place(self, bank: &Cloudbank, at: (f64, f64, f64)) -> Option<(f64, f64, f64)> {
+        self.place_in(bank, at, 1)
+    }
+
+    /// The eight cells about `place`, of cells `per` to a voxel along each
+    /// axis, and the weight each is read with.
+    fn cube(self, place: (f64, f64, f64), per: usize) -> [((usize, usize, usize), f64); 8] {
+        let ((i, fu), (k, fv), (j, fw)) = (cell_of(place.0), cell_of(place.1), cell_of(place.2));
+        let (along, up) = (self.cells * per - 1, self.layers * per - 1);
+        let (i, k, j) = (i.min(along), k.min(up), j.min(along));
+        let (i1, k1, j1) = ((i + 1).min(along), (k + 1).min(up), (j + 1).min(along));
+        [
+            ((i, k, j), (1.0 - fu) * (1.0 - fv) * (1.0 - fw)),
+            ((i1, k, j), fu * (1.0 - fv) * (1.0 - fw)),
+            ((i, k1, j), (1.0 - fu) * fv * (1.0 - fw)),
+            ((i1, k1, j), fu * fv * (1.0 - fw)),
+            ((i, k, j1), (1.0 - fu) * (1.0 - fv) * fw),
+            ((i1, k, j1), fu * (1.0 - fv) * fw),
+            ((i, k1, j1), (1.0 - fu) * fv * fw),
+            ((i1, k1, j1), fu * fv * fw),
+        ]
     }
 
     /// The eight voxels about a place, and the weight each is read with.
     fn corners(self, place: (f64, f64, f64)) -> [(usize, f64); 8] {
-        let ((i, fu), (k, fv), (j, fw)) = (cell_of(place.0), cell_of(place.1), cell_of(place.2));
-        let (i, k, j) = (
-            i.min(self.cells - 1),
-            k.min(self.layers - 1),
-            j.min(self.cells - 1),
-        );
-        let (i1, k1, j1) = (
-            (i + 1).min(self.cells - 1),
-            (k + 1).min(self.layers - 1),
-            (j + 1).min(self.cells - 1),
-        );
-        let at = |i: usize, k: usize, j: usize, weight: f64| (self.index((i, k, j)), weight);
-        [
-            at(i, k, j, (1.0 - fu) * (1.0 - fv) * (1.0 - fw)),
-            at(i1, k, j, fu * (1.0 - fv) * (1.0 - fw)),
-            at(i, k1, j, (1.0 - fu) * fv * (1.0 - fw)),
-            at(i1, k1, j, fu * fv * (1.0 - fw)),
-            at(i, k, j1, (1.0 - fu) * (1.0 - fv) * fw),
-            at(i1, k, j1, fu * (1.0 - fv) * fw),
-            at(i, k1, j1, (1.0 - fu) * fv * fw),
-            at(i1, k1, j1, fu * fv * fw),
-        ]
+        self.cube(place, 1)
+            .map(|(voxel, weight)| (self.index(voxel), weight))
     }
 
     /// The cells along each side of the level's floor.
@@ -306,15 +367,166 @@ impl Packed {
     }
 }
 
+/// The voxels of a level holding cloud, each held as a block of its fine
+/// cells: each column's runs of them, laid column by column.
+#[derive(Clone, Debug, Default)]
+struct Runs {
+    /// Each column's first run and how many it has, and its first block.
+    columns: Vec<(u32, u32)>,
+    starts: Vec<u32>,
+    /// Every column's runs, as their first layer and how many layers.
+    spans: Vec<(u16, u16)>,
+    blocks: usize,
+}
+
+impl Runs {
+    /// The runs of `grid`'s voxels holding cloud, as `layered` has each
+    /// column's layers, with the voxel each block holds; `None` when the
+    /// heap will not hold them.
+    fn holding(grid: Grid, layered: &[u64]) -> Option<(Self, Vec<u32>)> {
+        let (cells, layers, words) = (grid.cells, grid.layers, grid.layer_words());
+        // Each run of layers holding cloud up column `(i, j)`, its first and
+        // its end.
+        let each = |(i, j): (usize, usize), visit: &mut dyn FnMut(usize, usize)| {
+            let column = j * cells + i;
+            let bits = layered
+                .get(column * words..(column + 1) * words)
+                .unwrap_or(&[]);
+            let mut k = 0;
+            while let Some(first) = next_bit(bits, k, true) {
+                let end = next_bit(bits, first, false).map_or(layers, |end| end.min(layers));
+                visit(first, end);
+                k = end;
+            }
+        };
+        let (mut runs_held, mut blocks) = (0, 0);
+        for column in 0..cells * cells {
+            each((column % cells, column / cells), &mut |first, end| {
+                runs_held += 1;
+                blocks += end - first;
+            });
+        }
+        let mut columns = fallible::filled(cells * cells, (0, 0))?;
+        let mut starts = fallible::filled(cells * cells, 0)?;
+        let (mut spans, mut voxels) = (Vec::new(), Vec::new());
+        (fallible::reserve(&mut spans, runs_held) && fallible::reserve(&mut voxels, blocks))
+            .then_some(())?;
+        let mut fits = true;
+        for (column, (span, start)) in columns.iter_mut().zip(&mut starts).enumerate() {
+            let (i, j) = (column % cells, column / cells);
+            *start = u32::try_from(voxels.len()).ok()?;
+            span.0 = u32::try_from(spans.len()).ok()?;
+            each((i, j), &mut |first, end| {
+                let (Ok(low), Ok(count)) = (u16::try_from(first), u16::try_from(end - first))
+                else {
+                    fits = false;
+                    return;
+                };
+                spans.push((low, count));
+                span.1 += 1;
+                voxels
+                    .extend((first..end).filter_map(|k| u32::try_from(grid.index((i, k, j))).ok()));
+            });
+        }
+        // Every voxel of a level is counted within 32 bits and every layer
+        // within 16, as its blocks and runs are.
+        (fits && voxels.len() == blocks && u32::try_from(blocks).is_ok()).then_some(())?;
+        Some((
+            Self {
+                columns,
+                starts,
+                spans,
+                blocks,
+            },
+            voxels,
+        ))
+    }
+
+    /// The block voxel `(i, k, j)` is held as, if it is.
+    fn block(&self, grid: Grid, (i, k, j): (usize, usize, usize)) -> Option<usize> {
+        let column = j * grid.cells + i;
+        let (first, count) = *self.columns.get(column)?;
+        let first = usize::try_from(first).ok()?;
+        let mut block = usize::try_from(*self.starts.get(column)?).ok()?;
+        for &(low, layers) in self
+            .spans
+            .get(first..first + usize::try_from(count).ok()?)?
+        {
+            let (low, layers) = (usize::from(low), usize::from(layers));
+            if (low..low + layers).contains(&k) {
+                return Some(block + k - low);
+            }
+            block += layers;
+        }
+        None
+    }
+
+    /// The fine cell `(i, k, j)`, counted in fine cells, is held as, if it
+    /// is.
+    fn fine(&self, grid: Grid, (i, k, j): (usize, usize, usize)) -> Option<usize> {
+        let fine = grid.fine;
+        let block = self.block(grid, (i / fine, k / fine, j / fine))?;
+        Some(block * grid.fine_cells() + fine_within(fine, (i % fine, k % fine, j % fine)))
+    }
+}
+
+/// The first layer from `from` up whose bit in `bits` is `set`, if any.
+fn next_bit(bits: &[u64], from: usize, set: bool) -> Option<usize> {
+    let mut word = from / LAYER_BITS;
+    let mut mask = u64::MAX << (from % LAYER_BITS);
+    while let Some(&value) = bits.get(word) {
+        let found = mask & if set { value } else { !value };
+        if found != 0 {
+            return Some(word * LAYER_BITS + usize::try_from(found.trailing_zeros()).ok()?);
+        }
+        word += 1;
+        mask = u64::MAX;
+    }
+    None
+}
+
+/// Where fine cell `(i, k, j)` of a voxel `fine` fine cells a side lies in
+/// its block.
+const fn fine_within(fine: usize, (i, k, j): (usize, usize, usize)) -> usize {
+    (k * fine + j) * fine + i
+}
+
+/// Where the `within`th fine cell of the block holding voxel `voxel` lies,
+/// counted in fine cells.
+fn fine_cell(grid: Grid, voxel: u32, within: usize) -> (usize, usize, usize) {
+    let (cells, fine, voxel) = (grid.cells, grid.fine, usize::try_from(voxel).unwrap_or(0));
+    let (i, j, k) = (
+        voxel % cells,
+        voxel / cells % cells,
+        voxel / (cells * cells),
+    );
+    (
+        i * fine + within % fine,
+        k * fine + within / (fine * fine),
+        j * fine + within / fine % fine,
+    )
+}
+
+/// A level's diffuse light held finely within its voxels holding cloud: the
+/// fluence of each colour and the net flux at each fine cell's middle.
+#[derive(Clone, Debug, Default)]
+struct Fine {
+    runs: Runs,
+    fluence: [Packed; 2],
+    flux: [Packed; 3],
+}
+
 /// One level of a bank's light.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Volume {
     grid: Grid,
     /// At each voxel's middle: the optical depth toward the sun; the diffuse
-    /// light's fluence of each colour; and its net flux, in luminance.
+    /// light's fluence of each colour; and its net flux, in luminance. And
+    /// the same light held finely where cloud stands.
     depth: Packed,
     fluence: [Packed; 2],
     flux: [Packed; 3],
+    fine: Fine,
     /// Over each cell of its floor: how much of the sky overhead it leaves
     /// open, and the irradiance of each colour its cloud sheds down; and over
     /// each column what of the sunlight the bank above lets through at its
@@ -325,20 +537,55 @@ pub(super) struct Volume {
 }
 
 impl Volume {
-    fn reading(&self, place: (f64, f64, f64)) -> Reading {
-        let corners = self.grid.corners(place);
-        Reading {
-            depth: self.depth.read(&corners),
-            fluence: [
-                self.fluence[SUNLIT].read(&corners),
-                self.fluence[SKYLIT].read(&corners),
-            ],
-            flux: Vec3::new(
-                self.flux[0].read(&corners),
-                self.flux[1].read(&corners),
-                self.flux[2].read(&corners),
-            ),
+    /// What the level holds at `at`: its diffuse light from the fine cells
+    /// about it where they are held, and from its voxels for the share of
+    /// the fine cells that are not; `None` off its square.
+    fn reading(&self, bank: &Cloudbank, at: (f64, f64, f64)) -> Option<Reading> {
+        let grid = self.grid;
+        let corners = grid.corners(grid.place(bank, at)?);
+        let coarse = |fluence: &[Packed; 2], flux: &[Packed; 3], corners: &[(usize, f64); 8]| {
+            (
+                [fluence[SUNLIT].read(corners), fluence[SKYLIT].read(corners)],
+                Vec3::new(
+                    flux[0].read(corners),
+                    flux[1].read(corners),
+                    flux[2].read(corners),
+                ),
+            )
+        };
+        let mut fine = [(0, 0.0); 8];
+        let mut held = 0.0;
+        if self.fine.runs.blocks > 0 {
+            for (slot, (cell, weight)) in fine
+                .iter_mut()
+                .zip(grid.cube(grid.place_in(bank, at, grid.fine)?, grid.fine))
+            {
+                if let Some(index) = self.fine.runs.fine(grid, cell) {
+                    *slot = (index, weight);
+                    held += weight;
+                }
+            }
         }
+        let (fluence, flux) = if held <= 0.0 {
+            coarse(&self.fluence, &self.flux, &corners)
+        } else {
+            let (fluence, flux) = coarse(&self.fine.fluence, &self.fine.flux, &fine);
+            if held >= 1.0 - 1e-9 {
+                (fluence, flux)
+            } else {
+                let (wide, across) = coarse(&self.fluence, &self.flux, &corners);
+                let rest = 1.0 - held;
+                (
+                    [fluence[0] + rest * wide[0], fluence[1] + rest * wide[1]],
+                    flux + across * rest,
+                )
+            }
+        };
+        Some(Reading {
+            depth: self.depth.read(&corners),
+            fluence,
+            flux,
+        })
     }
 }
 
@@ -371,16 +618,21 @@ enum Stage {
     /// Its levels not yet laid about the eye.
     #[default]
     Unlaid,
-    /// Level by level from the coarsest in: its voxels, by rows; the sun's
-    /// optical depth, a slice at a time from the sunward face; the bank
-    /// above's light at its ceiling, by rows of columns; the photons
-    /// followed, by batches, round on round; each tally made a field, a pass
-    /// at a time by rows; and its depth and column maps, by rows.
+    /// Level by level from the coarsest in: what the weather holds over its
+    /// columns, by rows of them; its voxels, by rows; the sun's optical
+    /// depth, a slice at a time from the sunward face; the bank above's light
+    /// at its ceiling, by rows of columns; its tallies laid at nought, a
+    /// share of each at a time; the photons followed, by batches, round on
+    /// round; each tally made a field, a pass at a time by rows, and then
+    /// each fine tally, by blocks; and its depth and column maps, by rows.
+    Stands(usize, usize),
     Voxels(usize, usize),
     Sweep(usize, usize),
     Above(usize, usize),
+    Tallies(usize),
     Photons(usize, usize),
     Fields(usize, usize, usize),
+    Fine(usize, usize, usize),
     Maps(usize, usize),
     Done,
 }
@@ -400,12 +652,17 @@ struct Solving {
     volume: Volume,
     /// Each voxel's extinction, averaged over it, and optical depth toward
     /// the sun; and the most extinction any of its cloud holds, which
-    /// photons meet it against, from where each deck's cloud can stand over
+    /// photons meet it against, from what each deck's weather holds over
     /// each column.
     sigma: Vec<f32>,
     depth: Vec<f32>,
     bounds: Vec<f32>,
-    stands: Vec<[(f64, f64); 2]>,
+    stands: Vec<[Holding; 2]>,
+    /// Where its light is held finely, which of each column's layers hold
+    /// cloud, a bit a layer, until its runs are found; and the voxel each
+    /// block of its fine light holds.
+    layered: Vec<u64>,
+    voxels: Vec<u32>,
     /// How many voxels of each row hold cloud.
     cloudy: Vec<u32>,
     plan: Plan,
@@ -432,12 +689,55 @@ struct Plan {
     laid: u64,
 }
 
-/// The integer tallies photons lay down as they are followed.
+/// The integer tallies photons lay down as they are followed: over the
+/// voxels, over the fine cells of those holding cloud, and over the floor;
+/// and how many cells each of the three holds once laid.
 #[derive(Debug, Default)]
 struct Tally {
+    voxels: Sums,
+    fine: Sums,
+    shed: [Vec<AtomicU64>; 2],
+    cells: [usize; 3],
+}
+
+/// Tallies of each field over some cells: the fluence of each colour, then
+/// each axis of the net flux.
+#[derive(Debug, Default)]
+struct Sums {
     fluence: [Vec<AtomicU64>; 2],
     flux: [Vec<AtomicU64>; 3],
-    shed: [Vec<AtomicU64>; 2],
+}
+
+impl Sums {
+    /// Room for tallies over `cells`, none laid yet; `None` when the heap
+    /// will not hold it.
+    fn reserved(cells: usize) -> Option<Self> {
+        Some(Self {
+            fluence: [room(cells)?, room(cells)?],
+            flux: [room(cells)?, room(cells)?, room(cells)?],
+        })
+    }
+
+    /// Each field's tally.
+    fn each_mut(&mut self) -> impl Iterator<Item = &mut Vec<AtomicU64>> {
+        self.fluence.iter_mut().chain(&mut self.flux)
+    }
+
+    /// Field `field`'s tally.
+    fn field(&self, field: usize) -> Option<&Vec<AtomicU64>> {
+        match field.checked_sub(FLUENCES) {
+            None => self.fluence.get(field),
+            Some(axis) => self.flux.get(axis),
+        }
+    }
+
+    /// Field `field`'s tally, to be let go once its field is made.
+    fn field_mut(&mut self, field: usize) -> Option<&mut Vec<AtomicU64>> {
+        match field.checked_sub(FLUENCES) {
+            None => self.fluence.get_mut(field),
+            Some(axis) => self.flux.get_mut(axis),
+        }
+    }
 }
 
 impl Clone for Tally {
@@ -448,21 +748,51 @@ impl Clone for Tally {
     }
 }
 
-/// `count` tallies at nought; `None` when the heap will not hold them.
-fn zeroed(count: usize) -> Option<Vec<AtomicU64>> {
+/// Room for `count` tallies; `None` when the heap will not hold it.
+fn room(count: usize) -> Option<Vec<AtomicU64>> {
     let mut values = Vec::new();
     values.try_reserve_exact(count).ok()?;
-    values.extend((0..count).map(|_| AtomicU64::new(0)));
     Some(values)
 }
 
 impl Tally {
-    fn new(voxels: usize, columns: usize) -> Option<Self> {
+    /// Room for `volume`'s tallies over its voxels, the fine cells of its
+    /// runs and its floor, none laid yet; `None` when the heap will not hold
+    /// it.
+    fn reserved(volume: &Volume) -> Option<Self> {
+        let grid = volume.grid;
+        let (voxels, fine) = (grid.voxels(), volume.fine.runs.blocks * grid.fine_cells());
+        let columns = grid.floor_cells() * grid.floor_cells();
         Some(Self {
-            fluence: [zeroed(voxels)?, zeroed(voxels)?],
-            flux: [zeroed(voxels)?, zeroed(voxels)?, zeroed(voxels)?],
-            shed: [zeroed(columns)?, zeroed(columns)?],
+            voxels: Sums::reserved(voxels)?,
+            fine: Sums::reserved(fine)?,
+            shed: [room(columns)?, room(columns)?],
+            cells: [voxels, fine, columns],
         })
+    }
+
+    /// Each tally, and how many cells it holds once laid.
+    fn each_mut(&mut self) -> impl Iterator<Item = (&mut Vec<AtomicU64>, usize)> {
+        let [voxels, fine, columns] = self.cells;
+        let over_voxels = self.voxels.each_mut().map(move |values| (values, voxels));
+        let over_fine = self.fine.each_mut().map(move |values| (values, fine));
+        let shed = self.shed.iter_mut().map(move |values| (values, columns));
+        over_voxels.chain(over_fine).chain(shed)
+    }
+
+    /// Lay up to [`TALLY_CELLS`] more cells at nought for each of `runner`'s
+    /// cores, each in a tally of its own still short of its cells and within
+    /// the room reserved for it; whether every one holds all its cells.
+    fn lay(&mut self, runner: &dyn JobRunner) -> bool {
+        let unlaid = self
+            .each_mut()
+            .filter(|(values, cells)| values.len() < *cells)
+            .take(runner.width().max(1));
+        tairix_parallel::for_each_drawn(runner, unlaid, &|(values, cells)| {
+            let more = cells.saturating_sub(values.len()).min(TALLY_CELLS);
+            values.extend((0..more).map(|_| AtomicU64::new(0)));
+        });
+        self.each_mut().all(|(values, cells)| values.len() >= cells)
     }
 }
 
@@ -500,12 +830,17 @@ impl Lights {
     }
 
     /// Lay the levels about `bank`'s middle, out to cover its coarsest level
-    /// of weather, their solving started afresh; `None` when the heap will
-    /// not hold them.
-    pub(super) fn lay(&mut self, bank: &Cloudbank) -> Option<()> {
+    /// of weather, their solving started afresh, their light held finely
+    /// only where a fine cell spans at least a pixel `pixel` radians across;
+    /// `None` when the heap will not hold them.
+    pub(super) fn lay(&mut self, bank: &Cloudbank, pixel: f64) -> Option<()> {
         let resolution = self.resolution?;
         let reach = bank.levels.last()?.half;
         let cells = resolution.cells.max(4);
+        // A level's fine cells, a half breadth's `2 / (cells · fine)` across,
+        // stand no nearer than the finer level's edge at half that breadth.
+        let spanned = 4.0 / real(cells * resolution.fine.max(1)) >= pixel;
+        let heaped = bank.decks.iter().flatten().any(|deck| deck.heap >= HEAPED);
         let span = bank.ceiling - bank.floor;
         let mut volumes = Vec::new();
         let mut half = resolution.finest.min(reach);
@@ -520,6 +855,11 @@ impl Lights {
                     layers,
                     breadth,
                     height: span / real(layers),
+                    fine: if heaped && spanned && half <= resolution.reach {
+                        resolution.fine.max(1)
+                    } else {
+                        1
+                    },
                 },
                 ..Volume::default()
             });
@@ -528,7 +868,7 @@ impl Lights {
             }
             half *= 2.0;
         }
-        self.stage = Stage::Voxels(volumes.len() - 1, 0);
+        self.stage = Stage::Stands(volumes.len() - 1, 0);
         self.volumes = volumes;
         self.solving = None;
         Some(())
@@ -544,20 +884,29 @@ impl Lights {
             // fine level's photons lay some fifty voxels' track, a coarse
             // level's too little to end its rounds before the last.
             let rounds = (tracks / (ROUND * 50.0)).min(f64::from(MOST_ROUNDS));
-            rows / real(VOXEL_ROWS)
+            let cloudy = 0.1 * real(grid.voxels());
+            let fine = if grid.fine > 1 { cloudy } else { 0.0 };
+            let tallied = real(grid.voxels()) + fine * real(grid.fine_cells());
+            real(grid.cells) / real(STAND_ROWS)
+                + rows / real(VOXEL_ROWS)
                 + real(grid.layers.max(grid.cells))
-                + rounds * ROUND * 0.1 * real(grid.voxels()) / real(PHOTON_BATCH)
+                + real(FLUENCES + FLUXES) * tallied / real(TALLY_CELLS)
+                + rounds * ROUND * real(grid.fine * grid.fine) * cloudy / real(PHOTON_BATCH)
                 + real(FIELD_PASSES + 1) * rows / real(FIELD_ROWS)
+                + real(FIELD_PASSES) * fine / real(FIELD_BLOCKS)
         };
         let total: f64 = self.volumes.iter().map(per_level).sum();
         let level = match self.stage {
             Stage::Unlaid => return (0.0, total),
             Stage::Done => return (total, total),
-            Stage::Voxels(level, _)
+            Stage::Stands(level, _)
+            | Stage::Voxels(level, _)
             | Stage::Sweep(level, _)
             | Stage::Above(level, _)
+            | Stage::Tallies(level)
             | Stage::Photons(level, _)
             | Stage::Fields(level, ..)
+            | Stage::Fine(level, ..)
             | Stage::Maps(level, _) => level,
         };
         // The levels past this one, solved first, are done.
@@ -579,10 +928,21 @@ impl Lights {
         self.stage = match self.stage {
             Stage::Unlaid => return None,
             Stage::Done => return Some(true),
-            Stage::Voxels(level, row) => {
+            Stage::Stands(level, row) => {
                 if self.solving.is_none() {
-                    self.solving = Some(begin(self.volumes.get(level)?.grid, bank)?);
+                    self.solving = Some(begin(self.volumes.get(level)?.grid)?);
                 }
+                let solving = self.solving.as_mut()?;
+                let cells = solving.volume.grid.cells;
+                let end = (row + STAND_ROWS * width).min(cells);
+                stand_rows(solving, bank, row..end, runner)?;
+                if end >= cells {
+                    Stage::Voxels(level, 0)
+                } else {
+                    Stage::Stands(level, end)
+                }
+            }
+            Stage::Voxels(level, row) => {
                 let solving = self.solving.as_mut()?;
                 let end = (row + VOXEL_ROWS * width).min(rows_of(solving));
                 voxel_rows(solving, bank, row..end, runner)?;
@@ -608,44 +968,36 @@ impl Lights {
                 let end = (row + 8 * width).min(cells);
                 above_rows(solving, bank, above, row..end, runner)?;
                 if end >= cells {
-                    plan(solving, bank, self.resolution?)?;
-                    Stage::Photons(level, 0)
+                    solving.tally = Tally::reserved(&solving.volume)?;
+                    Stage::Tallies(level)
                 } else {
                     Stage::Above(level, end)
                 }
             }
-            Stage::Photons(level, first) => {
+            Stage::Tallies(level) => {
                 let solving = self.solving.as_mut()?;
-                let total = usize::try_from(solving.plan.counts.iter().sum::<u64>()).ok()?;
-                let batches = total.div_ceil(PHOTON_BATCH);
-                let end = (first + BATCHES * width).min(batches);
-                let laid = follow(solving, bank, first..end, runner);
-                solving.plan.laid = solving.plan.laid.saturating_add(laid);
-                if end < batches {
-                    Stage::Photons(level, end)
+                if solving.tally.lay(runner) {
+                    plan(solving, bank, self.resolution?)?;
+                    Stage::Photons(level, 0)
                 } else {
-                    let cloudy: f64 = solving.cloudy.iter().map(|&count| f64::from(count)).sum();
-                    let wanted = self.resolution?.tracks * cloudy;
-                    solving.plan.round += 1;
-                    if track_laid(&solving.plan) < wanted
-                        && solving.plan.round < MOST_ROUNDS
-                        && total > 0
-                    {
-                        Stage::Photons(level, 0)
-                    } else {
-                        Stage::Fields(level, 0, 0)
-                    }
+                    Stage::Tallies(level)
                 }
             }
+            Stage::Photons(level, first) => self.photons((level, first), bank, runner)?,
             Stage::Fields(level, pass, row) => {
                 let solving = self.solving.as_mut()?;
                 let end = (row + FIELD_ROWS * width).min(rows_of(solving));
                 field_pass(solving, pass, row..end, runner)?;
-                match (end >= rows_of(solving), pass + 1 >= FIELD_PASSES) {
-                    (false, _) => Stage::Fields(level, pass, end),
-                    (true, false) => Stage::Fields(level, pass + 1, 0),
-                    (true, true) => Stage::Maps(level, 0),
-                }
+                let at = |pass, row| Stage::Fields(level, pass, row);
+                passed((pass, end, rows_of(solving)), at, Stage::Fine(level, 0, 0))
+            }
+            Stage::Fine(level, pass, block) => {
+                let solving = self.solving.as_mut()?;
+                let blocks = solving.volume.fine.runs.blocks;
+                let end = (block + FIELD_BLOCKS * width).min(blocks);
+                fine_pass(solving, pass, block..end, runner)?;
+                let at = |pass, block| Stage::Fine(level, pass, block);
+                passed((pass, end, blocks), at, Stage::Maps(level, 0))
             }
             Stage::Maps(level, row) => {
                 let solving = self.solving.as_mut()?;
@@ -655,22 +1007,58 @@ impl Lights {
                 if end < rows_of(solving) {
                     Stage::Maps(level, end)
                 } else {
-                    let mut solved = self.solving.take()?;
-                    solved.volume.open = smoothed(
-                        &open_floor(&solved, cells)?,
-                        solved.volume.grid.floor_cells(),
-                    )?;
-                    let [sunlit, skylit] = shed_floor(&solved)?;
-                    let floor = solved.volume.grid.floor_cells();
-                    solved.volume.shed = [smoothed(&sunlit, floor)?, smoothed(&skylit, floor)?];
-                    *self.volumes.get_mut(level)? = solved.volume;
+                    self.finish(level, cells)?;
                     level
                         .checked_sub(1)
-                        .map_or(Stage::Done, |finer| Stage::Voxels(finer, 0))
+                        .map_or(Stage::Done, |finer| Stage::Stands(finer, 0))
                 }
             }
         };
         Some(self.stage == Stage::Done)
+    }
+
+    /// Follow the next unit of level `level`'s photons from batch `first`
+    /// across `runner`; the stage after it: on through the round, another
+    /// round while the track laid falls short of what the level's cloud
+    /// wants, and its fields once it does not or the rounds run out.
+    fn photons(
+        &mut self,
+        (level, first): (usize, usize),
+        bank: &Cloudbank,
+        runner: &dyn JobRunner,
+    ) -> Option<Stage> {
+        let tracks = self.resolution?.tracks;
+        let solving = self.solving.as_mut()?;
+        let total = usize::try_from(solving.plan.counts.iter().sum::<u64>()).ok()?;
+        let batches = total.div_ceil(PHOTON_BATCH);
+        let end = (first + BATCHES * runner.width().max(1)).min(batches);
+        let laid = follow(solving, bank, first..end, runner);
+        solving.plan.laid = solving.plan.laid.saturating_add(laid);
+        if end < batches {
+            return Some(Stage::Photons(level, end));
+        }
+        let cloudy: f64 = solving.cloudy.iter().map(|&count| f64::from(count)).sum();
+        let fine = solving.volume.grid.fine;
+        let wanted = tracks * real(fine * fine) * cloudy;
+        solving.plan.round += 1;
+        let more = track_laid(&solving.plan) < wanted && solving.plan.round < MOST_ROUNDS;
+        Some(if more && total > 0 {
+            Stage::Photons(level, 0)
+        } else {
+            Stage::Fields(level, 0, 0)
+        })
+    }
+
+    /// Level `level`, `cells` voxels a side, solved: its floor's maps made
+    /// and the volume kept in its place.
+    fn finish(&mut self, level: usize, cells: usize) -> Option<()> {
+        let mut solved = self.solving.take()?;
+        let floor = solved.volume.grid.floor_cells();
+        solved.volume.open = smoothed(&open_floor(&solved, cells)?, floor)?;
+        let [sunlit, skylit] = shed_floor(&solved)?;
+        solved.volume.shed = [smoothed(&sunlit, floor)?, smoothed(&skylit, floor)?];
+        *self.volumes.get_mut(level)? = solved.volume;
+        Some(())
     }
 
     /// The finest level whose square holds `(x, z)`, and how far its rim
@@ -715,7 +1103,7 @@ impl Lights {
         self.blended(
             bank,
             (at.0, at.2),
-            |volume| Some(volume.reading(volume.grid.place(bank, at)?)),
+            |volume| volume.reading(bank, at),
             Reading::lerp,
         )
     }
@@ -781,6 +1169,21 @@ impl Lights {
     }
 }
 
+/// The stage after pass `pass` of a level's fields has made them as far as
+/// `end` of `count`: on through the pass, `at` the next pass from its start,
+/// or `then` once the last pass is made, or at once over no cells at all.
+fn passed(
+    (pass, end, count): (usize, usize, usize),
+    at: impl Fn(usize, usize) -> Stage,
+    then: Stage,
+) -> Stage {
+    match (end >= count, pass + 1 >= FIELD_PASSES || count == 0) {
+        (false, _) => at(pass, end),
+        (true, false) => at(pass + 1, 0),
+        (true, true) => then,
+    }
+}
+
 /// Where the way toward `bank`'s sun from `(x, altitude, z)` rises through
 /// its ceiling: straight up from it with the sun at or below the level.
 fn ceiling_under(bank: &Cloudbank, (x, altitude, z): (f64, f64, f64)) -> (f64, f64) {
@@ -803,24 +1206,19 @@ fn around(value: f64, side: f64) -> f64 {
     }
 }
 
-/// A level's solving begun over `bank`, where each deck's cloud can stand
-/// over each of its columns found and its maps reserved; `None` when the
-/// heap will not hold them.
-fn begin(grid: Grid, bank: &Cloudbank) -> Option<Solving> {
-    let (west, south) = (bank.centre.0 - grid.half, bank.centre.1 - grid.half);
-    let stands = (0..grid.cells * grid.cells).map(|column| {
-        let (i, j) = (column % grid.cells, column / grid.cells);
-        let low = (
-            west + real(i) * grid.breadth,
-            south + real(j) * grid.breadth,
-        );
-        bank.stands_over(low, (low.0 + grid.breadth, low.1 + grid.breadth))
-    });
+/// A level's solving begun, its maps reserved; `None` when the heap will not
+/// hold them.
+fn begin(grid: Grid) -> Option<Solving> {
     Some(Solving {
         sigma: fallible::filled(grid.voxels(), 0.0)?,
         depth: fallible::filled(grid.voxels(), 0.0)?,
         bounds: fallible::filled(grid.voxels(), 0.0)?,
-        stands: fallible::collected(grid.cells * grid.cells, stands)?,
+        stands: fallible::filled(grid.cells * grid.cells, [Holding::NONE; 2])?,
+        layered: if grid.fine > 1 {
+            fallible::filled(grid.cells * grid.cells * grid.layer_words(), 0)?
+        } else {
+            Vec::new()
+        },
         cloudy: fallible::filled(grid.rows(), 0)?,
         volume: Volume {
             grid,
@@ -834,6 +1232,31 @@ fn begin(grid: Grid, bank: &Cloudbank) -> Option<Solving> {
 /// The point over the Earth's curve at `(x, altitude, z)`.
 fn point(bank: &Cloudbank, (x, altitude, z): (f64, f64, f64)) -> Vec3 {
     Vec3::new(x, bank.height_at(altitude, (x, z)), z)
+}
+
+/// Rows `rows` of the level's columns of voxels: what each deck's weather
+/// holds over each.
+fn stand_rows(
+    solving: &mut Solving,
+    bank: &Cloudbank,
+    rows: Range<usize>,
+    runner: &dyn JobRunner,
+) -> Option<()> {
+    let grid = solving.volume.grid;
+    let (west, south) = (bank.centre.0 - grid.half, bank.centre.1 - grid.half);
+    let stands = solving
+        .stands
+        .get_mut(rows.start * grid.cells..rows.end * grid.cells)?;
+    band::for_each(runner, stands, (rows.start, grid.cells), &|j, band| {
+        for (i, stand) in band.iter_mut().enumerate() {
+            let low = (
+                west + real(i) * grid.breadth,
+                south + real(j) * grid.breadth,
+            );
+            *stand = bank.weather_over(low, (low.0 + grid.breadth, low.1 + grid.breadth));
+        }
+    });
+    Some(())
 }
 
 /// Rows `rows` of the level's voxels: each one's extinction, averaged over it
@@ -890,22 +1313,35 @@ fn voxel_rows(
         let (k, j) = (row / cells, row % cells);
         let low = bank.floor + real(k) * grid.height;
         for (i, slot) in band.iter_mut().enumerate() {
-            let stand = stands
+            let over = stands
                 .get(j * cells + i)
                 .copied()
-                .unwrap_or([(f64::INFINITY, f64::NEG_INFINITY); 2]);
-            *slot = single(bank.densest(&stand, (low, low + grid.height)));
+                .unwrap_or([Holding::NONE; 2]);
+            *slot = single(bank.densest(&over, (low, low + grid.height), FOOTPRINT));
         }
     });
     if rows.end >= grid.rows() {
         solving.stands = Vec::new();
     }
-    for row in rows {
-        let held = solving
-            .sigma
-            .get(row * cells..(row + 1) * cells)
-            .map_or(0, |band| band.iter().filter(|&&value| value > 0.0).count());
-        *solving.cloudy.get_mut(row)? = u32::try_from(held).unwrap_or(u32::MAX);
+    let words = grid.layer_words();
+    for row in rows.clone() {
+        let (k, j) = (row / cells, row % cells);
+        let sigma = solving.sigma.get(row * cells..(row + 1) * cells)?;
+        let mut held = 0u32;
+        for (i, _) in sigma.iter().enumerate().filter(|&(_, &value)| value > 0.0) {
+            held += 1;
+            if let Some(word) = solving
+                .layered
+                .get_mut((j * cells + i) * words + k / LAYER_BITS)
+            {
+                *word |= 1 << (k % LAYER_BITS);
+            }
+        }
+        *solving.cloudy.get_mut(row)? = held;
+    }
+    if rows.end >= grid.rows() && grid.fine > 1 {
+        (solving.volume.fine.runs, solving.voxels) = Runs::holding(grid, &solving.layered)?;
+        solving.layered = Vec::new();
     }
     Some(())
 }
@@ -1131,7 +1567,6 @@ fn scaled(bank: &Cloudbank) -> f64 {
 /// brightest sunlight in the bank would.
 fn plan(solving: &mut Solving, bank: &Cloudbank, resolution: Resolution) -> Option<()> {
     let grid = solving.volume.grid;
-    solving.tally = Tally::new(grid.voxels(), grid.floor_cells() * grid.floor_cells())?;
     // A bank no air lights sends no photons.
     let Some(lighting) = bank.lighting.as_ref() else {
         solving.plan = Plan::default();
@@ -1139,7 +1574,7 @@ fn plan(solving: &mut Solving, bank: &Cloudbank, resolution: Resolution) -> Opti
     };
     let cloudy: f64 = solving.cloudy.iter().map(|&count| f64::from(count)).sum();
     let wanted = if resolution.tracks > 0.0 {
-        ROUND * cloudy
+        ROUND * real(grid.fine * grid.fine) * cloudy
     } else {
         0.0
     };
@@ -1318,10 +1753,10 @@ impl Pending {
         }
     }
 
-    /// `track` laid through voxel `index` heading along `ways`.
-    fn lay(&mut self, tally: &Tally, index: usize, track: f64, ways: [f64; 3]) {
+    /// `track` laid through cell `index` of `sums` heading along `ways`.
+    fn lay(&mut self, sums: &Sums, index: usize, track: f64, ways: [f64; 3]) {
         if self.index != Some(index) || self.fluence + track > MOST_ADD {
-            self.flush(tally);
+            self.flush(sums);
             self.index = Some(index);
         }
         self.fluence += track;
@@ -1330,11 +1765,11 @@ impl Pending {
         }
     }
 
-    /// What is gathered added to the tallies.
-    fn flush(&mut self, tally: &Tally) {
+    /// What is gathered added to `sums`.
+    fn flush(&mut self, sums: &Sums) {
         if let Some(index) = self.index.take() {
-            add(&tally.fluence[self.colour], index, self.fluence);
-            for (flux, gathered) in tally.flux.iter().zip(self.flux) {
+            add(&sums.fluence[self.colour], index, self.fluence);
+            for (flux, gathered) in sums.flux.iter().zip(self.flux) {
                 add(flux, index, gathered);
             }
         }
@@ -1468,7 +1903,7 @@ impl<'a> Walker<'a> {
     /// has been followed as far as any is; how many voxels' track it laid.
     fn walk(&self, mut photon: Photon, draws: &mut Draws) -> u32 {
         let colour = if photon.kind == SKY { SKYLIT } else { SUNLIT };
-        let mut pending = Pending::new(colour);
+        let mut pending = [Pending::new(colour), Pending::new(colour)];
         let (mut steps, mut laid) = (0u32, 0.0);
         while steps < MOST_STEPS {
             match self.fly(&mut photon, (&mut steps, &mut pending, &mut laid), draws) {
@@ -1512,7 +1947,9 @@ impl<'a> Walker<'a> {
                 photon.weight = LEAST_WEIGHT;
             }
         }
-        pending.flush(&self.solving.tally);
+        let [voxels, fine] = &mut pending;
+        voxels.flush(&self.solving.tally.voxels);
+        fine.flush(&self.solving.tally.fine);
         u32::try_from(whole(laid)).unwrap_or(u32::MAX)
     }
 
@@ -1557,7 +1994,7 @@ impl<'a> Walker<'a> {
     fn fly(
         &self,
         photon: &mut Photon,
-        (steps, pending, laid): (&mut u32, &mut Pending, &mut f64),
+        (steps, pending, laid): (&mut u32, &mut [Pending; 2], &mut f64),
         draws: &mut Draws,
     ) -> Flight {
         let grid = self.grid;
@@ -1565,7 +2002,7 @@ impl<'a> Walker<'a> {
         let side = real(cells);
         let extent = [grid.breadth, grid.height, grid.breadth];
         let ways = [photon.way.x, photon.way.y, photon.way.z];
-        let tally = &self.solving.tally;
+        let runs = &self.solving.volume.fine.runs;
         let weight = photon.weight * self.factor[photon.kind] * FIXED / grid.breadth;
         let start = photon.at;
         // Where it stands `t` metres on, round the level's square.
@@ -1589,7 +2026,12 @@ impl<'a> Walker<'a> {
             if *steps >= MOST_STEPS {
                 return Flight::Escaped;
             }
-            let index = grid.index((cell[0], cell[1], cell[2]));
+            let voxel = (cell[0], cell[1], cell[2]);
+            let index = grid.index(voxel);
+            let held = (!photon.beam)
+                .then(|| runs.block(grid, voxel))
+                .flatten()
+                .map(|block| (block, along(t)));
             let bound = self.scaled
                 * self
                     .solving
@@ -1602,8 +2044,9 @@ impl<'a> Walker<'a> {
             if !exit.is_finite() {
                 return Flight::Escaped;
             }
-            let mut within = t;
+            let mut met = None;
             if bound > 0.0 {
+                let mut within = t;
                 loop {
                     within -= mathf::ln((1.0 - draws.next()).max(1e-300)) / bound;
                     if within >= exit {
@@ -1614,21 +2057,22 @@ impl<'a> Walker<'a> {
                     place[1] = place[1].clamp(real(cell[1]), real(cell[1] + 1) - 1e-9);
                     let share = self.scaled * self.extinction(place) / bound;
                     if draws.next() < share {
-                        if !photon.beam {
-                            pending.lay(tally, index, weight * (within - t), ways);
-                            *laid += (within - t) / grid.breadth;
-                        }
-                        photon.at = place;
-                        return Flight::Collided;
+                        met = Some((within, place));
+                        break;
                     }
                     if *steps >= MOST_STEPS {
                         return Flight::Escaped;
                     }
                 }
             }
+            let end = met.map_or(exit, |(within, _)| within);
             if !photon.beam {
-                pending.lay(tally, index, weight * (exit - t), ways);
-                *laid += (exit - t) / grid.breadth;
+                self.lay(pending, (index, held), (cell, ways), (end - t, weight));
+                *laid += (end - t) / grid.breadth;
+            }
+            if let Some((_, place)) = met {
+                photon.at = place;
+                return Flight::Collided;
             }
             t = exit;
             next[axis] += apart[axis];
@@ -1651,6 +2095,71 @@ impl<'a> Walker<'a> {
             } else {
                 cell[1] -= 1;
             }
+        }
+    }
+}
+
+impl Walker<'_> {
+    /// Lay `length` metres of a photon's track, each metre weighing `weight`,
+    /// through voxel `index`, `cell` of the level, along `ways`: where the
+    /// voxel is `held` as a block, entered at a place given in voxels, its
+    /// share in each fine cell it crosses, the whole track kept, the voxel's
+    /// own light being the sum of its fine cells'; elsewhere in the voxel.
+    fn lay(
+        &self,
+        [voxels, fine]: &mut [Pending; 2],
+        (index, held): (usize, Option<(usize, [f64; 3])>),
+        (cell, ways): ([usize; 3], [f64; 3]),
+        (length, weight): (f64, f64),
+    ) {
+        let tally = &self.solving.tally;
+        let Some((block, from)) = held else {
+            voxels.lay(&tally.voxels, index, weight * length, ways);
+            return;
+        };
+        let grid = self.grid;
+        let (per, parts) = (grid.fine, real(grid.fine));
+        let extent = [
+            grid.breadth / parts,
+            grid.height / parts,
+            grid.breadth / parts,
+        ];
+        let side = real(grid.cells);
+        let (mut at, mut next, mut apart) = ([0usize; 3], [f64::INFINITY; 3], [f64::INFINITY; 3]);
+        for axis in 0..3 {
+            let mut offset = from[axis] - real(cell[axis]);
+            // Across the square's wrap, the photon stands a side away.
+            if axis != 1 {
+                offset -= side * mathf::round(offset / side);
+            }
+            let local = (offset * parts).clamp(0.0, parts - 1e-9);
+            at[axis] = cell_of(local).0.min(per - 1);
+            if ways[axis].abs() > 1e-12 {
+                let wall = real(at[axis]) + if ways[axis] > 0.0 { 1.0 } else { 0.0 };
+                next[axis] = (wall - local) * extent[axis] / ways[axis];
+                apart[axis] = extent[axis] / ways[axis].abs();
+            }
+        }
+        let mut t = 0.0;
+        loop {
+            let axis = nearest(next);
+            let end = next[axis].min(length);
+            let cell = block * grid.fine_cells() + fine_within(per, (at[0], at[1], at[2]));
+            let onward = if ways[axis] > 0.0 {
+                at[axis].checked_add(1).filter(|&step| step < per)
+            } else {
+                at[axis].checked_sub(1)
+            };
+            // What a rounding error leaves past the voxel's last wall stays in
+            // its last cell.
+            let Some(step) = onward.filter(|_| end < length) else {
+                fine.lay(&tally.fine, cell, weight * (length - t), ways);
+                return;
+            };
+            fine.lay(&tally.fine, cell, weight * (end - t), ways);
+            t = end;
+            next[axis] += apart[axis];
+            at[axis] = step;
         }
     }
 }
@@ -1729,11 +2238,11 @@ fn field_pass(
     let smoothings = SMOOTHINGS[usize::from(signed)];
     let range = rows.start * cells..rows.end * cells;
     if step == 0 {
-        let tally = if signed {
-            solving.tally.flux.get(field - FLUENCES)?
-        } else {
-            solving.tally.fluence.get(field)?
-        };
+        let (tally, fine) = (
+            solving.tally.voxels.field(field)?,
+            solving.tally.fine.field(field)?,
+        );
+        let (runs, per) = (&solving.volume.fine.runs, grid.fine_cells());
         let scale =
             solving.plan.reference / (FIXED * grid.breadth * grid.height * rounds(&solving.plan));
         let values = solving.field.get_mut(range)?;
@@ -1743,9 +2252,15 @@ fn field_pass(
             (rows.start, cells),
             0.0f64,
             &|row, band| {
+                let (k, j) = (row / cells, row % cells);
                 let mut most = 0.0f64;
                 for (i, slot) in band.iter_mut().enumerate() {
-                    let value = summed(tally, row * cells + i) * scale;
+                    let held = runs.block(grid, (i, k, j)).map_or(0.0, |block| {
+                        (block * per..(block + 1) * per)
+                            .map(|cell| summed(fine, cell))
+                            .sum()
+                    });
+                    let value = (summed(tally, row * cells + i) + held) * scale;
                     most = most.max(value.abs());
                     *slot = single(value);
                 }
@@ -1794,17 +2309,152 @@ fn field_pass(
     pack(solving, (field, signed), rows.clone(), passes % 2 == 0)?;
     if rows.end >= grid.rows() {
         // The tally is spent; and once every field is, the copies.
-        if signed {
-            *solving.tally.flux.get_mut(field - FLUENCES)? = Vec::new();
-        } else {
-            *solving.tally.fluence.get_mut(field)? = Vec::new();
-        }
+        *solving.tally.voxels.field_mut(field)? = Vec::new();
         if field + 1 >= FLUENCES + FLUXES {
             solving.field = Vec::new();
             solving.smoothed = Vec::new();
         }
     }
     Some(())
+}
+
+/// One pass over blocks `blocks` of making the level's fine tallies its fine
+/// fields, as [`field_pass`] makes its voxels' own: a neighbour its runs do
+/// not hold stands in as the cell itself, so the blur neither spills light
+/// out of the cloud nor dims its edge.
+fn fine_pass(
+    solving: &mut Solving,
+    pass: usize,
+    blocks: Range<usize>,
+    runner: &dyn JobRunner,
+) -> Option<()> {
+    let grid = solving.volume.grid;
+    let per = grid.fine_cells();
+    let held = solving.volume.fine.runs.blocks * per;
+    if solving.field.len() != held {
+        solving.field = fallible::filled(held, 0.0)?;
+        solving.smoothed = fallible::filled(held, 0.0)?;
+    }
+    let (field, step) = field_step(pass);
+    let signed = field >= FLUENCES;
+    let smoothings = SMOOTHINGS[usize::from(signed)];
+    let range = blocks.start * per..blocks.end * per;
+    let band = (0, per * BAND_BLOCKS);
+    if step == 0 {
+        let tally = solving.tally.fine.field(field)?;
+        // A fine cell holds its voxel's share of the volume.
+        let scale = solving.plan.reference * real(per)
+            / (FIXED * grid.breadth * grid.height * rounds(&solving.plan));
+        let first = range.start;
+        let values = solving.field.get_mut(range)?;
+        let most = band::fold(
+            runner,
+            values,
+            band,
+            0.0f64,
+            &|number, values| {
+                let mut most = 0.0f64;
+                let from = first + number * per * BAND_BLOCKS;
+                for (offset, slot) in values.iter_mut().enumerate() {
+                    let value = summed(tally, from + offset) * scale;
+                    most = most.max(value.abs());
+                    *slot = single(value);
+                }
+                most
+            },
+            &f64::max,
+        );
+        solving.most = if blocks.start == 0 {
+            most
+        } else {
+            solving.most.max(most)
+        };
+        return Some(());
+    }
+    let (axis, passes) = ((step - 1) % 3, step - 1);
+    let last = passes + 1 == 3 * smoothings;
+    let (source, target) = if passes % 2 == 0 {
+        (&solving.field, &mut solving.smoothed)
+    } else {
+        (&solving.smoothed, &mut solving.field)
+    };
+    let (runs, voxels) = (&solving.volume.fine.runs, &solving.voxels);
+    let (along, up) = (grid.cells * grid.fine, grid.layers * grid.fine);
+    let first = blocks.start;
+    let values = target.get_mut(range.clone())?;
+    band::for_each(runner, values, band, &|number, values| {
+        let from = first + number * BAND_BLOCKS;
+        for (offset, slot) in values.iter_mut().enumerate() {
+            let (block, within) = (from + offset / per, offset % per);
+            let read = |index: usize| f64::from(source.get(index).copied().unwrap_or(0.0));
+            let here = read(block * per + within);
+            let (i, k, j) = fine_cell(grid, voxels.get(block).copied().unwrap_or(0), within);
+            let beside = |cell: (usize, usize, usize)| runs.fine(grid, cell).map_or(here, read);
+            let (before, after) = match axis {
+                0 => (((i + along - 1) % along, k, j), ((i + 1) % along, k, j)),
+                1 => ((i, k, (j + along - 1) % along), (i, k, (j + 1) % along)),
+                _ => ((i, k.saturating_sub(1), j), (i, (k + 1).min(up - 1), j)),
+            };
+            *slot = single(0.25 * beside(before) + 0.5 * here + 0.25 * beside(after));
+        }
+    });
+    if !last {
+        return Some(());
+    }
+    pack_fine(solving, (field, signed), range, passes % 2 == 0)?;
+    if blocks.end >= solving.volume.fine.runs.blocks {
+        *solving.tally.fine.field_mut(field)? = Vec::new();
+        if field + 1 >= FLUENCES + FLUXES {
+            solving.field = Vec::new();
+            solving.smoothed = Vec::new();
+            solving.voxels = Vec::new();
+        }
+    }
+    Some(())
+}
+
+/// Fine cells `range` of fine field `field` of the level's, signed or not,
+/// packed from the copy it was last smoothed into, or else the field itself;
+/// the field reserved whole at its first cell.
+fn pack_fine(
+    solving: &mut Solving,
+    (field, signed): (usize, bool),
+    range: Range<usize>,
+    copy: bool,
+) -> Option<()> {
+    if range.start == 0 {
+        let held = solving.volume.fine.runs.blocks * solving.volume.grid.fine_cells();
+        let packed = Packed::reserved(held, Packed::scale_for(solving.most, signed), signed)?;
+        *fine_field(&mut solving.volume.fine, field)? = packed;
+    }
+    let source = if copy {
+        &solving.smoothed
+    } else {
+        &solving.field
+    };
+    let packed = fine_field(&mut solving.volume.fine, field)?;
+    let packing = Packed {
+        scale: packed.scale,
+        codes: Vec::new(),
+        signed,
+    };
+    for (code, &value) in packed
+        .codes
+        .get_mut(range.clone())?
+        .iter_mut()
+        .zip(source.get(range)?)
+    {
+        *code = packing.code(f64::from(value));
+    }
+    Some(())
+}
+
+/// Field `field` of the fine light: a fluence, then each axis of the flux.
+fn fine_field(fine: &mut Fine, field: usize) -> Option<&mut Packed> {
+    match field.checked_sub(FLUENCES) {
+        None => fine.fluence.get_mut(field),
+        Some(axis) => fine.flux.get_mut(axis),
+    }
 }
 
 /// Rows `rows` of field `field` of the level's, signed or not, packed from

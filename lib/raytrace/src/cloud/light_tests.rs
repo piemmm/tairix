@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::atmosphere::GROUND;
-use crate::cloud::{Deck, Lighting, Matter, SUNLIGHT_LEVELS, SUN_COSINES};
+use crate::cloud::{Deck, Lighting, Matter, SCREEN_PIXEL, SUNLIGHT_LEVELS, SUN_COSINES};
 use crate::sample::{mix32, unit};
 
 const HEAPS: Deck = Deck {
@@ -30,11 +30,14 @@ const OVERCAST: Deck = Deck {
     ..HEAPS
 };
 
-/// Light solved coarsely enough for a test to solve it many times over.
+/// Light solved coarsely enough for a test to solve it many times over,
+/// every level holding its light finely where cloud stands.
 const COARSE: Resolution = Resolution {
     cells: 16,
     finest: 4000.0,
     tracks: 24.0,
+    fine: 2,
+    reach: f64::INFINITY,
 };
 
 /// The sunlight, sky and ground a test bank is lit by.
@@ -53,7 +56,7 @@ fn solved(
 ) -> Cloudbank {
     let mut bank =
         Cloudbank::new([Some(deck), None], (most, resolution), sun, GROUND * 1000.0).expect("fits");
-    bank.stand(Vec3::ZERO).expect("levels fit");
+    bank.stand(Vec3::ZERO, SCREEN_PIXEL).expect("levels fit");
     let cosines = bank.sun_cosines(sun);
     bank.light_by(Lighting {
         sunlight: alloc::vec![Vec3::splat(SUNLIGHT); SUNLIGHT_LEVELS * SUN_COSINES],
@@ -82,11 +85,14 @@ fn a_banks_light_comes_out_the_same_however_many_cores_follow_it() {
     assert!(alone.len() >= 2, "{} levels", alone.len());
     for (a, b) in alone.iter().zip(spread) {
         assert_eq!(a.depth.codes, b.depth.codes);
+        assert_eq!(a.fine.runs.blocks, b.fine.runs.blocks);
         for (a, b) in a
             .fluence
             .iter()
             .zip(&b.fluence)
             .chain(a.flux.iter().zip(&b.flux))
+            .chain(a.fine.fluence.iter().zip(&b.fine.fluence))
+            .chain(a.fine.flux.iter().zip(&b.fine.flux))
         {
             assert_eq!(a.codes, b.codes);
             assert_eq!(a.scale.to_bits(), b.scale.to_bits());
@@ -224,7 +230,8 @@ fn no_cloud_holds_more_than_its_voxels_bound() {
     let (mut cloudy, mut checked) = (0u32, 0u32);
     for volume in &bank.lights.volumes {
         let grid = volume.grid;
-        let mut solving = begin(grid, &bank).expect("fits");
+        let mut solving = begin(grid).expect("fits");
+        stand_rows(&mut solving, &bank, 0..grid.cells, &tairix_parallel::SERIAL).expect("fits");
         voxel_rows(
             &mut solving,
             &bank,
@@ -284,7 +291,7 @@ fn a_thick_overcast_lets_down_what_diffuses_through_it() {
         GROUND * 1000.0,
     )
     .expect("fits");
-    bank.stand(Vec3::ZERO).expect("levels fit");
+    bank.stand(Vec3::ZERO, SCREEN_PIXEL).expect("levels fit");
     let cosines = bank.sun_cosines(Vec3::UP);
     bank.light_by(Lighting {
         sunlight: alloc::vec![Vec3::splat(SUNLIGHT); SUNLIGHT_LEVELS * SUN_COSINES],
@@ -379,4 +386,410 @@ fn the_track_laid_counts_past_any_thirty_two_bits() {
         ..Plan::default()
     };
     assert!((track_laid(&plan) - 1_099_511_627_783.0).abs() < 1e-3);
+}
+
+/// A bank of `deck` stood and lit as [`solved`] has it, its light not yet
+/// built.
+fn lit(deck: Deck) -> Cloudbank {
+    let sun = high_sun();
+    let mut bank =
+        Cloudbank::new([Some(deck), None], (12_000.0, COARSE), sun, GROUND * 1000.0).expect("fits");
+    bank.stand(Vec3::ZERO, SCREEN_PIXEL).expect("levels fit");
+    let cosines = bank.sun_cosines(sun);
+    bank.light_by(Lighting {
+        sunlight: alloc::vec![Vec3::splat(SUNLIGHT); SUNLIGHT_LEVELS * SUN_COSINES],
+        cosines,
+        toward: sun,
+        above: SKY,
+        ground: (Vec3::splat(GROUND_LIGHT), ALBEDO),
+    });
+    bank
+}
+
+/// A bank of `deck` [`lit`], its light followed until its coarsest level's
+/// photons are all followed, their tallies not yet made fields.
+fn tallied(deck: Deck) -> Cloudbank {
+    let mut bank = lit(deck);
+    let runner = tairix_parallel::Threaded::new(3);
+    while !matches!(bank.lights.stage, Stage::Fields(..)) {
+        assert!(
+            !bank.step(&runner, None).expect("held"),
+            "solved before its fields"
+        );
+    }
+    bank
+}
+
+/// A bank's light counts the units of its solving done as it goes, its fine
+/// levels' among them: never falling back, never past its whole, and whole
+/// only once every level is solved.
+#[test]
+fn a_banks_light_counts_its_units_to_its_whole_once_solved() {
+    let mut bank = lit(HEAPS);
+    assert!(bank
+        .lights
+        .volumes
+        .iter()
+        .any(|volume| volume.grid.fine > 1));
+    let runner = tairix_parallel::Threaded::new(3);
+    let mut before = 0.0;
+    loop {
+        let solved = bank.step(&runner, None).expect("held");
+        let (done, total) = bank.lights.units();
+        assert!(done >= before, "fell back from {before} to {done}");
+        assert!(done <= total, "{done} past its whole {total}");
+        assert_eq!(solved, done >= total, "{done} of {total}, solved {solved}");
+        before = done;
+        if solved {
+            break;
+        }
+    }
+}
+
+/// A level holds its fine light in exactly the voxels holding cloud, each
+/// as its own block, and finds each fine cell of them where it laid it.
+#[test]
+fn a_levels_runs_hold_each_voxel_holding_cloud_once() {
+    let bank = tallied(HEAPS);
+    let solving = bank.lights.solving.as_ref().expect("solving");
+    let (grid, runs) = (solving.volume.grid, &solving.volume.fine.runs);
+    assert!(runs.blocks > 100, "{} blocks", runs.blocks);
+    assert_eq!(solving.voxels.len(), runs.blocks);
+    let mut seen = alloc::vec![false; runs.blocks];
+    for k in 0..grid.layers {
+        for j in 0..grid.cells {
+            for i in 0..grid.cells {
+                let voxel = (i, k, j);
+                let cloudy = solving.sigma[grid.index(voxel)] > 0.0;
+                let block = runs.block(grid, voxel);
+                assert_eq!(block.is_some(), cloudy, "{voxel:?}");
+                let Some(block) = block else {
+                    continue;
+                };
+                assert!(!seen[block], "{voxel:?} shares block {block}");
+                seen[block] = true;
+                assert_eq!(solving.voxels[block] as usize, grid.index(voxel));
+                for within in 0..grid.fine_cells() {
+                    let cell = fine_cell(grid, solving.voxels[block], within);
+                    assert_eq!(
+                        runs.fine(grid, cell),
+                        Some(block * grid.fine_cells() + within)
+                    );
+                }
+            }
+        }
+    }
+    assert!(seen.iter().all(|&held| held));
+}
+
+/// A track through a voxel held finely is laid in its fine cells alone, the
+/// whole of it shared out among those it crosses whatever its way; through
+/// one that is not, in the voxel alone. And in a level's photons' tallies
+/// every voxel held finely is lit through its fine cells and none through
+/// its own.
+#[test]
+fn a_held_voxels_track_is_laid_whole_in_its_fine_cells_alone() {
+    let bank = tallied(HEAPS);
+    let solved = bank.lights.solving.as_ref().expect("solving");
+    let grid = solved.volume.grid;
+    let per = grid.fine_cells();
+    assert!(per > 1, "{per} fine cells a voxel");
+    let (runs, tally) = (&solved.volume.fine.runs, &solved.tally);
+    let mut lit = 0;
+    for block in 0..runs.blocks {
+        let voxel = solved.voxels[block] as usize;
+        for field in 0..FLUENCES + FLUXES {
+            let own = tally.voxels.field(field).expect("held")[voxel].load(Ordering::Relaxed);
+            assert_eq!(own, 0, "block {block} field {field} lit through its voxel");
+        }
+        let fine = tally.fine.field(SUNLIT).expect("held");
+        lit += usize::from((0..per).any(|within| summed(fine, block * per + within) > 0.0));
+    }
+    assert!(lit > runs.blocks / 2, "{lit} of {} lit", runs.blocks);
+
+    let mut solving = solved.clone();
+    solving.tally = Tally::reserved(&solving.volume).expect("fits");
+    while !solving.tally.lay(&tairix_parallel::SERIAL) {}
+    let walker = Walker::new(&solving, &bank);
+    let (cells, side) = (grid.cells, grid.cells * grid.cells);
+    let at = |voxel: usize| [voxel % cells, voxel / side, voxel / cells % cells];
+    for (draw, block) in (0..runs.blocks).step_by(runs.blocks / 40 + 1).enumerate() {
+        let voxel = solving.voxels[block] as usize;
+        let cell = at(voxel);
+        let unit = |salt: u32| unit(mix32(u32::try_from(draw).expect("small") ^ salt));
+        let way = Vec3::new(unit(1) - 0.5, unit(2) - 0.5, unit(3) - 0.5).normalized();
+        let ways = [way.x, way.y, way.z];
+        let from = [
+            real(cell[0]) + unit(4),
+            real(cell[1]) + unit(5),
+            real(cell[2]) + unit(6),
+        ];
+        let (length, weight) = (unit(7) * grid.breadth, 1.0e3);
+        let mut pending = [Pending::new(SUNLIT), Pending::new(SUNLIT)];
+        walker.lay(
+            &mut pending,
+            (voxel, Some((block, from))),
+            (cell, ways),
+            (length, weight),
+        );
+        let [coarse, fine] = &mut pending;
+        coarse.flush(&solving.tally.voxels);
+        fine.flush(&solving.tally.fine);
+        let fluence = solving.tally.fine.field(SUNLIT).expect("held");
+        let parts: f64 = (0..per)
+            .map(|within| summed(fluence, block * per + within))
+            .sum();
+        let laid = weight * length;
+        // Each fine cell's add rounds to a whole on its own.
+        assert!(
+            (parts - laid).abs() <= real(per),
+            "block {block}: {parts} of {laid}"
+        );
+        let own = solving.tally.voxels.field(SUNLIT).expect("held")[voxel].load(Ordering::Relaxed);
+        assert_eq!(own, 0, "block {block} lit through its voxel");
+        for within in 0..per {
+            let index = block * per + within;
+            fluence[index].store(0, Ordering::Relaxed);
+        }
+    }
+    let open = (0..grid.voxels())
+        .find(|&voxel| {
+            runs.block(grid, (voxel % cells, voxel / side, voxel / cells % cells))
+                .is_none()
+        })
+        .expect("a voxel holds no cloud");
+    let mut pending = [Pending::new(SUNLIT), Pending::new(SUNLIT)];
+    walker.lay(
+        &mut pending,
+        (open, None),
+        (at(open), [0.0, 1.0, 0.0]),
+        (10.0, 3.0),
+    );
+    let [coarse, fine] = &mut pending;
+    coarse.flush(&solving.tally.voxels);
+    fine.flush(&solving.tally.fine);
+    let own = solving.tally.voxels.field(SUNLIT).expect("held")[open].load(Ordering::Relaxed);
+    assert_eq!(own, 30, "laid whole in the voxel");
+    let fluence = solving.tally.fine.field(SUNLIT).expect("held");
+    assert!(fluence
+        .iter()
+        .all(|value| value.load(Ordering::Relaxed) == 0));
+}
+
+/// A place reads its light from the fine cells about it where all are held,
+/// from its voxels where none is, and between the two where some are.
+#[test]
+fn a_place_reads_the_fine_light_where_it_is_held() {
+    let bank = solved(
+        HEAPS,
+        high_sun(),
+        (12_000.0, COARSE),
+        &tairix_parallel::Threaded::new(4),
+    );
+    let (mut fine, mut coarse, mut between) = (0, 0, 0);
+    for volume in &bank.lights.volumes {
+        let grid = volume.grid;
+        for index in 0..3000u32 {
+            let draw = |salt: u32| unit(mix32(index.wrapping_mul(0x9e37_79b9) ^ salt));
+            let at = (
+                bank.centre.0 + (2.0 * draw(1) - 1.0) * 0.98 * grid.half,
+                bank.floor + draw(2) * (bank.ceiling - bank.floor),
+                bank.centre.1 + (2.0 * draw(3) - 1.0) * 0.98 * grid.half,
+            );
+            let reading = volume.reading(&bank, at).expect("on the level");
+            let held = grid
+                .cube(
+                    grid.place_in(&bank, at, grid.fine).expect("on the level"),
+                    grid.fine,
+                )
+                .iter()
+                .filter(|&&(cell, weight)| {
+                    weight > 0.0 && volume.fine.runs.fine(grid, cell).is_some()
+                })
+                .count();
+            let corners = grid.corners(grid.place(&bank, at).expect("on the level"));
+            let voxels = volume.fluence[SUNLIT].read(&corners);
+            if held == 0 {
+                assert!((reading.fluence[SUNLIT] - voxels).abs() <= 1e-9 * voxels.abs().max(1.0));
+                coarse += 1;
+            } else if held == 8 {
+                fine += 1;
+            } else {
+                between += 1;
+            }
+            assert!(reading
+                .fluence
+                .iter()
+                .all(|&value| value.is_finite() && value >= 0.0));
+        }
+    }
+    assert!(
+        fine > 50 && coarse > 50 && between > 20,
+        "{fine} fine, {coarse} coarse, {between} between"
+    );
+}
+
+/// A bank of heaps holds its light finely on the levels within its reach
+/// and in its voxels past it; a bank of sheets holds it in its voxels
+/// throughout.
+#[test]
+fn heaps_are_lit_finely_within_their_reach_and_sheets_not_at_all() {
+    let resolution = Resolution {
+        reach: 8000.0,
+        ..COARSE
+    };
+    for (deck, heaped) in [(HEAPS, true), (OVERCAST, false)] {
+        let mut bank = Cloudbank::new(
+            [Some(deck), None],
+            (12_000.0, resolution),
+            high_sun(),
+            GROUND * 1000.0,
+        )
+        .expect("fits");
+        bank.stand(Vec3::ZERO, SCREEN_PIXEL).expect("levels fit");
+        assert!(bank.lights.volumes.len() >= 3);
+        for volume in &bank.lights.volumes {
+            let fine = heaped && volume.grid.half <= resolution.reach;
+            assert_eq!(
+                volume.grid.fine,
+                if fine { COARSE.fine } else { 1 },
+                "{}",
+                volume.grid.half
+            );
+        }
+    }
+}
+
+/// A level's fields move on pass by pass to the stage after them, and a
+/// field over no cells at all, as a level holding no fine light has, moves
+/// straight there.
+#[test]
+fn a_field_over_no_cells_moves_straight_on() {
+    let at = |pass, block| Stage::Fine(0, pass, block);
+    let then = Stage::Maps(0, 0);
+    assert_eq!(passed((0, 0, 0), at, then), then);
+    assert_eq!(passed((0, 5, 10), at, then), Stage::Fine(0, 0, 5));
+    assert_eq!(passed((0, 10, 10), at, then), Stage::Fine(0, 1, 0));
+    assert_eq!(passed((FIELD_PASSES - 1, 10, 10), at, then), then);
+}
+
+/// A level's tallies are laid at nought a share at a time, no more than one
+/// for each core and each in a tally of its own, within the room reserved
+/// for them, until every one holds exactly its cells.
+#[test]
+fn a_levels_tallies_are_laid_at_nought_a_share_at_a_time() {
+    let grid = Grid {
+        cells: 96,
+        layers: 32,
+        fine: 1,
+        ..Grid::default()
+    };
+    let mut tally = Tally::reserved(&Volume {
+        grid,
+        ..Volume::default()
+    })
+    .expect("fits");
+    let rooms: Vec<usize> = tally
+        .each_mut()
+        .map(|(values, _)| values.capacity())
+        .collect();
+    let laid =
+        |tally: &mut Tally| -> usize { tally.each_mut().map(|(values, _)| values.len()).sum() };
+    let runner = tairix_parallel::Threaded::new(3);
+    let mut before = laid(&mut tally);
+    let mut units = 0;
+    let done = loop {
+        units += 1;
+        let whole = tally.lay(&runner);
+        let after = laid(&mut tally);
+        assert!(after > before, "unit {units} laid nothing");
+        assert!(
+            after - before <= 3 * TALLY_CELLS,
+            "unit {units} laid {}",
+            after - before
+        );
+        before = after;
+        if whole || units > 64 {
+            break whole;
+        }
+    };
+    assert!(done, "laid in {units} units");
+    let floor = grid.floor_cells() * grid.floor_cells();
+    for ((values, cells), room) in tally.each_mut().zip(rooms) {
+        assert!(cells == grid.voxels() || cells == floor || cells == 0);
+        assert_eq!(values.len(), cells);
+        assert_eq!(values.capacity(), room, "laid within its room");
+        assert!(values
+            .iter()
+            .all(|value| value.load(Ordering::Relaxed) == 0));
+    }
+}
+
+/// A column's runs of layers holding cloud are found bit by bit across its
+/// words: from mid-word, over a word's edge, and up to a top that is or is
+/// not a word's edge.
+#[test]
+fn a_columns_layer_bits_are_searched_across_its_words() {
+    let bits = [1u64 << 63 | 1 << 2, u64::MAX >> 60, 0];
+    assert_eq!(next_bit(&bits, 0, true), Some(2));
+    assert_eq!(next_bit(&bits, 2, false), Some(3));
+    assert_eq!(next_bit(&bits, 3, true), Some(63));
+    assert_eq!(next_bit(&bits, 63, false), Some(68), "over the word's edge");
+    assert_eq!(next_bit(&bits, 68, true), None);
+    assert_eq!(
+        next_bit(&[u64::MAX], 5, false),
+        None,
+        "up to the last word's top"
+    );
+    assert_eq!(next_bit(&[], 0, true), None);
+    let grid = Grid {
+        cells: 2,
+        layers: 70,
+        fine: 2,
+        ..Grid::default()
+    };
+    // Column (1, 0) holds layers 2, 63 to 67 and 69; the rest hold none.
+    let mut layered = alloc::vec![0u64; 4 * grid.layer_words()];
+    layered[grid.layer_words()] = bits[0];
+    layered[grid.layer_words() + 1] = bits[1] | 1 << 5;
+    let (runs, voxels) = Runs::holding(grid, &layered).expect("fits");
+    assert_eq!(runs.blocks, 7);
+    let held: Vec<usize> = (0..grid.layers)
+        .filter(|&k| runs.block(grid, (1, k, 0)).is_some())
+        .collect();
+    assert_eq!(held, [2, 63, 64, 65, 66, 67, 69]);
+    for (block, &k) in held.iter().enumerate() {
+        assert_eq!(runs.block(grid, (1, k, 0)), Some(block));
+        assert_eq!(voxels[block] as usize, grid.index((1, k, 0)));
+    }
+    assert!((0..grid.layers).all(|k| runs.block(grid, (0, k, 1)).is_none()));
+}
+
+/// A picture whose pixels a fine cell would not span where its level begins
+/// holds a bank's light in its voxels however heaped the bank, and one whose
+/// pixels it would, finely.
+#[test]
+fn a_picture_too_coarse_for_its_fine_cells_holds_the_light_in_voxels() {
+    let resolution = Resolution {
+        reach: f64::INFINITY,
+        ..COARSE
+    };
+    let narrowest = 4.0 / real(COARSE.cells * COARSE.fine);
+    for (pixel, fine) in [(0.9 * narrowest, COARSE.fine), (1.1 * narrowest, 1)] {
+        let mut bank = Cloudbank::new(
+            [Some(HEAPS), None],
+            (12_000.0, resolution),
+            high_sun(),
+            GROUND * 1000.0,
+        )
+        .expect("fits");
+        bank.stand(Vec3::ZERO, pixel).expect("levels fit");
+        assert!(
+            bank.lights
+                .volumes
+                .iter()
+                .all(|volume| volume.grid.fine == fine),
+            "pixel {pixel}"
+        );
+    }
 }

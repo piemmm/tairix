@@ -17,7 +17,7 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   lake, a coast, desert, snow, a lagoon, canyons, a river valley, a stream
   through its pools, riffles and ledges).
 - `Detail` — how much a scene sets out: `Simple`, every setting plainer
-  within about 512 MiB at its peak, or `Maximum`, all the realism a 2 GiB peak
+  within about 768 MiB at its peak, or `Maximum`, all the realism a 2 GiB peak
   buys; `peak` states each one's budget for a caller weighing its memory.
 - `Draft` — a scene composed at a `Detail` but not yet traceable: its lands
   built, its woods, water's edge and swards grown, its trees and deadwood grown into
@@ -67,9 +67,12 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   couple of thousand of their beams or a few thousand of their pyramids'
   nodes, 48 steps of a stone's wear, a few rows of a stream's flow, a few rows
   of a radiosity record's hemisphere, a few rows of a cloud
-  level's weather or bands, of its light's voxels, a slice of its sweep
-  toward the sun, a few batches of its photons or a pass of its fields, each
-  level's maps reserved whole and written as their rows are filled.
+  level's weather or bands, a few columns or rows of its distances to its
+  footprints' edges, a few rows of what its weather holds over its light's
+  columns or of its light's voxels, a slice of its sweep toward the sun, a
+  megabyte of one of its tallies laid at nought, a few batches of its photons
+  or a pass of its fields or its fine fields, each level's maps reserved whole
+  and written as their rows are filled.
 
 ## Tests
 
@@ -151,11 +154,23 @@ standing over the cell beneath each point on every level, far cloud lit by the
 sun at its own place and shading the ground from a low sun, an overcast grey to
 the horizon, and a point drawn along the air falling as its sunlight is
 gathered; a deck's footprints covering its share of the sky and a heap
-deeper the broader its field; a cloud's light the same however many cores
-solve it, no cloud denser than its voxel's bound, the light under a thin veil
-the sky's and the lit ground's own, a thick overcast letting down what
-diffuses through a lossless slab as deep, and a heap's top lying the deeper
-in the shadow of a deck above it; a bridge's deck and a row of arches keeping trees off the strip
+deeper the broader its field; a column's edge its distance to the nearest
+place its cover crosses a footprint's edge, an envelope rising from its edge
+to its depth, a place lying within it by the chord beside it and no nearer
+than it truly is outside, and the highest a cloud can stand found to half a
+metre; a fringe cut into filaments low down and puffs high up, read as its
+wisps' mean where they are too fine to see; a cloud's light the same however
+many cores solve it, its units counted up to their whole only once it is
+solved, no cloud denser than its voxel's bound, each voxel
+holding cloud held finely once and its track laid whole in its fine cells
+alone, a column's runs found across the words of its layer bits, its tallies
+laid at nought a share a core at a time within their room and a field over no
+cells moving straight on, a place reading the fine light where it is held,
+heaps lit finely within their reach and sheets not, nor in a picture too
+small for their fine cells, the light under a thin veil the sky's and the lit
+ground's own, a thick overcast letting down what diffuses through a
+lossless slab as deep, and a heap's top lying the deeper in the shadow of a
+deck above it; a bridge's deck and a row of arches keeping trees off the strip
 beneath them, a strip claimed with no gap at its edges, a narrow slanting
 river wet in every cell it crosses, and woods with nothing beneath them still
 casting their shade; a seed showing the same place at either detail, `Simple` standing

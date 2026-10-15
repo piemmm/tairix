@@ -76,11 +76,14 @@ const LEVEL: f64 = GROUND * 1000.0;
 const BROAD: f64 = 200_000.0;
 const FINE: f64 = 12_000.0;
 
-/// Light solved coarsely enough for a test to build many banks.
+/// Light solved coarsely enough for a test to build many banks, its two
+/// finest levels held finely where heaps stand.
 const COARSE: Resolution = Resolution {
     cells: 16,
     finest: 4000.0,
     tracks: 16.0,
+    fine: 2,
+    reach: 8000.0,
 };
 
 /// The sunlight, sky and ground a test bank is lit by.
@@ -98,7 +101,7 @@ fn stood(
     light: fn(&Cloudbank, Vec3) -> Lighting,
 ) -> Cloudbank {
     let mut bank = Cloudbank::new(decks, (most, COARSE), sun, LEVEL).expect("fits");
-    bank.stand(Vec3::ZERO).expect("levels fit");
+    bank.stand(Vec3::ZERO, SCREEN_PIXEL).expect("levels fit");
     let lighting = light(&bank, sun);
     bank.light_by(lighting);
     while !bank.step(runner, above).expect("held") {}
@@ -451,7 +454,98 @@ fn column_at(bank: &Cloudbank, slot: usize, (x, z): (f64, f64)) -> Option<Column
     let level = bank.level_over(Vec3::new(x, 0.0, z))?;
     let place = place_on(bank.centre, level.half, (x, z), WEATHER_CELLS);
     let (corners, across) = about(level.weather.get(slot)?, WEATHER_CELLS + 1, place)?;
-    Some(Blend { corners, across }.column())
+    let blend = Blend { corners, across };
+    let read = |field: fn(&Column) -> f32| single(blend.at(field));
+    Some(Column {
+        edge: read(|column| column.edge),
+        base: read(|column| column.base),
+        top: read(|column| column.top),
+    })
+}
+
+/// A column stands as far within its footprint as the nearest place its
+/// level's cover crosses a footprint's edge between two vertices, on any row
+/// or column of the level's grid, wherever the rim leaves the level its own
+/// edges: checked against every crossing about it.
+#[test]
+fn a_columns_edge_is_its_distance_to_the_nearest_crossing() {
+    let mut bank =
+        Cloudbank::new([Some(CUMULUS), None], (FINE, COARSE), high_sun(), LEVEL).expect("fits");
+    bank.stand(Vec3::ZERO, SCREEN_PIXEL).expect("levels fit");
+    let runner = tairix_parallel::Threaded::new(4);
+    while bank.stage != Stage::Light {
+        bank.step(&runner, None).expect("held");
+    }
+    let points = WEATHER_CELLS + 1;
+    let mut checked = [0u32; 2];
+    for level in bank.levels.iter().take(2) {
+        let spacing = 2.0 * level.half / real(WEATHER_CELLS);
+        let farthest = RIM * level.half;
+        let covers: Vec<f32> = (0..points * points)
+            .map(|place| {
+                let at = vertex_of(
+                    bank.centre,
+                    level.half,
+                    (place % points, place / points),
+                    WEATHER_CELLS,
+                );
+                weather(&CUMULUS, at, spacing).0
+            })
+            .collect();
+        let cover = |i: usize, j: usize| covers.get(j * points + i).copied();
+        let reach = WEATHER_CELLS / 16 + 2;
+        let own = (WEATHER_CELLS / 2) * 7 / 8 - 1;
+        for sample in 0..150u32 {
+            let pick = |salt: u32| {
+                WEATHER_CELLS / 2 - own
+                    + usize::try_from(mix32(sample.wrapping_mul(0x9e37_79b9) ^ salt) % 1000)
+                        .unwrap_or(0)
+                        * (2 * own)
+                        / 1000
+            };
+            let (i, j) = (pick(1), pick(2));
+            assert!(rim(WEATHER_CELLS, (i, j)) <= 0.0);
+            let mut nearest = f64::INFINITY;
+            for row in j.saturating_sub(reach)..(j + reach).min(points) {
+                for column in i.saturating_sub(reach)..(i + reach).min(points) {
+                    let mut meet = |(x, z): (f64, f64)| {
+                        let (dx, dz) = ((x - real(i)) * spacing, (z - real(j)) * spacing);
+                        nearest = nearest.min(mathf::sqrt(dx * dx + dz * dz));
+                    };
+                    let here = cover(column, row).unwrap_or(0.0);
+                    if let Some(share) =
+                        cover(column + 1, row).and_then(|east| form::crossed(here, east))
+                    {
+                        meet((real(column) + share, real(row)));
+                    }
+                    if let Some(share) =
+                        cover(column, row + 1).and_then(|north| form::crossed(here, north))
+                    {
+                        meet((real(column), real(row) + share));
+                    }
+                }
+            }
+            let inside = f64::from(cover(i, j).unwrap_or(0.0)) > 0.5;
+            let truth = nearest.min(farthest) * if inside { 1.0 } else { -1.0 };
+            let Some(column) = level
+                .weather
+                .first()
+                .and_then(|map| map.get(j * points + i))
+            else {
+                panic!("{i} {j} lies on the map");
+            };
+            let edge = f64::from(column.edge);
+            assert!(
+                (edge - truth).abs() <= 1e-3 * truth.abs().max(1.0),
+                "{i} {j}: {edge} against {truth}"
+            );
+            checked[usize::from(inside)] += 1;
+        }
+    }
+    assert!(
+        checked.iter().all(|&count| count > 20),
+        "{checked:?} inside and out"
+    );
 }
 
 /// Either side of where one level gives way to the next, the weather, the
@@ -482,7 +576,7 @@ fn the_levels_meet_without_a_seam() {
                     panic!("{edge}: both sides lie on the bank");
                 };
                 assert!(
-                    (a.cover - b.cover).abs() < 1e-4
+                    (a.edge - b.edge).abs() < 0.05
                         && (a.base - b.base).abs() < 0.05
                         && (a.top - b.top).abs() < 0.05,
                     "{edge} at {inside:?}: {a:?} against {b:?}"
@@ -556,7 +650,7 @@ fn a_square_holds_its_cloud_within_its_bands_and_its_densest() {
         let draw = |salt: u32| unit(mix32(square.wrapping_mul(0x85eb_ca6b) ^ salt));
         let breadth = 50.0 + 3000.0 * draw(1);
         let low = (60_000.0 * draw(2) - 30_000.0, 60_000.0 * draw(3) - 30_000.0);
-        let stands = bank.stands_over(low, (low.0 + breadth, low.1 + breadth));
+        let holding = bank.weather_over(low, (low.0 + breadth, low.1 + breadth));
         for sample in 0..60u32 {
             let key = square * 64 + sample;
             let place = |salt: u32| unit(mix32(key.wrapping_mul(0x9e37_79b9) ^ salt));
@@ -567,7 +661,7 @@ fn a_square_holds_its_cloud_within_its_bands_and_its_densest() {
                 continue;
             };
             cloudy += 1;
-            let densest = bank.densest(&stands, (height - 1.0, height + 1.0));
+            let densest = bank.densest(&holding, (height - 1.0, height + 1.0), 1.0);
             assert!(
                 sample.extinction <= densest * (1.0 + 1e-9),
                 "{} past {densest}",
@@ -675,7 +769,7 @@ fn a_coarse_ray_reaches_cloud_beyond_however_many_clear_columns_it_crosses() {
                 let i = place % (WEATHER_CELLS + 1);
                 let (x, _) = vertex_of(centre, half, (i, 0), WEATHER_CELLS);
                 if x < 8_000.0 {
-                    column.cover = 0.0;
+                    column.edge = -1e6;
                 }
             }
         }

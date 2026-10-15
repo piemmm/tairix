@@ -143,18 +143,34 @@ through the air and the cloud, and the sky above, cosine-weighted — so water
 by moonlight glows only as much as moonlight lights it, and at sunset with
 sunset's colour.
 
-A deck's clouds stand where its weather lays them (`cloud::form`). Over each
-footprint an envelope rises from a flat base — steep-sided domes for heaps, a
-plateau for sheets — as deep as the broad field of cloud about it has grown
-it, and falls away beyond the footprint's edge; bubbles push its surface out
-into turrets on turrets at four scales, as thermals rising through a heap
-swell it, each settling to its mean where a footprint is too coarse to see
-it, and fine wisps fray its edge. A deck's footprints cover the share of the
-sky its cover names, its weather field's quantile placing their edge. Water
-holds extinction rising with the two-thirds power of the height above its
-base, as adiabatic liquid water and its droplets' growth have it (Stephens
-1978), so a heap is thinnest at its base and densest high in its body, its
-columns tens to some hundreds of optical depths deep; ice holds it evenly.
+A deck's clouds stand where its weather lays them (`cloud::form`). A deck's
+footprints cover the share of the sky its cover names, its weather field's
+quantile placing their edge, and each weather column holds its exact distance
+to the nearest place its cover crosses that edge between two columns: on a
+row or a column of the grid, found along the rows and down the columns
+(Felzenszwalb and Huttenlocher's separable transform). Over each footprint an
+envelope rises from a flat base as a dome over that distance, as deep as the
+broad field of cloud about it has grown it: a heap's rises to its depth some
+billows in however deep it stands, so a shallow heap is a low dome and a deep
+one stands steep-walled; a sheet's rises soon after its edge, a plateau.
+A place's depth within the envelope is measured to the chord between the
+envelope straight above or below it and the envelope level with it, so
+turrets stand out from a heap's walls as they rise from its top. Bubbles push
+the surface out into turrets on turrets at six scales, as thermals rising
+through a heap swell it, each scale's reach falling as the 0.85th power of
+its size, so the finer stand out as on a real heap, each settling to its mean
+where a footprint is too coarse to see it. Past the turrets stands a fringe
+of droplets diluted into the dry air: narrow at a heap's top and widest low
+down, thinning outward as the cube of how far into it a place lies, so a
+grazing look through it shows the sky, and cut by the wisps — into puffs high
+up, where thermals push the cloud out, and into filaments low down, where it
+mixes away. Water holds extinction rising with the two-thirds power of the
+height above its base, as adiabatic liquid water and its droplets' growth
+have it (Stephens 1978), so a heap is thinnest at its base and densest high
+in its body, its columns tens to some hundreds of optical depths deep; ice
+holds it evenly. A read of the cloud stops as soon as the turret scales still
+to come could neither bring its surface out to the place nor take it back
+past it.
 
 Cloud scatters the sun once exactly, through its phase: water's a forward
 lobe (g 0.9) and a twentieth's backward one (g −0.3), ice's rough crystals'
@@ -169,25 +185,47 @@ scaled by `1 − g`, the similarity principle (van de Hulst 1980), and off the
 ground as its albedo has it. So a heap traps its light as its own thickness
 has it however coarse the voxels: averaged over voxels broader than itself it
 would be spread thin and let the light go, a far field of cumulus reading
-less than half as bright as it is. Each voxel holds the diffuse light's
-fluence and net flux, the tracks photons lay through it, and the optical
-depth toward the sun swept from the sunward face; each level's floor the sky
-it leaves open and the light its cloud sheds down. A sample's light is its
+less than half as bright as it is. A voxel's bound is the most its cloud can
+hold anywhere within it: none where the bands of its weather cells, or the
+envelope at the weather's furthest, deepest and lowest over it with the
+turrets and fringe at their furthest, leave no room for cloud; each band's
+top is likewise the envelope's own, to the metre. A place lies no further
+within its envelope for a column less far within its footprint, a shallower
+column or a place higher above its base, so both bound every read. Each voxel
+holds the diffuse light's fluence and net flux, the tracks photons lay
+through it, and the optical depth toward the sun swept from the sunward face;
+each level's floor the sky it leaves open and the light its cloud sheds down.
+Where a bank holds heaps, the levels within a detail's reach hold that light
+again finely within each voxel holding cloud — three times finer along each
+axis at either detail, every fine cell lit by as much track as a voxel — since
+the light just inside a heap's surface varies within a transport mean free
+path, some 40–60 m in its dense core, which the voxels hold only in part. A
+read takes the fine cells about it where they are held and the voxels for the
+rest of its weight. Past the reach a heap stands low over the horizon behind
+miles of air, too far for the fine light to show; a sheet's relief is a third
+of a heap's, and an overcast filling every voxel of its layers would spend the
+fine light's photons on a grey ceiling, so sheets keep the voxels' light. A
+picture too small for a fine cell to span one of its pixels, where the cell's
+level begins, keeps the voxels' light too: a fine cell spans some 7–20 of a
+full-HD screen's pixels, and under one of a picture fifty pixels high.
+A sample's light is its
 single scattering, what of the sun the phase's forward peak carries on
 scattered once more, and the diffuse light's fluence and flux through the
 full phase's asymmetry. Toward the sun a sample looks through its own billows
 in short taps, out to a voxel's breadth of clear air past its cloud, and
 through the rest of the bank by the volumes' depth: its billows shade their
 neighbours, and a cloud shades the clouds behind it. Against a brute-force
-path tracer through the same cloud, near heaps read within a few percent and
-far ones some 15–20% dark, the volumes' coarser voxels blurring the light
-just inside a far cloud's surface.
+path tracer through the same cloud, seen from below, an unbroken overcast's
+base reads some 15–20% bright, its voxels drawing the light from within it
+down to its base (fine light, were it spent there, reads it within a few
+percent), and a broken deck's base beside a gap some 12% dark.
 
 A ray seen directly strides on to where a bounding read says cloud may stand,
 then steps through it a pixel's footprint or two at a time, further within a
 cloud's body as its depth below the surface and its extinction allow, its
-edges cut by finer reads of the wisps as far as that footprint resolves them,
-each finer one settling to what it leaves on average.
+fringe cut by finer reads of the wisps as far as that footprint resolves
+them, a fringe too finely cut for the footprint reading as the mean the wisps
+leave.
 
 ## Lands
 
@@ -1028,16 +1066,18 @@ hull faces, 256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns
 and 8 woods, each carried on far off at `Maximum` as at most 576 tiles of its
 land, and a path at most nine bounces.
 
-A scene may take up to 160 s to prepare on a desktop-class machine across 8
-threads and hold up to 2 GB at its peak at `Maximum`, far less at `Simple`
-(`plans/RAYTRACE.md`). Measured at 1920×1080 on a 24-thread desktop preparing
-across 8 threads, a landscape prepares at `Maximum` in 1.0–102 s — a stream
-in 65–102 s, a meadow in 48–64 s, a forest in 65–74 s, a mountain forest over
-a lake in 44–55 s, snow over a frozen pond in 72–76 s, a desert in 7–20 s, a
-lagoon in 1.0–4.6 s, most of each its radiosity records and up to half of a
-lagoon's its caustics — holding at most about 840 MB at its peak and once
-prepared, a stream's; at `Simple` it prepares in 0.35–9.3 s, holding at most
-475 MB.
+A scene prepares in up to 160 s on a desktop-class machine across 8 threads
+and holds up to 2 GB at its peak at `Maximum`, far less at `Simple`
+(`plans/RAYTRACE.md`); a heaped sky's cloud light at `Maximum` may take
+longer. Measured at 1920×1080 on a 24-thread desktop preparing across 8
+threads, over 29 landscapes at `Simple` and the twelve heaviest found at
+`Maximum`, a landscape prepares at `Maximum` in at most 343 s, most of each
+its radiosity records — a farmland's the slowest, past the budget — and up to
+half of a lagoon's its caustics; under a heaped sky its cloud light adds the
+most, a scene taking 88–130 s under cumulus, humilis or stratocumulus and up
+to 333 s under congestus over a stream. It holds at most 1275 MiB at its
+peak, a farmland's under stratocumulus. At `Simple` a landscape prepares in
+at most 34 s, holding at most 702 MiB.
 Laying a scene's caustics takes up to 0.25 s at `Simple` and
 0.95 s at `Maximum`, and holds up to about 75 MB and 330 MB. Traced on one of its cores,
 built for the x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the

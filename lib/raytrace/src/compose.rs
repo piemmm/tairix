@@ -671,7 +671,7 @@ impl Composition {
             .into_iter()
             .flatten()
         {
-            bank.stand(eye)?;
+            bank.stand(eye, pixel)?;
         }
         if let Dome::Air(atmosphere) = &mut look.sky.dome {
             atmosphere.place_eye(eye);

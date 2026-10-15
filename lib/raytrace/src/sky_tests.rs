@@ -7,7 +7,9 @@ use tairix_util::mathf;
 use super::{Dome, Gradient, Seeing, Sky};
 use crate::atmosphere::{Air, Atmosphere};
 use crate::body;
-use crate::cloud::{Cloudbank, Deck, Lighting, Matter, Resolution, SUNLIGHT_LEVELS, SUN_COSINES};
+use crate::cloud::{
+    Cloudbank, Deck, Lighting, Matter, Resolution, SCREEN_PIXEL, SUNLIGHT_LEVELS, SUN_COSINES,
+};
 use crate::stars::Starfield;
 use crate::vector::Vec3;
 
@@ -130,6 +132,8 @@ const COARSE: Resolution = Resolution {
     cells: 16,
     finest: 4000.0,
     tracks: 16.0,
+    fine: 2,
+    reach: 8000.0,
 };
 
 /// A bank of one deck of `form`, stood about the eye at the scene's middle,
@@ -138,7 +142,7 @@ fn bank(deck: Deck) -> Cloudbank {
     let sun = Vec3::new(0.2, 0.9, 0.3).normalized();
     let mut bank =
         Cloudbank::new([Some(deck), None], (12_000.0, COARSE), sun, LEVEL).expect("fits");
-    bank.stand(Vec3::ZERO).expect("levels fit");
+    bank.stand(Vec3::ZERO, SCREEN_PIXEL).expect("levels fit");
     bank.light_by(Lighting {
         sunlight: alloc::vec![Vec3::splat(20.0); SUNLIGHT_LEVELS * SUN_COSINES],
         cosines: bank.sun_cosines(sun),
@@ -177,7 +181,7 @@ fn under(air: Air, deck: Deck) -> Sky {
         air.ground(),
     )
     .expect("fits");
-    low.stand(air.eye).expect("levels fit");
+    low.stand(air.eye, SCREEN_PIXEL).expect("levels fit");
     let mut sky = Sky {
         dome: Dome::Air(Atmosphere::new(air).expect("tables fit")),
         stars: None,

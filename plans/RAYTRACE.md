@@ -20,7 +20,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT2 | Progress readout: *Generating scene... N%* while a scene is prepared, then *Rendering... N%*, small and mid-grey in the lower right, gone once the picture is whole | done |
 | RT3 | Saving finished pictures: `screensaver.raytrace.save` keeps each whole picture as a PNG in the user's `UserFiles/Pictures/Raytracing/`, with no limit on how many | done |
 | RT4 | Highest quality, always: no sample governor; a reconstruction filter and sampling rounds that leave no jagged or noisy edge | done |
-| RT5 | A 160 s preparation budget, every unit of preparation bounded and parallel (closes D464), spent where it measurably buys realism: radiosity records, and woods reaching twice as far | done |
+| RT5 | A 160 s preparation budget, a heaped sky's cloud light at *Maximum* up to about 5.5 min, every unit of preparation bounded and parallel (closes D464), spent where it measurably buys realism: radiosity records, and woods reaching twice as far | done |
 | RT6 | Wind on water without repetition: a spectrum of many wave components under gusting patches; the open sea's grid no longer tiles in view; detail finer than a pixel becomes roughness | done |
 | RT7 | The water defects: ripples aliasing far off, reflections lost at grazing angles, the open sea stopping short of the horizon, and the noise seams under every pattern (D490–D494) | done |
 | RT8 | Caustics on and under every body of water, from the light the surface itself focuses: beams over the water the picture shows, every one gathered, refracted onto beds and what stands in the water and reflected onto what stands over it | done |
@@ -62,6 +62,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT44 | Cloud to the horizon: decks over the Earth's curve, mapped in levels about the eye out to as far as they can be seen, the air beneath them shaded by them, each place lit by the sun as it stands there | done |
 | RT45 | No primitive stand-ins: every limb's foot flares into the roots it grows out of, every break torn, every end tapered, cut or broken as the real thing's is, every leaf and flower worn as the real one is — trees, snags, stumps, fallen trunks and their root plates, the snowman's carrot and sticks, saguaro ribs, spines and areoles, a palm's and a shrub's foot, a reed's tip and plume, a reedmace's spike, a lily's pads and flowers and a crowfoot's flower | done |
 | RT46 | Cumulus as they are: heaps as tall as they are broad, fluffy, detailed at every scale a pixel shows, a thick one dark underneath its sunlit top | in progress |
+| RT47 | *Maximum*'s radiosity records gathered within the 160 s budget on a farmland as on every other land | planned |
 
 ## Standing rules
 
@@ -88,10 +89,12 @@ These bind every item, done or planned.
   wave, cloud — is drawn from its own key, so no two match. Nothing tiles in
   view, and no scene is uniformly covered by any one thing: cover comes in
   patches, gradients and gaps.
-- **Budgets.** A scene may take up to 160 s to prepare on a desktop-class
-  machine preparing across 8 threads, and hold at its peak up to 2 GB (or the
-  free memory, if less) at *Maximum* detail, far less at *Simple* (RT39). Both
-  are spent on detail and never wasted: a buffer is sized to what it holds, a
+- **Budgets.** A scene prepares in up to 160 s on a desktop-class machine
+  preparing across 8 threads, and holds at its peak up to 2 GB (or the free
+  memory, if less) at *Maximum* detail, far less at *Simple* (RT39). The cloud
+  light of a heaped sky at *Maximum* may take longer: up to about 5.5 min
+  under congestus over a stream (RT43). Both budgets are spent on detail and
+  never wasted: a buffer is sized to what it holds, a
   stage's working set is let go when the stage ends, and where an efficient
   structure serves as well it is the one used. Every unit of preparation stays
   small enough for a caller answering a frame to stop after it; every
@@ -564,8 +567,9 @@ stands by no stream looks over its dale with no brook laid.
   beams stray.
 
 Measured on Stream at 1920×1080 preparing across 8 threads, seeds 0–2: at
-*Simple* in 7.0–9.3 s, holding at most 373 MB; at *Maximum* in 65–102 s, at
-most 840 MB at its peak and once prepared.
+*Simple* in 6.1–21.4 s, holding at most 396 MiB at its peak; at *Maximum* in
+69–117 s, at most 914 MiB, seeds 0 and 1 the slower for their heaped skies'
+fine cloud light.
 The flow is solved on 2048 × 256 points at *Simple* and 4096 × 512 at
 *Maximum*, holding at most 34 MB and 134 MB while it is solved, each grid
 reserved only once the solve reaches it.
@@ -1045,26 +1049,59 @@ Every light out of doors comes of a published measurement, nothing tuned
   as many voxels (`Resolution`: 96 a side, the finest 4 km either way, at
   *Simple*; 160 at *Maximum*). Photons follow the bank's own cloud, read at
   a 16 m footprint (`FOOTPRINT`), by delta tracking against each voxel's
-  bound — the bands of the weather cells under its column and the
-  extinction law (`Cloudbank::stands_over`, `densest`) — a band check
-  skipping air no cell can hold cloud in (`may_stand`). The sun's enter the
-  top along its beam, the sky's from above, through the similarity
-  principle's scaled extinction, off the ground by its albedo, in rounds
-  until each voxel holding cloud has `tracks` voxels' track or 16 rounds
-  have gone (`MOST_ROUNDS`). Track tallies are exact integers, so the light
-  is the same however many cores solve it. Toward the sun a sample looks
-  through its own billows by taps out to a voxel's breadth of clear air,
-  the volumes' depth answering past that: cloud-on-cloud shadow.
-- Against a brute-force path tracer through the same cloud (96 samples a
-  pixel): near heaps within 3%, the field 0.83 of it, far heaps 0.79–0.84,
-  the gap the voxels' hold on the light just inside a far cloud's surface
-  (192 a side gives 0.86–0.92); the cloud averaged over the voxels for its
-  photons read 0.43. Under a thin veil the light is the sky's and the lit
-  ground's own to 8%; a thick overcast lets down a lossless slab's diffusion
-  transmission to 30%. Per-voxel photon noise is some 10%.
-- Cost: Farmland at 960×540, *Simple*, 24 threads, prepares in 5.3–5.9 s
-  against 4.6 s with the voxels' average for its photons; tracing is
-  unchanged.
+  bound (`Cloudbank::weather_over`, `densest`): none where the bands of the
+  weather cells under it, or the envelope at the weather's furthest,
+  deepest and lowest over the voxel's own box with its turrets and fringe at
+  their furthest (`form::may_hold`), leave no room for cloud; a band check
+  skipping air no cell can hold cloud in (`may_stand`), each band's top the
+  envelope's own to the metre (`highest_rise`). The sun's enter the top along
+  its beam, the sky's from above, through the similarity principle's scaled
+  extinction, off the ground by its albedo, in rounds until each voxel
+  holding cloud has `tracks` voxels' track or 16 rounds have gone
+  (`MOST_ROUNDS`). Track tallies are exact integers, so the light is the
+  same however many cores solve it. Toward the sun a sample looks through
+  its own billows by taps out to a voxel's breadth of clear air, the
+  volumes' depth answering past that: cloud-on-cloud shadow.
+- Fine light: where a bank holds a heaped deck (`HEAPED`, a heap of 0.5 or
+  more), each level within the resolution's `reach` (32 km at either
+  detail) holds its light again three times finer along each axis
+  (`Resolution::fine`) within every voxel holding cloud (`Runs`), the
+  voxel's track shared out among the fine cells it crosses and the photons
+  multiplied by the fineness squared, so each fine cell is lit as well as a
+  voxel: 28 m cells at the finest level at *Simple*, 17 m at *Maximum*. A
+  read takes the fine cells about it where they are held and the voxels for
+  the rest of its weight. A fine flux matters as much as a fine fluence:
+  with the voxels' flux the lobes' shaded sides flatten. A picture whose
+  pixels a fine cell would not span where its level begins, at
+  `4 / (cells · fine)` radians, keeps the voxels' light (`Lights::lay`): a
+  fine cell spans some 7–20 of a full-HD screen's pixels, and under one of
+  a picture fifty pixels high, as the tests' pictures are.
+- Against a brute-force path tracer through the same cloud, seen from below:
+  an unbroken overcast's base reads 14–19% bright in the voxels' light, with
+  the ground's light and without, and the test overcast's 18% (see RT46),
+  where the fine light read it within 4% once its rounds were spent; a broken
+  deck's base beside a gap reads 12% dark. Under a thin veil the light is the
+  sky's and the lit ground's own to 8%; a thick overcast lets down a lossless
+  slab's diffusion transmission to 30%. Per-fine-cell noise is held near the
+  voxels' own; a quarter of the fineness-squared budget mottles near heaps
+  visibly.
+- Cost: measured at 1920×1080 across 8 threads, a scene under a heaped sky
+  prepares at *Simple* in 11–34 s; at *Maximum* in 88–130 s under cumulus,
+  humilis or stratocumulus, and in 112–333 s under congestus, a stream's the
+  slowest (Stream, seed 24), its cloud light some three quarters of it. An
+  overcast keeps the voxels' light alone. A fine level sends nine times a
+  voxel level's photons, each some 40 µs under congestus: about 95 reads of
+  the cloud, three in four of them passed through against the voxel's bound,
+  260 voxels crossed, and 185 additions to the tallies, a third of the cost.
+  A voxel held finely tallies its track in its fine cells alone, its own
+  light their sum (`Walker::lay`). The fine light adds
+  25–100 MiB to a heaped scene's peak at *Simple* and 230–350 MiB at
+  *Maximum*, stratocumulus's broad layers the most: Farmland, seed 3, peaks
+  at 702 MiB and 1275 MiB. Every unit of a level's solving stays a few
+  milliseconds of a core's work: what the weather holds over its columns
+  found a few rows at a time (`Stage::Stands`), its tallies laid at nought a
+  megabyte a core at a time (`Stage::Tallies`), and its runs read off its
+  columns' layer bits (`Runs::holding`).
 
 ## RT44 — Cloud to the horizon
 
@@ -1132,30 +1169,51 @@ Done:
 
 - *Heaps.* A footprint is where a deck's weather field passes the quantile
   its cover names (`normal_quantile`), so its footprints cover that share of
-  the sky. Over it an envelope rises from a flat base — a heap's steep-sided
-  dome, a sheet's plateau (`PROFILE`) — as deep as the field's broadest
-  octaves have grown it, falling away beyond its edge (`FALL`).
-- *Turrets on turrets.* Bubbles at four scales push the envelope out
-  (`BUBBLES`): unions of spheres swelling from tiled cells, each scale
-  settling to its mean where a footprint is too coarse to see it; wisps fray
-  the edge (`FRAYING`).
+  the sky; each weather column holds its exact distance to the nearest place
+  its cover crosses a footprint's edge between two columns (`Edging`,
+  `nearest_crossings`, `Envelope`: the separable transform, the crossings on
+  rows and on columns each swept along and then across). Over it an envelope
+  rises from a flat base as a dome over that distance (`envelope`): a heap's
+  run to its depth some billows in (`HEAP_RUN`) however deep it stands, so it
+  leaves its edge as steeply as its depth over that run and a shallow heap is
+  a low dome while a deep one stands steep-walled, a sheet's a share of its
+  depth in (`SHEET_RUN`), and below its base outside at a fixed fall
+  (`FALL`). A place's depth within it
+  is measured to the chord between the envelope above or below it and the
+  envelope level with it (`within_envelope`), so turrets stand out from walls
+  as from tops, and no turret stands further from the envelope than it
+  reaches.
+- *Turrets on turrets.* Bubbles at six scales push the envelope out
+  (`BUBBLES`), down to 12 m cells: unions of spheres swelling from tiled
+  cells, each scale's reach falling as the 0.85th power of its size
+  (Malinowski and Zawadzki's 2.35-dimensional surface), each settling to its
+  mean where a footprint is too coarse to see it.
+- *Fringe.* Past the turrets a fringe of diluted droplets (`FRINGE`), narrow
+  at a heap's top and widest low down (`BILLOWING`), thinning outward as the
+  cube of how far into it a place lies and cut by the wisps (`eroded`) —
+  their walls left as filaments low down, their middles as puffs high up —
+  read as its tabulated mean where its wisps are too fine for a footprint
+  (`fringe_means`).
 - *Opacity.* Water's extinction rises with the two-thirds power of the
   height above its base (`ADIABATIC`), a deck's `thickness` taken a
   kilometre up: cumulus columns a median of some 30 optical depths, a tenth
   past 140.
-- *Lit by the light itself* (RT43): bases grey beneath sunlit tops, and near
-  heaps as bright as a brute-force path tracer through them.
+- *Lit by the light itself* (RT43): bases grey beneath sunlit tops, and the
+  light just inside a heap's surface held in fine cells, so its lobes show
+  their lit faces and shaded creases.
+- *Reads decided early.* A read of the cloud stops once the turret scales
+  still to come can neither bring the surface out to the place nor take it
+  back past it (`Surface`): about twice as fast within cloud.
 
 Remaining:
 
-- *Spires.* A small footprint the field's finer octaves alone lift past its
-  edge still rises most of its deck's depth: a straight-sided spire
-  (Farmland, seed 4, top left). A heap's height is to follow its own
-  breadth.
-- *Surface light.* Just inside a heap's sunlit surface the diffuse light
-  varies within a transport mean free path, some 60 m, which the finest
-  voxels (83 m at *Simple*) hold only in part: near turrets show more in
-  outline than in shading.
+- *Sheets' bases.* A sheet or an overcast keeps the voxels' light, the fine
+  light costing an overcast that fills every voxel of its layers nine times
+  the photons: seen from below, an unbroken overcast's base reads some
+  15–20% bright against a brute-force path tracer through it, the voxels
+  drawing the light from within it down to its base, and a broken deck's base
+  beside a gap some 12% dark. A base is to read as it is without the fine
+  light's cost: the voxels' light to hold a base's boundary layer on its own.
 - *The clear sky.* The atmosphere's zenith at noon is 0.065 of the ground's
   sunlight over π, where clear skies measure about 0.12 and Preetham's model
   0.3; it sets how bright cloud reads against the sky, so it is to be
@@ -1186,6 +1244,16 @@ Remaining:
 - **Reeds** end in a spear of rolled leaf or a branched plume of silky tufts;
   **a reedmace's spike** swells between blunt ends under a withered spire and
   bursts in fluff over winter.
+
+## RT47 — Radiosity within the budget on a farmland
+
+Measured at 1920×1080 across 8 threads, Farmland, seed 2, prepares at
+*Maximum* in 340 s, 267 s of it gathering its radiosity records: past the
+160 s budget under any sky, where a stream gathers its records in under a
+minute. What remains: find what a farmland's records cost — how many its
+hedges, walls and hedgerow trees ask for, and how many rays each gathers — and
+bound it, so its gathering keeps within the budget without thinning the light
+the records hold on any other land.
 
 ## RT32 — The moon
 
@@ -1247,16 +1315,18 @@ is set out, never what a setting is: the land, the eye, the hour and the
 weather are drawn before any wood grows, and each wood and the sward draw from
 streams of their own keyed from one draw, so however many draws one wood takes
 a seed shows the same place — woods and sward included — at either.
-`Detail::peak` states each profile's budget, 512 MiB and 2 GiB, which the
+`Detail::peak` states each profile's budget, 768 MiB and 2 GiB, which the
 session weighs against the memory band (`plans/NEW-DESKTOP-SETTINGS.md`
 DS24); each profile has its own measured progress shares.
 
-Measured at 1920×1080 on a 24-thread desktop preparing across 8 threads, a
-landscape prepares at *Simple* in 0.35–9.3 s, holding at most 475 MB at its
-peak and once prepared, a mountain lake's, its tree prototypes and the
-clouds' light grids most of it; and at *Maximum* in 1.0–102 s, at most
-840 MB at its peak and once prepared, a stream's — most of *Maximum*'s time
-its radiosity records. A wood carried on far off adds its survey, about 4 s
+Measured at 1920×1080 on a 24-thread desktop preparing across 8 threads,
+over 29 landscapes at *Simple* and the twelve heaviest found at *Maximum*: a
+landscape prepares at *Simple* in at most 34 s, holding at most 702 MiB at
+its peak, a farmland's under stratocumulus; and at *Maximum* in at most
+343 s, holding at most 1275 MiB, the same farmland's. *Maximum*'s time is
+mostly its radiosity records, a farmland's past the budget (RT47), and under
+a heaped sky its cloud light, congestus over a stream the slowest at 333 s
+(RT43). A wood carried on far off adds its survey, about 4 s
 of a mountain forest's 50 at *Maximum*, and a few per cent to gathering and
 tracing. RT38's stones and what later items buy are *Maximum*'s to spend the
 rest of its budget on.

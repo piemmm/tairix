@@ -13,7 +13,7 @@ use crate::cloud::Resolution;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Detail {
     /// Every setting, plainer: woods reaching less far and radiosity records
-    /// of fewer rays laid more sparingly, within about 512 MiB at the scene's
+    /// of fewer rays laid more sparingly, within about 768 MiB at the scene's
     /// peak.
     Simple,
     /// All the realism the budget buys, within 2 GiB at the scene's peak.
@@ -29,7 +29,7 @@ impl Detail {
     #[must_use]
     pub const fn peak(self) -> u64 {
         match self {
-            Self::Simple => 512 << 20,
+            Self::Simple => 768 << 20,
             Self::Maximum => 2 << 30,
         }
     }
@@ -255,11 +255,15 @@ const SIMPLE: Densities = Densities {
             cells: 96,
             finest: 4000.0,
             tracks: 160.0,
+            fine: 3,
+            reach: 32_000.0,
         },
         high: Resolution {
             cells: 48,
             finest: 30_000.0,
             tracks: 60.0,
+            fine: 1,
+            reach: 0.0,
         },
     },
 };
@@ -328,11 +332,15 @@ const MAXIMUM: Densities = Densities {
             cells: 160,
             finest: 4000.0,
             tracks: 320.0,
+            fine: 3,
+            reach: 32_000.0,
         },
         high: Resolution {
             cells: 64,
             finest: 30_000.0,
             tracks: 120.0,
+            fine: 1,
+            reach: 0.0,
         },
     },
 };
