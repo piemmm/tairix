@@ -129,6 +129,7 @@ fn a_host_offering_services_can_spread_them_and_names_how_to_reach_it() {
                 String::from("Fit Map to Window"),
                 Command::Steer(Steer::Fit)
             ),
+            (String::from("Probe Settings…"), Command::OpenSettings),
         ]
     );
     let separators = folded
@@ -169,7 +170,8 @@ fn an_unnamed_host_offers_no_name_and_one_address_per_family() {
         [
             "Copy IPv4 Address",
             "Copy IPv6 Address",
-            "Fit Map to Window"
+            "Fit Map to Window",
+            "Probe Settings…"
         ]
     );
     assert_eq!(
@@ -196,7 +198,10 @@ fn a_network_offers_itself_and_this_machine_offers_only_the_map() {
         &[],
     );
     let built = menu(Some(subject(&subnet)), Point::ORIGIN).unwrap();
-    assert_eq!(labels(&built), ["Copy Network", "Fit Map to Window"]);
+    assert_eq!(
+        labels(&built),
+        ["Copy Network", "Fit Map to Window", "Probe Settings…"]
+    );
     assert_eq!(
         copied(&built, "Copy Network").as_deref(),
         Some("192.168.1.0/24")
@@ -210,7 +215,7 @@ fn a_network_offers_itself_and_this_machine_offers_only_the_map() {
         &[],
     );
     let built = menu(Some(subject(&local)), Point::ORIGIN).unwrap();
-    assert_eq!(labels(&built), ["Fit Map to Window"]);
+    assert_eq!(labels(&built), ["Fit Map to Window", "Probe Settings…"]);
 }
 
 #[test]
@@ -219,10 +224,13 @@ fn the_maps_own_menu_fits_it() {
     assert_eq!(built.model().title(), "Network Map");
     assert_eq!(
         rows(&built),
-        [(
-            String::from("Fit Map to Window"),
-            Command::Steer(Steer::Fit)
-        )]
+        [
+            (
+                String::from("Fit Map to Window"),
+                Command::Steer(Steer::Fit)
+            ),
+            (String::from("Probe Settings…"), Command::OpenSettings),
+        ]
     );
 }
 
@@ -232,7 +240,13 @@ fn a_web_service_offers_where_it_is_and_its_url() {
     let built = menu(Some(subject(&console)), Point::ORIGIN).unwrap();
     assert_eq!(
         labels(&built),
-        ["Copy Address", "Copy URL", "Copy Name", "Fit Map to Window"]
+        [
+            "Copy Address",
+            "Copy URL",
+            "Copy Name",
+            "Fit Map to Window",
+            "Probe Settings…"
+        ]
     );
     assert_eq!(
         copied(&built, "Copy Address").as_deref(),

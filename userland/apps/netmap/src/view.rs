@@ -1580,6 +1580,8 @@ fn evidence_line(evidence: &Evidence) -> String {
         Seen::Service(service) => format!("Advertises {service}"),
         Seen::Model(model) => format!("Names its model {model}"),
         Seen::MacOsVersion => String::from("States a macOS version"),
+        Seen::ReplyTtl(ttl) => format!("Replied with hop limit {ttl}"),
+        Seen::OpenPort(port) => format!("Has port {port} open"),
     };
     let device = evidence.device.map(|(class, _)| class_name(class));
     let os = evidence.os.map(|(family, _)| os_name(family));

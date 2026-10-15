@@ -22,7 +22,15 @@ the shipped code are the same code.
 - `discover` — the pure `Discovery` engine over discovery-v1: service types,
   browses, resolves, host lookups and link-local reverse names, each bounded.
 - `infer` — passive device-class and OS inference from the routing role, the
-  hardware maker, the advertised service types and the TXT model.
+  hardware maker, the advertised service types and the TXT model, plus the
+  reply-TTL banding and open well-known ports an active probe found.
+- `probe` — the pure active reachability engine: a token-bucket-paced ICMP-echo
+  sweep and a bounded TCP well-known-port check over an injected socket+clock
+  seam, emitting one-shot deadlines (never a spin). Every rate, concurrency and
+  target bound is a fixed containment bound.
+- `settings` — the `passive`/`polite`/`thorough` probe posture, persisted in the
+  app's own store through the shared config engine and read at start; plus the
+  chooser-only settings-window content.
 - `ingest` — `Inventory`, the source of truth, and `Inventory::build`, which
   projects interfaces, subnets, neighbours, routers, the gateway and services
   into a fresh `Map`, one node per device, and classifies every host.
@@ -39,20 +47,23 @@ the shipped code are the same code.
   stands; drawing, hit-testing and the tooltip all read it.
 - `menu` — the context menu a secondary press opens, built as the desktop's
   menu model: show or hide a host's services, copy its address, name or
-  hardware address, a service's `host:port` or web URL, a network, and fit the
-  map. A URL is built only from parts valid in one.
+  hardware address, a service's `host:port` or web URL, a network, open the
+  probe-settings window, and fit the map. A URL is built only from parts valid
+  in one.
 
 Copying uses the desktop clipboard from the map's window. *Open in Browser*
 waits on a web browser and a desktop URL hand-off (`plans/NETMAP.md` NM2e).
 
 ## Capabilities
 
-`CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_FS_ACCESS` (the bundled OUI table),
-`CAP_SYSINFO_GLOBAL` (interface state, routes), `CAP_SYSINFO_HW` (hardware
-addresses, the neighbour cache), `CAP_NET` (reverse DNS) and
-`CAP_NET_DISCOVER_ALL` (every advertised service type). The `SYSINFO` pair and
-`CAP_NET_DISCOVER_ALL` are administrative; under a narrower ceiling the map
-draws what it may read and states the rest.
+`CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_FS_ACCESS` (the bundled OUI table and the
+app's own settings store), `CAP_SYSINFO_GLOBAL` (interface state, routes),
+`CAP_SYSINFO_HW` (hardware addresses, the neighbour cache), `CAP_NET` (reverse
+DNS), `CAP_NET_DISCOVER_ALL` (every advertised service type), `CAP_NET_RAW` (the
+ICMP-echo and TCP sockets the reachability probe opens) and `CAP_LOG_EMIT` (the
+probe-campaign audit trail). The `SYSINFO` pair, `CAP_NET_DISCOVER_ALL` and
+`CAP_NET_RAW` are administrative; under a narrower ceiling the map draws and
+probes what it may and states the rest.
 
 ## Security
 
@@ -67,7 +78,12 @@ its evidence.
 
 Host tests cover interning and the containment bounds; the projection of
 interfaces, subnets, neighbours, routers, the gateway and services; one node
-per device; the discovery walk and its bounds; every inference rule table, its
+per device; the probe engine's pacing, concurrency bounds, sequence/token
+attribution, expiry, target-set building (known-hosts-first, subnet sweep
+skipping network and broadcast, no IPv6 sweep, the cap) and termination; the
+reachability folded into liveness, facts and inference; the posture round-trip
+and the settings pane; the discovery walk and its bounds; every inference rule
+table, its
 matching boundaries, the combination of evidence and ties, and that every
 maker rule names an organisation the committed registry lists; maker naming
 and its notice; the layout's determinism; the viewport's round trip, fit,
@@ -81,4 +97,8 @@ label placement; refused sources becoming notices; and drawing.
 
 The `netmap_qemu_aarch64` vertical opens the map from the program library on a
 booted desktop whose NIC has autoconfigured against a router-advertising peer,
-and asserts its interface, subnet and gateway tiers are drawn.
+asserts its interface, subnet and gateway tiers are drawn, and holds the run to
+the live active probe reaching a host (the peer answers the echo sweep) before
+the map is quit — the one end-to-end witness that probing reached the real
+network. `tests/fuzz_probe.rs` fuzzes the probe engine against arbitrary answer
+streams.

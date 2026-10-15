@@ -8,7 +8,9 @@ services the hosts on the local link advertise.
 
 ## What it reads
 
-Every source is capability-checked, and none is a probe of a host:
+Every source is capability-checked. All but the reachability probe are passive
+reads of the stack's own state; the probe is the one source that puts packets on
+the wire, and it is administrative, polite, and bounded (below).
 
 | Source | Through | Capability |
 |---|---|---|
@@ -19,6 +21,7 @@ Every source is capability-checked, and none is a probe of a host:
 | Advertised services and link-local names | the discovery service (discovery-v1) | `CAP_NET_DISCOVER_ALL` |
 | Host names | reverse DNS through `lib/resolver` | `CAP_NET` |
 | Hardware makers | the bundle's IEEE MA-L table, `Resources/oui.ids.bin` (`lib/devids`) | `CAP_FS_ACCESS` |
+| Reachability (liveness, open ports) | ICMP echo + TCP connect (`lib/rt::net`) | `CAP_NET_RAW` + `CAP_LOG_EMIT` |
 
 Each source is read whole or refused, and each read is held to the map's node
 bound, so a segment of hostile size cannot grow it without limit. A refused
@@ -85,11 +88,41 @@ each needs a thread of its own: where the system grants none, that part is off
 and the map says so, rather than making those calls from the window's
 thread.
 
+## Reachability probing
+
+The map actively checks which hosts are up and what well-known services they
+offer, as an administrator's friendly host-discovery sweep — never a scanner.
+It is configurable through a **posture**, chosen in the *Probe Settings* window
+(the context menu's *Probe Settings…* row) and kept in the app's own settings
+store, read once at start and written off the interactive loop when the chooser
+settles:
+
+- **Off** sends no probes; the map keeps the liveness it already knows.
+- **Polite** (the default) is a gentle sweep.
+- **Thorough** is a faster, wider sweep of the same hosts and ports.
+
+Polite and Thorough probe the same target set — the known hosts (neighbours,
+next hops, advertised hosts) and every small-enough attached IPv4 subnet swept
+whole — and differ only in pace. IPv6 is never swept, only its already-known
+hosts probed; the sweep skips each subnet's network and broadcast addresses and
+never targets multicast. A campaign is a token-bucket-paced ICMP-echo sweep
+followed by a bounded TCP-connect check of a curated well-known-port set on the
+hosts that answered. Every limit — the rate, the in-flight concurrency, the
+target count — is a fixed containment bound, because choosing the OS's own CPU
+and wire cost is a denial-of-service channel. The probe runs on a worker thread
+of its own, so the window never waits on it; without `CAP_NET_RAW`, without a
+thread, or at the Off posture it simply does not probe, and the window says so.
+Every campaign's start, finish and refusal is audited through `CAP_LOG_EMIT`
+(`docs/src/security/network.md`, the `33_000` range).
+
+A reachable host's node shows a reachable light, and its detail panel lists its
+reply TTL and any open ports; these also feed its classification (below).
+
 ## What each host is
 
-Every host is classified from what the map already holds — nothing is probed
-for it. `infer` reads four kinds of signal, each rule suggesting a device
-class, an OS family, or both, with a weight out of 100:
+Every host is classified from what the map holds of it — including the passive
+reachability evidence above. `infer` reads these kinds of signal, each rule
+suggesting a device class, an OS family, or both, with a weight out of 100:
 
 - the routing role it plays (the default gateway, a named route's next hop);
 - the organisation its hardware address was assigned to, matched on the
@@ -99,7 +132,12 @@ class, an OS family, or both, with a weight out of 100:
 - the DNS-SD service types it advertises (`_ipp._tcp`, `_companion-link._tcp`,
   `_googlecast._tcp`, …);
 - the model its TXT data names (`model=`, `am=`, `md=`, `MacBookPro18,3`,
-  `AppleTV11,1`, `Chromecast`) and a stated macOS version (`osxvers=`).
+  `AppleTV11,1`, `Chromecast`) and a stated macOS version (`osxvers=`);
+- the echo reply's hop limit, banded weakly to an OS family (near 255 suggests
+  network gear, near 128 Windows; 64 and below is ambiguous), and the
+  well-known ports an active probe found open (9100/515 a printer, 445/139 NAS
+  or Windows, 3389 Windows, 548 macOS or NAS, 22 a server) — classic, weak
+  signals, so their weights are low.
 
 Weights for one guess combine as independent hints, each removing its share of
 the doubt left; the strongest guess wins less half the runner-up's score, so
@@ -198,6 +236,7 @@ builds the model and the desktop places, draws, grabs and answers it once
 | *Copy Hardware Address* | a node whose MAC is known | its MAC |
 | *Copy Network* | a network | its prefix |
 | *Fit Map to Window* | every menu | as `Home` |
+| *Probe Settings…* | every menu | opens the probe-posture window |
 
 A URL is built only from parts valid in one, since every part of it was
 authored by an unauthenticated peer: the host is the service's IPv4 address,

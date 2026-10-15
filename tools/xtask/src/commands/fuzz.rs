@@ -110,6 +110,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/abi SocketEcho delivery decoder (echo replies and ICMP errors, the reply hop limit in the frame's spare byte)",
     },
     Target {
+        package: "tairix-netmap",
+        test: "fuzz_probe",
+        description: "netmap active reachability probe engine (arbitrary answer/outcome/hop-limit/token streams; bounded in-flight, termination)",
+    },
+    Target {
         package: "tairix-abi",
         test: "fuzz_desktop_layer",
         description: "lib/abi desktop-layer surface wire surface (the capability-gated requests, the two feed events, the terrain reply)",

@@ -32,6 +32,8 @@ pub enum Command {
     Steer(Steer),
     /// Put this text on the clipboard, which the shell reaches.
     Copy(String),
+    /// Open the probe-settings window.
+    OpenSettings,
 }
 
 /// What a menu row asks of the view.
@@ -108,10 +110,10 @@ pub fn menu(subject: Option<Subject<'_>>, anchor: Point) -> Result<NodeMenu, Err
         built.group(services_rows(subject))?;
         built.group(copy_rows(subject.node))?;
     }
-    built.group(Vec::from([(
-        "Fit Map to Window",
-        Command::Steer(Steer::Fit),
-    )]))?;
+    built.group(Vec::from([
+        ("Fit Map to Window", Command::Steer(Steer::Fit)),
+        ("Probe Settings…", Command::OpenSettings),
+    ]))?;
     Ok(NodeMenu {
         anchor,
         model: built.model,

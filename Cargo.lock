@@ -3457,14 +3457,18 @@ name = "tairix-netmap"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
  "tairix-buildcfg",
  "tairix-controls",
  "tairix-devids",
  "tairix-discovery",
  "tairix-font",
+ "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-icon",
  "tairix-input",
+ "tairix-log",
  "tairix-net",
  "tairix-procinfo",
  "tairix-raster",

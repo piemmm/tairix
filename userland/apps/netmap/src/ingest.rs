@@ -13,11 +13,11 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::net::IpAddr;
+use core::net::{IpAddr, Ipv4Addr};
 
 use tairix_abi::net_ipc::{
-    address_parts, ip_from_parts, ip_network, NetInterfaceFactsRecord, NetInterfaceStateRecord,
-    NetNeighborRecord, NetNeighborState, NetRouteRecord,
+    address_parts, ip_from_parts, ip_network, ipv4_network, NetInterfaceFactsRecord,
+    NetInterfaceStateRecord, NetNeighborRecord, NetNeighborState, NetRouteRecord,
 };
 use tairix_procinfo::render_ip;
 
@@ -29,6 +29,7 @@ use crate::model::{
     Classification, DeviceClass, EdgeKind, Endpoint, InterfaceName, Liveness, Map, NodeId, NodeKey,
     NodeKind, OsFamily,
 };
+use crate::probe::{self, ProbeProfile, Reachability};
 
 /// One interface's accrued observations: its facts page, its state page, or
 /// both. Either may arrive first or alone.
@@ -56,6 +57,8 @@ pub struct Inventory {
     /// The organisation each assigned identifier the neighbours' hardware
     /// addresses carry was registered to, already display-safe.
     vendors: BTreeMap<u32, String>,
+    /// What the last active probe campaign found, keyed by host address.
+    reachability: Reachability,
 }
 
 impl Inventory {
@@ -109,6 +112,40 @@ impl Inventory {
     /// Replace the organisations the neighbours' hardware addresses name.
     pub fn replace_vendors(&mut self, vendors: BTreeMap<u32, String>) {
         self.vendors = vendors;
+    }
+
+    /// Replace what the last active probe campaign found.
+    pub fn record_reachability(&mut self, reachability: Reachability) {
+        self.reachability = reachability;
+    }
+
+    /// The host addresses a campaign at `profile` should probe: the known hosts
+    /// (neighbours, next hops and advertised hosts) that are not this machine's,
+    /// plus every small-enough attached IPv4 subnet swept whole. IPv6 is never
+    /// swept.
+    #[must_use]
+    pub fn probe_targets(&self, profile: &ProbeProfile) -> Vec<IpAddr> {
+        let mut local = BTreeSet::new();
+        let mut subnets = BTreeSet::new();
+        for observation in self.interfaces.values() {
+            let Some(state) = &observation.state else {
+                continue;
+            };
+            let count = usize::from(state.addr_count).min(state.addrs.len());
+            for addr in &state.addrs[..count] {
+                let ip = ip_from_parts(addr.family, addr.addr);
+                local.insert(ip);
+                if let IpAddr::V4(v4) = ip {
+                    subnets.insert((ipv4_network(v4, addr.prefix), addr.prefix));
+                }
+            }
+        }
+        let mut known: BTreeSet<IpAddr> = self.host_addresses().collect();
+        for service in &self.services {
+            known.extend(service.addresses.iter().copied());
+        }
+        let subnets: Vec<(Ipv4Addr, u8)> = subnets.into_iter().collect();
+        probe::targets(&local, &known, &subnets, profile)
     }
 
     /// Every host address the map shows — each neighbour's and each next
@@ -198,6 +235,15 @@ pub fn assigned_oui(mac: [u8; 6]) -> Option<u32> {
     let chosen = mac[0] & LOCALLY_ADMINISTERED != 0;
     let group = mac[0] & GROUP != 0;
     (!chosen && !group).then(|| u32::from_be_bytes([0, mac[0], mac[1], mac[2]]))
+}
+
+/// A host snapshotted out of the map for the classification pass, so the pass
+/// can mutate the map while it reads what each host was.
+struct HostToClassify {
+    id: NodeId,
+    mac: Option<[u8; 6]>,
+    addrs: Vec<IpAddr>,
+    liveness: Liveness,
 }
 
 /// One projection in progress: the map, and the indices that let a later
@@ -487,18 +533,30 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Infer what each host is from everything the sources said of it, and
-    /// name the organisation its hardware address was assigned to.
+    /// Infer what each host is from everything the sources said of it, fold in
+    /// the active probe's reachability, and name the organisation its hardware
+    /// address was assigned to.
     fn classify(&mut self) {
         let inventory = self.inventory;
-        let hosts: Vec<(NodeId, Option<[u8; 6]>)> = self
+        let hosts: Vec<HostToClassify> = self
             .map
             .nodes()
             .iter()
             .filter(|node| is_host(node.kind))
-            .map(|node| (node.id, node.mac))
+            .map(|node| HostToClassify {
+                id: node.id,
+                mac: node.mac,
+                addrs: node.addrs.clone(),
+                liveness: node.liveness,
+            })
             .collect();
-        for (id, mac) in hosts {
+        for HostToClassify {
+            id,
+            mac,
+            addrs,
+            liveness,
+        } in hosts
+        {
             let vendor = mac
                 .and_then(assigned_oui)
                 .and_then(|oui| inventory.vendors.get(&oui))
@@ -506,10 +564,29 @@ impl<'a> Builder<'a> {
             if let Some(vendor) = vendor {
                 self.map.set_fact(id, "vendor", vendor);
             }
+            let reach = addrs
+                .iter()
+                .find_map(|addr| inventory.reachability.get(*addr));
+            if let Some(reach) = reach {
+                if reach.live {
+                    self.map.set_liveness(id, Liveness::Reachable);
+                } else if liveness == Liveness::Unknown {
+                    self.map.set_liveness(id, Liveness::Unreachable);
+                }
+                if let Some(ttl) = reach.reply_hop_limit {
+                    self.map.set_fact(id, "reply TTL", &format!("{ttl}"));
+                }
+                if !reach.open_ports.is_empty() {
+                    self.map
+                        .set_fact(id, "open ports", &join_ports(&reach.open_ports));
+                }
+            }
             let (classification, evidence) = infer(&Signals {
                 role: self.roles.get(&id).copied(),
                 vendor,
                 services: self.served.get(&id).map_or(&[], Vec::as_slice),
+                reply_ttl: reach.and_then(|reach| reach.reply_hop_limit),
+                open_ports: reach.map_or(&[], |reach| reach.open_ports.as_slice()),
             });
             self.map.set_classification(id, classification, evidence);
         }
@@ -561,6 +638,18 @@ fn is_host(kind: NodeKind) -> bool {
         kind,
         NodeKind::Neighbour | NodeKind::Router | NodeKind::Gateway | NodeKind::RemoteHost
     )
+}
+
+/// The open ports joined for the detail panel, as `22, 80, 445`.
+fn join_ports(ports: &[u16]) -> String {
+    use core::fmt::Write;
+    let mut out = String::new();
+    for (index, port) in ports.iter().enumerate() {
+        let separator = if index > 0 { ", " } else { "" };
+        // Writing a u16 into a String never fails.
+        let _ = write!(out, "{separator}{port}");
+    }
+    out
 }
 
 /// An interface name's printable form (its bytes up to the first NUL).

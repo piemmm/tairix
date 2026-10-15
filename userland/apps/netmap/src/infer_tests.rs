@@ -25,6 +25,16 @@ fn of(
         role,
         vendor,
         services: &services,
+        reply_ttl: None,
+        open_ports: &[],
+    })
+}
+
+fn probed(reply_ttl: Option<u8>, open_ports: &[u16]) -> (Classification, Vec<Evidence>) {
+    infer(&Signals {
+        reply_ttl,
+        open_ports,
+        ..Signals::default()
     })
 }
 
@@ -170,6 +180,41 @@ fn an_exact_tie_is_no_guess_but_keeps_its_evidence() {
 }
 
 #[test]
+fn a_reply_hop_limit_bands_the_os_weakly() {
+    assert_eq!(probed(Some(255), &[]).0.os, OsFamily::NetworkOs);
+    assert_eq!(probed(Some(128), &[]).0.os, OsFamily::Windows);
+    // 64 and below is ambiguous between Linux, macOS and the BSDs.
+    let ambiguous = probed(Some(64), &[]);
+    assert_eq!(ambiguous.0.os, OsFamily::Unknown);
+    assert!(
+        ambiguous.1.is_empty(),
+        "an ambiguous hop limit is no evidence"
+    );
+    // The signal is weak: a stronger one outweighs it.
+    let (class, _) = infer(&Signals {
+        reply_ttl: Some(128),
+        services: &[&advertised("_workstation._tcp", &[])],
+        ..Signals::default()
+    });
+    assert_eq!(
+        class.os,
+        OsFamily::Linux,
+        "an advertised Linux service wins"
+    );
+}
+
+#[test]
+fn open_ports_suggest_a_device_class() {
+    assert_eq!(probed(None, &[9100]).0.device, DeviceClass::Printer);
+    assert_eq!(probed(None, &[515]).0.device, DeviceClass::Printer);
+    let (class, _) = probed(None, &[445]);
+    assert!(matches!(class.device, DeviceClass::Nas) || class.os == OsFamily::Windows);
+    assert_eq!(probed(None, &[3389]).0.os, OsFamily::Windows);
+    // A port no rule names says nothing.
+    assert_eq!(probed(None, &[80]), (Classification::default(), Vec::new()));
+}
+
+#[test]
 fn the_rule_tables_are_well_formed() {
     let weights = |hint: &Hint| {
         [hint.device.map(|(_, w)| w), hint.os.map(|(_, w)| w)]
@@ -195,6 +240,13 @@ fn the_rule_tables_are_well_formed() {
         assert!(
             service.starts_with('_') && (service.ends_with("._tcp") || service.ends_with("._udp")),
             "{service}"
+        );
+    }
+    for (index, (port, hint)) in PORTS.iter().enumerate() {
+        assert!(weights(hint), "{port}");
+        assert!(
+            PORTS[index + 1..].iter().all(|(other, _)| other != port),
+            "{port} is listed twice"
         );
     }
 }

@@ -149,6 +149,8 @@ pub const NETCHAN: EventRange = EventRange::new(29_100, 29_200);
 pub const AUDIOD: EventRange = EventRange::new(30_000, 31_000);
 /// The Switchboard system-overview service.
 pub const SWITCHBOARD: EventRange = EventRange::new(31_000, 32_000);
+/// The network map's active reachability probing.
+pub const NETMAP: EventRange = EventRange::new(33_000, 34_000);
 
 /// Every range and the crates that take identifiers from it.
 pub const OWNERS: &[Owner] = &[
@@ -335,6 +337,10 @@ pub const OWNERS: &[Owner] = &[
     Owner {
         range: SWITCHBOARD,
         crates: &["userland/gui/switchboard"],
+    },
+    Owner {
+        range: NETMAP,
+        crates: &["userland/apps/netmap"],
     },
 ];
 

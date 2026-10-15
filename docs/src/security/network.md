@@ -95,6 +95,18 @@ decisions:
 | `25_004` | `REQUEST_DENIED` | Warn | A discovery request was refused for want of `CAP_NET`, a grant for the type, or `CAP_NET_DISCOVER_ALL`; carries what was lacking, the caller's uid, and the type asked for — never whether another principal holds it. |
 | `25_005` | `GRANTS_REFUSED` | Warn | The browse grant store could not be opened or read, or was refused whole, so no application may browse; carries the reason. |
 
+The network map's active reachability probing is its own administrative
+action with its own range, `33_000` … `33_999`
+(`docs/src/desktop/netmap.md`). Choosing the OS's own CPU and wire cost is a
+denial-of-service channel, so every campaign is token-paced, concurrency- and
+target-bounded, and audited at `CAP_LOG_EMIT`:
+
+| Id | Name | Level | Meaning |
+|---|---|---|---|
+| `33_001` | `PROBE_STARTED` | Info | A probe campaign began; carries the posture (`polite`/`thorough`) and the number of targets. |
+| `33_002` | `PROBE_FINISHED` | Info | A campaign finished; carries the count of hosts found reachable. |
+| `33_003` | `PROBE_REFUSED` | Info | A campaign could not probe — raw network access (`CAP_NET_RAW`) was refused, or a delivery socket could not be bound; carries the reason. Probing then stays off and the map draws what it already knows. |
+
 The stack-wide `net.*` policy (`net.ipv4.enabled`, `net.ipv6.enabled`,
 `net.ipv6.privacy`, `net.tcp.syncookies`, `net.tcp.keepalive`,
 `net.tcp.ecn`, `net.sockets.mem`) is read from

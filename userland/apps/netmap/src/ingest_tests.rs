@@ -573,3 +573,107 @@ fn only_routable_unnamed_hosts_await_reverse_dns() {
     assert_eq!(link_local.len(), 1);
     assert!(is_link_local_address(link_local[0]));
 }
+
+#[test]
+fn probe_targets_cover_known_hosts_and_the_local_subnet_not_this_machine() {
+    let (mut inv, eth0) = lan();
+    // 192.168.1.50/24 is this machine; a gateway and a neighbour are known.
+    inv.replace_routes(alloc::vec![route(
+        eth0,
+        [0; 16],
+        0,
+        Some(v4_bytes(192, 168, 1, 1)),
+    )]);
+    inv.replace_neighbors(alloc::vec![neighbor(
+        eth0,
+        v4_bytes(192, 168, 1, 7),
+        Some([2, 0, 0, 0, 0, 7])
+    )]);
+    let targets = inv.probe_targets(&crate::probe::ProbeProfile::POLITE);
+    assert!(
+        targets.contains(&ip4(192, 168, 1, 1)),
+        "the gateway is probed"
+    );
+    assert!(
+        targets.contains(&ip4(192, 168, 1, 7)),
+        "a neighbour is probed"
+    );
+    assert!(
+        !targets.contains(&ip4(192, 168, 1, 50)),
+        "this machine is never probed"
+    );
+    assert!(
+        !targets.contains(&ip4(192, 168, 1, 0)),
+        "the network address is skipped"
+    );
+    assert!(
+        !targets.contains(&ip4(192, 168, 1, 255)),
+        "the broadcast address is skipped"
+    );
+}
+
+#[test]
+fn recorded_reachability_sets_liveness_facts_and_feeds_inference() {
+    let (mut inv, eth0) = lan();
+    inv.replace_neighbors(alloc::vec![neighbor(
+        eth0,
+        v4_bytes(192, 168, 1, 7),
+        Some([2, 0, 0, 0, 0, 7])
+    )]);
+    // Drive the recorded result through a tiny campaign: a reply plus an open
+    // printer port, so the host should read Reachable and classify as a printer.
+    let reach = {
+        let mut probe = crate::probe::Probe::new(
+            crate::probe::ProbeCampaign {
+                targets: Vec::from([ip4(192, 168, 1, 7)]),
+                profile: crate::probe::ProbeProfile::POLITE,
+            },
+            0,
+        );
+        let mut now = 0;
+        loop {
+            match probe.poll(now) {
+                crate::probe::ProbeAction::SendEcho { dest, sequence } => {
+                    probe.answer_echo(
+                        sequence,
+                        dest,
+                        tairix_abi::net::EchoOutcome::Reply,
+                        Some(64),
+                        now,
+                    );
+                }
+                crate::probe::ProbeAction::OpenConnect { port, token, .. } => {
+                    let outcome = if port == 9100 {
+                        crate::probe::ConnectOutcome::Open
+                    } else {
+                        crate::probe::ConnectOutcome::Refused
+                    };
+                    probe.answer_connect(token, outcome, now);
+                }
+                crate::probe::ProbeAction::CloseConnect { .. } => {}
+                crate::probe::ProbeAction::Wait { until_ns } => now = until_ns,
+                crate::probe::ProbeAction::Done => break,
+            }
+        }
+        probe.into_reachability()
+    };
+    inv.record_reachability(reach);
+
+    let map = inv.build(0);
+    let node = map
+        .node(
+            map.id_for(&NodeKey::Neighbour(ip4(192, 168, 1, 7)))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(node.liveness, crate::model::Liveness::Reachable);
+    assert!(node
+        .facts
+        .iter()
+        .any(|(k, v)| k == "reply TTL" && v == "64"));
+    assert!(node.facts.iter().any(|(k, _)| k == "open ports"));
+    assert_eq!(
+        node.classification.device,
+        crate::model::DeviceClass::Printer
+    );
+}

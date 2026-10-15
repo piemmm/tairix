@@ -30,7 +30,7 @@ ahead of it (§2.4).
 | NM-S1 | Neighbour-cache read seam (ARP + NDP): `lib/net` iterator, the `NetNeighborRecord` ABI + `NET_NEIGHBORS` query, netstack serve, `lib/procinfo` resolver + `state:net/<iface>/neighbors`; engine L2-adjacency ingest | done |
 | NM-S2 | Routing-table + gateway read seam, and router discovery: `NetRouteRecord` ABI + `NET_ROUTES` query, netstack serve, `lib/procinfo` resolver + `state:net/<iface>/routes` (keeps NETWORK §5's promise), the RA-learned IPv6 default routers; engine router/gateway ingest | done |
 | NM-F | Passive device-class and OS inference: the pure inference engine over the inventory's signals (routing role, MAC OUI vendor, advertised service types and TXT model), the committed IEEE MA-L OUI vendor database with its `cargo xtask` generator and drift gate, and the OS emblems a host is marked with | done |
-| NM3 | Active reachability probing, configurable and polite: the pure probe engine (token-bucket rate limit, bounded concurrency, injected socket+clock seam), the ICMP-echo subnet sweep and the TCP-connect well-known-service check, the reply-TTL and open-port evidence they add to NM-F's inference, the audit events, and the settings pane that holds the posture | in progress: reply-TTL seam landed, probe engine/inference/settings/audit/fuzz remain |
+| NM3 | Active reachability probing, configurable and polite: the pure probe engine (token-bucket rate limit, bounded concurrency, injected socket+clock seam), the ICMP-echo subnet sweep and the TCP-connect well-known-service check, the reply-TTL and open-port evidence they add to NM-F's inference, the audit events, and the settings pane that holds the posture | done |
 | NM-S3 | The traceroute seam: per-send hop-limit control and ICMP-error delivery to the owning socket (`lib/net` quoted-packet demux, netstack routing, `lib/rt` wrappers), plus the `traceroute` command app and its QEMU vertical as the minimal consumer | done |
 | NM4 | Inter-network topology: engine hop-by-hop path discovery to user-entered targets (LAN or WAN) over NM-S3, per-hop reverse DNS, and the "beyond the gateway" map region | planned |
 | NM-S4 | The passive packet-capture seam: a receive-only, capability-gated, bounded link-layer capture socket from netstack, and the driver capture tap upstream of the receive pre-filter so non-IP ethertypes (STP, LLDP, …) reach it; `lib/rt` wrappers; audited | planned |
@@ -578,11 +578,25 @@ connect-with-deadline and an unanswered SYN takes minutes to fail, so the
 engine imposes its own connect deadline; a refusal arrives as
 `Closed { Refused }`. The reply-TTL evidence reads the echo reply's hop limit,
 carried on `StackEvent::EchoReply` and in the `SocketEcho` frame's spare byte
-(landed; `ping` prints it as iputils' `ttl=`). Liveness and open-service markers flow onto the map's existing
-host/neighbour nodes. The settings pane (`passive`/`polite`/`thorough`, rate,
-concurrency) persisted via `tairix_appdata` and read at start (§28 — never
-written from the loop). Every campaign start/stop and refusal audited via
-`CAP_LOG_EMIT` with stable event ids. Fuzz the probe-engine input handling.
+(`ping` prints it as iputils' `ttl=`). Liveness and open-service markers flow
+onto the map's existing host/neighbour nodes, and the reply-TTL banding and
+open-port signals feed NM-F's inference (both weak, both low-weight).
+
+The posture is the only knob: `passive` does not probe, `polite` (the default)
+and `thorough` probe the same target set — the known hosts plus every attached
+IPv4 subnet small enough to sweep whole (its network and broadcast skipped;
+IPv6 known-hosts only, never swept) — and differ only in pace. Every rate,
+concurrency and target bound is a fixed containment bound keyed to the posture's
+preset; the presets are the single source the engine reads. The posture is held
+in the app's own settings store (one `probe.posture` key), read once at start
+and written off the interactive loop when the chooser settles (§28), through a
+chooser-only settings window opened from the context menu's *Probe Settings…*
+row. Probing is on only with `CAP_NET_RAW`, a prober thread of its own, and a
+non-passive posture; otherwise it is off with a stated notice and the map keeps
+its passive liveness. Every campaign's start, finish and refusal is audited via
+`CAP_LOG_EMIT` in netmap's own `33_000` event range. The probe engine is fuzzed
+against arbitrary answer streams, and the QEMU vertical holds the run to the
+live probe reaching a host before the map is quit.
 
 ### NM-S3 — the traceroute seam + `traceroute` command app
 

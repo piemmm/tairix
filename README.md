@@ -96,6 +96,7 @@ for filesystems, the feature section below.
 | Link-local service browse, resolve, and `.local` lookup (mDNS / DNS-SD, `discoveryd`, `dns-sd`) | ✓ | ✓ | ✓ | — |
 | Link-local service publication (mDNS / DNS-SD) | ▢ | ▢ | ▢ | — |
 | Network map (`netmap.app`): topology, advertised services, hardware makers, passive device and OS inference | ✓ | ✓ | ✓ | — |
+| Network map active reachability probing (`netmap.app`: polite ICMP-echo sweep + TCP well-known-port check, posture-configurable, audited) | ✓ | ✓ | ✓ | — |
 | Network clock synchronisation (`timed`, sandboxed NTP client) | ✓ | ✓ | ✓ | — |
 | Real-time clock (RTC) drivers | ✓ mc146818 | ✓ pl031 + ◐ rpi + ◐ i2c | ✓ goldfish | — |
 | Accelerator (offload-engine) drivers | ▢ | ✓ virtio-crypto | ▢ | — |

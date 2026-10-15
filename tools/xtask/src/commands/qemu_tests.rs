@@ -1004,6 +1004,13 @@ const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 /// the title carries everything it presented before asking for it.
 const WINDOW_RETITLED_MARKER: &str = tairix_desktop_session::WINDOW_RETITLED_MESSAGE;
 
+/// Serial marker the netmap vertical's quit gesture waits on: the live system's
+/// own audit line for a finished reachability probe. Gating the quit on it holds
+/// the map open until its active probe has run against the real network, so the
+/// map cannot be quit before the probe reaches the gateway. Imported from
+/// netmap's own event definitions.
+const NETMAP_PROBE_FINISHED_MARKER: &str = tairix_netmap::events::PROBE_FINISHED_MESSAGE;
+
 /// Serial marker a size-state dump or keystroke waits on: the session's
 /// announcement that a served window is on screen at the size state it was
 /// just given, in a frame its client drew at that state's extent. Imported
@@ -16542,9 +16549,16 @@ fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
     // Off the bar and clear of the window before the frame the dump reads.
     pen.aim(LIBRARY_SHOWN_MARKER, 1, rest);
-    // The window wears its post-first-read title, so its slot is drawn and the
-    // dump (gated on the same witness) has been read before this fires.
-    pen.click(WINDOW_RETITLED_MARKER, 1, MouseButton::Secondary, slot);
+    // The quit waits on the finished-probe audit line, not just the retitle, so
+    // the active probe has reached the gateway before the map is closed — the
+    // guest's probe witness lands before its exit witness. The dump is still
+    // gated on the retitle, which precedes this.
+    pen.click(
+        NETMAP_PROBE_FINISHED_MARKER,
+        1,
+        MouseButton::Secondary,
+        slot,
+    );
     pen.click(MENU_SHOWN_MARKER, 1, MouseButton::Primary, quit_row);
     Ok(pen.steps())
 }

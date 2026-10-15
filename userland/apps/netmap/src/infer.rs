@@ -38,6 +38,10 @@ pub struct Signals<'a> {
     pub vendor: Option<&'a str>,
     /// The services it advertises.
     pub services: &'a [&'a AdvertisedService],
+    /// The hop limit its echo reply carried, if it was probed and replied.
+    pub reply_ttl: Option<u8>,
+    /// The well-known ports an active probe found open on it.
+    pub open_ports: &'a [u16],
 }
 
 /// One signal and what it suggested, each suggestion with its weight.
@@ -66,6 +70,10 @@ pub enum Seen {
     Model(String),
     /// Its TXT data states a macOS version.
     MacOsVersion,
+    /// Its echo reply carried this hop limit.
+    ReplyTtl(u8),
+    /// An active probe found this port open.
+    OpenPort(u16),
 }
 
 /// What one rule suggests.
@@ -263,6 +271,32 @@ const MODELS: &[(&str, Hint)] = &[
     ("iPod", both(Phone, 85, Ios, 95)),
 ];
 
+/// What an open well-known port says. Each is a classic, weak signal — a
+/// service runs behind it, not proof of what the host is — so weights are low;
+/// a port no rule names (http, https: too generic) says nothing.
+const PORTS: &[(u16, Hint)] = &[
+    (22, device(Server, 25)),
+    (139, both(Nas, 30, Windows, 30)),
+    (445, both(Nas, 30, Windows, 35)),
+    (515, device(Printer, 60)),
+    (548, both(Nas, 40, MacOs, 40)),
+    (631, device(Printer, 40)),
+    (3389, os(Windows, 60)),
+    (9100, device(Printer, 70)),
+];
+
+/// What an echo reply's hop limit suggests about the OS, by the initial value
+/// it most likely counted down from on a near network: a weak, classic signal
+/// (`ttl`-based OS guessing). A value at or below 64 is ambiguous — Linux,
+/// macOS and the BSDs all start there — so it suggests nothing.
+fn reply_ttl_hint(ttl: u8) -> Option<Hint> {
+    match ttl {
+        129..=255 => Some(os(NetworkOs, 25)),
+        65..=128 => Some(os(Windows, 30)),
+        _ => None,
+    }
+}
+
 /// What `signals` suggest the host is, and the evidence that says so.
 #[must_use]
 pub fn infer(signals: &Signals<'_>) -> (Classification, Vec<Evidence>) {
@@ -302,6 +336,16 @@ pub fn infer(signals: &Signals<'_>) -> (Classification, Vec<Evidence>) {
                     note(&mut evidence, Seen::Model(String::from(value)), hint);
                 }
             }
+        }
+    }
+    if let Some(ttl) = signals.reply_ttl {
+        if let Some(hint) = reply_ttl_hint(ttl) {
+            note(&mut evidence, Seen::ReplyTtl(ttl), hint);
+        }
+    }
+    for &port in signals.open_ports {
+        if let Some((_, hint)) = PORTS.iter().find(|(known, _)| *known == port) {
+            note(&mut evidence, Seen::OpenPort(port), *hint);
         }
     }
     let (device, device_confidence) = decide(evidence.iter().filter_map(|e| e.device));

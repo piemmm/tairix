@@ -24,24 +24,31 @@
 //!
 //! # The PASS gate
 //!
-//! Three latches which must land **in order**, each attributed by the kernel:
+//! Four latches which must land **in order**, each attributed by the kernel:
 //!
 //! 1. **The map launched.** An `APP_LOADED` record naming the bundle
 //!    [`NETMAP_APP_NAME`] spells — the library row's own launch.
 //! 2. **Its window opened.** A `WINDOW_CREATE_REPLY_LEN` reply on the reserved
 //!    window endpoint after that load. `netmap` opens one window, and the
 //!    desktop's own surfaces never call the window channel.
-//! 3. **The map exited cleanly.** A `SyscallInvoked` record naming the exit
+//! 3. **Its active probe reached a host.** A netmap audit record (its id in
+//!    netmap's own event range) carrying a reachable count of at least one,
+//!    after the window opened — the gateway answering the live ICMP-echo sweep.
+//!    This is what no host test can show: the probe actually reaching the real
+//!    network the guest booted onto.
+//! 4. **The map exited cleanly.** A `SyscallInvoked` record naming the exit
 //!    syscall from [`NETMAP_COMM`], after the window opened — the *Quit* the
-//!    host injects as its final gesture, after it has read the dump.
+//!    host injects as its final gesture, which it gates on the probe's own audit
+//!    line, so the probe reaches a host before the map is quit.
 //!
 //! # Why the guest cannot false-pass
 //!
 //! The screendump the tier assertion reads is gated by the host on the window
 //! on screen wearing its post-first-read title. A map that failed before
-//! drawing data exits too, latching (3), but no dump is taken, so the tier
-//! assertion fails the run. A panic parks the CPU and the runner reports a
-//! timeout. Neither is a false pass.
+//! drawing data exits too, but no dump is taken, so the tier assertion fails
+//! the run; and a map whose probing never reached a host never latches (3), so
+//! the host never quits it and the run times out. A panic parks the CPU and the
+//! runner reports a timeout. None is a false pass.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -55,7 +62,7 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::{field_str, names_bundle};
+    use tairix_itest_witness::{field_str, field_u64, names_bundle};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
@@ -80,12 +87,14 @@ mod kernel {
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Audit observer that replays the whole trail to serial and latches the
-    /// three ordered PASS witnesses described in the module docs.
+    /// ordered PASS witnesses described in the module docs.
     struct NetMapSink {
         /// The map bundle was loaded.
         launched: AtomicBool,
         /// Its window was created after that.
         window_opened: AtomicBool,
+        /// Its active probe reached at least one host after that.
+        probe_reached: AtomicBool,
         /// It exited cleanly after that.
         exited: AtomicBool,
     }
@@ -96,6 +105,7 @@ mod kernel {
             Self {
                 launched: AtomicBool::new(false),
                 window_opened: AtomicBool::new(false),
+                probe_reached: AtomicBool::new(false),
                 exited: AtomicBool::new(false),
             }
         }
@@ -137,6 +147,22 @@ mod kernel {
             }
         }
 
+        /// Latch the probe witness from a netmap audit record carrying a
+        /// reachable-host count of at least one, once the window has opened.
+        /// The record is identified by its id falling in netmap's own event
+        /// range and its carrying the `live` field only `PROBE_FINISHED` has, so
+        /// no other service's audit matches. Proving a host was reached — not
+        /// merely that a campaign ran — is what witnesses that active probing
+        /// reached the live map (the gateway answers the sweep).
+        fn note_probe(&self, event: &Event<'_>) {
+            if !self.window_opened.load(Ordering::Acquire) {
+                return;
+            }
+            if field_u64(event, "live").is_some_and(|live| live >= 1) {
+                self.probe_reached.store(true, Ordering::Release);
+            }
+        }
+
         /// Latch the exit witness from the map's own `exit` syscall, once its
         /// window has opened. Both the calling process and the syscall are read
         /// from the record's kernel-attested fields, so no other principal's
@@ -152,9 +178,11 @@ mod kernel {
             }
         }
 
-        /// Whether every witness is in, launch before window before exit.
+        /// Whether every witness is in: launch, then window, then a probe that
+        /// reached a host, then a clean exit. The host gates the quit gesture on
+        /// the probe's audit line, so the probe is in before the exit.
         fn passed(&self) -> bool {
-            self.exited.load(Ordering::Acquire)
+            self.probe_reached.load(Ordering::Acquire) && self.exited.load(Ordering::Acquire)
         }
     }
 
@@ -170,6 +198,8 @@ mod kernel {
                 self.note_call_replied(event);
             } else if event.id.0 == tairix_kernel_syscall::AuditEvent::SyscallInvoked.id().0 {
                 self.note_syscall(event);
+            } else if tairix_log::registry::NETMAP.contains(event.id) {
+                self.note_probe(event);
             } else {
                 return;
             }

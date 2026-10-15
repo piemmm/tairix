@@ -741,7 +741,8 @@ fn a_secondary_press_asks_for_the_menu_of_what_it_lands_on() {
             "Show Services",
             "Copy Address",
             "Copy Name",
-            "Fit Map to Window"
+            "Fit Map to Window",
+            "Probe Settings…"
         ]
     );
 
@@ -751,7 +752,10 @@ fn a_secondary_press_asks_for_the_menu_of_what_it_lands_on() {
 
     let canvas = secondary_press(&mut view, Point::new(799, 599));
     assert_eq!(canvas.model().title(), "Network Map");
-    assert_eq!(row_labels(&canvas), ["Fit Map to Window"]);
+    assert_eq!(
+        row_labels(&canvas),
+        ["Fit Map to Window", "Probe Settings…"]
+    );
     assert!(
         view.is_spread(&host(2)),
         "asking for a menu changes nothing"

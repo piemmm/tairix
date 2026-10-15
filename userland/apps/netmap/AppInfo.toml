@@ -9,9 +9,11 @@
 # routing table; CAP_SYSINFO_HW reads interface and neighbour hardware
 # addresses. CAP_NET carries the reverse DNS queries that name hosts, and
 # CAP_NET_DISCOVER_ALL lets the map enumerate and browse every advertised
-# service type. The SYSINFO pair and CAP_NET_DISCOVER_ALL are administrative:
-# the launched process receives this set intersected with the launching user's
-# grants, and under a narrower ceiling the map states what it cannot read and
+# service type. CAP_NET_RAW opens the ICMP-echo and TCP sockets the active
+# reachability probe uses, and CAP_LOG_EMIT audits each probe campaign. The
+# SYSINFO pair, CAP_NET_DISCOVER_ALL and CAP_NET_RAW are administrative: the
+# launched process receives this set intersected with the launching user's
+# grants, and under a narrower ceiling the map states what it cannot do and
 # draws the rest.
 id = "os.tairix.netmap"
 name = "netmap"
@@ -20,6 +22,6 @@ version = "0.1.0"
 kind = "application"
 purpose = "See the networks this machine is on and what is on them"
 author = "The TAIRiX Project"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_NET", "CAP_NET_DISCOVER_ALL", "CAP_SHM", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_HW"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_LOG_EMIT", "CAP_NET", "CAP_NET_DISCOVER_ALL", "CAP_NET_RAW", "CAP_SHM", "CAP_SYSINFO_GLOBAL", "CAP_SYSINFO_HW"]
 library = "SystemTools"
 library-icon = "netmap.png"

@@ -1474,15 +1474,19 @@ mod tests {
     // pair, plus `CAP_FS_ACCESS` to read the table of hardware makers its
     // bundle ships in `Resources/`, `CAP_SYSINFO_GLOBAL` for the interface
     // state and routing table, `CAP_SYSINFO_HW` for interface and neighbour
-    // hardware addresses, `CAP_NET` for the reverse DNS that names hosts, and
+    // hardware addresses, `CAP_NET` for the reverse DNS that names hosts,
     // `CAP_NET_DISCOVER_ALL` to enumerate and browse every advertised service
-    // type. Under a narrower ceiling the map states what it cannot read and
+    // type, `CAP_NET_RAW` for the ICMP-echo and TCP sockets the active
+    // reachability probe opens, and `CAP_LOG_EMIT` to audit each probe
+    // campaign. Under a narrower ceiling the map states what it cannot do and
     // draws the rest.
     const NETMAP_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
+        CapabilityId::LOG_EMIT,
         CapabilityId::NET,
         CapabilityId::NET_DISCOVER_ALL,
+        CapabilityId::NET_RAW,
         CapabilityId::SHM,
         CapabilityId::SYSINFO_GLOBAL,
         CapabilityId::SYSINFO_HW,

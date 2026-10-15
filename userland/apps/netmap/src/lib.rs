@@ -21,11 +21,14 @@
 extern crate alloc;
 
 pub mod discover;
+pub mod events;
 pub mod infer;
 pub mod ingest;
 pub mod layout;
 pub mod menu;
 pub mod model;
+pub mod probe;
+pub mod settings;
 pub mod source;
 pub mod view;
 pub mod viewport;
@@ -39,6 +42,11 @@ pub use model::{
     Classification, DeviceClass, Edge, EdgeKind, Endpoint, InterfaceName, Liveness, Map, Node,
     NodeId, NodeKey, NodeKind, OsFamily, MAX_EDGES, MAX_LABEL_LEN, MAX_NODES,
 };
+pub use probe::{
+    targets, ConnectOutcome, HostReach, Probe, ProbeAction, ProbeCampaign, ProbeProfile,
+    Reachability, MAX_PROBE_TARGETS, WELL_KNOWN_PORTS,
+};
+pub use settings::{Posture, ProbeKey, ProbeSettings};
 pub use source::Snapshot;
 pub use view::{node_look, os_emblem, Look, MapView, Reaction, NODE_RADIUS};
 pub use viewport::{Viewport, DEFAULT_ZOOM_PER_MILLE, MAX_ZOOM_PER_MILLE, MIN_ZOOM_PER_MILLE};

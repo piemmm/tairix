@@ -33,24 +33,38 @@ mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
-    use tairix_abi::waitset::WaitSourceKind;
+    use tairix_abi::net::{SocketAddr, SocketEcho, SocketId, SocketStreamEvent, StreamCloseReason};
+    use tairix_abi::net_ipc::{address_parts, ip_from_parts, NetAddrFamily};
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
     use tairix_abi::window_ipc::{
-        AppBarClick, ClipboardKind, MenuOutcome, WindowEvent, WindowRegion,
+        AppBarClick, ClipboardKind, MenuOutcome, WindowEvent, WindowRegion, WindowSizing,
     };
-    use tairix_abi::{Errno, ProcId, ORIGIN_WIRE_LEN};
+    use tairix_abi::{Errno, FieldValue, ProcId, ORIGIN_WIRE_LEN};
+    use tairix_appdata::{Publication, PublishJob, Published, RtHost, Settings};
+    use tairix_controls::damage::{self, Repaint};
+    use tairix_controls::Keystroke;
     use tairix_devids::{DbKind, DevIds};
     use tairix_discovery::{DiscoveryError, RtTransport, Session};
-    use tairix_geometry::Rect;
+    use tairix_geometry::{Rect, Region};
     use tairix_input::InputEvent;
+    use tairix_log::{Event, EventId, Field, Level};
+    use tairix_netmap::events::{
+        PROBE_FINISHED, PROBE_FINISHED_MESSAGE, PROBE_REFUSED, PROBE_STARTED,
+    };
+    use tairix_netmap::settings::{ProbePane, Request as SettingsRequest};
     use tairix_netmap::{
-        layout, win_sizing, AdvertisedService, Collect, Command, Discovery, Inventory, MapView,
-        NodeMenu, OpenSession, Reaction, Snapshot, REFRESH_NS, WIN_HEIGHT, WIN_WIDTH,
+        layout, settings, win_sizing, AdvertisedService, Collect, Command, ConnectOutcome,
+        Discovery, Inventory, MapView, NodeMenu, OpenSession, Posture, Probe, ProbeAction,
+        ProbeCampaign, ProbeSettings, Reachability, Reaction, Snapshot, REFRESH_NS, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_procinfo::IpcTransport;
+    use tairix_raster::Surface;
     use tairix_resolver::RtDnsTransport;
     use tairix_rt::work::{Worker, WorkerGuard};
-    use tairix_rt::PrivatePort;
+    use tairix_rt::{LogSink, PrivatePort, WaitSet};
     use tairix_theme::ThemeRegistry;
+    use tairix_window::app::WindowPane;
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         clipboard, damage_in, key_input_event, pinch_input_events, pointer_input_events,
@@ -74,6 +88,12 @@ mod program {
     const NAMER_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
     /// The discovery doorbell's token on the event wait-set.
     const DOORBELL_TOKEN: u64 = app::FIRST_APP_TOKEN + 2;
+    /// The prober's wake token on the event wait-set.
+    const PROBER_TOKEN: u64 = app::FIRST_APP_TOKEN + 3;
+    /// The settings publisher's wake token on the event wait-set.
+    const PUBLISH_TOKEN: u64 = app::FIRST_APP_TOKEN + 4;
+    /// The audit sink every probe campaign is recorded through.
+    static LOG_SINK: LogSink = LogSink;
     /// Doorbells the port holds: one ring says "collect", so a few cover a
     /// burst the loop has not yet drained.
     const DOORBELL_CAPACITY: usize = 4;
@@ -208,6 +228,216 @@ mod program {
     type NameWorker =
         Worker<Option<RtDnsTransport>, IpAddr, Named, tairix_util::defer::JobQueue<IpAddr, Named>>;
 
+    /// Delivered echo frames the prober's port holds before it drains them.
+    const ECHO_DELIVER_CAPACITY: usize = 64;
+    /// Delivered stream events the prober's port holds before it drains them.
+    const STREAM_DELIVER_CAPACITY: usize = 64;
+    /// The prober's own wait-set tokens: the two delivery ports it parks on.
+    const PROBE_ECHO_TOKEN: u64 = 1;
+    const PROBE_STREAM_TOKEN: u64 = 2;
+
+    /// The sockets and buffers one prober thread owns across campaigns: one
+    /// unconnected echo socket per family, a pool of stream sockets for the
+    /// well-known-port check, and the wait-set it parks on. Only this thread
+    /// ever blocks on them, so the window stays responsive while it sweeps.
+    struct Prober {
+        echo_port: PrivatePort,
+        stream_port: PrivatePort,
+        set: WaitSet,
+        echo_v4: Option<SocketId>,
+        echo_v6: Option<SocketId>,
+        /// Each outstanding connect's socket and the engine token it answers.
+        connects: Vec<(SocketId, u64)>,
+        echo_buf: Vec<u8>,
+        stream_buf: Vec<u8>,
+        /// The next echo sequence, carried across campaigns so a late reply to
+        /// one cannot be read as an answer in the next.
+        next_sequence: u16,
+    }
+
+    impl Prober {
+        /// The echo socket for `family`, opened and kept on first use.
+        fn echo_socket(&mut self, family: NetAddrFamily) -> Option<SocketId> {
+            let slot = match family {
+                NetAddrFamily::V4 => &mut self.echo_v4,
+                NetAddrFamily::V6 => &mut self.echo_v6,
+            };
+            if let Some(socket) = *slot {
+                return Some(socket);
+            }
+            let opened = tairix_rt::net::icmp_echo_socket(family, self.echo_port.id()).ok();
+            *slot = opened;
+            opened
+        }
+
+        fn send_echo(&mut self, dest: IpAddr, sequence: u16, probe: &mut Probe) {
+            let (family, bytes) = address_parts(dest);
+            let Some(socket) = self.echo_socket(family) else {
+                probe.fail_echo(sequence);
+                return;
+            };
+            let to = SocketAddr {
+                family,
+                addr: bytes,
+                port: 0,
+            };
+            if tairix_rt::net::send_echo(socket, Some(to), sequence, None, &[]).is_err() {
+                probe.fail_echo(sequence);
+            }
+        }
+
+        fn open_connect(&mut self, target: IpAddr, port: u16, token: u64, probe: &mut Probe) {
+            let (family, bytes) = address_parts(target);
+            let Ok(socket) = tairix_rt::net::stream_socket(family, self.stream_port.id()) else {
+                probe.fail_connect(token);
+                return;
+            };
+            let to = SocketAddr {
+                family,
+                addr: bytes,
+                port,
+            };
+            if tairix_rt::net::connect(socket, to).is_err() {
+                let _ = tairix_rt::net::close(socket);
+                probe.fail_connect(token);
+                return;
+            }
+            self.connects.push((socket, token));
+        }
+
+        fn close_connect(&mut self, token: u64) {
+            if let Some(socket) = self.take_connect_by_token(token) {
+                let _ = tairix_rt::net::close(socket);
+            }
+        }
+
+        fn take_connect_by_token(&mut self, token: u64) -> Option<SocketId> {
+            let at = self.connects.iter().position(|(_, held)| *held == token)?;
+            Some(self.connects.swap_remove(at).0)
+        }
+
+        fn take_connect_by_socket(&mut self, socket: SocketId) -> Option<u64> {
+            let at = self.connects.iter().position(|(held, _)| *held == socket)?;
+            Some(self.connects.swap_remove(at).1)
+        }
+
+        fn wait_and_drain(&mut self, until_ns: u64, probe: &mut Probe) {
+            let _ = self.set.wait_until(until_ns);
+            self.drain_echo(probe);
+            self.drain_stream(probe);
+        }
+
+        fn drain_echo(&mut self, probe: &mut Probe) {
+            let port = self.echo_port.id();
+            while let Ok(echo) = tairix_rt::net::recv_echo(port, &mut self.echo_buf) {
+                let sequence = echo.sequence;
+                let source = ip_from_parts(echo.source.family, echo.source.addr);
+                let outcome = echo.outcome;
+                let hop = echo.reply_hop_limit.map(core::num::NonZeroU8::get);
+                probe.answer_echo(sequence, source, outcome, hop, tairix_rt::clock_get());
+            }
+        }
+
+        fn drain_stream(&mut self, probe: &mut Probe) {
+            let port = self.stream_port.id();
+            loop {
+                // Only Copy fields are kept, so the borrow of the buffer ends
+                // before the socket table is touched below.
+                let verdict = match tairix_rt::net::stream_recv(port, &mut self.stream_buf) {
+                    Ok(SocketStreamEvent::Connected { socket }) => {
+                        Some((socket, ConnectOutcome::Open))
+                    }
+                    Ok(SocketStreamEvent::Closed { socket, reason }) => Some((
+                        socket,
+                        match reason {
+                            StreamCloseReason::Refused => ConnectOutcome::Refused,
+                            _ => ConnectOutcome::Inconclusive,
+                        },
+                    )),
+                    Ok(_) => continue,
+                    Err(_) => break,
+                };
+                let Some((socket, outcome)) = verdict else {
+                    break;
+                };
+                if let Some(token) = self.take_connect_by_socket(socket) {
+                    probe.answer_connect(token, outcome, tairix_rt::clock_get());
+                    let _ = tairix_rt::net::close(socket);
+                }
+            }
+        }
+    }
+
+    type ProbeWorker = Worker<Prober, ProbeCampaign, Reachability>;
+
+    /// Run one whole campaign on the prober thread, blocking only here, and
+    /// answer what it found. An empty or passive campaign is a no-op.
+    fn run_campaign(prober: &mut Prober, campaign: &mut ProbeCampaign) -> Reachability {
+        let campaign = core::mem::take(campaign);
+        if !campaign.profile.probe || campaign.targets.is_empty() {
+            return Reachability::new();
+        }
+        let count = u64::try_from(campaign.targets.len()).unwrap_or(u64::MAX);
+        audit(
+            PROBE_STARTED,
+            "netmap: reachability probe started",
+            &[
+                Field {
+                    key: "posture",
+                    value: FieldValue::Str(campaign.profile.label()),
+                },
+                Field {
+                    key: "targets",
+                    value: FieldValue::UnsignedInt(count),
+                },
+            ],
+        );
+        let first = prober.next_sequence;
+        prober.next_sequence =
+            first.wrapping_add(u16::try_from(campaign.targets.len()).unwrap_or(0));
+        let mut probe = Probe::new(campaign, first);
+        loop {
+            match probe.poll(tairix_rt::clock_get()) {
+                ProbeAction::SendEcho { dest, sequence } => {
+                    prober.send_echo(dest, sequence, &mut probe);
+                }
+                ProbeAction::OpenConnect {
+                    target,
+                    port,
+                    token,
+                } => prober.open_connect(target, port, token, &mut probe),
+                ProbeAction::CloseConnect { token } => prober.close_connect(token),
+                ProbeAction::Wait { until_ns } => prober.wait_and_drain(until_ns, &mut probe),
+                ProbeAction::Done => break,
+            }
+        }
+        let reach = probe.into_reachability();
+        audit(
+            PROBE_FINISHED,
+            PROBE_FINISHED_MESSAGE,
+            &[Field {
+                key: "live",
+                value: FieldValue::UnsignedInt(
+                    u64::try_from(reach.live_count()).unwrap_or(u64::MAX),
+                ),
+            }],
+        );
+        reach
+    }
+
+    /// Emit one audit record best-effort.
+    fn audit(id: EventId, message: &str, fields: &[Field<'_>]) {
+        tairix_log::log(
+            &LOG_SINK,
+            &Event {
+                level: Level::Info,
+                id,
+                message,
+                fields,
+            },
+        );
+    }
+
     /// The production event source: the app's own authenticated mailbox,
     /// parked on with the worker's wake until the earlier of the refresh and
     /// the next animation frame.
@@ -216,6 +446,8 @@ mod program {
         set: u64,
         reader: &'a ReadWorker,
         namer: &'a NameWorker,
+        prober: Option<&'a ProbeWorker>,
+        publisher: Option<&'a Publisher>,
         doorbell: Option<&'a PrivatePort>,
         open_session: &'a OpenSession,
         deadlines: &'a Deadlines,
@@ -294,6 +526,18 @@ mod program {
                     self.namer.wake().drain();
                     Ok(Parked::Interrupted)
                 }
+                Wake::App(PROBER_TOKEN) => {
+                    if let Some(prober) = self.prober {
+                        prober.wake().drain();
+                    }
+                    Ok(Parked::Interrupted)
+                }
+                Wake::App(PUBLISH_TOKEN) => {
+                    if let Some(publisher) = self.publisher {
+                        publisher.wake().drain();
+                    }
+                    Ok(Parked::Interrupted)
+                }
                 Wake::App(DOORBELL_TOKEN) => {
                     self.drain_doorbell();
                     Ok(Parked::Interrupted)
@@ -358,10 +602,21 @@ mod program {
         discovery_notice: Option<String>,
         /// Why hosts are not named by DNS, if they cannot be.
         naming_notice: Option<String>,
+        /// Why reachability is not actively probed, if it is not.
+        probe_notice: Option<String>,
         /// The context menu asked for and not yet answered, by its open id.
         menu: Option<(u64, Box<NodeMenu>)>,
         /// The tooltip last declared over the window.
         tip: DeclaredTip,
+        /// The probe posture, published off the loop and read at start.
+        choice: Publication<ProbeSettings>,
+        /// The settings window, while it is open.
+        settings: Option<SettingsPane>,
+        /// The event endpoint the settings window opens on.
+        event_endpoint: u64,
+        /// The session serving the map's window, which must answer the settings
+        /// window too; `None` until the map's window first opens.
+        server: Option<ProcId>,
     }
 
     impl NetMap {
@@ -391,7 +646,125 @@ mod program {
                 let _ = self.window.close();
                 return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
+            self.server = Some(server);
             Ok(server)
+        }
+
+        /// Open the probe-settings window, on the posture now in force. A
+        /// refusal is reported and the map carries on; a window already open is
+        /// left as it is.
+        fn open_settings(&mut self) {
+            if self.settings.is_some() {
+                return;
+            }
+            let Some(server) = self.server else {
+                return;
+            };
+            let posture = self.choice.live().posture;
+            match SettingsPane::open(
+                self.window.client(),
+                self.event_endpoint,
+                server,
+                posture,
+                &self.desktop,
+                &self.themes,
+            ) {
+                Ok(pane) => self.settings = Some(pane),
+                Err(reason) => app::report(
+                    APP_NAME,
+                    format_args!("probe settings not shown ({reason})"),
+                ),
+            }
+        }
+
+        /// Close the settings window if it is open.
+        fn close_settings(&mut self) {
+            if let Some(pane) = self.settings.take() {
+                pane.close(self.window.client());
+            }
+        }
+
+        /// Route an event the settings window owns to its pane, answering what
+        /// it asked and owing whatever moved.
+        fn apply_settings(&mut self, event: &WindowEvent, now: u64) -> Option<SettingsRequest> {
+            let scale = self.desktop.scale();
+            let theme = self.themes.active();
+            let pane = self.settings.as_mut()?;
+            let mut sink = Region::new();
+            let request = match *event {
+                WindowEvent::Pointer {
+                    x,
+                    y,
+                    action,
+                    modifiers,
+                    ..
+                } => {
+                    let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
+                    let mut request = None;
+                    for input in core::iter::once(held)
+                        .chain(pointer_input_events(action, pointer_point(x, y)))
+                    {
+                        if let Some(asked) =
+                            pane.content.on_pointer(&input, scale, theme, &mut sink)
+                        {
+                            request = Some(asked);
+                        }
+                    }
+                    request
+                }
+                WindowEvent::Key {
+                    key: pressed @ KeyInput::Pressed { .. },
+                    ..
+                } => Keystroke::pressed(key_input_event(pressed), now)
+                    .and_then(|stroke| pane.content.on_key(stroke, scale, theme, &mut sink)),
+                WindowEvent::CloseRequested { .. } => Some(SettingsRequest::Close),
+                WindowEvent::ContentReleased { .. } => {
+                    pane.pane.release_frames();
+                    None
+                }
+                _ => None,
+            };
+            pane.owe(sink);
+            request
+        }
+
+        /// Reflect the durable posture the store settled on in the open window.
+        fn adopt_posture(&mut self, posture: Posture) {
+            if let Some(pane) = self.settings.as_mut() {
+                let mut sink = Region::new();
+                pane.content.adopt(posture, &mut sink);
+                pane.owe(sink);
+            }
+        }
+
+        /// Re-fit the settings window for the desktop as it stands now, so a
+        /// scale or theme change while it is open does not leave it rendering at
+        /// the wrong size.
+        fn refit_settings(&mut self) {
+            let Some(pane) = self.settings.as_mut() else {
+                return;
+            };
+            let wanted = pane.content.fit(self.desktop.scale(), self.themes.active());
+            if wanted != (pane.surface.width(), pane.surface.height()) {
+                let _ = pane.pane.resize_with(
+                    self.window.client(),
+                    &app::mode_for(wanted.0, wanted.1),
+                    &mut pane.surface,
+                );
+            }
+            pane.content
+                .set_extent((pane.surface.width(), pane.surface.height()));
+            pane.owed = Repaint::Whole;
+        }
+
+        /// Paint the settings window if it owes anything.
+        fn paint_settings(&mut self) -> Result<(), Errno> {
+            let (Some(pane), desktop, themes) =
+                (self.settings.as_mut(), &self.desktop, &self.themes)
+            else {
+                return Ok(());
+            };
+            pane.paint(self.window.client(), desktop, themes)
         }
 
         /// Draw `area` of the map as it stands at `now_ns`, and present it.
@@ -467,6 +840,10 @@ mod program {
                     Some(Command::Steer(steer)) => self.view.steer(steer, now_ns),
                     Some(Command::Copy(text)) => {
                         self.copy(text);
+                        false
+                    }
+                    Some(Command::OpenSettings) => {
+                        self.open_settings();
                         false
                     }
                     None => false,
@@ -553,6 +930,7 @@ mod program {
             let mut notices = self.read_notices.clone();
             notices.extend(self.discovery_notice.clone());
             notices.extend(self.naming_notice.clone());
+            notices.extend(self.probe_notice.clone());
             self.view.set_notices(notices);
         }
 
@@ -734,6 +1112,11 @@ mod program {
     struct Workers<'a> {
         reader: &'a ReadWorker,
         namer: &'a NameWorker,
+        /// The prober, when probing is on (`CAP_NET_RAW` granted and a thread of
+        /// its own); the posture it probes at is the published choice.
+        prober: Option<&'a ProbeWorker>,
+        /// The settings-store worker the posture is published through.
+        publisher: Option<&'a Publisher>,
         /// Where collects start: off unless the reader can make them.
         collect: Collect,
         /// Whether the namer has a thread of its own, and so names hosts.
@@ -746,6 +1129,54 @@ mod program {
     struct Threaded {
         reader: bool,
         namer: bool,
+    }
+
+    /// Take every settings answer the store has given back, adopt the posture
+    /// it settled on, and submit the next owed write. Shared by the loop's
+    /// wake path and the inline write a settle does when there is no worker.
+    fn adopt_settings(app_state: &mut NetMap, publisher: &Publisher) {
+        let mut refusals = Vec::new();
+        let mut adopted = false;
+        while let Some(answer) = publisher.collect() {
+            adopted = true;
+            let owed = app_state.choice.adopt(answer, &mut refusals);
+            if !owed.is_some_and(|job| publisher.submit(job)) {
+                break;
+            }
+        }
+        for refusal in refusals {
+            app::report(APP_NAME, format_args!("settings not saved ({refusal:?})"));
+        }
+        if adopted {
+            let posture = app_state.choice.adopted().posture;
+            app_state.adopt_posture(posture);
+        }
+    }
+
+    /// The chooser settled on `posture`: show it live, write it off the loop,
+    /// and probe at it at once (a passive posture probes nothing).
+    fn settle_posture(
+        app_state: &mut NetMap,
+        prober: Option<&ProbeWorker>,
+        publisher: Option<&Publisher>,
+        posture: Posture,
+    ) {
+        let was = *app_state.choice.live();
+        app_state.choice.edit(&was, &ProbeSettings { posture });
+        if let Some(publisher) = publisher {
+            if let Some(job) = app_state.choice.settle() {
+                if publisher.submit(job) {
+                    adopt_settings(app_state, publisher);
+                }
+            }
+        }
+        if let Some(prober) = prober {
+            let profile = posture.profile();
+            let targets = app_state.inventory.probe_targets(&profile);
+            if !targets.is_empty() {
+                prober.submit(ProbeCampaign { targets, profile });
+            }
+        }
     }
 
     /// The event loop: wait, drain the burst, then present at most once.
@@ -801,6 +1232,7 @@ mod program {
                         app_state
                             .view
                             .set_motion(app_state.themes.active().motion());
+                        app_state.refit_settings();
                         repaint |= changed;
                     }
                     Err(err) => {
@@ -847,6 +1279,15 @@ mod program {
                 };
                 moved = true;
             });
+            if let Some(prober) = workers.prober {
+                while let Some(reachability) = prober.collect() {
+                    app_state.inventory.record_reachability(reachability);
+                    moved = true;
+                }
+            }
+            if let Some(publisher) = workers.publisher {
+                adopt_settings(app_state, publisher);
+            }
             if moved {
                 app_state.rebuild();
                 repaint = true;
@@ -861,13 +1302,39 @@ mod program {
                 if workers.naming {
                     outstanding.ask_names(workers.namer, &app_state.inventory);
                 }
+                // A fresh read gives the campaign its latest targets at the
+                // chosen posture; the latest-wins desk collapses a still-running
+                // one, so this never piles up (the loop only submits, never
+                // probes).
+                if let Some(prober) = workers.prober {
+                    let profile = app_state.choice.live().posture.profile();
+                    let targets = app_state.inventory.probe_targets(&profile);
+                    if !targets.is_empty() {
+                        prober.submit(ProbeCampaign { targets, profile });
+                    }
+                }
                 retitle = !app_state.loaded;
                 app_state.loaded = true;
             }
             for event in &burst {
+                // An event the settings window owns is the pane's; everything
+                // else is the map's.
+                let for_settings = event.window_id().is_some()
+                    && event.window_id() == app_state.settings.as_ref().map(SettingsPane::id);
+                if for_settings {
+                    match app_state.apply_settings(event, now) {
+                        Some(SettingsRequest::Settle(posture)) => {
+                            settle_posture(app_state, workers.prober, workers.publisher, posture);
+                        }
+                        Some(SettingsRequest::Close) => app_state.close_settings(),
+                        None => {}
+                    }
+                    continue;
+                }
                 match app_state.apply(event, now) {
                     Acted::Quit => return 0,
                     Acted::Close => {
+                        app_state.close_settings();
                         let _ = app_state.window.close();
                         app_state.menu = None;
                         deadlines.refresh_ns.set(None);
@@ -910,6 +1377,13 @@ mod program {
                 deadlines
                     .frame_ns
                     .set(next.map(|wait| now.saturating_add(wait)));
+            }
+            if app_state.paint_settings().is_err() {
+                app::report(
+                    APP_NAME,
+                    "the settings window could not be drawn; closing it",
+                );
+                app_state.close_settings();
             }
             app_state.declare_tip(now);
             // Only once the frame carrying the first read is presented: the
@@ -1026,6 +1500,234 @@ mod program {
         Ok((reader, namer, threaded))
     }
 
+    /// Start the prober on a thread of its own, parking on its own echo and
+    /// stream delivery ports. Probing needs `CAP_NET_RAW` and a thread of its
+    /// own; without either it is off and the notice says why, so the map still
+    /// draws everything else (fail loud, degrade gracefully).
+    fn start_prober(set: u64) -> (Option<Arc<ProbeWorker>>, Option<String>) {
+        let (Ok(echo_port), Ok(stream_port)) = (
+            PrivatePort::bind(SocketEcho::MAX_WIRE_LEN, ECHO_DELIVER_CAPACITY),
+            PrivatePort::bind(SocketStreamEvent::MAX_WIRE_LEN, STREAM_DELIVER_CAPACITY),
+        ) else {
+            return (
+                None,
+                Some(String::from(
+                    "Reachability probing is off: no delivery port",
+                )),
+            );
+        };
+        let Ok(waitset) = WaitSet::create() else {
+            return (
+                None,
+                Some(String::from("Reachability probing is off: no wait-set")),
+            );
+        };
+        let wired = waitset
+            .add(WaitSourceKind::Port, echo_port.id(), PROBE_ECHO_TOKEN)
+            .and_then(|()| waitset.add(WaitSourceKind::Port, stream_port.id(), PROBE_STREAM_TOKEN));
+        if wired.is_err() {
+            return (
+                None,
+                Some(String::from(
+                    "Reachability probing is off: wait-set refused",
+                )),
+            );
+        }
+        // A throwaway socket is the CAP_NET_RAW check; the worker opens its own
+        // lazily, so nothing is held across the fallible start-up below.
+        match tairix_rt::net::icmp_echo_socket(NetAddrFamily::V4, echo_port.id()) {
+            Ok(socket) => {
+                let _ = tairix_rt::net::close(socket);
+            }
+            Err(err) => {
+                audit(
+                    PROBE_REFUSED,
+                    "netmap: reachability probing refused",
+                    &[Field {
+                        key: "reason",
+                        value: FieldValue::Str("raw network access"),
+                    }],
+                );
+                return (
+                    None,
+                    Some(format!("Reachability probing needs CAP_NET_RAW ({err})")),
+                );
+            }
+        }
+        let prober = Prober {
+            echo_port,
+            stream_port,
+            set: waitset,
+            echo_v4: None,
+            echo_v6: None,
+            connects: Vec::new(),
+            echo_buf: alloc::vec![0u8; SocketEcho::MAX_WIRE_LEN],
+            stream_buf: alloc::vec![0u8; SocketStreamEvent::MAX_WIRE_LEN],
+            next_sequence: 0,
+        };
+        let worker = Arc::new(Worker::new(
+            run_campaign,
+            prober,
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        if Worker::start(&worker).is_err() {
+            return (
+                None,
+                Some(String::from(
+                    "Reachability probing is off: it needs a thread of its own",
+                )),
+            );
+        }
+        if app::watch_wake(set, worker.wake(), PROBER_TOKEN).is_err() {
+            return (
+                None,
+                Some(String::from("Reachability probing is off: wake refused")),
+            );
+        }
+        (Some(worker), None)
+    }
+
+    /// The worker the probe posture is written through, off the loop.
+    type Publisher = Worker<(), PublishJob<ProbeSettings>, Result<Published<ProbeSettings>, Errno>>;
+
+    /// Write one settings job to the app's own store and read the result back.
+    fn write_settings(
+        _: &mut (),
+        job: &mut PublishJob<ProbeSettings>,
+    ) -> Result<Published<ProbeSettings>, Errno> {
+        tairix_appdata::publish(&mut Settings::open_without_defaults(&mut RtHost), job)
+    }
+
+    /// Start the settings-store worker and put its answer wake on `set`. Where
+    /// neither the wake nor the thread can be had, the write falls back to the
+    /// loop (its desk stopped), so a choice is never lost — slower, never wrong.
+    fn start_publisher(publisher: &Arc<Publisher>, set: u64) {
+        let added = publisher.wake().read_end().is_some_and(|read| {
+            tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                PUBLISH_TOKEN,
+            ) == 0
+        });
+        if !added {
+            publisher.stop();
+            app::report(
+                APP_NAME,
+                "settings writes stay on the loop: no store-worker wake",
+            );
+            return;
+        }
+        if Publisher::start(publisher).is_err() {
+            publisher.stop();
+            app::report(
+                APP_NAME,
+                "settings writes stay on the loop: no store-worker thread",
+            );
+        }
+    }
+
+    /// The settings window on screen: its pane on the map's own channel, the
+    /// picture retained between paints, and what of it is owed.
+    struct SettingsPane {
+        pane: WindowPane,
+        surface: Surface,
+        content: ProbePane,
+        owed: Repaint,
+    }
+
+    impl SettingsPane {
+        /// Open the window on `client`, refusing a create answered by any
+        /// session but `server`, the one serving the map's window.
+        fn open(
+            client: &mut WindowClient<app::RtWindowTransport>,
+            endpoint: u64,
+            server: ProcId,
+            posture: Posture,
+            desktop: &Desktop,
+            themes: &ThemeRegistry,
+        ) -> Result<Self, String> {
+            let content = ProbePane::new(posture, desktop.scale(), themes.active());
+            let (width, height) = content.extent();
+            let surface = Surface::new(width, height)
+                .ok_or_else(|| String::from("no memory for the window"))?;
+            let mode = app::mode_for(width, height);
+            let (pane, replied) = WindowPane::open(
+                client,
+                endpoint,
+                &mode,
+                settings::TITLE,
+                WindowSizing::Fixed,
+            )
+            .map_err(|err| alloc::format!("{err}"))?;
+            if replied != server {
+                let _ = pane.close(client);
+                return Err(String::from(
+                    "the settings window was answered by another session",
+                ));
+            }
+            Ok(Self {
+                pane,
+                surface,
+                content,
+                owed: Repaint::Whole,
+            })
+        }
+
+        /// The session's id for the window.
+        const fn id(&self) -> u64 {
+            self.pane.id()
+        }
+
+        /// Owe what an event reported.
+        fn owe(&mut self, sink: Region) {
+            self.owed.merge(Repaint::Parts(sink));
+        }
+
+        /// Paint what is owed and present only that.
+        fn paint(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            desktop: &Desktop,
+            themes: &ThemeRegistry,
+        ) -> Result<(), Errno> {
+            if self.pane.content_released() {
+                self.owed = Repaint::Whole;
+            }
+            if self.owed.is_clean() {
+                return Ok(());
+            }
+            let area = self.owed.area(self.surface.width(), self.surface.height());
+            let (content, scale, theme) = (&self.content, desktop.scale(), themes.active());
+            damage::paint_parts(&mut self.surface, area.rects(), |surface| {
+                content.render(surface, scale, theme);
+            });
+            let Some(rect) = damage_in(self.pane.mode(), area.bounds()) else {
+                self.owed = Repaint::clean();
+                return Ok(());
+            };
+            match self.pane.present(client, &self.surface, rect) {
+                Ok(()) => {
+                    self.owed = Repaint::clean();
+                    Ok(())
+                }
+                Err(err) => {
+                    self.owed = Repaint::Whole;
+                    Err(err)
+                }
+            }
+        }
+
+        fn close(self, client: &mut WindowClient<app::RtWindowTransport>) {
+            let _ = self.pane.close(client);
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one-time wiring of the window, the four workers and the event loop"
+    )]
     fn main() -> i32 {
         let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
         let mut window = AppWindow::new();
@@ -1062,8 +1764,22 @@ mod program {
         }
         let naming_notice = (!threaded.namer)
             .then(|| String::from("Hosts are not named: naming needs a thread of its own"));
+        let (prober, probe_notice) = start_prober(set);
+        let (loaded_settings, settings_refusals) =
+            tairix_appdata::loaded(&Settings::open_without_defaults(&mut RtHost));
+        for refusal in settings_refusals {
+            app::report(APP_NAME, format_args!("settings not read ({refusal:?})"));
+        }
+        let publisher = Arc::new(Publisher::new(
+            write_settings,
+            (),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        start_publisher(&publisher, set);
         let _reader_guard = WorkerGuard::new(&reader);
         let _namer_guard = WorkerGuard::new(&namer);
+        let _prober_guard = prober.as_ref().map(WorkerGuard::new);
+        let _publisher_guard = WorkerGuard::new(&publisher);
 
         declare_app_bar(window.client(), event_endpoint);
         let canvas = Rect::new(0, 0, mode.width_px, mode.height_px);
@@ -1079,8 +1795,13 @@ mod program {
             read_notices: Vec::new(),
             discovery_notice,
             naming_notice,
+            probe_notice,
             menu: None,
             tip: DeclaredTip::new(),
+            choice: Publication::new(loaded_settings),
+            settings: None,
+            event_endpoint,
+            server: None,
         };
         // The map was started to be looked at, so a first window that will
         // not open leaves it nothing to be; later ones are a click on its slot.
@@ -1097,6 +1818,8 @@ mod program {
             set,
             reader: &reader,
             namer: &namer,
+            prober: prober.as_deref(),
+            publisher: Some(&publisher),
             doorbell: doorbell.as_ref(),
             open_session: &open_session,
             deadlines: &deadlines,
@@ -1108,6 +1831,8 @@ mod program {
             &Workers {
                 reader: &reader,
                 namer: &namer,
+                prober: prober.as_deref(),
+                publisher: Some(&publisher),
                 collect,
                 naming: threaded.namer,
             },

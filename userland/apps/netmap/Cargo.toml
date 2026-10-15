@@ -44,6 +44,11 @@ tairix-net = { path = "../../../lib/net", version = "=0.0.0" }
 # The organisation a hardware address was assigned to, from the IEEE table
 # this bundle ships as `Resources/oui.ids.bin`; the import half stays off.
 tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", default-features = false }
+# The stable event-id range and the records the probe campaigns are audited
+# through.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The per-app `key = value` settings schema the probe posture is persisted as.
+tairix-appconf = { path = "../../../lib/appconf", version = "=0.0.0" }
 
 # The package is both the host-tested map engine and the `Run` entry-point
 # binary of the on-disk `netmap.app` bundle: a freestanding pure-Rust program
@@ -68,11 +73,15 @@ tairix-discovery = { path = "../../../lib/discovery", version = "=0.0.0", featur
 tairix-resolver = { path = "../../../lib/resolver", version = "=0.0.0", features = ["program"] }
 # The one bounded loader the bundled OUI table is read through.
 tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", default-features = false, features = ["rt"] }
+# The per-app settings store the probe posture is published to and read from.
+tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
 
 [dev-dependencies]
 # The view's host tests draw labels, so they inject the shared solid test
 # transport rather than reaching a running `fontd`.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The deterministic seed/PRNG/budget the probe-engine fuzz harness drives.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # The source tests compile a fixture OUI table through the same pipeline the
 # generator uses, never a hand-built imitation of its format.
 tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", features = ["textdb"] }
