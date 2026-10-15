@@ -19,9 +19,9 @@ strukturiertes Dokument je Befehl oder Thema, je Sprache. `man` löst
 Seite dokumentiert also immer das Programm, das die Shell für dasselbe
 Wort starten würde; `PATH` kann dieses Präfix weder umordnen noch
 überschreiben. Ein angehängtes `.app` benennt das Paket direkt. Enthält
-keines davon das Wort, durchsucht `man` die App-Stores rekursiv — zuerst
-`/Apps`, dann die eigenen Ordner `Commands` und `Applications` im
-Benutzerverzeichnis —, sodass ein in verschachtelten Ordnern abgelegtes
+keines davon das Wort, durchsucht `man` die
+eigenen Ordner `Commands` und `Applications` im Benutzerverzeichnis
+rekursiv, sodass ein in verschachtelten Ordnern abgelegtes
 Paket dennoch gefunden wird; die Suche blickt nie in ein anderes Paket
 hinein, und der flachste Treffer gewinnt.
 

@@ -186,7 +186,7 @@ fn stores<'a>(machine: &'a MemStore, user: &'a MemStore) -> Stores<'a> {
 fn chess_bundle() -> MemBundles {
     let mut bundles = MemBundles::default();
     bundles.manifest(
-        "/Apps/chess.app",
+        "/System/Applications/chess.app",
         &manifest_bytes("chess", Some(LibraryCategory::Games), Some("chess.svg")),
     );
     bundles
@@ -219,7 +219,7 @@ fn parse_maps_the_grammar() {
     assert_eq!(
         parse(&[
             "add",
-            "/Apps/chess.app",
+            "/System/Applications/chess.app",
             "--category=Games",
             "--name",
             "Chess",
@@ -228,7 +228,7 @@ fn parse_maps_the_grammar() {
             "--user"
         ]),
         Ok(Command::Add(AddRequest {
-            bundle: "/Apps/chess.app",
+            bundle: "/System/Applications/chess.app",
             category: Some(LibraryCategory::Games),
             name: Some("Chess"),
             icon: Some("chess.svg"),
@@ -295,13 +295,23 @@ fn parse_refuses_what_the_grammar_does_not_define() {
         ),
         (&["add"][..], AppLibError::Usage),
         (
-            &["add", "/Apps/a.app", "/Apps/b.app"][..],
+            &[
+                "add",
+                "/System/Applications/a.app",
+                "/System/Applications/b.app",
+            ][..],
             AppLibError::Usage,
         ),
-        (&["add", "/Apps/a.app", "--frob"][..], AppLibError::Usage),
-        (&["add", "/Apps/a.app", "-x"][..], AppLibError::Usage),
         (
-            &["add", "/Apps/a.app", "--user=yes"][..],
+            &["add", "/System/Applications/a.app", "--frob"][..],
+            AppLibError::Usage,
+        ),
+        (
+            &["add", "/System/Applications/a.app", "-x"][..],
+            AppLibError::Usage,
+        ),
+        (
+            &["add", "/System/Applications/a.app", "--user=yes"][..],
             AppLibError::Usage,
         ),
         (&["remove"][..], AppLibError::Usage),
@@ -319,7 +329,7 @@ fn list_shows_the_resolved_library_folder_by_folder() {
          os.tairix.edit.bundle = /System/Commands/edit.app\n\
          os.tairix.edit.category = Accessories\n\
          os.tairix.chess.name = Chess\n\
-         os.tairix.chess.bundle = /Apps/chess.app\n\
+         os.tairix.chess.bundle = /System/Applications/chess.app\n\
          os.tairix.chess.category = Games\n",
     ));
     // The user's overlay renames Edit; the resolved view shows the rename.
@@ -337,7 +347,7 @@ fn list_shows_the_resolved_library_folder_by_folder() {
     assert_eq!(
         output.text(),
         "Accessories\n  os.tairix.edit  My Editor  /System/Commands/edit.app\n\
-         Games\n  os.tairix.chess  Chess  /Apps/chess.app\n"
+         Games\n  os.tairix.chess  Chess  /System/Applications/chess.app\n"
     );
 
     // A folder filter shows only that folder.
@@ -355,7 +365,7 @@ fn list_shows_the_resolved_library_folder_by_folder() {
     .expect("lists");
     assert_eq!(
         filtered.text(),
-        "Games\n  os.tairix.chess  Chess  /Apps/chess.app\n"
+        "Games\n  os.tairix.chess  Chess  /System/Applications/chess.app\n"
     );
 }
 
@@ -382,13 +392,13 @@ fn add_derives_the_entry_from_the_bundles_manifest() {
     let user = MemStore::new(None);
     let mut bundles = MemBundles::default();
     bundles.manifest(
-        "/Apps/chess.app",
+        "/System/Applications/chess.app",
         &manifest_bytes("chess", Some(LibraryCategory::Games), Some("chess.svg")),
     );
     let output = MemOutput::default();
     run(
         Command::Add(AddRequest {
-            bundle: "/Apps/chess.app/",
+            bundle: "/System/Applications/chess.app/",
             category: None,
             name: None,
             icon: None,
@@ -405,7 +415,7 @@ fn add_derives_the_entry_from_the_bundles_manifest() {
         machine.text().as_deref(),
         Some(
             "os.tairix.chess.name = chess\n\
-             os.tairix.chess.bundle = /Apps/chess.app\n\
+             os.tairix.chess.bundle = /System/Applications/chess.app\n\
              os.tairix.chess.category = Games\n\
              os.tairix.chess.icon = chess.svg\n"
         )
@@ -427,13 +437,13 @@ fn add_overrides_win_over_the_manifest() {
     let user = MemStore::new(None);
     let mut bundles = MemBundles::default();
     bundles.manifest(
-        "/Apps/chess.app",
+        "/System/Applications/chess.app",
         &manifest_bytes("chess", Some(LibraryCategory::Games), None),
     );
     let output = MemOutput::default();
     run(
         Command::Add(AddRequest {
-            bundle: "/Apps/chess.app",
+            bundle: "/System/Applications/chess.app",
             category: Some(LibraryCategory::Utilities),
             name: Some("Grandmaster"),
             icon: Some("gm.svg"),
@@ -463,9 +473,12 @@ fn add_refuses_what_it_cannot_derive_and_changes_nothing() {
     let machine = MemStore::new(None);
     let user = MemStore::new(None);
     let mut bundles = MemBundles::default();
-    bundles.manifest("/Apps/tool.app", &manifest_bytes("tool", None, None));
-    bundles.manifest("/Apps/bad.app", &[0u8; 16]);
-    bundles.manifest_err("/Apps/locked.app", Errno::PermissionDenied);
+    bundles.manifest(
+        "/System/Applications/tool.app",
+        &manifest_bytes("tool", None, None),
+    );
+    bundles.manifest("/System/Applications/bad.app", &[0u8; 16]);
+    bundles.manifest_err("/System/Applications/locked.app", Errno::PermissionDenied);
     let output = MemOutput::default();
     let add = |bundle, category| {
         run(
@@ -485,18 +498,31 @@ fn add_refuses_what_it_cannot_derive_and_changes_nothing() {
     };
 
     // An unlisted manifest needs an explicit folder.
-    assert_eq!(add("/Apps/tool.app", None), Err(AppLibError::NotListed));
+    assert_eq!(
+        add("/System/Applications/tool.app", None),
+        Err(AppLibError::NotListed)
+    );
     // …and with one, it registers.
-    add("/Apps/tool.app", Some(LibraryCategory::Utilities)).expect("adds");
+    add(
+        "/System/Applications/tool.app",
+        Some(LibraryCategory::Utilities),
+    )
+    .expect("adds");
     assert!(machine
         .text()
         .expect("written")
         .contains("category = Utilities"));
 
-    assert_eq!(add("/Apps/ghost.app", None), Err(AppLibError::NoManifest));
-    assert_eq!(add("/Apps/bad.app", None), Err(AppLibError::BadManifest));
     assert_eq!(
-        add("/Apps/locked.app", None),
+        add("/System/Applications/ghost.app", None),
+        Err(AppLibError::NoManifest)
+    );
+    assert_eq!(
+        add("/System/Applications/bad.app", None),
+        Err(AppLibError::BadManifest)
+    );
+    assert_eq!(
+        add("/System/Applications/locked.app", None),
         Err(AppLibError::Bundle(Errno::PermissionDenied))
     );
     // A bundle path outside every application store is refused by the model.
@@ -509,19 +535,19 @@ fn add_refuses_what_it_cannot_derive_and_changes_nothing() {
 #[test]
 fn a_refused_machine_write_surfaces_and_changes_nothing() {
     let mut machine = MemStore::new(Some(
-        "os.tairix.edit.name = Edit\nos.tairix.edit.bundle = /Apps/edit.app\n",
+        "os.tairix.edit.name = Edit\nos.tairix.edit.bundle = /System/Applications/edit.app\n",
     ));
     machine.write_err = Some(Errno::PermissionDenied);
     let user = MemStore::new(None);
     let mut bundles = MemBundles::default();
     bundles.manifest(
-        "/Apps/chess.app",
+        "/System/Applications/chess.app",
         &manifest_bytes("chess", Some(LibraryCategory::Games), None),
     );
     let output = MemOutput::default();
     let err = run(
         Command::Add(AddRequest {
-            bundle: "/Apps/chess.app",
+            bundle: "/System/Applications/chess.app",
             category: None,
             name: None,
             icon: None,
@@ -571,7 +597,7 @@ fn a_user_rescan_without_a_home_fails_closed_and_the_rest_do_not_need_one() {
     // The overlay edits go through, home or no home.
     run(
         Command::Add(AddRequest {
-            bundle: "/Apps/chess.app",
+            bundle: "/System/Applications/chess.app",
             category: Some(LibraryCategory::Games),
             name: None,
             icon: None,
@@ -590,7 +616,8 @@ fn a_user_rescan_without_a_home_fails_closed_and_the_rest_do_not_need_one() {
 
 #[test]
 fn remove_takes_an_identifier_or_a_bundle_path() {
-    let text = "os.tairix.chess.name = Chess\nos.tairix.chess.bundle = /Apps/chess.app\n";
+    let text =
+        "os.tairix.chess.name = Chess\nos.tairix.chess.bundle = /System/Applications/chess.app\n";
     let machine = MemStore::new(Some(text));
     let user = MemStore::new(None);
     let output = MemOutput::default();
@@ -616,7 +643,7 @@ fn remove_takes_an_identifier_or_a_bundle_path() {
     let machine = MemStore::new(Some(text));
     run(
         Command::Remove {
-            target: "/Apps/chess.app/",
+            target: "/System/Applications/chess.app/",
             user: false,
         },
         None,
@@ -649,7 +676,7 @@ fn remove_takes_an_identifier_or_a_bundle_path() {
 #[test]
 fn hide_and_show_record_the_visibility_verdict() {
     let machine = MemStore::new(Some(
-        "os.tairix.chess.name = Chess\nos.tairix.chess.bundle = /Apps/chess.app\n",
+        "os.tairix.chess.name = Chess\nos.tairix.chess.bundle = /System/Applications/chess.app\n",
     ));
     let user = MemStore::new(None);
     let output = MemOutput::default();
@@ -746,10 +773,10 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
     // solitaire; a rescan must disturb neither.
     let machine = MemStore::new(Some(
         "os.tairix.chess.name = Grandmaster\n\
-         os.tairix.chess.bundle = /Apps/chess.app\n\
+         os.tairix.chess.bundle = /System/Applications/chess.app\n\
          os.tairix.chess.category = Games\n\
          os.tairix.solitaire.name = Solitaire\n\
-         os.tairix.solitaire.bundle = /Apps/solitaire.app\n\
+         os.tairix.solitaire.bundle = /System/Applications/solitaire.app\n\
          os.tairix.solitaire.category = Games\n\
          os.tairix.solitaire.hidden = true\n",
     ));
@@ -759,10 +786,10 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
         "/System/Commands",
         &[("edit.app", true), ("ls.app", true), ("notes.txt", false)],
     );
-    bundles.dir("/System/Applications", &[("viewer.app", true)]);
     bundles.dir(
-        "/Apps",
+        "/System/Applications",
         &[
+            ("viewer.app", true),
             ("chess.app", true),
             ("solitaire.app", true),
             ("bad.app", true),
@@ -770,7 +797,7 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
         ],
     );
     // Nested plain subdirectories are walked; bundles are sealed units.
-    bundles.dir("/Apps/games", &[("mahjong.app", true)]);
+    bundles.dir("/System/Applications/games", &[("mahjong.app", true)]);
     bundles.manifest(
         "/System/Commands/edit.app",
         &manifest_bytes("edit", Some(LibraryCategory::Accessories), None),
@@ -782,16 +809,16 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
         &manifest_bytes("viewer", Some(LibraryCategory::Graphics), None),
     );
     bundles.manifest(
-        "/Apps/chess.app",
+        "/System/Applications/chess.app",
         &manifest_bytes("chess", Some(LibraryCategory::Games), None),
     );
     bundles.manifest(
-        "/Apps/solitaire.app",
+        "/System/Applications/solitaire.app",
         &manifest_bytes("solitaire", Some(LibraryCategory::Games), None),
     );
-    bundles.manifest("/Apps/bad.app", &[0u8; 16]);
+    bundles.manifest("/System/Applications/bad.app", &[0u8; 16]);
     bundles.manifest(
-        "/Apps/games/mahjong.app",
+        "/System/Applications/games/mahjong.app",
         &manifest_bytes("mahjong", Some(LibraryCategory::Games), None),
     );
 
@@ -817,7 +844,7 @@ fn rescan_registers_only_listed_bundles_and_never_disturbs_curation() {
         "{text}"
     );
     assert!(
-        text.contains("os.tairix.mahjong.bundle = /Apps/games/mahjong.app\n"),
+        text.contains("os.tairix.mahjong.bundle = /System/Applications/games/mahjong.app\n"),
         "{text}"
     );
     // …the unlisted tool is not…
@@ -912,7 +939,7 @@ fn the_rescan_walk_is_bounded() {
 
     // Depth: a bundle nested beyond the walk bound is never reached.
     let mut bundles = MemBundles::default();
-    let mut dir = String::from("/Apps");
+    let mut dir = String::from("/System/Applications");
     for level in 0..MAX_WALK_DEPTH {
         let child = format!("{dir}/d{level}");
         bundles.dir(&dir, &[(&format!("d{level}"), true)]);

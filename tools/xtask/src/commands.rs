@@ -47,6 +47,8 @@ mod rngsoak;
 mod sbom;
 mod seed;
 mod sound_encode;
+mod source_text;
+mod source_tree;
 mod spec_review;
 mod supply_chain;
 mod target_clippy;
@@ -84,6 +86,7 @@ pub enum Command {
     Loom,
     ModelCheck,
     SpecReview,
+    SourceText,
     CharterCite,
     Bench,
     Ci,
@@ -124,6 +127,7 @@ impl Command {
         Command::Loom,
         Command::ModelCheck,
         Command::SpecReview,
+        Command::SourceText,
         Command::CharterCite,
         Command::Bench,
         Command::Ci,
@@ -163,6 +167,7 @@ impl Command {
             "miri" => Command::Miri,
             "model-check" => Command::ModelCheck,
             "spec-review" => Command::SpecReview,
+            "source-text" => Command::SourceText,
             "charter-cite" => Command::CharterCite,
             "bench" => Command::Bench,
             "ci" => Command::Ci,
@@ -204,6 +209,7 @@ impl Command {
             Command::Miri => "miri",
             Command::ModelCheck => "model-check",
             Command::SpecReview => "spec-review",
+            Command::SourceText => "source-text",
             Command::CharterCite => "charter-cite",
             Command::Bench => "bench",
             Command::Ci => "ci",
@@ -274,6 +280,7 @@ impl Command {
                 "Exhaustively model-check the §19.7 Silver capability + IPC state machine."
             }
             Command::SpecReview => "Reject unreviewed AI draft markers in source (§19.7).",
+            Command::SourceText => "Reject control bytes in source text.",
             Command::CharterCite => {
                 "Reject a comment or description citing a charter section, not the reason (§2.11)."
             }
@@ -322,6 +329,7 @@ impl Command {
             Command::Miri => miri::run(ctx, args),
             Command::ModelCheck => run_model_check(args),
             Command::SpecReview => run_spec_review(ctx),
+            Command::SourceText => run_source_text(ctx),
             Command::CharterCite => run_charter_cite(ctx),
             Command::Bench => run_bench(args),
             Command::Ci => run_ci(ctx),
@@ -1206,6 +1214,11 @@ fn run_spec_review(ctx: &Context) -> Result<(), String> {
     spec_review::run(&ctx.workspace_root)
 }
 
+fn run_source_text(ctx: &Context) -> Result<(), String> {
+    eprintln!("xtask: [source-text] {}", ctx.workspace_root.display());
+    source_text::run(&ctx.workspace_root)
+}
+
 fn run_charter_cite(ctx: &Context) -> Result<(), String> {
     // A comment carries the reason, not a pointer to the rule. The scanner
     // lives in `commands/charter_cite.rs`.
@@ -1392,6 +1405,9 @@ fn run_static_gates(ctx: &Context) -> Result<(), String> {
         // Reject a comment or package description that cites a charter section
         // number in place of the reason; a source scan, fails closed.
         static_gate("charter-cite", ctx, run_charter_cite),
+        // Reject a control byte in source text, which tools then misread as
+        // binary; a source scan, fails closed.
+        static_gate("source-text", ctx, run_source_text),
         // Supply-chain integrity: the source-hash allow-list against
         // `Cargo.lock` and the advisory SLA, fails closed on drift.
         static_gate("supply-chain", ctx, |c| run_supply_chain(c, &[])),

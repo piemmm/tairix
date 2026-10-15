@@ -50,7 +50,7 @@ filesystem's locks.
 | Topic | Payload | Publisher | Subscribers |
 |---|---|---|---|
 | `Desktop` | `DesktopInfo` (54 B) | the seat's **live display lease** holder | every windowed app, through `lib/window` |
-| `Mounts` | none — the generation *is* the news | the kernel, from every `MountTable` mutation | `files.app`'s places rail |
+| `Mounts` | none — the generation *is* the news | the kernel, from every `MountTable` mutation and every volume crossing into or out of its reserve | `files.app`'s places rail |
 | `MemoryPressure` | the band depth (1 B) | the kernel, from `MEM_STATS` | `lib/procinfo::pressure`, for every process holding a cache |
 | `DisplayLease` | the boot seat's lease word and its holder's login session (24 B) | the kernel, from its seat registry and capability table | the display service (`lib/display::service`), to release a configuration whose lease ended and light the display it left dark; the audio service, to mix only the holder's session into the seat's speakers; the cue authority, to apply only the holder's sound choices (`plans/SOUND.md` SND23) |
 | `AudioCapture` | the capture streams moving frames (4 B) | the audio service, by its reserved rendezvous | the session's recording indicator, the Settings Sound pane |
@@ -115,7 +115,8 @@ copy:
   table's own epoch, `notice::mounts_changed()` and the directory watches'
   wake together, so no call site that attaches, re-backs, or removes a mount
   can forget one of them; a *refused* mutation changed nothing and moves
-  nothing.
+  nothing. The volume host bumps it too when a volume crosses into or out of
+  its reserve, which changes what the mount listing reports of that volume.
 - `MemoryPressure` — the published band's depth itself, which is what the old
   bespoke wait source used. A band that deepens and relaxes again before the
   waiter runs therefore correctly reports nothing to do.

@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use tairix_abi::log_ingress::LogIngressRequest;
 use tairix_abi::time::{Duration64, WallClockReading};
 use tairix_abi::{Errno, FieldName, FieldValue, Origin};
-use tairix_log::{CallerContent, Journal, JournalError, Level, SegmentStore, Stream};
+use tairix_log::{CallerContent, Journal, JournalError, Level, SegmentStore, Stamp, Stream};
 
 /// The journal's own ingest lane: a fixed CPU identity and the monotonically
 /// increasing per-CPU record sequence used to detect ingestion gaps.
@@ -154,10 +154,12 @@ pub fn serve<S: SegmentStore>(
         journal
             .commit(
                 &admission,
-                cpu,
-                ingest.take(),
-                clock.monotonic,
-                clock.wall,
+                Stamp {
+                    cpu,
+                    cpu_seq: ingest.take(),
+                    monotonic: clock.monotonic,
+                    wall: clock.wall,
+                },
                 caller,
                 &data,
                 scratch,
@@ -170,10 +172,12 @@ pub fn serve<S: SegmentStore>(
                     &admission,
                     requested_stream,
                     req.requested_source(),
-                    cpu,
-                    ingest.take(),
-                    clock.monotonic,
-                    clock.wall,
+                    Stamp {
+                        cpu,
+                        cpu_seq: ingest.take(),
+                        monotonic: clock.monotonic,
+                        wall: clock.wall,
+                    },
                     scratch,
                 )
                 .map_err(|e| map_journal_err(&e))?;

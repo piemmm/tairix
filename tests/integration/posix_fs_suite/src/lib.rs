@@ -56,7 +56,9 @@ pub use tairix_abi::driver::filesystem::{
 pub use tairix_abi::CapabilityId;
 pub use tairix_abi::Errno;
 pub use tairix_caps::CapabilitySet;
-pub use tairix_kernel_core::fs::{Credentials, FinalLink, Mode, MountBacking, Path, Vfs, VfsError};
+pub use tairix_kernel_core::fs::{
+    Attachment, Credentials, FinalLink, Metadata, Mode, Path, Vfs, VfsError,
+};
 pub use tairix_kernel_sec::{GroupId, UserId};
 
 /// Logical block (sector) size of the in-memory device, in bytes. The
@@ -224,22 +226,19 @@ pub fn arxfs_backed_vfs(read_only: bool) -> (Vfs, LiveFs) {
     )
     .expect("format the fixed-geometry arxfs test volume");
 
-    let mut vfs = Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID));
-    let caps = CapabilitySet::empty();
-    let owner = cred(ROOT_UID, ROOT_GID, &caps);
-    vfs.mkdir(&owner, &path(MOUNT), Mode::from_bits(0o755))
-        .expect("create the volume mount point under /Storage");
-
+    let vfs = Vfs::with_default_layout(UserId(ROOT_UID), GroupId(ROOT_GID));
     let handle = DriverHandle::from_raw(0x5f5f).expect("non-zero driver handle");
     let flags = if read_only {
         MountFlags::READ_ONLY
     } else {
         MountFlags::default()
     };
-    // The suite's volume is an in-RAM block vector, so it declares no storage
-    // medium: unknown is the honest record.
+    let template = Metadata::new(UserId(ROOT_UID), GroupId(ROOT_GID), Mode::from_bits(0o755));
+    // Attached under `/Storage` as a runtime volume is, its mount point's
+    // template travelling with it. The suite's volume is an in-RAM block
+    // vector, so it declares no storage medium: unknown is the honest record.
     vfs.mounts_write()
-        .mount(path(MOUNT), flags, Some(MountBacking::new(handle, None)))
+        .attach_at(Attachment::new(handle, None, flags), path(MOUNT), template)
         .expect("mount the arxfs volume");
 
     (vfs, fs)

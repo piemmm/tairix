@@ -99,7 +99,7 @@ use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{
-    Metadata, Mode, MountBacking, Path, SleepLock, Vfs, VolumePublishError, VolumeService,
+    Attachment, Metadata, Mode, Path, SleepLock, Vfs, VolumePublishError, VolumeService,
 };
 use tairix_kernel_ipc::EndpointId;
 use tairix_kernel_sec::{GroupId, UserId};
@@ -729,14 +729,38 @@ fn mount_storage_volume(
     let path = Path::parse(&format!("/Storage/{name}"))
         .map_err(|_| ("mount_path_invalid", Errno::OutOfRange))?;
     vfs.mounts_write()
-        .mount_with_template(
+        .attach_at(
+            Attachment::new(handle, device.class, mount_flags(device.read_only)),
             path.clone(),
-            mount_flags(device.read_only),
-            MountBacking::new(handle, device.class),
             mount_template(map_gid),
         )
         .map_err(|_| ("name_in_use", Errno::AlreadyExists))?;
     Ok(path)
+}
+
+/// Re-attach a recovered volume at `path` under `attachment`'s posture, then
+/// `serve` it.
+///
+/// The posture goes first: until `serve` registers the live driver, the
+/// fail-closed stand-in answers the mount, so no operation reaches the live
+/// driver under the posture it replaces. For a format whose driver opens
+/// writable whatever the posture, the mount is all that keeps a conflicted
+/// volume from being written.
+fn reattach_then_serve(
+    vfs: &Vfs,
+    attachment: Attachment,
+    path: Path,
+    template: Metadata,
+    serve: impl FnOnce() -> Result<(), (&'static str, Errno)>,
+) -> Result<(), (&'static str, Errno)> {
+    {
+        let mut mounts = vfs.mounts_write();
+        let _ = mounts.detach(attachment.driver());
+        mounts
+            .attach_at(attachment, path, template)
+            .map_err(|_| ("mount_path_invalid", Errno::AlreadyExists))?;
+    }
+    serve()
 }
 
 /// Register `driver` under `handle` and attach the live block-health
@@ -892,17 +916,14 @@ fn read_extent_head<B: Block>(
     Some(buf)
 }
 
-/// The mount-policy flags every runtime volume carries: the removable-
-/// media restrictions, plus `ro` when the device's write policy or the
-/// recovery posture demands it.
+/// The mount-policy flags every runtime volume carries: `noexec`, so a
+/// program carried in on removable media is not run, plus `ro` when the
+/// device's write policy or the recovery posture demands it.
 fn mount_flags(read_only: bool) -> MountFlags {
-    let flags = MountFlags::NOSUID
-        .union(MountFlags::NODEV)
-        .union(MountFlags::NOEXEC);
     if read_only {
-        flags.union(MountFlags::READ_ONLY)
+        MountFlags::NOEXEC.union(MountFlags::READ_ONLY)
     } else {
-        flags
+        MountFlags::NOEXEC
     }
 }
 
@@ -1102,12 +1123,12 @@ impl VolumeService for RuntimeVolumeService {
         let identity = opened.identity;
         let fstype = opened.fstype;
         if register_with_health(handle, opened, name, identity, health).is_err() {
-            let _ = vfs.mounts_write().unmount(&path);
+            let _ = vfs.mounts_write().detach(handle);
             return Err(refused("handle_in_use", Errno::AlreadyExists));
         }
         if let Err(err) = publish_volume_identity(identity, &["Storage", name], name, audit) {
             let _ = LATE_FILESYSTEM.unregister(handle);
-            let _ = vfs.mounts_write().unmount(&path);
+            let _ = vfs.mounts_write().detach(handle);
             let errno = match err {
                 VolumePublishError::NilIdentity => Errno::OutOfRange,
                 VolumePublishError::AlreadyPublished => Errno::AlreadyExists,
@@ -1159,7 +1180,6 @@ impl VolumeService for RuntimeVolumeService {
             state.iter().find(|v| v.id == request.volume_id).map(|v| {
                 (
                     v.name.clone(),
-                    v.path.clone(),
                     v.handle,
                     v.endpoint,
                     v.window,
@@ -1168,7 +1188,7 @@ impl VolumeService for RuntimeVolumeService {
                 )
             })
         };
-        let Some((name, path, handle, endpoint, window, journal, availability)) = snapshot else {
+        let Some((name, handle, endpoint, window, journal, availability)) = snapshot else {
             RuntimeVolumeService::audit_event(
                 audit,
                 VOLUME_DETACH_REFUSED,
@@ -1239,7 +1259,7 @@ impl VolumeService for RuntimeVolumeService {
         let vfs = LATE_FILESYSTEM
             .vfs()
             .map_err(|err| refused("no_mount_table", err))?;
-        let _ = vfs.mounts_write().unmount(&path);
+        let _ = vfs.mounts_write().detach(handle);
         let _ = LATE_FILESYSTEM.unregister(handle);
         let _ = VOLUME_FOREST.unpublish(&request.volume_id);
         // The disk's last volume just went: close the shared client and
@@ -1562,42 +1582,35 @@ impl RuntimeVolumeService {
             return Err(refused("recovery_identity_mismatch", Errno::BadMagic));
         }
 
-        // Swap the fail-closed stand-in for the live driver and remount
-        // with the recovered posture. A refusal here leaves the handle
-        // and path unresolved — fail closed, audited — and cannot occur
-        // under the operation lock (the handle was just freed, the path
-        // just unmounted).
-        let _ = LATE_FILESYSTEM.unregister(target.handle);
+        // A refusal here leaves the handle and path unresolved — fail closed,
+        // audited — and cannot occur under the operation lock (the handle was
+        // just freed, the path just unmounted).
         let fstype = opened.fstype;
-        if register_with_health(target.handle, opened, &target.name, target.id, health).is_err() {
-            return Err(refused("handle_in_use", Errno::AlreadyExists));
-        }
-        // A conflicted volume stays read-only `RecoveryConflict`, over which
-        // the health overlay never competes; a cleanly recovered one reads
-        // `Available` and reflects its device's ongoing health.
-        let _ = LATE_FILESYSTEM.set_availability(
-            target.handle,
-            if conflict {
-                MountAvailability::RecoveryConflict
-            } else {
-                MountAvailability::Available
+        reattach_then_serve(
+            vfs,
+            Attachment::new(target.handle, device.class, mount_flags(read_only)),
+            target.path.clone(),
+            mount_template(map_gid),
+            || {
+                let _ = LATE_FILESYSTEM.unregister(target.handle);
+                register_with_health(target.handle, opened, &target.name, target.id, health)
+                    .map_err(|()| ("handle_in_use", Errno::AlreadyExists))?;
+                // A conflicted volume stays read-only `RecoveryConflict`, over
+                // which the health overlay never competes; a cleanly recovered
+                // one reads `Available` and reflects its device's ongoing
+                // health.
+                let _ = LATE_FILESYSTEM.set_availability(
+                    target.handle,
+                    if conflict {
+                        MountAvailability::RecoveryConflict
+                    } else {
+                        MountAvailability::Available
+                    },
+                );
+                Ok(())
             },
-        );
-        {
-            let mut mounts = vfs.mounts_write();
-            let _ = mounts.unmount(&target.path);
-            if mounts
-                .mount_with_template(
-                    target.path.clone(),
-                    mount_flags(read_only),
-                    MountBacking::new(target.handle, device.class),
-                    mount_template(map_gid),
-                )
-                .is_err()
-            {
-                return Err(refused("mount_path_invalid", Errno::AlreadyExists));
-            }
-        }
+        )
+        .map_err(|(cause, errno)| refused(cause, errno))?;
         {
             let mut state = self.state.lock();
             if let Some(entry) = state.iter_mut().find(|v| v.id == target.id) {
@@ -1678,7 +1691,7 @@ impl RuntimeVolumeService {
             None => {}
             Some(VanishOutcome::Clean(entry)) => {
                 if let Ok(vfs) = LATE_FILESYSTEM.vfs() {
-                    let _ = vfs.mounts_write().unmount(&entry.path);
+                    let _ = vfs.mounts_write().detach(entry.handle);
                 }
                 let _ = LATE_FILESYSTEM.unregister(entry.handle);
                 let _ = VOLUME_FOREST.unpublish(&entry.id);

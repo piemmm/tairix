@@ -153,6 +153,16 @@ fn mount(target: &str, block: u32, total: u64, avail: u64) -> MountRecord {
 /// A mount of [`VOLUME`] whose format withholds `free - avail` blocks from
 /// ordinary allocation.
 fn reserved_mount(target: &str, block: u32, total: u64, free: u64, avail: u64) -> MountRecord {
+    reserve_mount(target, block, (total, free, avail), false)
+}
+
+/// [`reserved_mount`], saying whether the volume is down to its reserve.
+fn reserve_mount(
+    target: &str,
+    block: u32,
+    (total, free, avail): (u64, u64, u64),
+    in_reserve: bool,
+) -> MountRecord {
     MountRecord::new(
         b"nvme0",
         target.as_bytes(),
@@ -161,6 +171,7 @@ fn reserved_mount(target: &str, block: u32, total: u64, free: u64, avail: u64) -
         MountVolumeState {
             usage: VolumeStats {
                 block_size: block,
+                in_reserve,
                 total_blocks: total,
                 free_blocks: free,
                 avail_blocks: avail,
@@ -290,46 +301,33 @@ fn the_rail_grows_one_entry_per_discovered_device_and_interface() {
 }
 
 #[test]
-fn a_volume_projected_at_many_paths_is_one_rail_entry() {
-    // The boot namespace projects one writable volume at `/` and at every
-    // flag-bearing subtree beneath it. Those are views of one volume, not
-    // six devices, and drawing one per mount is the defect this grouping
-    // exists to fix.
+fn a_volume_states_where_its_root_is_mounted_and_under_what_policy() {
+    let shown = mount_of("ARXFSRoot", "/", [7; MOUNT_VOLUME_ID_LEN], 4_096, 100, 40);
+    // A volume no binding shows from its root states no mount point.
+    let unshown = mount_of("Spare", "", [9; MOUNT_VOLUME_ID_LEN], 4_096, 50, 10);
     let sample = Sample {
-        mounts: Some(alloc::vec![
-            mount("/", 4_096, 100, 40),
-            mount("/System/Logs", 4_096, 100, 40),
-            mount("/System/Settings", 4_096, 100, 40),
-            mount("/Users", 4_096, 100, 40),
-            mount("/Apps", 4_096, 100, 40),
-            mount("/Storage", 4_096, 100, 40),
-        ]),
+        mounts: Some(alloc::vec![shown, unshown]),
         ..permitted()
     };
     let report = report_of(&sample);
-    assert_eq!(
-        storage(&report),
-        alloc::vec![(UNSERVED, alloc::string::String::from("nvme0"))]
+    let root = device(
+        &report,
+        DeviceId::Storage(StorageId::Volume([7; MOUNT_VOLUME_ID_LEN])),
     );
-    // Every projection is still reachable from the pane, so collapsing the
-    // rail loses nothing: each mount point states its own permission policy.
-    let device = device(&report, UNSERVED);
-    for target in [
-        "/",
-        "/System/Logs",
-        "/System/Settings",
-        "/Users",
-        "/Apps",
-        "/Storage",
-    ] {
-        let _ = fact(device, target);
+    assert_eq!(fact(root, "/"), &Reading::measured("rw"));
+    assert_eq!(fact(root, "Volumes"), &Reading::measured("1"));
+    let spare = device(
+        &report,
+        DeviceId::Storage(StorageId::Volume([9; MOUNT_VOLUME_ID_LEN])),
+    );
+    for block in &spare.blocks {
+        if let BlockBody::Facts(facts) | BlockBody::Health { facts, .. } = &block.body {
+            assert!(
+                facts.iter().all(|fact| !fact.label.is_empty()),
+                "an unshown volume names no empty mount point"
+            );
+        }
     }
-    // The capacity is the volume's, counted once rather than six times.
-    assert_eq!(
-        fact(device, "Capacity"),
-        &Reading::measured("240.0 KiB of 400.0 KiB")
-    );
-    assert_eq!(fact(device, "Volumes"), &Reading::measured("1"));
 }
 
 #[test]
@@ -486,8 +484,8 @@ fn a_device_folds_its_counters_once_however_many_mounts_project_it() {
     let projected = |stats: VolumeIoStatsRecord| Sample {
         mounts: Some(alloc::vec![
             mount("/", 4_096, 100, 40),
-            mount("/Users", 4_096, 100, 40),
-            mount("/Apps", 4_096, 100, 40),
+            mount("/System/Logs", 4_096, 100, 40),
+            mount("/System/Settings", 4_096, 100, 40),
         ]),
         volume_io_stats: Some(alloc::vec![stats]),
         elapsed_ns: Some(1_000_000_000),
@@ -673,6 +671,38 @@ fn a_withheld_reserve_is_free_space_on_the_medium_not_used_space() {
     // And the row that states what may still be allocated is named for
     // that figure, which on a reserved format is the smaller one.
     assert_eq!(fact(volume, "Available"), &Reading::measured("120.0 KiB"));
+}
+
+#[test]
+fn a_volume_down_to_its_reserve_is_stated_on_its_device() {
+    let sample = Sample {
+        mounts: Some(alloc::vec![reserve_mount(
+            "System:",
+            4_096,
+            (100, 10, 0),
+            true
+        )]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let volume = device(&report, UNSERVED);
+    assert_eq!(
+        fact(volume, "Space"),
+        &Reading::measured("down to its reserve: ordinary writes may be refused")
+    );
+    // A volume with room outside its reserve says nothing of it.
+    let sample = Sample {
+        mounts: Some(alloc::vec![reserved_mount("System:", 4_096, 100, 40, 30)]),
+        ..permitted()
+    };
+    let report = report_of(&sample);
+    let volume = device(&report, UNSERVED);
+    assert!(volume.blocks.iter().all(|block| match &block.body {
+        BlockBody::Facts(facts) | BlockBody::Health { facts, .. } => {
+            facts.iter().all(|fact| fact.label != "Space")
+        }
+        _ => true,
+    }));
 }
 
 /// A volume's cumulative service counters, as one sample reports them.

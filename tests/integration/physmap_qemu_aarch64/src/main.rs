@@ -69,10 +69,8 @@ mod kernel {
     // vertical's guest RAM, and the figure it was dumped for.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-    /// Static boot heap, inside the kernel image so the boot pipeline
-    /// excludes it from the usable map exactly as the production binary's
-    /// heap is.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -80,7 +78,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// The QEMU `virt` board's RAM base. The kernel image is linked 2 MiB
     /// above it, so gigapage 1 is the kernel's own and every gigapage above

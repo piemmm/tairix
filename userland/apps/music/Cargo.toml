@@ -83,3 +83,6 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The engine's host tests draw text, so they inject the shared solid test
 # transport rather than reaching a running `fontd`.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

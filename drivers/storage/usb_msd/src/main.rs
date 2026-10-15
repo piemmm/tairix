@@ -44,6 +44,9 @@
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
+// An exit record is the driver's own failure report: a refusal is built only
+// once something is refused, never eagerly beside a success.
+#![deny(clippy::or_fun_call)]
 
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]

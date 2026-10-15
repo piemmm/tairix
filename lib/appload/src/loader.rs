@@ -87,8 +87,9 @@ impl<'a> AppLoader<'a> {
     /// [`AppError::Manifest`] for a bad manifest, [`AppError::InterfaceHashMismatch`]
     /// for a syscall-hash mismatch, [`AppError::Signature`] for a failed
     /// signature, [`AppError::PublisherCert`] for a publisher the bundle
-    /// cannot prove it belongs to, or [`AppError::ContentHashMismatch`] for
-    /// tampered contents.
+    /// cannot prove it belongs to, [`AppError::Misplaced`] for a bundle
+    /// launched from a store its signed kind does not run from, or
+    /// [`AppError::ContentHashMismatch`] for tampered contents.
     pub fn load(&self, bundle: &str, user_grants: &CapabilitySet) -> Result<LoadedApp, AppError> {
         let start_ns = self.cfg.clock.now_ns();
         let mut load_ns = 0u64;
@@ -143,6 +144,18 @@ impl<'a> AppLoader<'a> {
 
         self.verify_manifest_signature(bundle, &bytes, &header)?;
         let publisher = self.verify_publisher(bundle, &header)?;
+        if !header
+            .program_kind()
+            .is_some_and(|kind| kind.launchable_from(bundle))
+        {
+            self.audit(
+                events::APP_MISPLACED,
+                Level::Warn,
+                bundle,
+                "signed kind does not run from this store",
+            );
+            return Err(AppError::Misplaced);
+        }
 
         // One pass reads and hashes the bundle contents and hands back the
         // entry-point `Run` image read during that same walk, so `Run` is
@@ -519,7 +532,7 @@ fn event_message(id: EventId) -> &'static str {
         events::LIBRARY_REFUSED => "shared library refused",
         events::APP_RUN_IMAGE_INVALID => "application run image invalid",
         events::APP_PUBLISHER_INVALID => "application publisher unattributable",
-        _ => "appmgr event",
+        _ => "load gate event",
     }
 }
 
@@ -533,13 +546,13 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::PublisherId;
     use tairix_abi::{
         AppInfoHeader, BundleLayoutError, CapabilityId, Errno, LibraryError, LibraryScope,
         LoadHeader, NeededLibrary, RxeError, RxePermission, Segment, ABI_VERSION_CURRENT,
         APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_VERSION_MAX, LOAD_FLAG_PIE,
         LOAD_MAGIC, MIME_TYPE_MAX, SYSCALL_TABLE_HASH_LEN,
     };
+    use tairix_abi::{ProgramKind, PublisherId};
     use tairix_caps::CapabilitySet;
     use tairix_crypto::sha256;
     use tairix_log::{Event, EventId, Sink};
@@ -588,6 +601,7 @@ mod tests {
             capability_count: u16::try_from(caps.len()).unwrap(),
             mime_count: 1,
             browse_count: 0,
+            kind: ProgramKind::Application.to_wire(),
             reserved: 0,
             id_len: u8::try_from("com.example.app".len()).unwrap(),
             name_len: u8::try_from("Example".len()).unwrap(),
@@ -826,7 +840,7 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         let app = loader
-            .load("/Apps/Example.app", &CapabilitySet::empty())
+            .load("/System/Applications/Example.app", &CapabilitySet::empty())
             .expect("loads");
 
         let header = AppInfoHeader::from_bytes(&store.appinfo).expect("decodes");
@@ -872,7 +886,7 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::PublisherCert)
         );
         assert_eq!(sink.count(events::APP_PUBLISHER_INVALID), 1);
@@ -894,7 +908,7 @@ mod tests {
             let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
             assert_eq!(
-                loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+                loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
                 Err(AppError::Manifest(Errno::SignatureInvalid))
             );
             assert_eq!(sink.count(events::APP_PUBLISHER_INVALID), 1);
@@ -912,18 +926,20 @@ mod tests {
 
         // The user holds only NET_RAW, so FS_MOUNT is dropped on intersect.
         let user = cap_set(&[CapabilityId::NET_RAW]);
-        let app = loader.load("/Apps/Example.app", &user).expect("loads");
+        let app = loader
+            .load("/System/Applications/Example.app", &user)
+            .expect("loads");
 
         assert_eq!(app.id(), "com.example.app");
         assert_eq!(app.name(), "Example");
         assert_eq!(app.version(), "1.0");
-        assert_eq!(app.run_path(), "/Apps/Example.app/Run");
+        assert_eq!(app.run_path(), "/System/Applications/Example.app/Run");
         // The returned image is byte-for-byte the store's validated `Run`,
         // so a spawner maps exactly what the pipeline checked.
         assert_eq!(
             app.run_image(),
             store
-                .contents("/Apps/Example.app")
+                .contents("/System/Applications/Example.app")
                 .expect("contents")
                 .run_image
                 .as_slice()
@@ -960,11 +976,16 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         loader
-            .load("/Apps/Example.app", &cap_set(&[CapabilityId::NET_RAW]))
+            .load(
+                "/System/Applications/Example.app",
+                &cap_set(&[CapabilityId::NET_RAW]),
+            )
             .expect("loads");
 
         let signed = verifier.0.borrow();
-        let manifest = store.read_appinfo("/Apps/Example.app").expect("manifest");
+        let manifest = store
+            .read_appinfo("/System/Applications/Example.app")
+            .expect("manifest");
         let body = &manifest[AppInfoHeader::WIRE_LEN..];
         assert!(!body.is_empty(), "fixture must carry a capability body");
         assert_eq!(signed.len(), AppInfoHeader::signed_range().end + body.len());
@@ -973,6 +994,41 @@ mod tests {
             &manifest[AppInfoHeader::signed_range()]
         );
         assert_eq!(&signed[AppInfoHeader::signed_range().end..], body);
+    }
+
+    /// Regression: a bundle's kind was only the directory it sat in, so a
+    /// service or component copied anywhere ran as whatever that directory
+    /// held.
+    #[test]
+    fn a_bundle_runs_only_from_where_its_signed_kind_may() {
+        let sink = RecordingSink::new();
+        let clock = StepClock::new();
+        let load = |kind: ProgramKind, bundle: &str| {
+            let mut store = MockStore::good(&[]);
+            let mut header = AppInfoHeader::from_bytes(&store.appinfo).unwrap();
+            header.kind = kind.to_wire();
+            store.appinfo[..AppInfoHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
+            AppLoader::new(cfg(&store, &AcceptVerifier, &clock, &sink))
+                .load(bundle, &CapabilitySet::empty())
+                .map(|_| ())
+        };
+        assert_eq!(
+            load(ProgramKind::Service, "/System/Services/sysinfod.app"),
+            Ok(())
+        );
+        assert_eq!(
+            load(ProgramKind::Service, "/Users/ada/Commands/sysinfod.app"),
+            Err(AppError::Misplaced)
+        );
+        assert_eq!(
+            load(ProgramKind::Command, "/System/Applications/ps.app"),
+            Err(AppError::Misplaced)
+        );
+        assert_eq!(
+            load(ProgramKind::Command, "/Users/ada/bin/tool.app"),
+            Ok(())
+        );
+        assert!(sink.events.borrow().contains(&events::APP_MISPLACED));
     }
 
     #[test]
@@ -984,7 +1040,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         let app = loader
-            .load("/Apps/Example.app", &CapabilitySet::empty())
+            .load("/System/Applications/Example.app", &CapabilitySet::empty())
             .expect("loads");
         assert!(app.granted().is_empty());
     }
@@ -998,7 +1054,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Layout(BundleLayoutError::UnknownEntry))
         );
         assert_eq!(sink.count(events::APP_LAYOUT_REJECTED), 1);
@@ -1013,7 +1069,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Layout(BundleLayoutError::MissingRun))
         );
     }
@@ -1027,7 +1083,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Manifest(Errno::BadMagic))
         );
         assert_eq!(sink.count(events::APP_MANIFEST_INVALID), 1);
@@ -1043,7 +1099,7 @@ mod tests {
         config.accepted_abi_version = ABI_VERSION_CURRENT + 1;
         let loader = AppLoader::new(config);
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Manifest(Errno::AbiVersionUnsupported))
         );
     }
@@ -1063,7 +1119,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::InterfaceHashMismatch)
         );
         assert_eq!(sink.count(events::APP_INTERFACE_MISMATCH), 1);
@@ -1077,7 +1133,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Signature)
         );
         assert_eq!(sink.count(events::APP_SIGNATURE_INVALID), 1);
@@ -1092,7 +1148,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::ContentHashMismatch)
         );
         assert_eq!(sink.count(events::APP_CONTENT_MISMATCH), 1);
@@ -1107,7 +1163,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Store(Errno::NotFound))
         );
         assert_eq!(sink.count(events::APP_STORE_ERROR), 1);
@@ -1124,7 +1180,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Manifest(Errno::BufferTooSmall))
         );
     }
@@ -1138,11 +1194,17 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         assert_eq!(
-            loader.resolve_library("/Apps/Example.app", "/Apps/Example.app/Libraries/libui.so"),
+            loader.resolve_library(
+                "/System/Applications/Example.app",
+                "/System/Applications/Example.app/Libraries/libui.so"
+            ),
             Ok(LibraryScope::Bundle)
         );
         assert_eq!(
-            loader.resolve_library("/Apps/Example.app", "/System/Libraries/libtls.so"),
+            loader.resolve_library(
+                "/System/Applications/Example.app",
+                "/System/Libraries/libtls.so"
+            ),
             Ok(LibraryScope::System)
         );
         assert_eq!(sink.count(events::LIBRARY_RESOLVED), 2);
@@ -1157,11 +1219,14 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         assert_eq!(
-            loader.resolve_library("/Apps/Example.app", "/System/Kernel/secret"),
+            loader.resolve_library("/System/Applications/Example.app", "/System/Kernel/secret"),
             Err(AppError::Library(LibraryError::OutsidePolicy))
         );
         assert_eq!(
-            loader.resolve_library("/Apps/Example.app", "/System/Libraries/../Kernel/x"),
+            loader.resolve_library(
+                "/System/Applications/Example.app",
+                "/System/Libraries/../Kernel/x"
+            ),
             Err(AppError::Library(LibraryError::Traversal))
         );
         assert_eq!(sink.count(events::LIBRARY_REFUSED), 2);
@@ -1173,7 +1238,10 @@ mod tests {
         // System runtime / C ABI library plus one private bundle library.
         let mut store = MockStore::good(&[]);
         store.run = build_run_image(
-            &[RUNTIME_LIB, "/Apps/Example.app/Libraries/private.so"],
+            &[
+                RUNTIME_LIB,
+                "/System/Applications/Example.app/Libraries/private.so",
+            ],
             KERNEL_HASH,
         );
         let verifier = AcceptVerifier;
@@ -1182,13 +1250,16 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         let app = loader
-            .load("/Apps/Example.app", &CapabilitySet::empty())
+            .load("/System/Applications/Example.app", &CapabilitySet::empty())
             .expect("loads");
         let libs = app.libraries();
         assert_eq!(libs.len(), 2);
         assert_eq!(libs[0].reference, RUNTIME_LIB);
         assert_eq!(libs[0].scope, LibraryScope::System);
-        assert_eq!(libs[1].reference, "/Apps/Example.app/Libraries/private.so");
+        assert_eq!(
+            libs[1].reference,
+            "/System/Applications/Example.app/Libraries/private.so"
+        );
         assert_eq!(libs[1].scope, LibraryScope::Bundle);
         assert_eq!(sink.count(events::LIBRARY_RESOLVED), 2);
         assert_eq!(sink.count(events::APP_LOADED), 1);
@@ -1205,7 +1276,9 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         let user = cap_set(&[CapabilityId::NET_RAW]);
-        let app = loader.load("/Apps/Example.app", &user).expect("loads");
+        let app = loader
+            .load("/System/Applications/Example.app", &user)
+            .expect("loads");
         assert!(app.granted().contains(CapabilityId::NET_RAW));
         assert!(!app.granted().contains(CapabilityId::FS_MOUNT));
         assert_eq!(app.granted().len(), 1);
@@ -1222,7 +1295,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::Library(LibraryError::OutsidePolicy))
         );
         assert_eq!(sink.count(events::LIBRARY_REFUSED), 1);
@@ -1237,7 +1310,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert_eq!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::RunImage(RxeError::InterfaceHashMismatch))
         );
         assert_eq!(sink.count(events::APP_RUN_IMAGE_INVALID), 1);
@@ -1252,7 +1325,7 @@ mod tests {
         let clock = StepClock::new();
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
         assert!(matches!(
-            loader.load("/Apps/Example.app", &CapabilitySet::empty()),
+            loader.load("/System/Applications/Example.app", &CapabilitySet::empty()),
             Err(AppError::RunImage(_))
         ));
         assert_eq!(sink.count(events::APP_RUN_IMAGE_INVALID), 1);
@@ -1275,7 +1348,7 @@ mod tests {
         let loader = AppLoader::new(cfg(&store, &verifier, &clock, &sink));
 
         loader
-            .load("/Apps/Example.app", &CapabilitySet::empty())
+            .load("/System/Applications/Example.app", &CapabilitySet::empty())
             .expect("loads");
 
         assert_eq!(sink.count(events::APP_LOADED), 1);
@@ -1303,6 +1376,6 @@ mod tests {
             event_message(events::APP_LOADED),
             "application bundle loaded"
         );
-        assert_eq!(event_message(EventId(1)), "appmgr event");
+        assert_eq!(event_message(EventId(1)), "load gate event");
     }
 }

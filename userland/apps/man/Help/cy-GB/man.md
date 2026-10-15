@@ -19,9 +19,8 @@ storfeydd `/System/Commands`, `/System/Applications`, `<home>/Commands` a
 mae'r dudalen a ddangosir bob amser yn disgrifio'r rhaglen y byddai'r
 gragen yn ei rhedeg am yr un gair; ni all `PATH` ei aildrefnu na'i
 ddisodli. Mae ôl-ddodiad `.app` yn enwi'r bwndel yn uniongyrchol. Pan nad
-yw'r un o'r rhain yn cynnwys y gair, mae `man` yn chwilio'r storfeydd
-rhaglenni yn ailadroddus — `/Apps` yn gyntaf, yna'r ffolderi `Commands`
-ac `Applications` yn eich cartref — felly mae bwndel a gadwyd mewn
+yw'r un o'r rhain yn cynnwys y gair, mae `man` yn chwilio'r
+ffolderi `Commands` ac `Applications` yn eich cartref yn ailadroddus, felly mae bwndel a gadwyd mewn
 ffolderi nythog yn dal i gael ei ganfod; nid yw'r chwilio byth yn edrych
 y tu mewn i fwndel arall, a'r cydweddiad basaf sy'n ennill.
 

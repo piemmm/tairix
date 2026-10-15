@@ -79,6 +79,12 @@
 #define TAIRIX_APPINFO_LIBRARY_UTILITIES ((uint8_t)9u)
 #define TAIRIX_APPINFO_LIBRARY_OTHER ((uint8_t)10u)
 
+/* A program's kind, signed in the manifest's `kind` byte: where it may run from. */
+#define TAIRIX_PROGRAM_KIND_COMMAND ((uint8_t)1u)
+#define TAIRIX_PROGRAM_KIND_APPLICATION ((uint8_t)2u)
+#define TAIRIX_PROGRAM_KIND_SERVICE ((uint8_t)3u)
+#define TAIRIX_PROGRAM_KIND_COMPONENT ((uint8_t)4u)
+
 /* Signed AppInfo manifest prefix; encoded little-endian on the wire. */
 typedef struct tairix_appinfo_header {
     uint32_t magic;
@@ -87,7 +93,8 @@ typedef struct tairix_appinfo_header {
     uint16_t capability_count;
     uint16_t mime_count;
     uint16_t browse_count;
-    uint16_t reserved;
+    uint8_t kind;
+    uint8_t reserved;
     uint8_t id_len;
     uint8_t name_len;
     uint8_t version_len;

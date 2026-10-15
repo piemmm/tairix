@@ -38,7 +38,7 @@ tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # The kernel/ipc audit vocabulary: the `CallReplied` event id whose
 # `endpoint` field attributes a served reply to the window channel.
 tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-# The appmgr audit vocabulary: the `APP_LOADED` event id whose `bundle`
+# The load gate's audit vocabulary: the `APP_LOADED` event id whose `bundle`
 # field names the loaded bundle — the launch witness.
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
 # The reserved `WINDOW_ENDPOINT` id, the minted-id and create reply lengths

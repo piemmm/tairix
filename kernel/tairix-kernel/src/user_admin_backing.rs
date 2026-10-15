@@ -23,7 +23,8 @@
 use alloc::sync::Arc;
 
 use tairix_abi::driver::filesystem::{
-    FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind, NodeSecurity,
+    AllocationClass, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId, NodeKind,
+    NodeSecurity,
 };
 use tairix_abi::{DriverError, Errno};
 use tairix_kernel_core::{SleepLock, UserAdminBacking, VfsError};
@@ -52,25 +53,15 @@ impl<F> UserAdminBacking for RootAdminBacking<F>
 where
     F: FilesystemRead + FilesystemWrite + FilesystemSecurity + Send + 'static,
 {
+    /// The two databases are the system's own write set, so their rewrite
+    /// may draw on the volume's reserve once users have filled it.
     fn persist(&self, users_text: &str, groups_text: &str) -> Result<(), Errno> {
         let mut fs = self.fs.lock();
         let fs = &mut *fs;
-        let security_dir = resolve_security_dir(fs)?;
-        replace_file(
-            fs,
-            security_dir,
-            b"Users",
-            b"Users.tmp",
-            users_text.as_bytes(),
-        )?;
-        replace_file(
-            fs,
-            security_dir,
-            b"Groups",
-            b"Groups.tmp",
-            groups_text.as_bytes(),
-        )?;
-        fs.flush().map_err(driver_errno)
+        fs.set_allocation_class(AllocationClass::System);
+        let persisted = persist_databases(fs, users_text, groups_text);
+        fs.set_allocation_class(AllocationClass::Ordinary);
+        persisted
     }
 
     fn provision_home(&self, home: &str, uid: u32, gid: u32) -> Result<(), Errno> {
@@ -136,6 +127,29 @@ where
         }
         fs.flush().map_err(driver_errno)
     }
+}
+
+/// Replace both account databases and make the replacement durable.
+fn persist_databases<F>(fs: &mut F, users_text: &str, groups_text: &str) -> Result<(), Errno>
+where
+    F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
+{
+    let security_dir = resolve_security_dir(fs)?;
+    replace_file(
+        fs,
+        security_dir,
+        b"Users",
+        b"Users.tmp",
+        users_text.as_bytes(),
+    )?;
+    replace_file(
+        fs,
+        security_dir,
+        b"Groups",
+        b"Groups.tmp",
+        groups_text.as_bytes(),
+    )?;
+    fs.flush().map_err(driver_errno)
 }
 
 /// Resolve `/System/Security` on the root volume's own tree.
@@ -335,6 +349,48 @@ mod tests {
         assert_eq!(
             fs.lookup(security_dir, b"Users.tmp").unwrap_err(),
             DriverError::NotFound
+        );
+    }
+
+    /// Fill the volume with ordinary writes under `/Users` until it refuses.
+    fn fill(backing: &RootAdminBacking<ARXFS<VecBlock>>) {
+        let mut fs = backing.fs.lock();
+        let fs = &mut *fs;
+        let users = fs.lookup(fs.root(), b"Users").expect("Users");
+        let body = alloc::vec![0x3Cu8; 4096];
+        for file in 0..10_000 {
+            let name = alloc::format!("fill{file}");
+            if fs
+                .create(users, name.as_bytes(), NodeKind::RegularFile)
+                .is_err()
+                || fs.write_at(users, name.as_bytes(), 0, &body).is_err()
+            {
+                fs.flush().expect("publish the fill");
+                return;
+            }
+        }
+        panic!("the volume never filled");
+    }
+
+    #[test]
+    fn persist_rewrites_both_databases_on_a_volume_users_have_filled() {
+        let backing = backing();
+        fill(&backing);
+        backing
+            .persist("tairix-users-v1\n", "tairix-groups-v1\n")
+            .expect("the system's own write draws on the reserve");
+        assert_eq!(read_file(&backing, b"Users"), b"tairix-users-v1\n");
+        assert_eq!(read_file(&backing, b"Groups"), b"tairix-groups-v1\n");
+    }
+
+    #[test]
+    fn provisioning_a_home_on_a_full_volume_is_refused_like_any_user_write() {
+        let backing = backing();
+        fill(&backing);
+        assert_eq!(
+            backing.provision_home("/Users/late", 1001, 1001),
+            Err(Errno::NoSpace),
+            "a home holds user data, so its provisioning is ordinary"
         );
     }
 

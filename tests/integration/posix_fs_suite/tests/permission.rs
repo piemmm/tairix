@@ -21,9 +21,9 @@ const SHARED_GID: u32 = 42;
 fn planted_file(vfs: &Vfs, fs: &mut LiveFs, name: &str, body: &[u8], sec: NodeSecurity) {
     let caps = CapabilitySet::empty();
     let admin = cred(ROOT_UID, ROOT_GID, &caps);
-    vfs.create_via_secured(&admin, &vol_path(name), fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&vol_path(name)), fs)
         .expect("create as installer");
-    vfs.write_via_secured(&admin, &vol_path(name), fs, 0, body)
+    vfs.write_via_secured(&admin, &vfs.cover(&vol_path(name)), fs, 0, body)
         .expect("write as installer");
     let node = root_node_id(fs, name.as_bytes());
     fs.set_security(node, sec)
@@ -46,13 +46,25 @@ fn owner_can_read_a_private_file_but_a_stranger_cannot() {
 
     let owner = cred(OWNER_UID, OWNER_GID, &caps);
     let read = vfs
-        .read_via_secured(&owner, &vol_path("secret"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("secret")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("owner reads its own 0600 file");
     assert_eq!(&buf[..read], b"top secret");
 
     let stranger = cred(OTHER_UID, OTHER_UID, &caps);
     assert_eq!(
-        vfs.read_via_secured(&stranger, &vol_path("secret"), &mut fs, 0, &mut buf),
+        vfs.read_via_secured(
+            &stranger,
+            &vfs.cover(&vol_path("secret")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -72,7 +84,13 @@ fn capability_gate_blocks_read_even_at_mode_0644() {
     let without = CapabilitySet::empty();
     let denied = cred(OTHER_UID, OTHER_UID, &without);
     assert_eq!(
-        vfs.read_via_secured(&denied, &vol_path("audit.log"), &mut fs, 0, &mut buf),
+        vfs.read_via_secured(
+            &denied,
+            &vfs.cover(&vol_path("audit.log")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::PermissionDenied)
     );
 
@@ -80,7 +98,13 @@ fn capability_gate_blocks_read_even_at_mode_0644() {
     with.insert(CapabilityId::AUDIT_READ);
     let allowed = cred(OTHER_UID, OTHER_UID, &with);
     let read = vfs
-        .read_via_secured(&allowed, &vol_path("audit.log"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &allowed,
+            &vfs.cover(&vol_path("audit.log")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("holder of the capability reads the file");
     assert_eq!(&buf[..read], b"audit trail");
 }
@@ -103,14 +127,26 @@ fn acl_grant_allows_a_read_the_mode_bits_would_deny() {
     let groups = [GroupId(SHARED_GID)];
     let member = cred_with_groups(OTHER_UID, OTHER_UID, &groups, &caps);
     let read = vfs
-        .read_via_secured(&member, &vol_path("shared"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &member,
+            &vfs.cover(&vol_path("shared")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("ACL grant admits the group member");
     assert_eq!(&buf[..read], b"shared bytes");
 
     // A user outside the group still falls through to the denying mode.
     let outsider = cred(OTHER_UID, OTHER_UID, &caps);
     assert_eq!(
-        vfs.read_via_secured(&outsider, &vol_path("shared"), &mut fs, 0, &mut buf),
+        vfs.read_via_secured(
+            &outsider,
+            &vfs.cover(&vol_path("shared")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -121,12 +157,18 @@ fn directory_without_search_permission_blocks_traversal() {
     let caps = CapabilitySet::empty();
     let admin = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&admin, &vol_path("priv"), &mut fs)
+    vfs.mkdir_via_secured(&admin, &vfs.cover(&vol_path("priv")), &mut fs)
         .expect("mkdir priv");
-    vfs.create_via_secured(&admin, &vol_path("priv/inside"), &mut fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&vol_path("priv/inside")), &mut fs)
         .expect("create inside");
-    vfs.write_via_secured(&admin, &vol_path("priv/inside"), &mut fs, 0, b"hidden")
-        .expect("write inside");
+    vfs.write_via_secured(
+        &admin,
+        &vfs.cover(&vol_path("priv/inside")),
+        &mut fs,
+        0,
+        b"hidden",
+    )
+    .expect("write inside");
 
     // Restrict the directory to its owner with no access for others.
     let dir = root_node_id(&mut fs, b"priv");
@@ -137,14 +179,26 @@ fn directory_without_search_permission_blocks_traversal() {
 
     let stranger = cred(OTHER_UID, OTHER_UID, &caps);
     assert_eq!(
-        vfs.read_via_secured(&stranger, &vol_path("priv/inside"), &mut fs, 0, &mut buf),
+        vfs.read_via_secured(
+            &stranger,
+            &vfs.cover(&vol_path("priv/inside")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::PermissionDenied)
     );
 
     // The directory's owner has search permission and reaches the file.
     let owner = cred(OWNER_UID, OWNER_GID, &caps);
     let read = vfs
-        .read_via_secured(&owner, &vol_path("priv/inside"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("priv/inside")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("owner traverses its own directory");
     assert_eq!(&buf[..read], b"hidden");
 }
@@ -155,7 +209,7 @@ fn write_into_a_read_only_directory_is_denied() {
     let caps = CapabilitySet::empty();
     let admin = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&admin, &vol_path("ro"), &mut fs)
+    vfs.mkdir_via_secured(&admin, &vfs.cover(&vol_path("ro")), &mut fs)
         .expect("mkdir ro");
     let dir = root_node_id(&mut fs, b"ro");
     // r-x for the owner: search is allowed, but creating an entry is not.
@@ -164,7 +218,7 @@ fn write_into_a_read_only_directory_is_denied() {
 
     let owner = cred(OWNER_UID, OWNER_GID, &caps);
     assert_eq!(
-        vfs.create_via_secured(&owner, &vol_path("ro/new"), &mut fs),
+        vfs.create_via_secured(&owner, &vfs.cover(&vol_path("ro/new")), &mut fs),
         Err(VfsError::PermissionDenied)
     );
 }

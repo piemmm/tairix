@@ -28,8 +28,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeId,
-    NodeInfo, NodeKind, NodeTimes,
+    AllocationClass, DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity,
+    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes,
 };
 use tairix_abi::driver::DriverError;
 use tairix_abi::fs::{
@@ -44,7 +44,7 @@ use zeroize::Zeroize;
 use super::listing::{DirPosition, ListEnd};
 use super::path::{parse_link_target, TargetStep, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
 use super::perm::{Access, Credentials, Metadata};
-use super::VfsError;
+use super::{BoundedReadError, VfsError};
 
 /// Maximum symbolic links a single resolution may follow.
 ///
@@ -242,13 +242,15 @@ struct Place {
 /// derivable from the path: passing them as one value is what stops a call
 /// site from resolving against the driver root by omission.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MountProjection {
+pub struct MountProjection<'m> {
     /// The metadata delegated nodes are judged against under [`Uniform`],
     /// and the mount point's own record under [`PerInode`].
     pub template: Metadata,
     /// The mount's root path on the backing volume, empty for a mount
     /// rooted at the driver's own root.
-    pub subtree: Vec<String>,
+    pub subtree: &'m [String],
+    /// The class every driver mutation through the mount allocates under.
+    pub class: AllocationClass,
 }
 
 /// Whether a descent may run out of tree before it runs out of steps.
@@ -350,7 +352,7 @@ const fn map_link_error(error: DriverError) -> VfsError {
 /// point itself, i.e. the root the [`MountProjection`] describes.
 pub struct DelegatedFs<'fs, R: FilesystemRead + ?Sized, P = Uniform> {
     fs: &'fs mut R,
-    mount: MountProjection,
+    mount: MountProjection<'fs>,
     _policy: PhantomData<P>,
 }
 
@@ -418,7 +420,7 @@ impl<'fs, R: FilesystemRead + ?Sized> DelegatedFs<'fs, R, Uniform> {
     /// Bind `fs` to what its mount projects; every node in the delegated
     /// subtree is judged against the projection's one template.
     #[must_use]
-    pub fn new(fs: &'fs mut R, mount: MountProjection) -> Self {
+    pub fn new(fs: &'fs mut R, mount: MountProjection<'fs>) -> Self {
         Self {
             fs,
             mount,
@@ -437,14 +439,18 @@ impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, P
     /// driver's per-inode record for every node, including the projected
     /// root.
     #[must_use]
-    pub fn new_secured(fs: &'fs mut R, mount: MountProjection) -> Self {
+    pub fn new_secured(fs: &'fs mut R, mount: MountProjection<'fs>) -> Self {
         Self {
             fs,
             mount,
             _policy: PhantomData,
         }
     }
+}
 
+impl<R: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>
+    DelegatedFs<'_, R, PerInode>
+{
     /// Set the permission bits of the node at `components` to `mode` (the
     /// `chmod(2)` shape), leaving its ownership, ACL, and capability gate
     /// untouched.
@@ -481,7 +487,8 @@ impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, P
         }
         let mut sec = self.fs.security(node).map_err(map_driver_error)?;
         sec.mode = mode;
-        self.fs.set_security(node, sec).map_err(map_driver_error)
+        self.mutate(|fs| fs.set_security(node, sec))
+            .map_err(map_driver_error)
     }
 
     /// Set the owning user and/or group of the node at `components` (the
@@ -563,7 +570,8 @@ impl<'fs, R: FilesystemRead + FilesystemSecurity + ?Sized> DelegatedFs<'fs, R, P
         if sec.mode & FS_GROUP_EXEC_BIT != 0 {
             sec.mode &= !FS_SETGID_BIT;
         }
-        self.fs.set_security(node, sec).map_err(map_driver_error)
+        self.mutate(|fs| fs.set_security(node, sec))
+            .map_err(map_driver_error)
     }
 }
 
@@ -613,37 +621,6 @@ impl<R: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized>
             Some(len) => Ok(len),
             None => Err(VfsError::NoData),
         }
-    }
-
-    /// Set (insert or replace) the extended attribute `key` of the node at
-    /// `components` to `value`, in one copy-on-write driver transaction.
-    ///
-    /// Gated exactly as [`DelegatedFs::get_attr`], with write permission on
-    /// the node in place of read. The value is opaque; the driver enforces
-    /// the fixed per-inode bounds and fails closed at them.
-    ///
-    /// # Errors
-    ///
-    /// * [`VfsError::InvalidKey`] for a key outside the grammar (or an
-    ///   over-long key/value an in-kernel caller passed — the dispatcher
-    ///   bounds syscall inputs first).
-    /// * [`VfsError::NoSpace`] at the per-inode attribute bounds or a full
-    ///   volume.
-    /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`],
-    ///   [`VfsError::PermissionDenied`], or [`VfsError::Io`].
-    pub fn set_attr(
-        &mut self,
-        cred: &Credentials<'_>,
-        components: &[String],
-        key: &[u8],
-        value: &[u8],
-    ) -> Result<(), VfsError> {
-        let key = parse_unprivileged_key(key)?;
-        let (node, _info, meta) = self.resolve(cred, components)?;
-        meta.authorize(cred, Access::Write)?;
-        self.fs
-            .set_attr(node, key.as_bytes(), value)
-            .map_err(map_attr_driver_error)
     }
 
     /// Yield the `index`-th *visible* extended-attribute key of the node at
@@ -703,6 +680,40 @@ impl<R: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized>
             visible += 1;
         }
     }
+}
+
+impl<R: FilesystemRead + FilesystemSecurity + FilesystemAttrs + FilesystemWrite + ?Sized>
+    DelegatedFs<'_, R, PerInode>
+{
+    /// Set (insert or replace) the extended attribute `key` of the node at
+    /// `components` to `value`, in one copy-on-write driver transaction.
+    ///
+    /// Gated exactly as [`DelegatedFs::get_attr`], with write permission on
+    /// the node in place of read. The value is opaque; the driver enforces
+    /// the fixed per-inode bounds and fails closed at them.
+    ///
+    /// # Errors
+    ///
+    /// * [`VfsError::InvalidKey`] for a key outside the grammar (or an
+    ///   over-long key/value an in-kernel caller passed — the dispatcher
+    ///   bounds syscall inputs first).
+    /// * [`VfsError::NoSpace`] at the per-inode attribute bounds or a full
+    ///   volume.
+    /// * [`VfsError::NotFound`], [`VfsError::NotADirectory`],
+    ///   [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    pub fn set_attr(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), VfsError> {
+        let key = parse_unprivileged_key(key)?;
+        let (node, _info, meta) = self.resolve(cred, components)?;
+        meta.authorize(cred, Access::Write)?;
+        self.mutate(|fs| fs.set_attr(node, key.as_bytes(), value))
+            .map_err(map_attr_driver_error)
+    }
 
     /// Remove the extended attribute `key` from the node at `components`,
     /// in one copy-on-write driver transaction.
@@ -727,12 +738,22 @@ impl<R: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized>
         let key = parse_unprivileged_key(key)?;
         let (node, _info, meta) = self.resolve(cred, components)?;
         meta.authorize(cred, Access::Write)?;
-        self.fs
-            .remove_attr(node, key.as_bytes())
+        self.mutate(|fs| fs.remove_attr(node, key.as_bytes()))
             .map_err(|error| match error {
                 DriverError::NotFound => VfsError::NoData,
                 other => map_attr_driver_error(other),
             })
+    }
+}
+
+impl<R: FilesystemRead + FilesystemWrite + ?Sized, P> DelegatedFs<'_, R, P> {
+    /// Run one driver mutation under the class the mount's projection gives
+    /// its writes, putting the ordinary class back after it.
+    fn mutate<T, E>(&mut self, op: impl FnOnce(&mut R) -> Result<T, E>) -> Result<T, E> {
+        self.fs.set_allocation_class(self.mount.class);
+        let result = op(self.fs);
+        self.fs.set_allocation_class(AllocationClass::Ordinary);
+        result
     }
 }
 
@@ -1227,6 +1248,50 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
         self.fs.read_at(node, offset, buf).map_err(map_driver_error)
     }
 
+    /// Append up to `len` of the leading bytes of the regular file at
+    /// `components` to `buf`, resolving the path once.
+    ///
+    /// Nothing is read unless the node is a regular file of at most `max`
+    /// bytes that `cred` may read. A refusal leaves `buf` as it was, any
+    /// bytes already read into it zeroed first, since a boot file can hold
+    /// credentials.
+    ///
+    /// # Errors
+    ///
+    /// The [`BoundedReadError`] naming the first check that refused.
+    pub fn read_bounded(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        max: u64,
+        len: usize,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), BoundedReadError> {
+        let (node, info, meta) = self.resolve(cred, components)?;
+        if info.kind != NodeKind::RegularFile {
+            return Err(BoundedReadError::NotAFile);
+        }
+        if info.size > max {
+            return Err(BoundedReadError::TooLarge);
+        }
+        meta.authorize(cred, Access::Read)?;
+        let size = usize::try_from(info.size)
+            .map_err(|_| BoundedReadError::TooLarge)?
+            .min(len);
+        let start = buf.len();
+        buf.try_reserve_exact(size)
+            .map_err(|_| BoundedReadError::OutOfMemory)?;
+        buf.resize(start + size, 0);
+        let refusal = match self.fs.read_at(node, 0, &mut buf[start..]) {
+            Ok(read) if read == size => return Ok(()),
+            Ok(_) => BoundedReadError::ShortRead,
+            Err(err) => BoundedReadError::Vfs(map_driver_error(err)),
+        };
+        buf[start..].zeroize();
+        buf.truncate(start);
+        Err(refusal)
+    }
+
     /// Hand `each` the entries of the directory at `components` from `at`
     /// on, in the driver's stable on-disk order, moving `at` past each one it
     /// takes, until it answers [`DirVisit::Stop`] or the directory ends.
@@ -1448,15 +1513,15 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         if place.found.is_some() {
             return Err(VfsError::AlreadyExists);
         }
-        let node = self
-            .fs
-            .create(place.parent, place.name.as_bytes(), kind)
-            .map_err(map_driver_error)?;
-        // The driver minted the node with its format's default record;
-        // hand it to its creator before the create is observable, so the
+        // The driver mints the node with its format's default record; it is
+        // handed to its creator before the create is observable, so the
         // caller is never locked out of a node it just made.
-        P::stamp_creation(self.fs, node, cred)?;
-        Ok(())
+        self.mutate(|fs| {
+            let node = fs
+                .create(place.parent, place.name.as_bytes(), kind)
+                .map_err(map_driver_error)?;
+            P::stamp_creation(fs, node, cred)
+        })
     }
 
     /// Create a symbolic link at `components` whose stored target is
@@ -1492,14 +1557,14 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         if place.found.is_some() {
             return Err(VfsError::AlreadyExists);
         }
-        let node = self
-            .fs
-            .create_link(place.parent, place.name.as_bytes(), target.as_bytes())
-            .map_err(map_link_error)?;
-        // As for `create`: hand the node to its creator before the link is
-        // observable, so a caller is never locked out of one it just made.
-        P::stamp_creation(self.fs, node, cred)?;
-        Ok(())
+        // As for `create`: the node is handed to its creator before the link
+        // is observable, so a caller is never locked out of one it just made.
+        self.mutate(|fs| {
+            let node = fs
+                .create_link(place.parent, place.name.as_bytes(), target.as_bytes())
+                .map_err(map_link_error)?;
+            P::stamp_creation(fs, node, cred)
+        })
     }
 
     /// Add `link` as a second directory entry for the node `existing`
@@ -1556,8 +1621,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         if place.found.is_some() {
             return Err(VfsError::AlreadyExists);
         }
-        self.fs
-            .link(place.parent, place.name.as_bytes(), node)
+        self.mutate(|fs| fs.link(place.parent, place.name.as_bytes(), node))
             .map_err(map_link_error)
     }
 
@@ -1589,8 +1653,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         let place = self.place_for_write(cred, components, FinalLink::Follow)?;
         let (_, info, _) = place.found.ok_or(VfsError::NotFound)?;
         Self::deny_non_file(info.kind)?;
-        self.fs
-            .write_at(place.parent, place.name.as_bytes(), offset, data)
+        self.mutate(|fs| fs.write_at(place.parent, place.name.as_bytes(), offset, data))
             .map_err(map_driver_error)
     }
 
@@ -1610,8 +1673,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         let place = self.place_for_write(cred, components, FinalLink::Follow)?;
         let (_, info, _) = place.found.ok_or(VfsError::NotFound)?;
         Self::deny_non_file(info.kind)?;
-        self.fs
-            .truncate(place.parent, place.name.as_bytes(), size)
+        self.mutate(|fs| fs.truncate(place.parent, place.name.as_bytes(), size))
             .map_err(map_driver_error)
     }
 
@@ -1680,8 +1742,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         } else if dir_only {
             return Err(VfsError::NotADirectory);
         }
-        self.fs
-            .remove(place.parent, place.name.as_bytes())
+        self.mutate(|fs| fs.remove(place.parent, place.name.as_bytes()))
             .map_err(map_driver_error)?;
         Ok(directory.then_some(node))
     }
@@ -1760,14 +1821,15 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
             (info.kind == NodeKind::Directory && node != src_node).then_some(node)
         });
 
-        self.fs
-            .rename(
+        self.mutate(|fs| {
+            fs.rename(
                 src.parent,
                 src.name.as_bytes(),
                 dst.parent,
                 dst.name.as_bytes(),
             )
-            .map_err(map_driver_error)?;
+        })
+        .map_err(map_driver_error)?;
         Ok(replaced)
     }
 }

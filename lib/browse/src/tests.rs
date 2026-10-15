@@ -131,17 +131,16 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
             "Home",
             "Desktop",
             "UserFiles",
-            "Apps",
             "System",
             "Backup",
             "Scratch"
         ]
     );
-    assert_eq!(places.volume_start(), Some(5));
+    assert_eq!(places.volume_start(), Some(4));
     assert_eq!(places.rows()[0].kind(), PlaceKind::Home);
     assert_eq!(places.rows()[1].kind(), PlaceKind::UserFolder);
     assert_eq!(places.rows()[3].kind(), PlaceKind::SystemRoot);
-    assert_eq!(places.rows()[5].kind(), PlaceKind::Volume);
+    assert_eq!(places.rows()[4].kind(), PlaceKind::Volume);
     // The fixed places navigate where their names say, whether or not those
     // directories exist — the model performs no I/O and never checks.
     assert_eq!(places.rows()[0].components(), home().as_slice());
@@ -149,12 +148,12 @@ fn the_rail_lists_the_users_places_then_the_volumes_in_one_order() {
         places.rows()[2].components(),
         ["Users", "ann", "UserFiles"].map(String::from)
     );
-    assert_eq!(places.rows()[3].components(), ["Apps"].map(String::from));
+    assert_eq!(places.rows()[3].components(), ["System"].map(String::from));
     // With no volumes there is nothing to separate.
     assert_eq!(Places::new(&home(), &[]).volume_start(), None);
     // Without a home there is nothing for the three home rows to hang off, so
     // only the machine-wide roots remain — never a row navigating nowhere.
-    assert_eq!(place_labels(&Places::new(&[], &[])), ["Apps", "System"]);
+    assert_eq!(place_labels(&Places::new(&[], &[])), ["System"]);
 }
 
 /// A bare open lands among the user's own files first and their home next;
@@ -217,12 +216,12 @@ fn a_malformed_or_duplicate_volume_is_dropped_never_guessed_at() {
             // A second row for a target an accepted row already covers.
             volume("Twin", "/Storage/Good", None),
             // A volume landing on a fixed place's own target.
-            volume("Shadow", "/Apps", None),
+            volume("Shadow", "/System", None),
         ],
     );
     assert_eq!(
         place_labels(&places),
-        ["Home", "Desktop", "UserFiles", "Apps", "System", "Good"]
+        ["Home", "Desktop", "UserFiles", "System", "Good"]
     );
     // The duplicate never displaced the fixed row it collided with.
     assert_eq!(places.rows()[3].kind(), PlaceKind::SystemRoot);
@@ -827,11 +826,11 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
     // At the root, no place matches, so nothing is selected.
     assert_eq!(places.index_of(browser.components()), None);
     // Standing on a place selects exactly it.
-    assert_eq!(places.index_of(&["Apps".to_string()]), Some(3));
+    assert_eq!(places.index_of(&["System".to_string()]), Some(3));
     // A directory *inside* a place is not that place: an exact match only,
     // never a claim that the user is somewhere they are not.
     assert_eq!(
-        places.index_of(&["Apps".to_string(), "Notes.app".to_string()]),
+        places.index_of(&["System".to_string(), "Fonts".to_string()]),
         None
     );
 
@@ -867,7 +866,7 @@ fn the_rail_selects_the_row_matching_the_browsers_location() {
     );
     let rail = crate::render::sidebar_view(viewport, Scale::ONE, &theme, Some(&places), BAND)
         .expect("rail")
-        .row_rect(4)
+        .row_rect(3)
         .expect("the System row");
     let row_y = usize::try_from(rail.origin.y).expect("row top");
     let width = usize::try_from(viewport.width).expect("width");
@@ -945,7 +944,7 @@ impl MockFs {
             vec![
                 Entry::directory("System"),
                 Entry::directory("Users"),
-                Entry::directory("Apps"),
+                Entry::directory("Archive"),
                 Entry::directory("Storage"),
             ],
         );
@@ -1009,7 +1008,7 @@ fn open_root_lists_the_four_top_level_directories() {
     assert_eq!(browser.path(), "/");
     // The source lists the four in insertion order; the browser shows them in
     // the shared default order (directories, then case-insensitive by name).
-    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     assert_eq!(browser.focus_index(), Some(0));
 }
 
@@ -1038,7 +1037,7 @@ fn open_at_starts_at_the_named_directory_with_working_climb() {
     // rather than a remembered directory.
     assert_eq!(browser.go_up(), Ok(true));
     assert_eq!(browser.path(), "/");
-    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
 #[test]
@@ -1048,7 +1047,7 @@ fn open_at_empty_components_is_exactly_open_root() {
     let browser = Browser::open_at(MockFs::fixture(), Vec::new()).expect("root lists");
     assert!(browser.is_root());
     assert_eq!(browser.path(), "/");
-    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
 #[test]
@@ -1093,7 +1092,7 @@ fn components_from_absolute_path_rejects_a_malformed_segment() {
 #[test]
 fn descend_and_climb_track_the_path_and_entries() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    // Sorted root order is [Apps, Storage, System, Users]; System is index 2.
+    // Sorted root order is [Archive, Storage, System, Users]; System is index 2.
     browser.open_index(2).expect("enter System");
     assert!(!browser.is_root());
     assert_eq!(browser.path(), "/System");
@@ -1101,7 +1100,7 @@ fn descend_and_climb_track_the_path_and_entries() {
 
     assert_eq!(browser.go_up(), Ok(true));
     assert_eq!(browser.path(), "/");
-    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
 #[test]
@@ -1109,7 +1108,7 @@ fn go_up_at_the_root_is_a_no_op() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
     assert_eq!(browser.go_up(), Ok(false));
     assert!(browser.is_root());
-    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
 #[test]
@@ -1157,7 +1156,7 @@ fn an_empty_directory_has_no_selection() {
 #[test]
 fn open_selected_descends_into_the_selected_directory() {
     let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-    // Sorted root order is [Apps, Storage, System, Users]; Users is index 3.
+    // Sorted root order is [Archive, Storage, System, Users]; Users is index 3.
     browser.select(3).expect("select Users");
     browser.open_selected().expect("enter Users");
     assert_eq!(browser.path(), "/Users");
@@ -1419,7 +1418,13 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     {
         use crate::open_with::{AppAssociation, OpenWithChooser};
         let apps: alloc::vec::Vec<AppAssociation> = (0..3)
-            .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+            .map(|n| {
+                AppAssociation::new(
+                    alloc::format!("App{n}"),
+                    "/System/Applications/A.app",
+                    alloc::vec![],
+                )
+            })
             .collect();
         let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
         let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("three candidates");
@@ -3420,7 +3425,7 @@ fn descending_records_back_history_and_go_back_returns() {
     assert!(!browser.can_go_back());
     assert!(!browser.can_go_forward());
 
-    // Sorted root order is [Apps, Storage, System, Users]; System is index 2.
+    // Sorted root order is [Archive, Storage, System, Users]; System is index 2.
     browser.open_index(2).expect("enter System");
     assert_eq!(browser.path(), "/System");
     // The directory left behind is now on the back history.
@@ -3434,7 +3439,7 @@ fn descending_records_back_history_and_go_back_returns() {
     assert!(!browser.can_go_back());
     assert!(browser.can_go_forward());
     // The listing came back in the shared sorted order.
-    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 
     // Forward steps back into the directory we came from.
     assert_eq!(browser.go_forward(), Ok(true));
@@ -3449,7 +3454,7 @@ fn go_back_and_go_forward_are_no_ops_with_empty_history() {
     assert_eq!(browser.go_back(), Ok(false));
     assert_eq!(browser.go_forward(), Ok(false));
     assert!(browser.is_root());
-    assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
 }
 
 #[test]
@@ -3560,7 +3565,7 @@ mod rename_model {
 
     #[test]
     fn commit_moves_the_selected_item_and_refreshes_onto_the_new_name() {
-        // Root sorts to [Apps, Storage, System, Users]; rename Apps -> Downloads.
+        // Root sorts to [Archive, Storage, System, Users]; rename Archive -> Downloads.
         let fs = fs_with_refreshed_root(alloc::vec![
             Entry::directory("Downloads"),
             Entry::directory("Storage"),
@@ -3568,11 +3573,11 @@ mod rename_model {
             Entry::directory("Users"),
         ]);
         let mut browser = Browser::open_root(fs).expect("root");
-        browser.select(0).expect("select Apps");
-        assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
+        browser.select(0).expect("select Archive");
+        assert_eq!(focused(&browser).map(Entry::name), Some("Archive"));
 
         let pending = browser.prepare_rename("Downloads").expect("a valid rename");
-        assert_eq!((pending.from(), pending.to()), ("/Apps", "/Downloads"));
+        assert_eq!((pending.from(), pending.to()), ("/Archive", "/Downloads"));
         assert_eq!(browser.finish_rename(&pending, Ok(())), Ok(true));
         // The listing refreshed and the selection followed the entry.
         assert_eq!(names(&browser), ["Downloads", "Storage", "System", "Users"]);
@@ -3585,7 +3590,7 @@ mod rename_model {
     #[test]
     fn a_rename_answered_elsewhere_follows_nothing() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
+        browser.select(0).expect("select Archive");
         let pending = browser.prepare_rename("Downloads").expect("a valid rename");
         browser.open_index(2).expect("enter System");
         let before = focused(&browser).map(|entry| alloc::string::String::from(entry.name()));
@@ -3599,7 +3604,7 @@ mod rename_model {
     #[test]
     fn an_invalid_name_is_refused_before_any_syscall() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
+        browser.select(0).expect("select Archive");
 
         for (name, expected) in [
             ("", RenameError::Empty),
@@ -3611,38 +3616,41 @@ mod rename_model {
             assert_eq!(browser.prepare_rename(name), Err(expected));
         }
         // The listing is untouched.
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
-        assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
+        assert_eq!(focused(&browser).map(Entry::name), Some("Archive"));
     }
 
     #[test]
     fn a_clash_with_an_existing_sibling_is_refused_before_any_syscall() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
+        browser.select(0).expect("select Archive");
         assert_eq!(browser.prepare_rename("System"), Err(RenameError::Clash));
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
 
     #[test]
     fn renaming_to_the_same_name_is_a_no_op() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
-        assert_eq!(browser.prepare_rename("Apps"), Err(RenameError::Unchanged));
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        browser.select(0).expect("select Archive");
+        assert_eq!(
+            browser.prepare_rename("Archive"),
+            Err(RenameError::Unchanged)
+        );
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
 
     #[test]
     fn a_vfs_refusal_is_surfaced_and_leaves_the_listing_unchanged() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
+        browser.select(0).expect("select Archive");
         let pending = browser.prepare_rename("Downloads").expect("a valid rename");
         assert_eq!(
             browser.finish_rename(&pending, Err(Errno::PermissionDenied)),
             Err(RenameError::Refused(Errno::PermissionDenied))
         );
         // No refresh happened: the original listing and selection stand.
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
-        assert_eq!(focused(&browser).map(Entry::name), Some("Apps"));
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
+        assert_eq!(focused(&browser).map(Entry::name), Some("Archive"));
     }
 
     /// The volume decides a clash under its own rule — a sibling spelled
@@ -3651,13 +3659,13 @@ mod rename_model {
     #[test]
     fn a_name_the_volume_finds_taken_is_a_clash() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
+        browser.select(0).expect("select Archive");
         let pending = browser.prepare_rename("STORAGE").expect("no exact clash");
         assert_eq!(
             browser.finish_rename(&pending, Err(Errno::AlreadyExists)),
             Err(RenameError::Clash)
         );
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
 
     /// A re-spelling of the entry's own name is a real rename: the exact
@@ -3665,7 +3673,7 @@ mod rename_model {
     #[test]
     fn a_re_spelling_of_the_entry_s_own_name_is_offered_to_the_volume() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        browser.select(0).expect("select Apps");
+        browser.select(0).expect("select Archive");
         let pending = browser
             .prepare_rename("APPS")
             .expect("a case change is a change");
@@ -3686,14 +3694,14 @@ mod rename_model {
 
     #[test]
     fn validate_new_name_is_pure_and_covers_the_model_rules() {
-        let siblings = alloc::vec![Entry::directory("Apps"), Entry::file("notes.txt")];
-        assert_eq!(validate_new_name("Documents", "Apps", &siblings), Ok(()));
+        let siblings = alloc::vec![Entry::directory("Archive"), Entry::file("notes.txt")];
+        assert_eq!(validate_new_name("Documents", "Archive", &siblings), Ok(()));
         assert_eq!(
-            validate_new_name("Apps", "Apps", &siblings),
+            validate_new_name("Archive", "Archive", &siblings),
             Err(RenameError::Unchanged)
         );
         assert_eq!(
-            validate_new_name("notes.txt", "Apps", &siblings),
+            validate_new_name("notes.txt", "Archive", &siblings),
             Err(RenameError::Clash)
         );
     }
@@ -3888,9 +3896,9 @@ mod create_model {
 
     #[test]
     fn commit_creates_the_folder_and_follows_the_selection_onto_it() {
-        // Root sorts to [Apps, Storage, System, Users]; create Downloads.
+        // Root sorts to [Archive, Storage, System, Users]; create Downloads.
         let fs = fs_with_refreshed_root(alloc::vec![
-            Entry::directory("Apps"),
+            Entry::directory("Archive"),
             Entry::directory("Downloads"),
             Entry::directory("Storage"),
             Entry::directory("System"),
@@ -3910,7 +3918,7 @@ mod create_model {
         // ready for the app's inline rename.
         assert_eq!(
             names(&browser),
-            ["Apps", "Downloads", "Storage", "System", "Users"]
+            ["Archive", "Downloads", "Storage", "System", "Users"]
         );
         assert_eq!(focused(&browser).map(Entry::name), Some("Downloads"));
     }
@@ -3931,7 +3939,7 @@ mod create_model {
             assert_eq!(result, Err(expected));
         }
         // The listing is untouched.
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
 
     #[test]
@@ -3941,7 +3949,7 @@ mod create_model {
             panic!("a clashing create must not reach the VFS");
         });
         assert_eq!(result, Err(CreateError::Clash));
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
 
     #[test]
@@ -3950,7 +3958,7 @@ mod create_model {
         let result = browser.create_entry("Downloads", |_| Err(Errno::PermissionDenied));
         assert_eq!(result, Err(CreateError::Refused(Errno::PermissionDenied)));
         // No refresh happened: the original listing stands.
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
 
     #[test]
@@ -3958,7 +3966,7 @@ mod create_model {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
         let result = browser.create_entry("SYSTEM", |_| Err(Errno::AlreadyExists));
         assert_eq!(result, Err(CreateError::Clash));
-        assert_eq!(names(&browser), ["Apps", "Storage", "System", "Users"]);
+        assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
 
     #[test]
@@ -3993,10 +4001,10 @@ mod create_model {
 
     #[test]
     fn validate_new_entry_name_is_pure_and_covers_the_model_rules() {
-        let siblings = alloc::vec![Entry::directory("Apps"), Entry::file("notes.txt")];
+        let siblings = alloc::vec![Entry::directory("Archive"), Entry::file("notes.txt")];
         assert_eq!(validate_new_entry_name("Documents", &siblings), Ok(()));
         assert_eq!(
-            validate_new_entry_name("Apps", &siblings),
+            validate_new_entry_name("Archive", &siblings),
             Err(CreateError::Clash)
         );
         assert_eq!(
@@ -4048,19 +4056,19 @@ mod mode_edit_model {
     #[test]
     fn commit_applies_the_mode_to_the_named_node() {
         let seen = RefCell::new(None);
-        let result = set_mode("/Apps", 0o750, |path, mode| {
+        let result = set_mode("/Archive", 0o750, |path, mode| {
             *seen.borrow_mut() = Some((path.to_string(), mode));
             Ok(())
         });
 
         assert_eq!(result, Ok(()));
-        assert_eq!(*seen.borrow(), Some(("/Apps".to_string(), 0o750)));
+        assert_eq!(*seen.borrow(), Some(("/Archive".to_string(), 0o750)));
     }
 
     #[test]
     fn a_mode_carrying_a_bit_above_the_mask_is_refused_before_any_syscall() {
         // A file-type bit (above the 0o7777 permission word) is not settable.
-        let result = set_mode("/Apps", FS_MODE_MASK + 1, |_, _| {
+        let result = set_mode("/Archive", FS_MODE_MASK + 1, |_, _| {
             panic!("the VFS must not be touched for an invalid mode");
         });
         assert_eq!(result, Err(ModeError::Invalid));
@@ -4068,7 +4076,7 @@ mod mode_edit_model {
 
     #[test]
     fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
-        let result = set_mode("/Apps", 0o644, |_, _| Err(Errno::PermissionDenied));
+        let result = set_mode("/Archive", 0o644, |_, _| Err(Errno::PermissionDenied));
         assert_eq!(result, Err(ModeError::Refused(Errno::PermissionDenied)));
     }
 
@@ -4117,7 +4125,7 @@ mod owner_edit_model {
     fn commit_applies_the_owner_to_the_named_node() {
         let seen = RefCell::new(None);
         let result = set_owner(
-            "/Apps",
+            "/Archive",
             OwnerChange {
                 uid: Some(1000),
                 gid: Some(50),
@@ -4129,7 +4137,7 @@ mod owner_edit_model {
         );
 
         assert_eq!(result, Ok(()));
-        assert_eq!(*seen.borrow(), Some(("/Apps".to_string(), 1000, 50)));
+        assert_eq!(*seen.borrow(), Some(("/Archive".to_string(), 1000, 50)));
     }
 
     #[test]
@@ -4137,7 +4145,7 @@ mod owner_edit_model {
         let seen = RefCell::new(None);
         // Group-only change: the uid field must reach the seam as the
         // reserved "unchanged" sentinel, never a fabricated id.
-        let result = set_owner("/Apps", OwnerChange::group(7), |_, uid, gid| {
+        let result = set_owner("/Archive", OwnerChange::group(7), |_, uid, gid| {
             *seen.borrow_mut() = Some((uid, gid));
             Ok(())
         });
@@ -4149,9 +4157,13 @@ mod owner_edit_model {
     fn a_sentinel_target_is_refused_before_any_syscall() {
         // The reserved sentinel is not a real id: naming it as a target is
         // refused rather than misread as "leave unchanged".
-        let result = set_owner("/Apps", OwnerChange::user(FS_OWNER_UNCHANGED), |_, _, _| {
-            panic!("the VFS must not be touched for an invalid id");
-        });
+        let result = set_owner(
+            "/Archive",
+            OwnerChange::user(FS_OWNER_UNCHANGED),
+            |_, _, _| {
+                panic!("the VFS must not be touched for an invalid id");
+            },
+        );
         assert_eq!(result, Err(OwnerError::Invalid));
     }
 
@@ -4159,7 +4171,7 @@ mod owner_edit_model {
     fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
         // The missing-`CAP_FS_CHOWN` denial (or any VFS refusal) surfaces as
         // `Refused`, leaving the node as it was.
-        let result = set_owner("/Apps", OwnerChange::user(0), |_, _, _| {
+        let result = set_owner("/Archive", OwnerChange::user(0), |_, _, _| {
             Err(Errno::PermissionDenied)
         });
         assert_eq!(result, Err(OwnerError::Refused(Errno::PermissionDenied)));
@@ -4429,7 +4441,7 @@ fn the_offered_type_is_the_registry_type() {
     ] {
         let claimant = AppAssociation::new(
             "claimant",
-            "/Apps/claimant.app",
+            "/System/Applications/claimant.app",
             vec![media.as_str().to_string()],
         );
         let offered = applications_for(name, core::slice::from_ref(&claimant));
@@ -4444,7 +4456,7 @@ fn a_file_the_registry_cannot_type_is_offered_nothing() {
     // store whose bundle claims the generic type.
     let catch_all = AppAssociation::new(
         "catch-all",
-        "/Apps/catch-all.app",
+        "/System/Applications/catch-all.app",
         vec!["application/octet-stream".to_string()],
     );
     let bundles = [catch_all];
@@ -4479,12 +4491,12 @@ fn open_with_store() -> Vec<AppAssociation> {
         ),
         AppAssociation::new(
             "images",
-            "/Apps/images.app",
+            "/System/Applications/images.app",
             vec!["image/png".to_string(), "image/jpeg".to_string()],
         ),
         AppAssociation::new(
             "studio",
-            "/Apps/studio.app",
+            "/System/Applications/studio.app",
             vec!["text/plain".to_string(), "image/png".to_string()],
         ),
     ]
@@ -4508,7 +4520,7 @@ fn applications_for_offers_a_single_matching_bundle() {
     let matches = applications_for("scan.jpeg", &bundles);
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].name(), "images");
-    assert_eq!(matches[0].bundle_path(), "/Apps/images.app");
+    assert_eq!(matches[0].bundle_path(), "/System/Applications/images.app");
 }
 
 #[test]
@@ -4532,7 +4544,7 @@ fn new_offers_each_type_a_writing_application_declares_exactly() {
     let editor = |types: &[&str]| {
         AppAssociation::new(
             "editor",
-            "/Apps/editor.app",
+            "/System/Applications/editor.app",
             types.iter().map(ToString::to_string).collect(),
         )
         .writing_documents()
@@ -4669,7 +4681,11 @@ fn applications_for_is_empty_for_an_unrecognised_type() {
 /// An application declaring only the broad `text/plain` type — a plain text
 /// editor, the case the subclass chain exists for.
 fn plain_text_editor() -> AppAssociation {
-    AppAssociation::new("editor", "/Apps/editor.app", vec!["text/plain".to_string()])
+    AppAssociation::new(
+        "editor",
+        "/System/Applications/editor.app",
+        vec!["text/plain".to_string()],
+    )
 }
 
 #[test]
@@ -4720,7 +4736,7 @@ fn a_specific_declaration_outranks_a_generic_one() {
         plain_text_editor(),
         AppAssociation::new(
             "rustide",
-            "/Apps/rustide.app",
+            "/System/Applications/rustide.app",
             vec!["text/x-rust".to_string()],
         ),
     ];
@@ -4745,10 +4761,14 @@ fn a_two_step_chain_ranks_each_ancestor_in_turn() {
         plain_text_editor(),
         AppAssociation::new(
             "xmltool",
-            "/Apps/xmltool.app",
+            "/System/Applications/xmltool.app",
             vec!["application/xml".to_string()],
         ),
-        AppAssociation::new("draw", "/Apps/draw.app", vec!["image/svg+xml".to_string()]),
+        AppAssociation::new(
+            "draw",
+            "/System/Applications/draw.app",
+            vec!["image/svg+xml".to_string()],
+        ),
     ];
     let offered: Vec<&str> = applications_for("logo.svg", &bundles)
         .iter()
@@ -4762,7 +4782,7 @@ fn a_bundle_claiming_both_a_type_and_its_ancestor_is_offered_once() {
     let bundles = [
         AppAssociation::new(
             "studio",
-            "/Apps/studio.app",
+            "/System/Applications/studio.app",
             vec!["text/plain".to_string(), "text/x-rust".to_string()],
         ),
         plain_text_editor(),
@@ -5205,7 +5225,7 @@ fn plan_delete_marks_a_bundle_as_directory_backed() {
     use tairix_abi::time::Time64;
     let mut fs = MockFs::fixture();
     fs.dirs.insert(
-        "/Apps".to_string(),
+        "/Archive".to_string(),
         vec![
             Entry::new(
                 "Example.app",
@@ -5217,8 +5237,8 @@ fn plan_delete_marks_a_bundle_as_directory_backed() {
         ],
     );
     let mut browser = Browser::open_root(fs).expect("root");
-    // Sorted root order is [Apps, Storage, System, Users]; Apps is index 0.
-    browser.open_index(0).expect("enter Apps");
+    // Sorted root order is [Archive, Storage, System, Users]; Archive is index 0.
+    browser.open_index(0).expect("enter Archive");
     browser.select_all();
 
     let plan = browser.plan_delete().expect("a plan");
@@ -6398,7 +6418,7 @@ fn more_candidates_than_a_plate_offers_never_reach_the_new_rows_ids() {
         .map(|n| {
             AppAssociation::new(
                 alloc::format!("app{n}"),
-                alloc::format!("/Apps/app{n}.app"),
+                alloc::format!("/System/Applications/app{n}.app"),
                 vec!["text/plain".to_string()],
             )
         })
@@ -6675,19 +6695,22 @@ fn the_open_with_chooser_needs_a_candidate_and_keeps_the_ranked_order() {
 
     let editor = AppAssociation::new(
         "Editor",
-        "/Apps/Editor.app",
+        "/System/Applications/Editor.app",
         alloc::vec![String::from("text/plain")],
     );
     let viewer = AppAssociation::new(
         "Viewer",
-        "/Apps/Viewer.app",
+        "/System/Applications/Viewer.app",
         alloc::vec![String::from("text/plain")],
     );
     let chooser = OpenWithChooser::new(&[&editor, &viewer], "/Users/u/notes.txt", "notes.txt")
         .expect("two candidates");
     assert_eq!(chooser.candidates().len(), 2);
     assert_eq!(chooser.candidates()[0].name(), "Editor");
-    assert_eq!(chooser.candidates()[1].bundle_path(), "/Apps/Viewer.app");
+    assert_eq!(
+        chooser.candidates()[1].bundle_path(),
+        "/System/Applications/Viewer.app"
+    );
     assert_eq!(chooser.file_path(), "/Users/u/notes.txt");
     assert_eq!(chooser.display_name(), "notes.txt");
     // The first candidate is current, so an immediate activation opens the file
@@ -6701,7 +6724,13 @@ fn the_open_with_selection_clamps_at_both_ends() {
     use crate::open_with::{AppAssociation, OpenWithChooser};
 
     let apps: alloc::vec::Vec<AppAssociation> = (0..3)
-        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+        .map(|n| {
+            AppAssociation::new(
+                alloc::format!("App{n}"),
+                "/System/Applications/A.app",
+                alloc::vec![],
+            )
+        })
         .collect();
     let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
     let mut chooser = OpenWithChooser::new(&refs, "/f", "f").expect("three candidates");
@@ -6724,7 +6753,7 @@ fn chooser_of(count: usize) -> (crate::OpenWithChooser, Rect) {
     use crate::render::open_with_chooser_extent;
 
     let apps: Vec<AppAssociation> = (0..count)
-        .map(|n| AppAssociation::new(format!("App{n}"), "/Apps/A.app", vec![]))
+        .map(|n| AppAssociation::new(format!("App{n}"), "/System/Applications/A.app", vec![]))
         .collect();
     let refs: Vec<&AppAssociation> = apps.iter().collect();
     let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("a candidate");
@@ -7028,13 +7057,13 @@ fn the_open_with_chooser_is_sized_to_its_candidates_and_its_rows_agree() {
     // it; one that would outgrow the screen is clamped to it instead.
     let long = AppAssociation::new(
         "An Application With A Remarkably Long Display Name Indeed",
-        "/Apps/Long.app",
+        "/System/Applications/Long.app",
         alloc::vec![],
     );
     let refs = alloc::vec![&long];
     let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("one candidate");
     let (wide, _) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, screen);
-    let short = AppAssociation::new("A", "/Apps/A.app", alloc::vec![]);
+    let short = AppAssociation::new("A", "/System/Applications/A.app", alloc::vec![]);
     let refs = alloc::vec![&short];
     let brief = OpenWithChooser::new(&refs, "/f", "f").expect("one candidate");
     let (narrow, _) = open_with_chooser_extent(&brief, Scale::ONE, &theme, screen);
@@ -7059,7 +7088,7 @@ fn the_open_with_chooser_offers_open_and_cancel() {
 
     let theme = Theme::dark();
     let screen = Rect::new(0, 0, 800, 600);
-    let app = AppAssociation::new("Viewer", "/Apps/Viewer.app", alloc::vec![]);
+    let app = AppAssociation::new("Viewer", "/System/Applications/Viewer.app", alloc::vec![]);
     let refs = alloc::vec![&app];
     let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("one candidate");
     let (w, h) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, screen);
@@ -7096,7 +7125,13 @@ fn the_quick_open_with_candidates_are_the_top_of_the_ranked_list() {
     use crate::open_with::{quick_applications, AppAssociation, OPEN_WITH_QUICK_MAX};
 
     let apps: alloc::vec::Vec<AppAssociation> = (0..OPEN_WITH_QUICK_MAX + 5)
-        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+        .map(|n| {
+            AppAssociation::new(
+                alloc::format!("App{n}"),
+                "/System/Applications/A.app",
+                alloc::vec![],
+            )
+        })
         .collect();
     let ranked: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
     let quick = quick_applications(&ranked);
@@ -7127,7 +7162,7 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
     use crate::open_with::AppAssociation;
     use tairix_abi::window_ipc::AppMenuRowView;
 
-    let viewer = AppAssociation::new("Viewer", "/Apps/Viewer.app", alloc::vec![]);
+    let viewer = AppAssociation::new("Viewer", "/System/Applications/Viewer.app", alloc::vec![]);
     let candidates = alloc::vec![&viewer];
     let mut browser = Browser::open_root(activation_source()).expect("root");
     browser.select(2).expect("select notes.txt");
@@ -7172,7 +7207,7 @@ fn the_context_menu_offers_its_quick_actions_only_where_the_row_can_act() {
     let AppMenuRowView::Item(candidate) = candidate else {
         panic!("the candidate is an item");
     };
-    assert_eq!(candidate.icon_bundle, "/Apps/Viewer.app");
+    assert_eq!(candidate.icon_bundle, "/System/Applications/Viewer.app");
     let last_command = rows
         .iter()
         .rposition(|(row, _)| {
@@ -11804,7 +11839,11 @@ fn link_tree() -> (BTreeMap<String, Vec<u8>>, FixtureLinks) {
     let links = FixtureLinks::default()
         .with("/Docs", "/Storage/docs", Some(FileKind::Directory))
         .with("/notes", "/Users/me/notes.txt", Some(FileKind::Regular))
-        .with("/Editor", "/Apps/Editor.app", Some(FileKind::Directory))
+        .with(
+            "/Editor",
+            "/System/Applications/Editor.app",
+            Some(FileKind::Directory),
+        )
         .with("/gone", "../removed", None);
     (dirs, links)
 }
@@ -11963,7 +12002,7 @@ fn activating_a_link_acts_on_what_it_names() {
     assert_eq!(
         browser.activate_selected(BundleIntent::Launch),
         Ok(Activation::LaunchBundle {
-            path: "/Apps/Editor.app".to_string()
+            path: "/System/Applications/Editor.app".to_string()
         })
     );
 
@@ -12000,8 +12039,8 @@ fn a_relative_link_target_resolves_against_the_links_own_directory() {
     );
     // An absolute target names itself.
     assert_eq!(
-        crate::entry::resolve_target("/Users/me", "/Apps/Editor.app"),
-        "/Apps/Editor.app"
+        crate::entry::resolve_target("/Users/me", "/System/Applications/Editor.app"),
+        "/System/Applications/Editor.app"
     );
     // A root parent is not doubled.
     assert_eq!(crate::entry::resolve_target("/", "x"), "/x");
@@ -12091,7 +12130,7 @@ fn the_open_with_actions_are_control_plates_that_carry_their_labels() {
     let screen = Rect::new(0, 0, 800, 600);
     let apps = [AppAssociation::new(
         "Editor",
-        "/Apps/Editor.app",
+        "/System/Applications/Editor.app",
         alloc::vec![],
     )];
     let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
@@ -12163,7 +12202,13 @@ fn the_open_with_chooser_marks_the_default_candidate() {
     let theme = Theme::dark();
     let screen = Rect::new(0, 0, 800, 600);
     let apps: alloc::vec::Vec<AppAssociation> = (0..3)
-        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+        .map(|n| {
+            AppAssociation::new(
+                alloc::format!("App{n}"),
+                "/System/Applications/A.app",
+                alloc::vec![],
+            )
+        })
         .collect();
     let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
     let many = OpenWithChooser::new(&refs, "/f", "f").expect("three candidates");

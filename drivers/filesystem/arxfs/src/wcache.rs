@@ -38,7 +38,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
-use tairix_abi::driver::filesystem::WritebackHost;
+use tairix_abi::driver::filesystem::VolumeHost;
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
 use tairix_reclaim::{
@@ -238,7 +238,7 @@ pub(crate) struct WritebackReading {
 pub(crate) struct CommitScheduler {
     /// The host's timer and the handle this mount is registered under,
     /// installed when the volume is registered.
-    host: Option<(DriverHandle, &'static dyn WritebackHost)>,
+    host: Option<(DriverHandle, &'static dyn VolumeHost)>,
     /// The class of device the volume sits on, which sets the base window.
     class: BlkDeviceClass,
     /// The memory-pressure band the last operation read, which shortens the
@@ -297,7 +297,12 @@ impl CommitScheduler {
     /// A transaction already open when the host arrives is adopted as
     /// starting now: it has been open for an unmeasured time, so dating it
     /// from here bounds it by one window rather than leaving it unreported.
-    pub(crate) fn set_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+    /// The host and the handle this mount is registered under, once installed.
+    pub(crate) fn host(&self) -> Option<(DriverHandle, &'static dyn VolumeHost)> {
+        self.host
+    }
+
+    pub(crate) fn set_host(&mut self, volume: DriverHandle, host: &'static dyn VolumeHost) {
         self.host = Some((volume, host));
         if self.open && self.opened_ns.is_none() {
             self.opened_ns = host.now_ns();
@@ -371,29 +376,41 @@ impl CommitScheduler {
     }
 }
 
-/// The host half of the write-back timer, for tests: a settable monotonic
-/// clock and a record of the last deadline the driver reported.
+/// The host, for tests: a settable monotonic clock, a record of the last
+/// deadline the driver reported, and the last reserve crossing it reported.
 ///
 /// One definition for the whole crate — the scheduler's own tests and the
 /// mounted-volume tests both drive a transaction across its window through
 /// this, by moving the clock rather than waiting for one.
 #[cfg(test)]
-pub(crate) struct TestWritebackHost {
+pub(crate) struct TestVolumeHost {
     now_ns: core::sync::atomic::AtomicU64,
     /// The last reported deadline, with `u64::MAX` for "nothing open".
     due_ns: core::sync::atomic::AtomicU64,
     reports: core::sync::atomic::AtomicU32,
+    /// `0` for no crossing reported, `1` out of the reserve, `2` into it.
+    crossing: core::sync::atomic::AtomicU8,
 }
 
 #[cfg(test)]
-impl TestWritebackHost {
+impl TestVolumeHost {
     /// A leaked host reading `now_ns`, as the driver needs it: `&'static`.
     pub(crate) fn leaked(now_ns: u64) -> &'static Self {
         alloc::boxed::Box::leak(alloc::boxed::Box::new(Self {
             now_ns: core::sync::atomic::AtomicU64::new(now_ns),
             due_ns: core::sync::atomic::AtomicU64::new(u64::MAX),
             reports: core::sync::atomic::AtomicU32::new(0),
+            crossing: core::sync::atomic::AtomicU8::new(0),
         }))
+    }
+
+    /// Whether the driver last reported the volume in its reserve, or `None`
+    /// if it reported no crossing.
+    pub(crate) fn in_reserve(&self) -> Option<bool> {
+        match self.crossing.load(core::sync::atomic::Ordering::Acquire) {
+            0 => None,
+            reported => Some(reported == 2),
+        }
     }
 
     /// Move the clock to `now_ns`.
@@ -422,7 +439,7 @@ impl TestWritebackHost {
 }
 
 #[cfg(test)]
-impl WritebackHost for TestWritebackHost {
+impl VolumeHost for TestVolumeHost {
     fn now_ns(&self) -> Option<u64> {
         Some(self.now_ns.load(core::sync::atomic::Ordering::Acquire))
     }
@@ -434,6 +451,13 @@ impl WritebackHost for TestWritebackHost {
         );
         self.reports
             .fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+    }
+
+    fn reserve_crossed(&self, _volume: DriverHandle, in_reserve: bool) {
+        self.crossing.store(
+            1 + u8::from(in_reserve),
+            core::sync::atomic::Ordering::Release,
+        );
     }
 }
 
@@ -1375,9 +1399,9 @@ mod tests {
 
     #[test]
     fn a_deepening_band_brings_an_open_transactions_deadline_forward() {
-        let host = TestWritebackHost::leaked(0);
+        let host = TestVolumeHost::leaked(0);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::Removable);
-        schedule.set_host(TestWritebackHost::volume(), host);
+        schedule.set_host(TestVolumeHost::volume(), host);
         schedule.opened();
         let calm = host.reported().expect("an open transaction is due");
         schedule.set_band(PressureBand::Moderate);
@@ -1408,16 +1432,17 @@ mod tests {
     #[test]
     fn a_host_that_reads_no_clock_publishes_every_operation() {
         struct Clockless;
-        impl WritebackHost for Clockless {
+        impl VolumeHost for Clockless {
             fn now_ns(&self) -> Option<u64> {
                 None
             }
             fn writeback_due(&self, _volume: DriverHandle, _deadline_ns: Option<u64>) {}
+            fn reserve_crossed(&self, _volume: DriverHandle, _in_reserve: bool) {}
         }
         static CLOCKLESS: Clockless = Clockless;
 
         let mut schedule = CommitScheduler::new(BlkDeviceClass::Removable);
-        schedule.set_host(TestWritebackHost::volume(), &CLOCKLESS);
+        schedule.set_host(TestVolumeHost::volume(), &CLOCKLESS);
         schedule.opened();
         assert!(
             schedule.expired(),
@@ -1429,9 +1454,9 @@ mod tests {
     #[test]
     fn a_transaction_expires_when_its_window_elapses() {
         let window = writeback_window_ns(BlkDeviceClass::SolidState, PressureBand::Normal);
-        let host = TestWritebackHost::leaked(0);
+        let host = TestVolumeHost::leaked(0);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::SolidState);
-        schedule.set_host(TestWritebackHost::volume(), host);
+        schedule.set_host(TestVolumeHost::volume(), host);
         schedule.opened();
         assert!(schedule.is_open());
         assert!(!schedule.expired());
@@ -1446,9 +1471,9 @@ mod tests {
     #[test]
     fn an_opening_transaction_reports_its_deadline_and_a_closing_one_reports_none() {
         let window = writeback_window_ns(BlkDeviceClass::Rotational, PressureBand::Normal);
-        let host = TestWritebackHost::leaked(700);
+        let host = TestVolumeHost::leaked(700);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::Rotational);
-        schedule.set_host(TestWritebackHost::volume(), host);
+        schedule.set_host(TestVolumeHost::volume(), host);
         assert_eq!(
             host.reported(),
             None,
@@ -1482,8 +1507,8 @@ mod tests {
         // Opened before any host existed, so its age was never measured.
         schedule.opened();
         assert!(schedule.expired());
-        let host = TestWritebackHost::leaked(5_000);
-        schedule.set_host(TestWritebackHost::volume(), host);
+        let host = TestVolumeHost::leaked(5_000);
+        schedule.set_host(TestVolumeHost::volume(), host);
         assert_eq!(
             host.reported(),
             Some(5_000 + window),
@@ -1495,9 +1520,9 @@ mod tests {
 
     #[test]
     fn a_closed_transaction_forgets_the_operations_it_carried() {
-        let host = TestWritebackHost::leaked(0);
+        let host = TestVolumeHost::leaked(0);
         let mut schedule = CommitScheduler::new(BlkDeviceClass::Virtual);
-        schedule.set_host(TestWritebackHost::volume(), host);
+        schedule.set_host(TestVolumeHost::volume(), host);
         schedule.opened();
         schedule.joined();
         schedule.joined();

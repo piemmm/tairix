@@ -64,8 +64,13 @@ stable user/kernel `Errno` at the syscall boundary.
 
 A subtree can be backed by a `drivers/filesystem/*` driver instead of the
 in-RAM arena. The mount records the driver's `DriverHandle`, and the VFS
-exposes delegating operations that take the live driver the kernel host
-maps from that handle — the read ones a `&mut dyn FilesystemRead`, the
+exposes delegating operations over a `CoveredPath`: the path together with
+the mount that covered it, read under one guard of the mount table
+(`MountTable::cover`; `cover_pair` for a two-path operation). The kernel host
+looks up the live driver behind that mount under the same guard, so an
+operation is judged against exactly the mount whose volume serves it — a
+detach and re-attach at the path cannot pair one volume's driver with another
+mount's flags. The read operations take a `&mut dyn FilesystemRead`, the
 mutating ones a driver implementing both `FilesystemRead` and
 `FilesystemWrite`:
 
@@ -110,21 +115,22 @@ conflict.
 Where that `Metadata` comes from is the one place the two policies differ:
 
 - The `*_via` methods apply the **mount point's** `Metadata` as a uniform
-  template to every node — the natural model for a filesystem such as FAT
-  that stores no per-file owner.
+  template to every node. No mounted volume is served through them.
 - The `*_via_secured` counterparts (`read_via_secured`,
-  `list_via_secured`, `stat_via_secured`, `create_via_secured`,
-  `mkdir_via_secured`, `write_via_secured`, `truncate_via_secured`,
-  `remove_via_secured`, `readlink_via_secured`, `symlink_via_secured`,
-  `link_via_secured`, `realpath_via_secured`) instead read **each node's own stored §5.3
-  record** through the driver's `FilesystemSecurity` surface and translate
-  it (`Metadata::from_node_security`). The kernel host calls these for a
-  driver such as [arxfs](./arxfs.md) that stores full per-inode owner,
-  mode, ACL, and capability gate — so a file marked owner-only or gated on
-  a capability is enforced as stored regardless of the mount template — or
-  the [ext4 driver](./ext4.md), which reports each inode's stored owner and
-  mode (its ACLs live in xattr blocks not yet decoded) and likewise
-  serves the mutating `*_via` operations on writable volumes.
+  `read_bounded_via_secured`, `list_via_secured`, `stat_via_secured`,
+  `create_via_secured`, `mkdir_via_secured`, `write_via_secured`,
+  `truncate_via_secured`, `remove_via_secured`, `readlink_via_secured`,
+  `symlink_via_secured`, `link_via_secured`, `realpath_via_secured`) instead
+  read **each node's own stored §5.3 record** through the driver's
+  `FilesystemSecurity` surface and translate it
+  (`Metadata::from_node_security`). The kernel host serves every mounted
+  volume through these: [arxfs](./arxfs.md) stores full per-inode owner,
+  mode, ACL, and capability gate — so a file marked owner-only or gated on a
+  capability is enforced as stored regardless of the mount template — the
+  [ext4 driver](./ext4.md) reports each inode's stored owner and mode (its
+  ACLs live in xattr blocks not yet decoded), and FAT32, which stores no
+  owner, reports the record its volume's storage-group identity map assigns,
+  or its own restrictive system-owned posture where no map is provisioned.
 
 Both routes feed the *same* `Metadata::authorize` decision, so the policy
 is single-sourced; only the metadata's origin changes.

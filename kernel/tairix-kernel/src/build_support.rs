@@ -108,19 +108,16 @@ pub struct UnknownBoard<'a> {
 /// instruction set without naming `target_arch` inline.
 #[must_use]
 pub fn kernel_isa(target_arch: &str) -> Option<&'static str> {
-    match target_arch {
-        "x86_64" => Some("x86_64"),
-        "aarch64" => Some("aarch64"),
-        "riscv64" => Some("riscv64"),
-        _ => None,
-    }
+    tairix_buildcfg::NATIVE_ARCHES
+        .into_iter()
+        .find(|&isa| isa == target_arch)
 }
 
 /// True when the crate is being built as the bare-metal production
 /// kernel: a supported instruction set with no host operating system.
 #[must_use]
 pub fn is_freestanding(target_os: &str, target_arch: &str) -> bool {
-    target_os == "none" && kernel_isa(target_arch).is_some()
+    tairix_buildcfg::native_arch_of(target_os, target_arch).is_some()
 }
 
 /// Deterministic Ed25519 seed the build signs every driver manifest with

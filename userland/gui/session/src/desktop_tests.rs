@@ -238,7 +238,7 @@ fn catalog_of(id: &str, name: &str, bundle: &str) -> Catalog {
 fn editor() -> Vec<AppAssociation> {
     vec![AppAssociation::new(
         "Edit",
-        "/Apps/Edit.app",
+        "/System/Applications/Edit.app",
         vec!["text/plain".to_string()],
     )]
 }
@@ -1108,7 +1108,7 @@ fn double_clicking_a_file_launches_its_associated_application_with_the_file() {
             )
             .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
-            run_path: "/Apps/Edit.app/Run".to_string(),
+            run_path: "/System/Applications/Edit.app/Run".to_string(),
             label: "Edit".to_string(),
             document: Some(LaunchDocument {
                 path: "/Users/ada/Desktop/notes.txt".to_string(),
@@ -1189,12 +1189,16 @@ fn a_file_no_application_opens_is_refused_with_its_reason_and_does_nothing_else(
 #[test]
 fn a_shortcut_is_named_in_the_desktop_folder_and_stores_its_target_verbatim() {
     let desktop = desktop_of(vec![]);
-    let catalog = catalog_of("os.tairix.chess", "Chess", "/Apps/games/chess.app");
+    let catalog = catalog_of(
+        "os.tairix.chess",
+        "Chess",
+        "/System/Applications/games/chess.app",
+    );
     assert_eq!(
         desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
         DesktopAction::CreateShortcut {
             link: "/Users/ada/Desktop/Chess".to_string(),
-            target: "/Apps/games/chess.app".to_string(),
+            target: "/System/Applications/games/chess.app".to_string(),
         },
         "the link is the entry's own name inside the desktop folder, and the \
          target is the bundle directory, untouched"
@@ -1228,7 +1232,7 @@ fn a_display_name_the_shared_rule_refuses_is_refused_with_its_reason() {
         ),
         ("..", "`.` and `..` are not valid file or directory names"),
     ] {
-        let catalog = catalog_of("os.tairix.chess", name, "/Apps/chess.app");
+        let catalog = catalog_of("os.tairix.chess", name, "/System/Applications/chess.app");
         assert_eq!(
             desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
             DesktopAction::Refuse(alloc::format!(
@@ -1246,12 +1250,12 @@ fn a_shortcut_is_asked_for_even_where_the_name_is_already_taken() {
     // create time — not a second, differently-named shortcut chosen here off a
     // listing that may already be stale.
     let desktop = desktop_of(vec![file("Chess")]);
-    let catalog = catalog_of("os.tairix.chess", "Chess", "/Apps/chess.app");
+    let catalog = catalog_of("os.tairix.chess", "Chess", "/System/Applications/chess.app");
     assert_eq!(
         desktop.shortcut_to(&catalog, &entry_id("os.tairix.chess")),
         DesktopAction::CreateShortcut {
             link: "/Users/ada/Desktop/Chess".to_string(),
-            target: "/Apps/chess.app".to_string(),
+            target: "/System/Applications/chess.app".to_string(),
         }
     );
 }
@@ -1261,7 +1265,11 @@ fn double_clicking_a_shortcut_to_a_bundle_launches_the_resolved_target() {
     // The shortcut is named for the program, not for the bundle: bundle-ness
     // is read off the *target's* leaf, and the launch must name the bundle the
     // link resolves to, because the load gate judges the path it is handed.
-    let mut desktop = desktop_of(vec![link("Chess", LinkTarget::Bundle, "/Apps/chess.app")]);
+    let mut desktop = desktop_of(vec![link(
+        "Chess",
+        LinkTarget::Bundle,
+        "/System/Applications/chess.app",
+    )]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
     desktop.press(
@@ -1286,7 +1294,7 @@ fn double_clicking_a_shortcut_to_a_bundle_launches_the_resolved_target() {
             )
             .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
-            run_path: "/Apps/chess.app/Run".to_string(),
+            run_path: "/System/Applications/chess.app/Run".to_string(),
             label: "chess".to_string(),
             document: None,
         }))
@@ -1350,7 +1358,7 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
             )
             .action,
         Some(DesktopAction::Activate(DesktopActivation::Launch {
-            run_path: "/Apps/Edit.app/Run".to_string(),
+            run_path: "/System/Applications/Edit.app/Run".to_string(),
             label: "Edit".to_string(),
             document: Some(LaunchDocument {
                 path: "/Users/ada/Desktop/notes.txt".to_string(),
@@ -1363,7 +1371,11 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
 
 #[test]
 fn double_clicking_a_shortcut_whose_target_has_gone_is_refused_with_its_reason() {
-    let mut desktop = desktop_of(vec![link("Chess", LinkTarget::Dangling, "/Apps/chess.app")]);
+    let mut desktop = desktop_of(vec![link(
+        "Chess",
+        LinkTarget::Dangling,
+        "/System/Applications/chess.app",
+    )]);
     let layout = layout_of(&desktop);
     let at = centre_of(&layout, 0);
     desktop.press(

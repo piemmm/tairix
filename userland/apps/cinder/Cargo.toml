@@ -70,3 +70,6 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["tes
 
 [lints]
 workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -1,6 +1,6 @@
 /* The one PIE link script shared by every pure-Rust `Run` program the kernel
  * spawn/autoload path loads — PID 1 `init`, the system services, and every
- * `/Apps` and `/System/Drivers` bundle alike.
+ * application and `/System/Drivers` bundle alike.
  *
  * A `Run` program's entry point is the `tairix-rt` runtime's `_start`. It
  * links no architecture crate, so nothing in the default object graph

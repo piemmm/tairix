@@ -45,12 +45,10 @@ mod program {
     use tairix_abi::Errno;
     use tairix_configure::{parse, run, ConfigureError, NetPolicy, NetworkStore, Store, USAGE};
     use tairix_help::BundleHelp;
-    use tairix_netconfig::{
-        CONFIG_DIR as NET_CONFIG_DIR, CONFIG_PATH as NET_CONFIG_PATH,
-        MAX_CONFIG_LEN as NET_MAX_CONFIG_LEN,
-    };
+    use tairix_netconfig::{CONFIG_PATH as NET_CONFIG_PATH, MAX_CONFIG_LEN as NET_MAX_CONFIG_LEN};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout};
-    use tairix_sysconfig::{CONFIG_DIR, CONFIG_PATH, MAX_CONFIG_LEN};
+    use tairix_rt::ParentDir;
+    use tairix_sysconfig::{CONFIG_PATH, MAX_CONFIG_LEN};
 
     /// The production [`Store`] over the syscall-backed store file at
     /// [`CONFIG_PATH`], read and replaced whole. Every path resolution,
@@ -91,34 +89,19 @@ mod program {
         }
 
         fn write(&self, text: &str) -> Result<(), Errno> {
-            replace_document(CONFIG_DIR, CONFIG_PATH, text)
+            replace_document(CONFIG_PATH, text)
         }
     }
 
-    /// Replace the whole document at `path` with `text`, creating `dir`
-    /// first — on a fresh installation neither exists yet, and
-    /// `AlreadyExists` is the normal steady state rather than a failure.
-    ///
-    /// Shared by both stores: they are different documents under different
-    /// engines, but "render it and replace the file" is one operation.
-    fn replace_document(dir: &str, path: &str, text: &str) -> Result<(), Errno> {
-        let ret = tairix_rt::fs_mkdir(dir.as_bytes());
-        if ret != 0 && Errno::from_syscall(ret) != Errno::AlreadyExists {
-            return Err(Errno::from_syscall(ret));
-        }
-        let flags = OpenFlags::WRITE
-            .union(OpenFlags::CREATE)
-            .union(OpenFlags::TRUNCATE);
-        let ret = tairix_rt::fs_open(path.as_bytes(), flags);
-        if ret < 0 {
-            return Err(Errno::from_syscall(ret));
-        }
-        // `ret >= 0` is a descriptor by the syscall contract.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let fd = ret as u32;
-        let outcome = tairix_rt::fs_write_all(fd, 0, text.as_bytes());
-        let _ = tairix_rt::fs_close(fd);
-        outcome
+    /// Replace the whole document at `path` with `text`, so a crash leaves
+    /// the old document or the new. Its directory is created when missing:
+    /// on a fresh installation it does not exist yet.
+    fn replace_document(path: &str, text: &str) -> Result<(), Errno> {
+        tairix_rt::replace_file(
+            path.as_bytes(),
+            text.as_bytes(),
+            ParentDir::CreatedIfMissing,
+        )
     }
 
     /// The production [`NetworkStore`] over the syscall-backed network
@@ -151,7 +134,7 @@ mod program {
         }
 
         fn write(&self, text: &str) -> Result<(), Errno> {
-            replace_document(NET_CONFIG_DIR, NET_CONFIG_PATH, text)
+            replace_document(NET_CONFIG_PATH, text)
         }
     }
 

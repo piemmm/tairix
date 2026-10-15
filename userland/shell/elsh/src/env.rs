@@ -42,16 +42,6 @@ pub const DEFAULT_HOSTNAME: &str = "tairix";
 /// The user name the prompt shows when the session exported no `USER`.
 const DEFAULT_USER: &str = "user";
 
-/// The shell's own fallback search path when the session exported no `PATH`
-/// (the shell run outside a normal login): the machine-wide installed
-/// application store. A defensive default the shell owns, exactly as an
-/// interactive `bash` supplies its own when `PATH` is unset; the
-/// authoritative value is the one login exports. The two system stores and
-/// the user's own two are the fixed, non-overridable prefix the shared
-/// resolution policy already searches first, so repeating them here would be
-/// redundant and would imply they are overridable.
-const DEFAULT_PATH: &str = "/Apps";
-
 /// Mutable shell state: variables, working directory, and `$?`.
 #[derive(Clone, Debug)]
 pub struct Environment {
@@ -220,9 +210,11 @@ impl Environment {
     ///
     /// `inherited(name)` returns the value the spawner (login) exported for
     /// `name`, or `None`. Identity and locale variables (`USER`, `LOGNAME`,
-    /// `HOME`, `SHELL`, `PATH`, `TERM`, `LANG`) come from the inherited
-    /// environment login built; the shell fills a defensive default only when
-    /// one is absent (a shell run outside a normal login). The shell-owned
+    /// `HOME`, `SHELL`, `TERM`, `LANG`) come from the inherited environment
+    /// login built; the shell fills a defensive default only when one is
+    /// absent (a shell run outside a normal login). `PATH` is passed on only
+    /// as inherited, empty or not: the fixed lookup prefix already names every
+    /// program store, so the shell has nothing of its own to add. The shell-owned
     /// variables — `HOSTNAME` (the prompt host, defaulting to
     /// [`DEFAULT_HOSTNAME`] until the system hostname is provisioned),
     /// `PWD`/`OLDPWD`, and the prompt format `ELSH_PROMPT`
@@ -248,7 +240,9 @@ impl Environment {
         self.export("LOGNAME", logname);
         self.export("HOME", home);
         self.export("SHELL", take("SHELL", "/System/Commands/elsh.app/Run"));
-        self.export("PATH", take("PATH", DEFAULT_PATH));
+        if let Some(path) = inherited("PATH") {
+            self.export("PATH", path);
+        }
         self.export("TERM", take("TERM", "xterm-256color"));
         self.export("LANG", take("LANG", "en-US"));
         self.export("HOSTNAME", take("HOSTNAME", DEFAULT_HOSTNAME));
@@ -467,12 +461,15 @@ mod tests {
     fn export_controls_child_environment() {
         let mut env = Environment::new();
         env.set("SECRET", "1");
-        env.export("PATH", "/Apps");
-        assert_eq!(env.exported_vars(), [("PATH", "/Apps")]);
+        env.export("PATH", "/Users/ada/bin");
+        assert_eq!(env.exported_vars(), [("PATH", "/Users/ada/bin")]);
         // A plain `set` variable is visible to the shell but not exported.
         assert_eq!(env.get("SECRET"), Some("1"));
         assert!(env.mark_exported("SECRET"));
-        assert_eq!(env.exported_vars(), [("PATH", "/Apps"), ("SECRET", "1")]);
+        assert_eq!(
+            env.exported_vars(),
+            [("PATH", "/Users/ada/bin"), ("SECRET", "1")]
+        );
         assert!(!env.mark_exported("GHOST"));
     }
 
@@ -494,6 +491,7 @@ mod tests {
             "HOME" => Some("/Users/ada".to_string()),
             "SHELL" => Some("/System/Commands/elsh.app/Run".to_string()),
             "TERM" => Some("xterm-256color".to_string()),
+            "PATH" => Some("/Users/ada/bin".to_string()),
             _ => None,
         });
         assert_eq!(env.get("USER"), Some("ada"));
@@ -519,12 +517,14 @@ mod tests {
         assert_eq!(env.get("USER"), Some(super::DEFAULT_USER));
         assert_eq!(env.get("HOSTNAME"), Some(super::DEFAULT_HOSTNAME));
         assert_eq!(env.get("LANG"), Some("en-US"));
-        assert_eq!(env.get("PATH"), Some(super::DEFAULT_PATH));
+        assert_eq!(env.get("PATH"), None, "no PATH is invented");
         assert_eq!(env.get("ELSH_PROMPT"), Some(super::DEFAULT_PROMPT));
-        // An empty inherited value is treated as absent (fills the default).
+        // An empty inherited value is treated as absent (fills the default),
+        // except PATH, which stays exactly as inherited.
         let mut empty = Environment::new();
-        empty.seed_interactive(|name| (name == "USER").then(String::new));
+        empty.seed_interactive(|name| matches!(name, "USER" | "PATH").then(String::new));
         assert_eq!(empty.get("USER"), Some(super::DEFAULT_USER));
+        assert_eq!(empty.get("PATH"), Some(""), "an empty PATH stays empty");
     }
 
     #[test]

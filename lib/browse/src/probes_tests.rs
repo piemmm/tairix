@@ -299,7 +299,7 @@ fn a_change_to_no_folder_invalidates_nothing() {
 #[test]
 fn a_relisted_directory_forgets_its_folders_answers() {
     let dir = path(&["Users"]);
-    let (held, other) = (path(&["Users", "src"]), path(&["Apps", "src"]));
+    let (held, other) = (path(&["Users", "src"]), path(&["Archive", "src"]));
     let mut probes = Probes::new();
     let _ = probes.ask(&held);
     let _ = probes.ask(&other);

@@ -51,8 +51,8 @@ applib — デスクトップのプログラムライブラリを管理する
 の起動は、カタログの設定にかかわらず、常にローダーの署名および
 ケイパビリティ（capability）チェックによって制御されます。
 
-`applib rescan` は、アプリケーションストア（`/System/Commands`、
-`/System/Applications` および `/Apps`、または `--user` 指定時は呼び出し
+`applib rescan` は、アプリケーションストア（`/System/Commands` および
+`/System/Applications`、または `--user` 指定時は呼び出し
 元自身の `<home>/Commands` と `<home>/Applications`）をスキャンし、各
 バンドルのマニフェストを読み取り、リストへの掲載を要求していて、かつま
 だカタログに登録されていないすべてのアプリケーションを登録します。既存
@@ -92,9 +92,9 @@ applib — デスクトップのプログラムライブラリを管理する
 
 - `applib` — 解決されたライブラリをフォルダごとに表示します。
 - `applib list --category Games` — 1つのフォルダのみを表示します。
-- `applib add /Apps/chess.app` — マニフェストの要求に従ってバンドルを
+- `applib add /System/Applications/chess.app` — マニフェストの要求に従ってバンドルを
   登録します。
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   掲載宣言のないバンドルを、明示的なフォルダの下に登録します。
 - `applib remove os.tairix.chess` — 識別子でエントリを削除します。
 - `applib hide os.tairix.chess --user` — 自分のライブラリからのみ非表

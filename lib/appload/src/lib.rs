@@ -50,10 +50,8 @@
 //!
 //! This is a `lib/*` crate (`no_std`, with `alloc`) depending only on the
 //! audited `lib/*` crates `tairix-abi`, `tairix-caps`, `tairix-crypto`, and
-//! `tairix-log`, so it links no kernel or driver crate and both the kernel
-//! boot-floor spawn path and the user-space application-manager service
-//! (`userland/system/appmgr`) can share this one gate rather than each
-//! re-implementing it.
+//! `tairix-log`, so it links no kernel or driver crate: the kernel's `spawn`
+//! judges every bundle through it, and the host tests drive the same gate.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

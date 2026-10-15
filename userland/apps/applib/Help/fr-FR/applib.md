@@ -55,7 +55,7 @@ vérifications de signature et de capacité du chargeur, quel que soit le
 catalogue.
 
 `applib rescan` parcourt les magasins d'applications
-(`/System/Commands`, `/System/Applications` et `/Apps`, ou les propres
+(`/System/Commands` et `/System/Applications`, ou les propres
 `<home>/Commands` et `<home>/Applications` de l'appelant sous
 `--user`), lit le manifeste de chaque paquet et enregistre chaque
 application qui demande à être répertoriée et n'est pas encore
@@ -97,9 +97,9 @@ reste peut ignorer.
 
 - `applib` — afficher la bibliothèque résolue, dossier par dossier.
 - `applib list --category Games` — afficher un seul dossier.
-- `applib add /Apps/chess.app` — enregistrer un paquet comme son
+- `applib add /System/Applications/chess.app` — enregistrer un paquet comme son
   manifeste le demande.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   enregistrer un paquet qui ne déclare aucun référencement, sous un
   dossier explicite.
 - `applib remove os.tairix.chess` — supprimer une entrée par

@@ -362,8 +362,9 @@ impl<B: Block> DriverStoreService<B> {
         self.io.clone()
     }
 
-    /// A fresh read-only window onto the boot disk holding the `/System`
-    /// driver store. Each call hands out an independent [`SharedBlockHandle`];
+    /// A fresh window onto the boot disk holding the `/System` driver store —
+    /// read by the store and the `/System` mount, written through by the
+    /// writable root. Each call hands out an independent [`SharedBlockHandle`];
     /// the `SharedBlock` lock serialises device operations across windows, so the autoload window and the root-unlock
     /// window never interleave a device operation.
     #[must_use]

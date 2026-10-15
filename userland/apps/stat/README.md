@@ -23,11 +23,12 @@ own specifiers.
   the caller may not read leaves `%m` and `%o` as `?`; a uid the user
   directory has no name for is GNU's `UNKNOWN`, never the number wearing a
   name field's label.
-* **`%m` names the mount holding the *canonical* path.** The covering mount
-  is the longest mount-point prefix of the path the kernel canonicalises
-  (`fs_realpath`), matched by whole components — so a link into another
-  volume reports the volume it lands on, and `/vol` never claims
-  `/volume/x`.
+* **`%m` names the binding holding the *canonical* path.** The covering
+  binding is the longest view path prefixing the path the kernel
+  canonicalises (`fs_realpath`), matched by whole components, and the `-f`
+  figures are the volume that binding shows — so a link into another volume
+  reports the volume it lands on, `/vol` never claims `/volume/x`, and
+  `/System/Logs`, carved out of the root volume, reports the root volume.
 * **Four specifiers are refused by name, not answered with a fabrication.**
   `%G` (the System Information API publishes a user directory and no group
   counterpart, so `%g` is the honest field), `%t`/`%T` of the file

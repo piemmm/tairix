@@ -28,9 +28,9 @@ use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuCoreClass, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord,
     GroupDirectoryRecord, KernelMemoryStats, LoadAverage, MemoryPressureBand, MemoryPressureStats,
     MemoryTotal, MountRecord, ProcessRecord, ProcessState, ResourceLimitRecord, SelfAccountRecord,
-    SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
-    VolumeIoStatsRecord, CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX, PRESSURE_BAND_COUNT,
-    PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
+    SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord,
+    VolumeIoQueueRecord, VolumeIoStatsRecord, CPU_INFO_FLAG_FREQ_MEASURED, CPU_MODEL_NAME_MAX,
+    PRESSURE_BAND_COUNT, PROCESS_CPU_NONE, RESOURCE_LIMITS_REPORT_LEN,
 };
 use tairix_abi::{
     CapabilityId, CapabilityQuery, Duration64, Errno, LimitKind, ProcId, Time64, MEMORY_CLASS_COUNT,
@@ -428,6 +428,15 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         ))
     }
 
+    fn views(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
+        Ok(record_page(
+            &self.filesystem.view_snapshot(),
+            offset,
+            max_records,
+            ViewBindingRecord::to_le_bytes,
+        ))
+    }
+
     fn volume_io_health(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
         Ok(record_page(
             &self.filesystem.volume_io_health_snapshot(),
@@ -805,7 +814,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             // pinned and zero otherwise — the budget is only consumed by
             // a live pin, so an unpinned process honestly reports none.
             let pinned_usage = if aspaces.is_pinned(process) {
-                aspaces.pinned_footprint_bytes(process)
+                aspaces.mapped_aspace_bytes(process)
             } else {
                 0
             };

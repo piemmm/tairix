@@ -6,6 +6,7 @@
 
 use super::*;
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -435,8 +436,8 @@ struct Observed {
 }
 
 impl tairix_drv_fs_arxfs::ClusterCache for Observed {
-    fn get(&mut self, phys: u64) -> Option<&[u8]> {
-        let served = self.inner.get(phys);
+    fn lend(&mut self, phys: u64, read: &mut dyn FnMut(&[u8]) -> usize) -> Option<usize> {
+        let served = self.inner.lend(phys, read);
         if served.is_some() {
             self.counts.hits.fetch_add(1, Ordering::Relaxed);
         }
@@ -679,4 +680,74 @@ fn flipping_the_transform_switch_off_purges_the_held_clusters() {
     assert!(cache.get(10).is_none(), "the purge dropped it");
     assert_eq!(cache.accounting().total_bytes(), 0);
     assert!(cache.accounting().teardowns() >= 1);
+}
+
+/// Regression: the driver-store server's window onto `/System` had no cache,
+/// so every bundle the main mount had already decompressed was decompressed
+/// again. Two mounts sharing one cache decompress a cluster once.
+#[test]
+fn mounts_sharing_a_cache_decompress_a_cluster_once() {
+    let mut writer = ARXFS::format(
+        VecBlock::new(512, 256),
+        32,
+        Keying::Plaintext,
+        &mut TestEntropy { next: 1 },
+    )
+    .expect("format");
+    let root = writer.root();
+    writer
+        .create(root, b"bundle", NodeKind::RegularFile)
+        .expect("create");
+    let payload = compressible_cluster(16 * 1024);
+    assert_eq!(
+        writer.write_at(root, b"bundle", 0, &payload),
+        Ok(payload.len())
+    );
+    let device = writer.into_block().expect("committed");
+    let twin = VecBlock {
+        store: device.store.clone(),
+        block_size: device.block_size,
+        block_count: device.block_count,
+    };
+
+    let shared = SharedClusterCache::new(TransformClusterCache::new(
+        CacheBudget::from_backing(16 * 1024 * 1024),
+        owner(),
+        unpressured(),
+        sink(),
+    ));
+    let read_all = |fs: &mut ARXFS<VecBlock>| {
+        let node = fs.lookup(fs.root(), b"bundle").expect("lookup");
+        let mut out = vec![0u8; payload.len()];
+        let mut done = 0;
+        while done < out.len() {
+            let n = fs
+                .read_at(node, u64::try_from(done).expect("offset"), &mut out[done..])
+                .expect("read");
+            assert!(n > 0, "the read makes progress");
+            done += n;
+        }
+        out
+    };
+    let mut system = ARXFS::open_read_only(device, Keying::Plaintext)
+        .expect("mount")
+        .with_cluster_cache(Box::new(shared.clone()));
+    let mut window = ARXFS::open_read_only(twin, Keying::Plaintext)
+        .expect("mount")
+        .with_cluster_cache(Box::new(shared.clone()));
+
+    assert_eq!(read_all(&mut system), payload);
+    let (hits, misses) = {
+        let cache = shared.0.lock();
+        (cache.accounting().hits(), cache.accounting().misses())
+    };
+    assert!(misses > 0, "the first mount decompressed the clusters");
+    assert_eq!(read_all(&mut window), payload);
+    let cache = shared.0.lock();
+    assert_eq!(
+        cache.accounting().misses(),
+        misses,
+        "the second mount decompressed nothing"
+    );
+    assert!(cache.accounting().hits() > hits);
 }

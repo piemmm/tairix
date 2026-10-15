@@ -48,6 +48,10 @@ in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
   detent — is one detent, its release nothing. `EV_SYN` frame separators and any unmodelled `type`/`code` are
   consumed but surface no event, so the engine never fabricates a bogus one
   (`AGENTS.md` §2.9 — fail closed, never guess).
+- **`is_keyboard`**: whether the device reports a key below the buttons
+  (`BTN_MISC`), read from its `EV_KEY` bitmap at `open` — how Linux's keyboard
+  handler tells a keyboard from a pointer that only has buttons. A device that
+  states no bitmap is no keyboard.
 - **Multi-touch**: a device whose `EV_ABS` bitmap offers
   `ABS_MT_POSITION_X`, `ABS_MT_POSITION_Y` and `ABS_MT_TRACKING_ID`, each
   position axis with a stated range, is a touch surface, read through
@@ -95,6 +99,8 @@ only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
 `cargo test -p tairix-virtio-input` exercises, against the in-process
 `lib/virtio` `MockTransport` / `MockHost`:
 
+- the keyboard test: a key below the buttons makes a keyboard, buttons alone
+  or no bitmap do not;
 - decode: key press/release, relative pointer (X/Y), both wheels in scroll
   units with their signs, the hi-res code chosen from the device's own bitmap
   per axis (a device answering none read at detents), and the

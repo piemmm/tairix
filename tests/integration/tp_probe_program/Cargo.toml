@@ -21,3 +21,6 @@ path = "src/main.rs"
 # an inert stub so `cargo build --workspace` / clippy still cover the crate.
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

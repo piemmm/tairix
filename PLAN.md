@@ -249,6 +249,9 @@ allocation-free `lib/inline` beside the heap-backed `lib/collections`,
 `lib/memguard` (the one guard-region sentinel and canary window, shared by the
 slab guard, the kthread stack guard and every port's boot-stack guard),
 `lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry),
+`lib/buildcfg` (the one build-script definition of the `freestanding` cfg a
+program crate compiles under on a bare-metal target; `std`, as it runs only
+in build scripts),
 `lib/xml` (the one fail-closed XML element scanner, read by the SVG decoder
 and OpenRaster's layer stack), and `lib/util`.
 
@@ -733,7 +736,7 @@ binding increments:
 4. Disk-backed `spawn`: the kernel resolves `…/<Name>.app/Run`, reads it under
    the caller's identity through the secured VFS, verifies it against the
    embedded app trust anchor, and caches the accepted image once per boot for
-   the immutable store bundles (never for writable `/Apps`). The system
+   the immutable store bundles (never for a user's writable stores). The system
    principal resolves to the capability-less bootstrap identity when no
    `uid 0` record exists, so PID 1 can start the boot services before the root
    is unlocked.
@@ -913,6 +916,26 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-14 — §16.2, §16.5, §16.8: `/System/Components` and the signed
+  kind.** The desktop's own programs shared the users' application store, and
+  a bundle's kind was only the directory it sat in, so a system service copied
+  into a user's store ran as a command; the kind is signed and decides where a
+  bundle may run.
+- **2026-10-14 — §16.1, §16.3, §16.5, §16.8: no `/Apps`.** At the user's
+  direction machine-wide applications live only in `/System/Applications`, so
+  the root view holds `/System`, `/Users` and `/Storage` and a session exports
+  no default `PATH`.
+- **2026-10-14 — §16.3, §11: `/Users` and `/Storage` are not mounts.** A
+  mount carved out of one volume only to carry flags made a rename between it
+  and `/` cross volumes; `/Users` is a directory of the root, and `/Storage` the
+  catalog of attached volumes, stored on none.
+- **2026-10-14 — §5.3, §11, §16.2, §16.3: no `nosuid` or `nodev`.** Nothing
+  is a device file or honours a setuid bit, so the two flags restricted nothing
+  and were removed.
+- **2026-10-14 — §2.15: the source-text stage.** A raw NUL in a source made
+  `grep` read it as binary and skip it, so a census missed what it defined;
+  `source-text` refuses control bytes in every source and document type.
+
 - **2026-10-11 — §3: `lib/encoder`.** A display encoder is driven by its own
   driver while the engine scans out, and every encoder driver serves
   `encoder-v1`, whose holder and phase rules know no device, so the endpoint
@@ -1061,7 +1084,7 @@ lives in the charter.
   be a second, weaker trust path; only PID 1 is compiled in.
 - **2026-07-04 — §16.5: bundles are self-contained, and no app code lives in the
   kernel.** Command apps shipped only `Help/` on disk while their `Run` was
-  compiled into the kernel, bypassing `appmgr` verification.
+  compiled into the kernel, bypassing the bundle load gate's verification.
 - **2026-07-04 — §16.5 and `tools/syshelp`: help is authored in the bundle.**
   Programs embedded their help with `include_bytes!`, and two hand-kept lists
   planted it.

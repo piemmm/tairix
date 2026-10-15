@@ -7,10 +7,12 @@
 //! * **Listing** is a *read* of live system state, so — like `ps` — it goes
 //!   through the System Information API: TAIRiX has no
 //!   `/proc` and no mount-table file. `mount` issues the typed, versioned
-//!   `sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod.app/Run`
-//!   and renders one `source on target type fstype (options)` line per
-//!   mount. The query is ungated; the shared paging and rendering live in
-//!   `lib/procinfo` so `mount`, `ps`, and `sysinfo` never duplicate them.
+//!   `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries served by
+//!   `/System/Services/sysinfod.app/Run` and renders one
+//!   `source on target type fstype (options)` line per view binding, a
+//!   carved-out subtree read as `source[/subtree]`. The queries are ungated;
+//!   the shared paging, join, and rendering live in `lib/procinfo` so no
+//!   client duplicates them.
 //! * **Attaching** is privileged — it needs `CAP_FS_MOUNT` — and the **kernel** makes that decision, not
 //!   this tool. `mount` parses and presents a request to the injected
 //!   [`Mounter`] seam; an unauthorised or invalid attempt is refused there
@@ -22,14 +24,12 @@
 //! that touch the outside world are the injected seams:
 //!
 //! * [`Transport`](tairix_procinfo::Transport) / [`Output`](tairix_procinfo::Output)
-//!   — issue the `MOUNT_LIST` query and write each rendered line (shared
-//!   with the other `sysinfo` clients).
+//!   — issue the list queries and write each rendered line (shared with the
+//!   other `sysinfo` clients).
 //! * [`Mounter`] — perform the privileged attach.
 //!
-//! The binary that ships as `mount` wires the real syscall-backed transport,
-//! console output, and mount syscall; tests wire in-memory fixtures, mirroring
-//! the seam discipline of the other userland crates (`ps`'s `Transport`,
-//! `useradd`'s `UserDb`).
+//! No `mount` bundle ships and nothing implements [`Mounter`] outside the
+//! tests, which wire in-memory fixtures (`plans/OPEN-DEFECTS.md`).
 //!
 //! # Fail closed
 //!

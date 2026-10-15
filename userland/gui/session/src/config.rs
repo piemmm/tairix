@@ -22,12 +22,6 @@
 /// Label of the file manager, for launch diagnostics.
 pub const FILES_LABEL: &str = "Files";
 
-/// The file-manager bundle's entry-point path in the system application
-/// store (an OS-provided app, discovered on disk like every other bundle).
-/// The session autostarts it at desktop bring-up, and also launches it to
-/// open a folder the user activated on their desktop.
-pub const FILES_RUN_PATH: &str = "/System/Applications/files.app/Run";
-
 /// Label of the Switchboard monitor service, for launch diagnostics.
 pub const SWITCHBOARD_LABEL: &str = "Switchboard";
 
@@ -42,22 +36,5 @@ pub const SWITCHBOARD_RUN_PATH: &str = "/System/Services/switchboard.app/Run";
 /// Label of the Settings application, for launch diagnostics.
 pub const SETTINGS_LABEL: &str = "Settings";
 
-/// The Settings bundle's entry-point path in the system application store
-/// (`kind = "application"`, like the file manager). The backdrop menu's
-/// *Change Background* row launches it at its Wallpaper pane; Settings
-/// then asks the session to adopt what the user picked over the pinboard
-/// rendezvous, holding no authority to write the store — or even to read
-/// the shipped pictures — itself.
-pub const SETTINGS_RUN_PATH: &str = "/System/Applications/settings.app/Run";
-
 /// Label of the Date & Time app, for launch diagnostics.
 pub const DATETIME_LABEL: &str = "Date & Time";
-
-/// The Date & Time app bundle's entry-point path in the system application
-/// store.
-///
-/// The session never launches this itself: it names it to the console's
-/// elevation broker, which re-authenticates an account holding
-/// `CAP_TIME_SET` and starts it as that account. The session holds no such
-/// capability and must never hold one.
-pub const DATETIME_RUN_PATH: &str = "/System/Applications/datetime.app/Run";

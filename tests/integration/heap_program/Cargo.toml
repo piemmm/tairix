@@ -26,3 +26,6 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The pressure band the fixture reports to drive the heap's trim, which is what
 # reaches `mem_unmap`.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0", default-features = false }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -491,7 +491,7 @@ pub fn users_db_load<Tr: Transport>(
 fn link_vfs_round_trip<B: Block>(env: &dyn QemuEnv, fs: ARXFS<B>) -> Result<(), &'static str> {
     use alloc::boxed::Box;
     use tairix_abi::driver::filesystem::MountFlags;
-    use tairix_kernel_core::fs::{CachedFs, Credentials, Mode, MountBacking, Path, Vfs};
+    use tairix_kernel_core::fs::{Attachment, CachedFs, Credentials, Metadata, Mode, Path, Vfs};
     use tairix_kernel_sec::{GroupId, UserId};
     use tairix_reclaim::{CacheBudget, FreeMemorySource, MemoryPressure, ReclaimOwner};
 
@@ -532,7 +532,7 @@ fn link_vfs_round_trip<B: Block>(env: &dyn QemuEnv, fs: ARXFS<B>) -> Result<(), 
     // volume's nodes are owned by uid/gid 0, so that is the principal.
     let owner = UserId(0);
     let group = GroupId(0);
-    let mut vfs = Vfs::with_default_layout(owner, group);
+    let vfs = Vfs::with_default_layout(owner, group);
     let caps = CapabilitySet::empty();
     let cred = Credentials {
         uid: owner,
@@ -541,14 +541,12 @@ fn link_vfs_round_trip<B: Block>(env: &dyn QemuEnv, fs: ARXFS<B>) -> Result<(), 
         caps: &caps,
     };
     let mount = Path::parse(LINK_MOUNT).map_err(|_| "mount path")?;
-    vfs.mkdir(&cred, &mount, Mode::from_bits(0o755))
-        .map_err(|_| "create the mount point")?;
     let handle = DriverHandle::from_raw(9).map_err(|_| "driver handle")?;
     vfs.mounts_write()
-        .mount(
+        .attach_at(
+            Attachment::new(handle, None, MountFlags::default()),
             mount,
-            MountFlags::default(),
-            Some(MountBacking::new(handle, None)),
+            Metadata::new(owner, group, Mode::from_bits(0o755)),
         )
         .map_err(|_| "mount the volume")?;
     env.log("virtio-qemu: link-vfs volume projected");
@@ -585,10 +583,10 @@ where
     F: FilesystemRead + FilesystemWrite + tairix_abi::driver::filesystem::FilesystemSecurity,
 {
     let alias = under("alias")?;
-    vfs.symlink_via_secured(cred, &alias, cached, planted)
+    vfs.symlink_via_secured(cred, &vfs.cover(&alias), cached, planted)
         .map_err(|_| "symlink through the cache")?;
     if vfs
-        .readlink_via_secured(cred, &alias, cached)
+        .readlink_via_secured(cred, &vfs.cover(&alias), cached)
         .map_err(|_| "readlink through the cache")?
         != planted
     {
@@ -596,7 +594,7 @@ where
     }
     let mut buf = [0u8; 128];
     let read = vfs
-        .read_via_secured(cred, &alias, cached, 0, &mut buf)
+        .read_via_secured(cred, &vfs.cover(&alias), cached, 0, &mut buf)
         .map_err(|_| "read through the link")?;
     if &buf[..read] != tairix_test_arxfs_image::PLANTED_FILE_CONTENT {
         return Err("reading through the link reached the wrong bytes");
@@ -619,7 +617,7 @@ where
 {
     let alias = under("alias")?;
     if vfs
-        .realpath_via_secured(cred, &alias, cached, RealpathMode::Existing)
+        .realpath_via_secured(cred, &vfs.cover(&alias), cached, RealpathMode::Existing)
         .map_err(|_| "realpath through the cache")?
         != alloc::format!("{LINK_MOUNT}/{planted}")
     {
@@ -627,13 +625,13 @@ where
     }
     let vacant = under("absent")?;
     if vfs
-        .realpath_via_secured(cred, &vacant, cached, RealpathMode::Existing)
+        .realpath_via_secured(cred, &vfs.cover(&vacant), cached, RealpathMode::Existing)
         .is_ok()
     {
         return Err("a vacant name must be refused under the strict reading");
     }
     if vfs
-        .realpath_via_secured(cred, &vacant, cached, RealpathMode::Final)
+        .realpath_via_secured(cred, &vfs.cover(&vacant), cached, RealpathMode::Final)
         .map_err(|_| "realpath of a vacant name")?
         != alloc::format!("{LINK_MOUNT}/absent")
     {
@@ -658,13 +656,18 @@ where
 
     let target = under(planted)?;
     let second = under("second")?;
-    vfs.link_via_secured(cred, &target, &second, cached, FinalLink::Keep)
-        .map_err(|_| "link through the cache")?;
+    vfs.link_via_secured(
+        cred,
+        &vfs.cover_pair(&target, &second),
+        cached,
+        FinalLink::Keep,
+    )
+    .map_err(|_| "link through the cache")?;
     let first = vfs
-        .stat_via_secured(cred, &target, cached, FinalLink::Keep)
+        .stat_via_secured(cred, &vfs.cover(&target), cached, FinalLink::Keep)
         .map_err(|_| "stat the first name")?;
     let other = vfs
-        .stat_via_secured(cred, &second, cached, FinalLink::Keep)
+        .stat_via_secured(cred, &vfs.cover(&second), cached, FinalLink::Keep)
         .map_err(|_| "stat the second name")?;
     if first.node != other.node {
         return Err("the two names did not reach one node");
@@ -674,14 +677,19 @@ where
     }
     let mut through = [0u8; 128];
     let via_second = vfs
-        .read_via_secured(cred, &second, cached, 0, &mut through)
+        .read_via_secured(cred, &vfs.cover(&second), cached, 0, &mut through)
         .map_err(|_| "read through the second name")?;
     if &through[..via_second] != tairix_test_arxfs_image::PLANTED_FILE_CONTENT {
         return Err("the second name reached the wrong bytes");
     }
     let mount = Path::parse(LINK_MOUNT).map_err(|_| "mount path")?;
     if vfs
-        .link_via_secured(cred, &mount, &under("dirlink")?, cached, FinalLink::Keep)
+        .link_via_secured(
+            cred,
+            &vfs.cover_pair(&mount, &under("dirlink")?),
+            cached,
+            FinalLink::Keep,
+        )
         .is_ok()
     {
         return Err("a directory must never gain a second name");

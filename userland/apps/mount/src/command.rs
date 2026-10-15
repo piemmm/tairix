@@ -48,8 +48,7 @@ pub struct MountRequest {
 /// * `SOURCE TARGET` — attach `SOURCE` at `TARGET`.
 /// * `-r` / `--read-only` — mount read-only (shorthand for `-o ro`).
 /// * `-t` / `--types` TYPE — the driver filesystem type.
-/// * `-o` / `--options` LIST — a comma-separated subset of
-///   `ro,rw,nosuid,nodev,noexec`.
+/// * `-o` / `--options` LIST — a comma-separated subset of `ro,rw,noexec`.
 /// * `-h` / `--help` — print the usage banner (wins immediately).
 /// * `--` — end option parsing; every later argument is an operand.
 ///
@@ -166,8 +165,10 @@ fn value<'a>(
 /// Parse a comma-separated `-o` option list into the [`MountFlags`] it sets.
 ///
 /// Accepts the policy names TAIRiX recognises: `ro`/`rw` (read-only vs the
-/// read-write default) and the `nosuid`/`nodev`/`noexec` restrictions. `rw` clears nothing on its own — it is the default —
-/// but is accepted so a user can write it explicitly.
+/// read-write default) and the `noexec` restriction. `rw` clears nothing on
+/// its own — it is the default — but is accepted so a user can write it
+/// explicitly. There are no setuid programs or device files to restrict, so
+/// `nosuid` and `nodev` are refused rather than accepted as no-ops.
 ///
 /// # Errors
 ///
@@ -182,8 +183,6 @@ fn parse_options(text: &str) -> Result<MountFlags, MountError> {
         let flag = match element {
             "rw" => MountFlags::default(),
             "ro" => MountFlags::READ_ONLY,
-            "nosuid" => MountFlags::NOSUID,
-            "nodev" => MountFlags::NODEV,
             "noexec" => MountFlags::NOEXEC,
             _ => return Err(MountError::BadOption),
         };
@@ -235,7 +234,7 @@ mod tests {
                 "-t",
                 "arxfs",
                 "-o",
-                "nosuid,nodev",
+                "rw,noexec",
                 "vol",
                 "/Storage/vol",
             ]),
@@ -243,9 +242,7 @@ mod tests {
                 "vol",
                 "/Storage/vol",
                 Some("arxfs"),
-                MountFlags::READ_ONLY
-                    .union(MountFlags::NOSUID)
-                    .union(MountFlags::NODEV),
+                MountFlags::READ_ONLY.union(MountFlags::NOEXEC),
             ))
         );
     }
@@ -266,8 +263,8 @@ mod tests {
     #[test]
     fn attached_short_values_parse() {
         assert_eq!(
-            parse(&["-tarxfs", "-onodev", "v", "/Storage/v"]),
-            Ok(mount("v", "/Storage/v", Some("arxfs"), MountFlags::NODEV))
+            parse(&["-tarxfs", "-onoexec", "v", "/Storage/v"]),
+            Ok(mount("v", "/Storage/v", Some("arxfs"), MountFlags::NOEXEC))
         );
     }
 
@@ -327,9 +324,16 @@ mod tests {
         );
         assert_eq!(parse(&["-o", "", "a", "b"]), Err(MountError::BadOption));
         assert_eq!(
-            parse(&["-o", "ro,,nodev", "a", "b"]),
+            parse(&["-o", "ro,,noexec", "a", "b"]),
             Err(MountError::BadOption)
         );
+        for meaningless in ["nosuid", "nodev"] {
+            assert_eq!(
+                parse(&["-o", meaningless, "a", "b"]),
+                Err(MountError::BadOption),
+                "{meaningless} restricts nothing here"
+            );
+        }
     }
 
     #[test]

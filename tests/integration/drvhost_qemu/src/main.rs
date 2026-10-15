@@ -48,18 +48,15 @@ mod kernel {
 
     use crate::fixture::{MOCK_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
 
-    /// Static heap backing the bump allocator. Sized identically to
-    /// `kernel_arch_boot`'s — the test workload is similar (a single
-    /// boot pipeline plus a handful of `Vec` allocations from the
-    /// host's load path).
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`]. The pointer to `HEAP`
     /// outlives the binary, and the allocator is the only consumer
     /// (deterministic OOM via `FreeListAllocator`).
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// `EventId(4004)` — `AuditEvent::BootCompleted`. Pinned by the
     /// `event_ids_are_unique` test in `kernel/core/src/audit.rs`.

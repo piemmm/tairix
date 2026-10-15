@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(p.target(), Some("/Storage/docs"));
 
         let p = Properties::from_stat("Editor", EntryKind::Link(LinkTarget::Bundle), &s)
-            .with_target("/Apps/Editor.app");
+            .with_target("/System/Applications/Editor.app");
         assert_eq!(p.kind_label(), "Alias to application");
 
         let p = Properties::from_stat("notes", EntryKind::Link(LinkTarget::File), &s);

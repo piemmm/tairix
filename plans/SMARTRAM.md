@@ -48,7 +48,7 @@ added**; the remaining classes are staged
 below  
 Target: TAIRiX  
 Primary code areas: `lib/reclaim`, `kernel/mem`, `kernel/core`, `kernel/sched`, `lib/log`, existing filesystem drivers, existing desktop/session crates, and existing `lib/abi` diagnostics only if a current caller requires them  
-Secondary code areas: `drivers/filesystem/arxfs`, `userland/system/appmgr`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
+Secondary code areas: `drivers/filesystem/arxfs`, `userland/shell/elsh`, `userland/gui/wm`, `userland/gui/taskbar`, `userland/gui/session`, `lib/appload`, `lib/cmdres`, `lib/raster`, `lib/svg`, `lib/font`, `lib/icon`, `lib/theme`, and `lib/path`  
 Repository placement: `plans/SMARTRAM.md`, unless the repository layout in `AGENTS.md` is updated to permit another location
 
 This document defines the staged TAIRiX plan for using otherwise idle RAM as a
@@ -88,7 +88,7 @@ Before touching code, the implementing agent must read and reconcile:
 15. Existing VM pressure, page-reclaim, OOM, page-cache, filesystem-cache,
     scheduler-pressure, logging, and diagnostics code.
 16. `drivers/filesystem/arxfs` and any existing foreign filesystem cache code.
-17. `userland/system/appmgr`, `userland/shell/elsh`, and existing command or
+17. `userland/shell/elsh` and existing command or
     application-resolution helpers.
 18. `userland/gui/wm`, `userland/gui/taskbar`, and `userland/gui/session`.
 19. Existing shared libraries that already own parsing, rendering, path,

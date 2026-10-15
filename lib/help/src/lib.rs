@@ -13,7 +13,7 @@
 //! * **Locate** a document through an injected, capability-scoped read seam
 //!   ([`HelpSource`]). The engine performs no ambient I/O: the caller hands
 //!   it a reader already scoped to one bundle's `Help/` tree, mirroring how
-//!   `appmgr` injects its bundle store.
+//!   the load gate is handed its bundle store.
 //! * **Select** the locale by the deterministic fallback chain ([`load`]):
 //!   the exact requested tag, then the lexicographically first directory of
 //!   the same language that holds the document, then `en-US/`. The served

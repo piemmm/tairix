@@ -582,7 +582,7 @@ fn an_owner_bundle_for_a_process_that_is_not_running_names_no_row() {
         &mut host,
         SwitchboardCommand::OwnerBundle {
             owner: ProcId::from_raw([0xAB; 16]),
-            bundle: OwnerBundleDir::new("/Apps/Stranger.app").expect("in bounds"),
+            bundle: OwnerBundleDir::new("/System/Applications/Stranger.app").expect("in bounds"),
         },
         &NO_AUTHORITY,
     );

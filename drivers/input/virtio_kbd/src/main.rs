@@ -183,6 +183,11 @@ mod program {
         let Ok(mut input) = VirtioInput::open_armed(transport, vhost, |_| host.bind_irq()) else {
             return end(DriverExit::BringupFailed, &[]);
         };
+        if input.is_keyboard() {
+            // A boot waiting for a keyboard learns its keys can now arrive; a
+            // refused mark leaves the keys flowing all the same.
+            let _ = tairix_rt::hw_node_key_source();
+        }
 
         // Pump the device forever, injecting each decoded report for the
         // boot seat (`SEAT_PRIMARY`) — the seat a directly attached input

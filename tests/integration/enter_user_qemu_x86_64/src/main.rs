@@ -87,8 +87,8 @@ mod kernel {
     };
     use tairix_log::{Event, EventId, Sink};
 
-    /// Static heap for the bump allocator (per the production bin).
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -97,7 +97,7 @@ mod kernel {
     /// consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// `EventId` emitted when every boot init phase completed.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);

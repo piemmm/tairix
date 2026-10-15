@@ -2315,6 +2315,13 @@ impl DesktopShell {
         self.present(compositor);
     }
 
+    /// Tell the bar whether the Settings component is installed. Only the
+    /// menus that open it read this, and they are built when asked for, so
+    /// nothing on screen changes with it.
+    pub fn set_settings_installed(&mut self, installed: bool) {
+        self.session.taskbar_mut().set_settings_installed(installed);
+    }
+
     /// Re-lay the bar for an output whose extent changed under the session,
     /// and repaint every surface the desktop owns over the new screen.
     ///

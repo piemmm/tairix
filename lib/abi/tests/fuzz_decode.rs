@@ -99,8 +99,8 @@ use tairix_abi::sysinfo::{
     DmaUnitRecord, GroupDirectoryRecord, IntrospectDomain, KernelMemoryStats, MemoryPressureStats,
     MountRecord, NetInterfaceRatesRequest, PageRequest, ProcessRecord, RamzipStats,
     ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SysinfoRequestHeader,
-    SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
-    SYSINFO_REPLY_STATUS_LEN,
+    SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord, VolumeIoQueueRecord,
+    VolumeIoStatsRecord, SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::touch::{
@@ -259,6 +259,11 @@ fn exercise_sysinfo_records(bytes: &[u8]) {
     }
     if let Ok(rec) = MountRecord::from_bytes(bytes) {
         let redecoded = MountRecord::from_bytes(&rec.to_le_bytes())
+            .expect("round-trip of an accepted record must succeed");
+        assert_eq!(rec, redecoded);
+    }
+    if let Ok(rec) = ViewBindingRecord::from_bytes(bytes) {
+        let redecoded = ViewBindingRecord::from_bytes(&rec.to_le_bytes())
             .expect("round-trip of an accepted record must succeed");
         assert_eq!(rec, redecoded);
     }
@@ -1864,7 +1869,7 @@ fn structured_elevate_requests_with_corrupted_fields_never_panic() {
         ElevateRequest::Launch {
             username: "root",
             password: "hunter2",
-            program: "/System/Applications/datetime.app/Run",
+            program: tairix_abi::DATETIME_RUN_PATH,
         },
         ElevateRequest::Verify {
             password: "hunter2",

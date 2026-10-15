@@ -502,12 +502,13 @@ normalised.
 
 ## Atomic publish, and what a crash leaves
 
-A publish renders the document, writes it whole to a sibling temporary — the
-live name plus `.new`, so each scope has its own and no two can contend —
-flushes it, and renames it over the live document. A crash therefore leaves
-either the old document or the new one — never a torn one. A failed rename
-leaves the old document live and the temporary behind; the next publish
-overwrites the temporary, so a retry converges with no repair pass.
+A publish renders the document and replaces the live one through
+`tairix_rt::replace_file`: written whole to a sibling temporary of its own,
+synced, renamed over the live document, and synced again. A crash therefore
+leaves either the old document or the new one — never a torn one — and a
+refused replace leaves the old document live. The ownership pin a new store
+records is written the same way, so an interrupted create can never leave a
+torn pin.
 
 The same replacement serves the sealed document and the account's master-secret
 record, which is what stops a torn write from producing a record that attests

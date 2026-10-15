@@ -120,7 +120,6 @@ fn the_component_offers_the_places_and_neither_of_the_conventions_rows() {
             "Home".to_string(),
             "Desktop".to_string(),
             "UserFiles".to_string(),
-            "Apps".to_string(),
             "System".to_string(),
         ]
     );
@@ -162,7 +161,7 @@ fn a_rule_opens_the_mounted_volumes_and_only_when_there_are_some() {
     );
     // Sorted by label, after the fixed places.
     assert_eq!(
-        labels(&mounted)[5..],
+        labels(&mounted)[4..],
         ["Backup".to_string(), "Stick".to_string()]
     );
 }

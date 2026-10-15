@@ -1,10 +1,8 @@
-//! The `Run` entry-point binary of the `desktop` application, installed as
-//! a signed bundle in the system application store (`/System/Applications/`)
-//! and started two ways through the one bundle: a graphical login
-//! (`os.loginType graphical`) spawns it as the authenticated user's
-//! session, and a shell user starts it on demand by typing `desktop`
-//! (`plans/DISPLAY.md` D7c, `plans/APPS.md`). The reserved `-h`/`-?`
-//! switches serve the command's own short help; the grammar is otherwise
+//! The `Run` entry-point binary of the desktop session component, installed
+//! as a signed bundle in the component store (`/System/Components/`) and
+//! started by a graphical login (`os.loginType graphical`) as the
+//! authenticated user's session (`plans/DISPLAY.md` D7c). The reserved
+//! `-h`/`-?` switches serve its own short help; the grammar is otherwise
 //! closed (see [`tairix_desktop_session::cli`]).
 //!
 //! This is the client half of the zero-copy, lease-gated present path: the
@@ -108,8 +106,8 @@ mod program {
     };
     use tairix_abi::{
         CapabilityId, Errno, FdWire, Notice, NoticeTopic, Origin, ProcId, WaitFlags, WaitSetOp,
-        WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, STDIN, WAITSET_TIMEOUT_NONE,
-        WAIT_PID_ANY,
+        WaitSourceKind, WaitStatus, DATETIME_RUN_PATH, ENV_SHOWN_NAME, FILES_RUN_PATH,
+        ORIGIN_WIRE_LEN, SETTINGS_RUN_PATH, STDIN, WAITSET_TIMEOUT_NONE, WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
     use tairix_audio::live::{live_captures, RtAudio};
@@ -162,16 +160,16 @@ mod program {
         SwitchboardServe, Trial, TrialEnd, TrialOutcome, WallpaperDesk, WallpaperJob,
         WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
         APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED,
-        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
-        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        DESKTOP_RESIZED, DESKTOP_RESIZED_MESSAGE, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
+        ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, LAYER_FEEDS,
+        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
-        SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
-        SWITCHBOARD_RUN_PATH, TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN,
-        TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
-        WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
+        SETTINGS_LABEL, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
+        TRIAL_CONCLUDED, TRIAL_CONCLUDED_MESSAGE, TRIAL_SHOWN, TRIAL_SHOWN_MESSAGE, USAGE,
+        WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
+        WINDOW_SIZED_MESSAGE,
     };
     use tairix_desktop_session::{
         preview_source, resolution_ask, ScreensaverPreview, ScreensaverServe,
@@ -6645,14 +6643,9 @@ mod program {
         }
 
         fn create(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-            // Exclusive, so a name already taken is the kernel's own refusal and
-            // nothing is ever replaced; never through a link planted there.
-            let flags = tairix_abi::OpenFlags::WRITE
-                .union(tairix_abi::OpenFlags::CREATE)
-                .union(tairix_abi::OpenFlags::EXCLUSIVE)
-                .union(tairix_abi::OpenFlags::NO_FOLLOW);
-            let file =
-                tairix_rt::File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+            // A name already taken is the kernel's own refusal, so nothing is
+            // ever replaced, nor written through a link planted there.
+            let file = tairix_rt::create_new(path.as_bytes()).map_err(Errno::from_syscall)?;
             let written = tairix_rt::fs_write_all(file.fd(), 0, bytes)
                 .and_then(|()| file.sync().map_err(Errno::from_syscall));
             if written.is_err() {
@@ -8429,6 +8422,24 @@ mod program {
                     );
                 }
             }
+            ShellOutcome::Taskbar(TaskbarResponse::OpenSettings) => {
+                let _ = LaunchCtx {
+                    launched,
+                    apps: &apps.service,
+                    server,
+                    sink,
+                    windows,
+                    identity,
+                }
+                .launch(
+                    shell,
+                    compositor,
+                    SETTINGS_RUN_PATH,
+                    SETTINGS_LABEL,
+                    &[],
+                    None,
+                );
+            }
             ShellOutcome::Taskbar(TaskbarResponse::OpenNetworkSettings) => {
                 // The network's settings are a section of Settings: a running
                 // Settings is handed the pane, a fresh one opens on it.
@@ -9047,6 +9058,11 @@ mod program {
         // identity actually became knowable rather than once per rescan.
         programs.adopted |= programs.bundles != loaded.bundles;
         programs.bundles = loaded.bundles;
+        shell.set_settings_installed(
+            SETTINGS_RUN_PATH
+                .strip_suffix("/Run")
+                .is_some_and(|bundle| programs.bundles.holds(bundle)),
+        );
     }
 
     /// Ask for a fresh program catalogue, adopting it at once when there is no

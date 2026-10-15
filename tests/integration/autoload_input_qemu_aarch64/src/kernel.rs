@@ -16,12 +16,8 @@ use tairix_util::fmt::format_hex_u64;
 // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-/// Static boot heap, mirroring the production aarch64 kernel binary's
-/// `.bss`-resident heap (zeroed by the boot trampoline).
-///
-/// `static mut` because the bump allocator hands out disjoint slices via
-/// an atomic cursor; the storage is otherwise never aliased.
-static mut HEAP: Heap = Heap::ZERO;
+/// The global allocator's arena.
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -29,7 +25,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
 /// to QEMU once all six witnesses have appeared: the per-kind
@@ -39,10 +35,10 @@ static ALLOCATOR: FreeListAllocator =
 /// unlocked the encrypted root end to end), the reserved
 /// `DISPLAY_ENDPOINT` bind (the autoloaded framebuffer display service
 /// came up on its granted surface), the AW4 shell round trip (the
-/// `appmgr` load of `/System/Commands/sleep.app` — the windowed terminal
+/// load-gate load of `/System/Commands/sleep.app` — the windowed terminal
 /// received every typed key edge, wrote the line to its hosted shell, and
 /// the shell resolved and ran the typed program), and the pty `Ctrl-C`
-/// job-control round trip (the `appmgr` load of `/System/Commands/true.app`
+/// job-control round trip (the load-gate load of `/System/Commands/true.app`
 /// after the `sleep` round trip — the recovered `true` the shell could
 /// only run once `Ctrl-C` interrupted the parked foreground `sleep`,
 /// `plans/PTY.md`). The guest exits only after the host has everything it
@@ -111,7 +107,7 @@ impl AutoloadInputSink {
     }
 
     /// Latch the terminal round-trip and the pty `Ctrl-C` job-control
-    /// witnesses from an `appmgr` `APP_LOADED` record's `bundle` field,
+    /// witnesses from a load-gate `APP_LOADED` record's `bundle` field,
     /// each attributed to the *exact bundle the shell loaded* — never a
     /// cumulative delivery count (the drift `plans/OPEN-DEFECTS.md` D20
     /// removed):

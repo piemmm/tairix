@@ -157,7 +157,7 @@ impl ProcName {
     ///   [`tairix_abi::BundleEntry::Run`]) never names a process — every
     ///   bundle shares that leaf. The owning bundle directory's stem names
     ///   it instead, with a [`tairix_abi::BUNDLE_SUFFIX`] (`.app`) suffix
-    ///   stripped, so `/Apps/Example.app/Run` attests `Example` and a
+    ///   stripped, so `/System/Applications/Example.app/Run` attests `Example` and a
     ///   driver bundle `/System/Drivers/input/usb_hid/Run` attests
     ///   `usb_hid`.
     /// * Any other path names its final non-empty `/`-separated component.
@@ -2038,7 +2038,7 @@ mod tests {
         // An application bundle's `.app` suffix is stripped: the stem is
         // the command/program name, matching the spawn syscall's bundle
         // naming.
-        let app = ProcName::from_path(b"/Apps/Example.app/Run");
+        let app = ProcName::from_path(b"/System/Applications/Example.app/Run");
         assert_eq!(app.as_str(), "Example");
         let store = ProcName::from_path(b"/System/Commands/ps.app/Run");
         assert_eq!(store.as_str(), "ps");
@@ -2049,7 +2049,7 @@ mod tests {
 
         // A directory named exactly `.app` has an empty stem; the suffix is
         // then kept rather than attesting an empty name.
-        let bare_suffix = ProcName::from_path(b"/Apps/.app/Run");
+        let bare_suffix = ProcName::from_path(b"/System/Applications/.app/Run");
         assert_eq!(bare_suffix.as_str(), ".app");
 
         // A `Run` with no owning directory keeps the whole path bytes so

@@ -226,6 +226,9 @@ after the eventq is live (`DRIVER_OK`, buffers posted, device kicked), so the
 audited `irq_bind` syscall is a truthful "keyboard ready" witness — binding any
 earlier advertised readiness while the device could still silently drop a
 keystroke (the lost keypress that made the autoload-input vertical flaky).
+A device that is a keyboard (`VirtioInput::is_keyboard`) then marks its node a
+key source (`hw_node_key_source`), the fact a boot waiting for a keyboard
+waits on ([Hardware detection](hardware-detection.md)).
 `poll` parks in the kernel
 (`irq_wait` through the host's `notify_wait`) while no event is pending and
 acknowledges the device each cycle (`Transport::ack_interrupt`), so an idle
@@ -265,7 +268,9 @@ layout on a boot keyboard or boot mouse, and refuses any other interface with
 its reason logged; the descriptor is logged in hex at bind. An interface
 carrying nothing the seat serves — a receiver's vendor-defined interface — is
 declined rather than failed: the driver ends cleanly, recorded at info, and the
-device manager leaves the node unbound. Every keyboard,
+device manager leaves the node unbound. An interface with a keyboard
+application marks its node a key source (`hw_node_key_source`) before its
+first report is read. Every keyboard,
 mouse, touch pad and touch screen application on the interface is then served:
 each report is a blocking interrupt-IN URB the host controller answers when
 the device reports, so the driver parks between reports, and each record goes

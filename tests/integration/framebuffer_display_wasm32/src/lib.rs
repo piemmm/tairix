@@ -86,12 +86,8 @@ mod kernel {
 
     // --- Per-instance boot heap --------------------------------------
 
-    /// Per-instance boot heap. The display vertical runs only on the
-    /// boot context (logical CPU 0), which owns this linear memory.
-    ///
-    /// `static mut` because the bump allocator hands out disjoint slices
-    /// via an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -99,7 +95,7 @@ mod kernel {
     /// is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     // --- Static scan-out surface -------------------------------------
 

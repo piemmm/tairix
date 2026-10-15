@@ -7,9 +7,9 @@ per command or topic (`AGENTS.md` §16.5). `man <cmd>` resolves `<cmd>`
 through the **same** store-then-`PATH` policy the shell launches by
 (`lib/cmdres`), so the page shown always documents the program the shell
 would run; when no ordered candidate matches a bare word it falls back to
-the bounded, breadth-first **recursive bundle search** of the app stores —
-the machine-wide `/Apps`, then the user's own `<HOME>/Apps`
-(`tairix_cmdres::search_roots`) — finding a bundle's help however deeply
+the bounded, breadth-first **recursive bundle search** of the user's own
+`<HOME>/Commands` and `<HOME>/Applications` (`tairix_cmdres::search_roots`) —
+finding a bundle's help however deeply
 it was filed (never descending into another `.app`; an exhausted directory
 budget is reported, never silently "not found"). It then renders that
 bundle's document in the active locale through

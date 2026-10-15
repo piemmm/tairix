@@ -20,9 +20,11 @@ kernel-attested `Origin`, into an admitted, committed system-log record.
   exact claim. Every path fails closed.
 - `store` — the pure segment placement derivation the production filesystem
   sink uses (`segment_placement_for` → the `/System/Logs/<stream>/` directory
-  and the `<id>.seg` file path, read from the segment's own header), plus the
-  well-known identity paths (`MACHINE_ID_PATH`, `LOG_ATTESTATION_KEY_PATH`).
-  Host-tested independently of any syscall.
+  and the `<segment id>-<boot id>.seg` file path, read from the segment's own
+  header), the numbering a restart resumes from (`next_segment_id`, one past
+  the highest segment a stream directory holds), plus the well-known identity
+  paths (`MACHINE_ID_PATH`, `LOG_ATTESTATION_KEY_PATH`). Host-tested
+  independently of any syscall.
 
 The persistence engine (`Journal`/`SegmentStore`), the record model, the
 stream/level vocabulary, and the admission authority all live in `tairix-log`;
@@ -37,19 +39,22 @@ pure-Rust userland runtime `tairix-rt`, and at startup:
 - reads its installation identity — the non-secret machine-id
   (`/System/Security/MachineId`) and the optional log-attestation key
   (`/System/Security/Keys/LogAttestation`, which seals `audit`/`security`
-  segments — without it those two streams fail closed at rotation);
+  segments — without it every record on those two streams is refused);
 - reads its own attested `Origin` (`self_origin`) and the per-boot `BootId`;
+- numbers each stream's segments on from the highest its directory holds;
 - builds a `Journal` over an FS-backed `SegmentStore` (`FsSegmentStore`) that
-  writes each closed segment as its own immutable file under
-  `/System/Logs/<stream>/`, deriving the placement from the segment's own
-  header and `fs_sync`-ing it;
+  writes each closed segment as its own file under `/System/Logs/<stream>/`,
+  deriving the placement from the segment's own header, creating it
+  exclusively so no segment is ever overwritten, and `fs_sync`-ing it;
 - binds `LOG_INGRESS_ENDPOINT` (unrestricted-sender; the reserved id needs
   `CAP_IPC_BIND_PRIVILEGED` to bind) and serves: receive a
   request, attest the peer origin (`call_peer_origin`), stamp the current
   monotonic + wall time, and hand it to `serve`.
 
-Missing machine-id or boot-id fails the service closed (no logging bound to a
-fabricated genesis). On the host the binary is an inert stub.
+Missing machine-id or boot-id, or a stream directory it cannot list, fails the
+service closed with its reason on standard error (no logging bound to a
+fabricated genesis, and no segment numbered over one already stored). On the
+host the binary is an inert stub.
 
 ## What it does not do (yet)
 

@@ -150,8 +150,7 @@ there is a reason to doubt it, which is exactly the row above it.
 The persisted record is `/System/Settings/Time/state`: a small fail-closed
 document holding the last successful sync instant and the last-seen instant,
 rewritten on each successful sync. `/System/Settings` is one of the two
-writable paths under `/System` (§16.2) and is already mounted
-`nosuid,nodev,noexec`. A missing or corrupt record resolves to "no last-seen
+writable paths under `/System` (§16.2) and is already mounted `noexec`. A missing or corrupt record resolves to "no last-seen
 instant" — which makes the stale-boot row simply not fire, never a guess
 (§5.4).
 

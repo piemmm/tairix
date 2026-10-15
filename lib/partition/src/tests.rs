@@ -677,3 +677,76 @@ fn table_push_fails_closed_past_the_cap() {
         Err(PartitionError::TooManyPartitions)
     );
 }
+
+// ----------------------------------------------------------------------
+// Growing the root to the medium
+// ----------------------------------------------------------------------
+
+/// A disk of `disk_blocks` holding the three-partition layout an image
+/// writes, the root ending at `root_end`.
+fn image_on(disk_blocks: u64, root_end: u32) -> VecBlock {
+    let mut disk = VecBlock::new(512, disk_blocks);
+    let parts = [
+        boot(2048, 2048),
+        system(4096, 4096),
+        root(8192, root_end - 8192),
+    ];
+    let mut sector = mbr::encode(&parts).expect("encodes");
+    sector[440..444].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    disk.put(0, &sector);
+    disk
+}
+
+#[test]
+fn the_root_grows_to_the_end_of_a_larger_medium() {
+    let mut disk = image_on(65_536, 16_384);
+    let before = disk.data[..MBR_SECTOR_LEN].to_vec();
+    let grown = grow_root_to_medium(&mut disk).expect("grows");
+    assert_eq!(grown, Some(root(8192, 65_536 - 8192)));
+    let table = parse_partition_table(&mut disk).expect("the table still parses");
+    assert_eq!(
+        table.first_of_type(PartitionType::ARXFSRoot),
+        Some(root(8192, 65_536 - 8192))
+    );
+    // Every byte but the root entry's end is as it was: the disk signature,
+    // the other entries, the boot code.
+    let after = &disk.data[..MBR_SECTOR_LEN];
+    let entry = mbr::PARTITION_TABLE_OFFSET + 2 * mbr::PARTITION_ENTRY_LEN;
+    for (offset, (old, new)) in before.iter().zip(after).enumerate() {
+        let in_end =
+            (entry + 5..entry + 8).contains(&offset) || (entry + 12..entry + 16).contains(&offset);
+        if !in_end {
+            assert_eq!(old, new, "byte {offset} changed");
+        }
+    }
+}
+
+#[test]
+fn a_root_that_fills_its_medium_is_left_alone() {
+    let mut disk = image_on(16_384, 16_384);
+    let before = disk.data.clone();
+    assert_eq!(grow_root_to_medium(&mut disk), Ok(None));
+    assert_eq!(disk.data, before, "nothing was written");
+}
+
+#[test]
+fn a_root_with_a_partition_after_it_is_left_alone() {
+    let mut disk = VecBlock::new(512, 65_536);
+    let parts = [boot(2048, 2048), root(4096, 4096), system(16_384, 4096)];
+    disk.put(0, &mbr::encode(&parts).expect("encodes"));
+    let before = disk.data.clone();
+    assert_eq!(grow_root_to_medium(&mut disk), Ok(None));
+    assert_eq!(disk.data, before);
+}
+
+#[test]
+fn a_root_grows_no_further_than_the_mbr_can_address() {
+    let mut sector = mbr::encode(&[boot(2048, 2048), root(8192, 8192)]).expect("encodes");
+    let grown = mbr::grow_root(&mut sector, u64::MAX).expect("grows");
+    assert_eq!(grown, Some(root(8192, u32::MAX - 8192)));
+    let table = mbr::parse(&sector).expect("the grown table is still valid");
+    assert_eq!(
+        table.first_of_type(PartitionType::ARXFSRoot),
+        Some(root(8192, u32::MAX - 8192))
+    );
+}

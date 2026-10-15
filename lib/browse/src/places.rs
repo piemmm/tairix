@@ -2,7 +2,7 @@
 //! draws down the left edge of its window.
 //!
 //! Two kinds of row share one list. The **user's own places** — Home, Desktop,
-//! `UserFiles`, and the machine's application and system roots — are fixed: they
+//! `UserFiles`, and the machine's system root — are fixed: they
 //! are always offered, in one order, because they are where a session's work
 //! lives. The **volumes** are whatever is mounted right now, learned from the
 //! live mount table and each carrying the storage medium it actually sits on
@@ -53,9 +53,6 @@ const HOME_LABEL: &str = "Home";
 /// The folders inside the user's home the rail offers, in rail order.
 const USER_FOLDERS: [&str; 2] = [HOME_DESKTOP_DIR, HOME_USER_FILES_DIR];
 
-/// The machine-wide application store's root component.
-const APPS_ROOT: &str = "Apps";
-
 /// The OS-provided system tree's root component.
 const SYSTEM_ROOT: &str = "System";
 
@@ -65,13 +62,7 @@ const SYSTEM_ROOT: &str = "System";
 /// body face at the desktop scale, so every fixed row's label fits without
 /// truncation at any UI density. A volume whose label is longer simply
 /// truncates in its row, as any over-long label does.
-pub const FIXED_LABELS: [&str; 5] = [
-    HOME_LABEL,
-    USER_FOLDERS[0],
-    USER_FOLDERS[1],
-    APPS_ROOT,
-    SYSTEM_ROOT,
-];
+pub const FIXED_LABELS: [&str; 4] = [HOME_LABEL, USER_FOLDERS[0], USER_FOLDERS[1], SYSTEM_ROOT];
 
 /// The places a bare open — one naming no location — tries in turn for the
 /// user whose home is `home`: their `UserFiles`, then the home itself. A
@@ -95,7 +86,7 @@ pub enum PlaceKind {
     Home,
     /// A fixed folder inside the user's home (`Desktop`, `UserFiles`).
     UserFolder,
-    /// A machine-wide root (the application store, the system tree).
+    /// The machine-wide system tree.
     SystemRoot,
     /// A mounted volume, learned from the live mount table.
     Volume,
@@ -228,13 +219,6 @@ impl Places {
                 });
             }
         }
-        rows.push(Place {
-            label: String::from(APPS_ROOT),
-            icon: IconKind::Library,
-            components: alloc::vec![String::from(APPS_ROOT)],
-            kind: PlaceKind::SystemRoot,
-            available: true,
-        });
         rows.push(Place {
             label: String::from(SYSTEM_ROOT),
             icon: IconKind::Folder,

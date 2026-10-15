@@ -275,6 +275,8 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4263 | Error | `VOLUME_WRITEBACK_FAILED`   | audit  |
 | 4264 | Info  | `HW_NODE_REMOVED`           | audit  |
 | 4265 | Warn  | `HW_NODE_REMOVE_REFUSED`    | audit  |
+| 4267 | Warn  | `VOLUME_RESERVE_ENTERED`    | audit  |
+| 4268 | Info  | `VOLUME_RESERVE_LEFT`       | audit  |
 
 `PROCESS_SIGNAL_CROSS_PRINCIPAL` is the `signal` syscall's cross-principal
 authority decision (`plans/NEW-TASKBAR.md` T11). `signal` first tries the
@@ -688,9 +690,10 @@ The `USERS_DB_*` pair reports the boot-time users-database load
 (`tairix_kernel_core::users::load_users_db`, `plans/PI.md` P11): given the
 mounted root volume's `FilesystemRead` + `FilesystemSecurity` driver, the
 kernel resolves `/System/Security/Users` through the VFS's §5.3-checked
-per-inode delegation (`Vfs::read_via_secured`, with the root mount backed
-by the volume's driver), bounds the file against the format's 64 KiB
-maximum *before* reading it, and parses it through the fail-closed
+per-inode delegation (`Vfs::read_bounded_via_secured`, with the root mount
+backed by the volume's driver), resolving the path once and bounding the file
+against the format's 64 KiB maximum *before* reading it, and parses it through
+the fail-closed
 `tairix-users` parser. The read runs under the kernel's bootstrap identity
 — `uid 0`, no capabilities, no bypass (`AGENTS.md` §5.1) — and any refusal
 leaves the system with **no** database, so every login refuses

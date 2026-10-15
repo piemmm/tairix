@@ -8,10 +8,9 @@
 //! tools (`df`'s `Mounts`, `du`'s `Walk`, `ln`'s `FileSystem`).
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
-use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::{Errno, FileStat};
+use tairix_procinfo::Namespace;
 
 /// The facts a filesystem answers about one path.
 pub trait Filesystem {
@@ -42,10 +41,10 @@ pub trait Filesystem {
     /// The canonical path of `path` — every link followed, every `..`
     /// applied — as the kernel itself resolves it.
     ///
-    /// `%m` needs it: the mount point holding a path is the longest mount
-    /// prefix of the path's *canonical* spelling, so a link into another
-    /// volume reports the volume it really lands on rather than the one its
-    /// name was typed under.
+    /// `%m` needs it: the binding holding a path is the one covering the
+    /// path's *canonical* spelling, so a link into another volume reports the
+    /// volume it really lands on rather than the one its name was typed
+    /// under.
     ///
     /// # Errors
     ///
@@ -53,26 +52,15 @@ pub trait Filesystem {
     fn canonicalize(&self, path: &str) -> Result<String, Errno>;
 }
 
-/// One mounted volume, as the report needs it.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Mount {
-    /// The mount point's path in the caller's own namespace.
-    pub target: String,
-    /// The filesystem type the mount was registered with, empty for a mount
-    /// whose backing declares none.
-    pub fstype: String,
-    /// The volume's live usage and geometry, as its driver reports it.
-    pub usage: VolumeStats,
-}
-
-/// Reads the system's mount table.
+/// Reads the namespace: the attached volumes and the view bindings onto
+/// them.
 pub trait Mounts {
-    /// Every mount the caller may see, in the order the system reports them.
+    /// The namespace as the system reports it.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] the System Information service raises.
-    fn list(&self) -> Result<Vec<Mount>, Errno>;
+    fn namespace(&self) -> Result<Namespace, Errno>;
 }
 
 /// Resolves a numeric owner id to an account name (`%U`).

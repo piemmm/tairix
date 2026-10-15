@@ -926,6 +926,7 @@ name = "tairix-abi-trap"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
 ]
 
 [[package]]
@@ -957,6 +958,7 @@ dependencies = [
  "tairix-appconf",
  "tairix-appdata",
  "tairix-appstore",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-proglib",
  "tairix-rt",
@@ -972,13 +974,6 @@ dependencies = [
  "tairix-crypto",
  "tairix-log",
  "tairix-path",
-]
-
-[[package]]
-name = "tairix-appmgr"
-version = "0.0.0"
-dependencies = [
- "tairix-appload",
 ]
 
 [[package]]
@@ -1092,6 +1087,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audio",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -1104,6 +1100,7 @@ dependencies = [
  "tairix-abi",
  "tairix-audio",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-log",
  "tairix-rt",
@@ -1114,6 +1111,7 @@ dependencies = [
 name = "tairix-basename"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -1165,6 +1163,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-buildcfg"
+version = "0.0.0"
+
+[[package]]
 name = "tairix-caps"
 version = "0.0.0"
 dependencies = [
@@ -1180,6 +1182,7 @@ name = "tairix-cat"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -1198,6 +1201,7 @@ name = "tairix-chmod"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -1220,6 +1224,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-appdata",
+ "tairix-buildcfg",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -1236,6 +1241,7 @@ dependencies = [
 name = "tairix-clear"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-termcap",
@@ -1311,6 +1317,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appconf",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-crypto",
  "tairix-fuzzseed",
@@ -1325,6 +1332,7 @@ name = "tairix-configure"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-netconfig",
  "tairix-procinfo",
@@ -1377,6 +1385,7 @@ name = "tairix-cp"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -1410,6 +1419,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-abi-sys",
+ "tairix-buildcfg",
 ]
 
 [[package]]
@@ -1442,6 +1452,7 @@ name = "tairix-curses"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-fuzzseed",
  "tairix-rt",
  "tairix-termcap",
@@ -1467,6 +1478,7 @@ name = "tairix-datetime"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-controls",
  "tairix-font",
  "tairix-fsmeta",
@@ -1489,6 +1501,7 @@ dependencies = [
  "tairix-appstore",
  "tairix-audio",
  "tairix-browse",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-colour",
  "tairix-controls",
@@ -1553,6 +1566,7 @@ name = "tairix-devmgr"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-devmatch",
  "tairix-hash",
@@ -1570,6 +1584,7 @@ name = "tairix-df"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -1580,6 +1595,7 @@ dependencies = [
 name = "tairix-dirname"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -1606,6 +1622,7 @@ name = "tairix-discoveryd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-collections",
  "tairix-discoveryd",
@@ -1637,6 +1654,9 @@ dependencies = [
 [[package]]
 name = "tairix-dma-barrier"
 version = "0.0.0"
+dependencies = [
+ "tairix-buildcfg",
+]
 
 [[package]]
 name = "tairix-dmaengine"
@@ -1655,6 +1675,7 @@ name = "tairix-dns-sd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-discovery",
  "tairix-help",
  "tairix-net",
@@ -1676,6 +1697,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-linkclient",
  "tairix-rt",
@@ -1687,6 +1709,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-linkclient",
  "tairix-rng",
@@ -1699,6 +1722,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-dma-barrier",
  "tairix-drvrt",
  "tairix-edid",
@@ -1711,6 +1735,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-codec",
  "tairix-drvrt",
  "tairix-rt",
@@ -1722,6 +1747,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-codec",
  "tairix-drvrt",
  "tairix-i2c",
@@ -1735,6 +1761,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-log",
  "tairix-rt",
@@ -1747,6 +1774,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-rt",
  "tairix-virtio",
@@ -1757,6 +1785,7 @@ name = "tairix-drv-bus-i2c-bcm2835"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-i2cbus",
  "tairix-linkclient",
@@ -1768,6 +1797,7 @@ name = "tairix-drv-bus-i2c-brcmstb"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-i2cbus",
  "tairix-rt",
@@ -1778,6 +1808,7 @@ name = "tairix-drv-bus-mailbox-vcmailbox"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-drvrt",
  "tairix-log",
@@ -1799,6 +1830,7 @@ name = "tairix-drv-bus-pcie-brcm"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-pci",
  "tairix-rt",
@@ -1810,6 +1842,7 @@ name = "tairix-drv-bus-usb"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-drvrt",
  "tairix-inline",
@@ -1824,6 +1857,7 @@ name = "tairix-drv-bus-usb-vl805"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-rt",
  "tairix-usb",
@@ -1843,6 +1877,7 @@ name = "tairix-drv-clock-bcm2711-cprman"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-clock",
  "tairix-drvrt",
  "tairix-fuzzseed",
@@ -1854,6 +1889,7 @@ name = "tairix-drv-clock-bcm2711-dvp"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-clock",
  "tairix-drvrt",
  "tairix-rt",
@@ -1864,6 +1900,7 @@ name = "tairix-drv-clock-rpi-firmware"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-clock",
  "tairix-drvrt",
  "tairix-log",
@@ -1877,6 +1914,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audiochan",
+ "tairix-buildcfg",
  "tairix-devmatch",
  "tairix-drvrt",
  "tairix-edid",
@@ -1892,6 +1930,7 @@ name = "tairix-drv-display-bcm2711-hvs"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-display",
  "tairix-drvrt",
  "tairix-encoder",
@@ -1907,6 +1946,7 @@ name = "tairix-drv-display-framebuffer"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-display",
  "tairix-drvrt",
  "tairix-rt",
@@ -1928,6 +1968,7 @@ name = "tairix-drv-dma-bcm2835"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-devmatch",
  "tairix-dma-barrier",
  "tairix-dmaengine",
@@ -1995,6 +2036,7 @@ name = "tairix-drv-input-usb-hid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-fuzzseed",
  "tairix-hid",
@@ -2017,6 +2059,7 @@ name = "tairix-drv-input-virtio-kbd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-rt",
  "tairix-virtio",
@@ -2028,6 +2071,7 @@ name = "tairix-drv-irq-brcmstb-l2"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-devmatch",
  "tairix-drvrt",
  "tairix-log",
@@ -2039,6 +2083,7 @@ name = "tairix-drv-network-genet"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-net",
  "tairix-netchan",
@@ -2058,6 +2103,7 @@ name = "tairix-drv-network-virtio-net-driver"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-netchan",
  "tairix-rt",
@@ -2070,6 +2116,7 @@ name = "tairix-drv-rtc-ds3231"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-i2c",
  "tairix-linkclient",
@@ -2081,6 +2128,7 @@ name = "tairix-drv-rtc-goldfish"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-rt",
 ]
@@ -2090,6 +2138,7 @@ name = "tairix-drv-rtc-mc146818"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-rt",
 ]
@@ -2099,6 +2148,7 @@ name = "tairix-drv-rtc-pcf85063a"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-i2c",
  "tairix-linkclient",
@@ -2110,6 +2160,7 @@ name = "tairix-drv-rtc-pcf8523"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-i2c",
  "tairix-linkclient",
@@ -2121,6 +2172,7 @@ name = "tairix-drv-rtc-pl031"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-rt",
 ]
@@ -2130,6 +2182,7 @@ name = "tairix-drv-rtc-rpi"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-rt",
  "tairix-vcmailbox",
@@ -2149,6 +2202,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-blkclient",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-drvrt",
  "tairix-fsprobe",
@@ -2165,6 +2219,7 @@ name = "tairix-drv-storage-raid-member"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-log",
  "tairix-raid",
@@ -2177,6 +2232,7 @@ name = "tairix-drv-storage-usb-msd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-drvrt",
  "tairix-log",
@@ -2199,6 +2255,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-blkclient",
+ "tairix-buildcfg",
  "tairix-drvrt",
  "tairix-fsprobe",
  "tairix-log",
@@ -2236,6 +2293,7 @@ name = "tairix-du"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -2257,6 +2315,7 @@ name = "tairix-edit"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-curses",
  "tairix-help",
  "tairix-rt",
@@ -2269,6 +2328,7 @@ name = "tairix-elsh"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-cmdres",
  "tairix-complete",
  "tairix-curses",
@@ -2304,6 +2364,7 @@ dependencies = [
 name = "tairix-false"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
 ]
@@ -2332,6 +2393,7 @@ dependencies = [
  "tairix-appdata",
  "tairix-appstore",
  "tairix-browse",
+ "tairix-buildcfg",
  "tairix-controls",
  "tairix-display",
  "tairix-font",
@@ -2357,6 +2419,7 @@ name = "tairix-flock"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-cmdres",
  "tairix-help",
  "tairix-rt",
@@ -2387,6 +2450,7 @@ name = "tairix-fontd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-font",
  "tairix-fontface",
@@ -2433,6 +2497,7 @@ dependencies = [
  "tairix-appconf",
  "tairix-appdata",
  "tairix-binfmt",
+ "tairix-buildcfg",
  "tairix-complete",
  "tairix-curses",
  "tairix-fsmeta",
@@ -2506,6 +2571,7 @@ name = "tairix-greeter-service"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-controls",
  "tairix-cursor",
@@ -2533,6 +2599,7 @@ name = "tairix-groupadd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-useradmin",
@@ -2545,6 +2612,7 @@ name = "tairix-groupdel"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-useradmin",
@@ -2565,6 +2633,7 @@ name = "tairix-head"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -2597,6 +2666,7 @@ name = "tairix-host"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-net",
  "tairix-resolver",
@@ -2660,6 +2730,7 @@ name = "tairix-init"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-enrolment",
  "tairix-log",
@@ -2715,6 +2786,7 @@ name = "tairix-itest-harness"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-crypto",
  "tairix-fdt",
  "tairix-net",
@@ -2748,6 +2820,7 @@ name = "tairix-journald"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-log",
  "tairix-rt",
@@ -2771,6 +2844,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-riscv64",
  "tairix-arch-x86_64",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-crypto",
  "tairix-devmatch",
@@ -2784,6 +2858,7 @@ dependencies = [
  "tairix-drv-storage-emmc2",
  "tairix-drv-storage-virtio-blk",
  "tairix-drvhost",
+ "tairix-enrolment",
  "tairix-fdt",
  "tairix-fsprobe",
  "tairix-hash",
@@ -2805,11 +2880,13 @@ dependencies = [
  "tairix-kernel-syscall",
  "tairix-kernel-virtio",
  "tairix-log",
+ "tairix-netconfig",
  "tairix-partition",
  "tairix-pci",
  "tairix-reclaim",
  "tairix-supervisor",
  "tairix-sync",
+ "tairix-sysconfig",
  "tairix-test-arxfs-image",
  "tairix-test-encrypted-root-image",
  "tairix-users",
@@ -3012,6 +3089,7 @@ dependencies = [
 name = "tairix-kernel-sched-api"
 version = "0.0.0"
 dependencies = [
+ "loom",
  "tairix-abi",
  "tairix-arch-api",
  "tairix-collections",
@@ -3110,6 +3188,7 @@ name = "tairix-link"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -3128,6 +3207,7 @@ name = "tairix-ln"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -3150,6 +3230,7 @@ name = "tairix-login"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-curses",
  "tairix-fsmeta",
@@ -3178,6 +3259,7 @@ name = "tairix-ls"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-curses",
  "tairix-fsmeta",
  "tairix-glob",
@@ -3194,6 +3276,7 @@ name = "tairix-lspci"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-devids",
  "tairix-help",
  "tairix-procinfo",
@@ -3206,6 +3289,7 @@ name = "tairix-lsusb"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-devids",
  "tairix-help",
  "tairix-procinfo",
@@ -3218,6 +3302,7 @@ name = "tairix-man"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-cmdres",
  "tairix-help",
  "tairix-log",
@@ -3232,6 +3317,7 @@ name = "tairix-mdadm"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -3247,6 +3333,7 @@ name = "tairix-mkdir"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -3298,6 +3385,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appdata",
  "tairix-audio",
+ "tairix-buildcfg",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -3323,6 +3411,7 @@ name = "tairix-mv"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -3368,6 +3457,7 @@ name = "tairix-netmap"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-controls",
  "tairix-devids",
  "tairix-discovery",
@@ -3390,6 +3480,7 @@ name = "tairix-netstack"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-collections",
  "tairix-crypto",
@@ -3422,6 +3513,7 @@ dependencies = [
  "tairix-appconf",
  "tairix-appdata",
  "tairix-browse",
+ "tairix-buildcfg",
  "tairix-colour",
  "tairix-controls",
  "tairix-font",
@@ -3464,6 +3556,7 @@ name = "tairix-passwd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-useradmin",
@@ -3490,6 +3583,7 @@ name = "tairix-ping"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-resolver",
  "tairix-rng",
@@ -3503,6 +3597,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audio",
+ "tairix-buildcfg",
  "tairix-curses",
  "tairix-help",
  "tairix-player",
@@ -3533,6 +3628,7 @@ name = "tairix-printf"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -3543,6 +3639,7 @@ name = "tairix-procinfo"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-fuzzseed",
  "tairix-reclaim",
  "tairix-resref",
@@ -3568,6 +3665,7 @@ name = "tairix-ps"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -3632,6 +3730,7 @@ name = "tairix-readlink"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -3652,6 +3751,7 @@ name = "tairix-reset"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-termcap",
@@ -3693,6 +3793,7 @@ name = "tairix-rm"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -3704,6 +3805,7 @@ name = "tairix-rmdir"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-path",
  "tairix-rt",
@@ -3725,6 +3827,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-abi-trap",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-hash",
  "tairix-log",
@@ -3740,6 +3843,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-binfmt",
+ "tairix-buildcfg",
  "tairix-collections",
  "tairix-crc32",
  "tairix-disasm",
@@ -3770,6 +3874,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-appdata",
+ "tairix-buildcfg",
  "tairix-colour",
  "tairix-controls",
  "tairix-font",
@@ -3791,6 +3896,7 @@ name = "tairix-seatmgr"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-log",
  "tairix-rt",
@@ -3801,6 +3907,7 @@ name = "tairix-seq"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -3811,6 +3918,7 @@ name = "tairix-servicectl"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
 ]
@@ -3833,6 +3941,7 @@ dependencies = [
  "tairix-appdata",
  "tairix-audio",
  "tairix-browse",
+ "tairix-buildcfg",
  "tairix-colour",
  "tairix-controls",
  "tairix-font",
@@ -3860,6 +3969,7 @@ name = "tairix-sleep"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -3883,6 +3993,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-audio",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-hash",
  "tairix-log",
@@ -3910,6 +4021,7 @@ name = "tairix-ss"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-resolver",
@@ -3933,6 +4045,7 @@ name = "tairix-stat"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-fsmeta",
  "tairix-help",
  "tairix-procinfo",
@@ -3945,6 +4058,7 @@ name = "tairix-stress"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -3976,6 +4090,7 @@ name = "tairix-switchboard"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-colour",
  "tairix-controls",
  "tairix-font",
@@ -4047,6 +4162,7 @@ name = "tairix-sysinfo"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-resref",
@@ -4059,6 +4175,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audio",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-collections",
  "tairix-hash",
@@ -4072,6 +4189,7 @@ name = "tairix-sysmon"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-curses",
  "tairix-help",
  "tairix-procinfo",
@@ -4085,6 +4203,7 @@ name = "tairix-tail"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -4117,6 +4236,7 @@ name = "tairix-tee"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -4127,6 +4247,7 @@ name = "tairix-telnet"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-fuzzseed",
  "tairix-help",
  "tairix-net",
@@ -4150,6 +4271,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-appdata",
+ "tairix-buildcfg",
  "tairix-colour",
  "tairix-controls",
  "tairix-display",
@@ -4355,6 +4477,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-audio",
+ "tairix-buildcfg",
  "tairix-rt",
  "tairix-soundtheme",
  "tairix-test-audio-wire",
@@ -4405,6 +4528,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-blkclient",
+ "tairix-buildcfg",
  "tairix-caps",
  "tairix-rt",
 ]
@@ -4739,6 +4863,7 @@ name = "tairix-test-driver-register-program"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -4816,6 +4941,7 @@ dependencies = [
 name = "tairix-test-el0-spinner"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -4823,6 +4949,7 @@ dependencies = [
 name = "tairix-test-el0-yielder"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -4868,6 +4995,7 @@ name = "tairix-test-entry-hygiene"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
 ]
 
 [[package]]
@@ -4978,6 +5106,7 @@ name = "tairix-test-file-map"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -5114,6 +5243,7 @@ name = "tairix-test-fp-probe"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -5180,6 +5310,7 @@ name = "tairix-test-framestats"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-log",
  "tairix-procinfo",
  "tairix-rt",
@@ -5243,6 +5374,7 @@ dependencies = [
 name = "tairix-test-heap"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-reclaim",
  "tairix-rt",
 ]
@@ -5483,6 +5615,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-kalloc",
  "tairix-kernel-core",
  "tairix-kernel-sched-eevdf",
 ]
@@ -5492,6 +5625,7 @@ name = "tairix-test-mem-map"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -5550,6 +5684,7 @@ name = "tairix-test-mem-pin"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -5639,6 +5774,7 @@ name = "tairix-test-memsoak"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-procinfo",
  "tairix-rt",
 ]
@@ -5678,6 +5814,7 @@ name = "tairix-test-mmio-map"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -6205,6 +6342,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-root-grow-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-root-unlock-admission-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -6342,6 +6490,7 @@ name = "tairix-test-sandbox"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-log",
  "tairix-rt",
  "tairix-sandbox",
@@ -6415,6 +6564,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-kalloc",
  "tairix-kernel-sched-mlfq",
 ]
 
@@ -6423,6 +6573,7 @@ name = "tairix-test-service-ceiling"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -6503,6 +6654,7 @@ name = "tairix-test-signal"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -6695,6 +6847,7 @@ dependencies = [
 name = "tairix-test-spawn-session-program"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -6753,6 +6906,7 @@ name = "tairix-test-stack-grow"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -6878,6 +7032,7 @@ name = "tairix-test-stalltrace"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -6973,6 +7128,7 @@ dependencies = [
 name = "tairix-test-svgtext"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-font",
  "tairix-log",
  "tairix-raster",
@@ -7030,6 +7186,7 @@ dependencies = [
 name = "tairix-test-syscall-resume-program"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -7069,6 +7226,7 @@ name = "tairix-test-tcpecho"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
  "tairix-test-netstack-wire",
 ]
@@ -7078,6 +7236,7 @@ name = "tairix-test-tcpserve"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
  "tairix-test-netstack-wire",
 ]
@@ -7087,6 +7246,7 @@ name = "tairix-test-threads"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-parallel",
  "tairix-rt",
 ]
@@ -7248,6 +7408,7 @@ dependencies = [
 name = "tairix-test-tp-probe"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -7431,6 +7592,7 @@ name = "tairix-test-wait"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -7510,6 +7672,7 @@ name = "tairix-test-watchdog-service"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-log",
  "tairix-rt",
 ]
@@ -7519,6 +7682,7 @@ name = "tairix-test-wild-fault"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-rt",
 ]
 
@@ -7609,6 +7773,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-browse",
+ "tairix-buildcfg",
  "tairix-colour",
  "tairix-controls",
  "tairix-font",
@@ -7642,6 +7807,7 @@ name = "tairix-timed"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-log",
  "tairix-net",
  "tairix-procinfo",
@@ -7669,6 +7835,7 @@ name = "tairix-top"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-curses",
  "tairix-help",
  "tairix-procinfo",
@@ -7691,6 +7858,7 @@ name = "tairix-traceroute"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-net",
  "tairix-procinfo",
@@ -7703,6 +7871,7 @@ dependencies = [
 name = "tairix-true"
 version = "0.0.0"
 dependencies = [
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
 ]
@@ -7720,6 +7889,7 @@ name = "tairix-unlink"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -7730,6 +7900,7 @@ name = "tairix-unmount"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -7751,6 +7922,7 @@ name = "tairix-useradd"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-useradmin",
@@ -7771,6 +7943,7 @@ name = "tairix-userdel"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-useradmin",
@@ -7783,6 +7956,7 @@ name = "tairix-usermod"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-useradmin",
@@ -7806,6 +7980,7 @@ name = "tairix-users-cli"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-useradmin",
@@ -7833,6 +8008,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-browse",
+ "tairix-buildcfg",
  "tairix-controls",
  "tairix-display",
  "tairix-font",
@@ -7854,6 +8030,7 @@ name = "tairix-vim"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-curses",
  "tairix-help",
  "tairix-rt",
@@ -7918,6 +8095,7 @@ name = "tairix-wc"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",
@@ -7929,6 +8107,7 @@ name = "tairix-whoami"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-procinfo",
  "tairix-rt",
@@ -7939,6 +8118,7 @@ name = "tairix-widgets"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-colour",
  "tairix-controls",
  "tairix-font",
@@ -7956,6 +8136,7 @@ name = "tairix-window"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-display",
  "tairix-geometry",
  "tairix-input",
@@ -7974,6 +8155,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-appdata",
+ "tairix-buildcfg",
  "tairix-controls",
  "tairix-font",
  "tairix-fuzzseed",
@@ -8107,6 +8289,7 @@ dependencies = [
  "tairix-appstore",
  "tairix-arch-api",
  "tairix-browse",
+ "tairix-buildcfg",
  "tairix-cc",
  "tairix-colour",
  "tairix-controls",
@@ -8162,6 +8345,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-fwcfg",
  "tairix-geometry",
+ "tairix-greeter-service",
  "tairix-hash",
  "tairix-help",
  "tairix-icon",
@@ -8236,6 +8420,7 @@ name = "tairix-yes"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-buildcfg",
  "tairix-help",
  "tairix-rt",
  "tairix-util",

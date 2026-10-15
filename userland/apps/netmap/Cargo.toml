@@ -79,3 +79,6 @@ tairix-devids = { path = "../../../lib/devids", version = "=0.0.0", features = [
 
 [lints]
 workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

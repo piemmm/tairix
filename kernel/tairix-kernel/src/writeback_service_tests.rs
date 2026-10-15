@@ -26,13 +26,14 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::driver::filesystem::{
-    FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity, WritebackHost,
+    FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity, VolumeHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
 use tairix_kernel_core::fs::writeback;
 use tairix_kernel_core::fs::LateFilesystem;
 use tairix_kernel_core::test_sink::TestSink;
+use tairix_kernel_core::AuditEvent;
 use tairix_sync::SpinLock;
 
 use crate::kernel_fs::KernelFs;
@@ -79,9 +80,10 @@ struct Fixture {
     now_ns: AtomicU64,
     armed: bool,
     reports: AtomicU64,
+    audit: &'static TestSink,
 }
 
-impl WritebackHost for Fixture {
+impl VolumeHost for Fixture {
     fn now_ns(&self) -> Option<u64> {
         if !self.armed {
             return None;
@@ -92,6 +94,10 @@ impl WritebackHost for Fixture {
     fn writeback_due(&self, volume: DriverHandle, deadline_ns: Option<u64>) {
         self.reports.fetch_add(1, Ordering::AcqRel);
         self.mounts.note_writeback_due(volume, deadline_ns);
+    }
+
+    fn reserve_crossed(&self, volume: DriverHandle, in_reserve: bool) {
+        VolumeHost::reserve_crossed(&self.mounts, volume, in_reserve);
     }
 }
 
@@ -117,10 +123,11 @@ impl Fixture {
             now_ns: AtomicU64::new(0),
             armed,
             reports: AtomicU64::new(0),
+            audit: sink(),
         }));
         fixture
             .mounts
-            .install_writeback_host(fixture)
+            .install_volume_host(fixture, fixture.audit)
             .expect("the timer installs");
         if armed {
             fixture.mounts.arm_writeback();
@@ -354,4 +361,50 @@ fn a_timer_not_yet_armed_makes_every_operation_publish() {
         "with nothing yet to fire a window, durability is never deferred"
     );
     assert_eq!(fixture.mounts.earliest_writeback_due(), None);
+}
+
+#[test]
+fn a_volume_running_down_to_its_reserve_is_recorded_both_ways() {
+    let (fixture, volume) = Fixture::with_volume();
+    let driver = fixture.mounts.driver(volume.handle).expect("registered");
+    let entered = AuditEvent::VolumeReserveEntered.id().0;
+    let left = AuditEvent::VolumeReserveLeft.id().0;
+    let body = alloc::vec![0x5Au8; 4096];
+    let mut files = 0;
+    {
+        let mut driver = driver.lock();
+        let root = driver.root();
+        loop {
+            let name = alloc::format!("f{files}");
+            if driver
+                .create(root, name.as_bytes(), NodeKind::RegularFile)
+                .is_err()
+                || driver.write_at(root, name.as_bytes(), 0, &body).is_err()
+            {
+                break;
+            }
+            files += 1;
+            assert!(files < 10_000, "the volume never filled");
+        }
+        driver.flush().expect("publish");
+    }
+    assert!(
+        fixture.audit.event_ids().contains(&entered),
+        "filling the volume is recorded"
+    );
+    assert!(!fixture.audit.event_ids().contains(&left));
+
+    {
+        let mut driver = driver.lock();
+        let root = driver.root();
+        for file in 0..files / 2 {
+            let name = alloc::format!("f{file}");
+            driver.remove(root, name.as_bytes()).expect("delete");
+        }
+        driver.flush().expect("publish");
+    }
+    assert!(
+        fixture.audit.event_ids().contains(&left),
+        "and so is the room the deletes made"
+    );
 }

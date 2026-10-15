@@ -26,9 +26,9 @@
 //! their on-disk owners, modes, and ACLs keep governing access.
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeStats, WritebackHost,
+    AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
+    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -196,8 +196,12 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for GroupMappedFs<F> {
         self.inner.flush()
     }
 
-    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
-        self.inner.set_writeback_host(volume, host);
+    fn set_volume_host(&mut self, volume: DriverHandle, host: &'static dyn VolumeHost) {
+        self.inner.set_volume_host(volume, host);
+    }
+
+    fn set_allocation_class(&mut self, class: AllocationClass) {
+        self.inner.set_allocation_class(class);
     }
 }
 
@@ -282,7 +286,9 @@ impl<F: FilesystemRead + FilesystemAttrsProvider> FilesystemAttrs for GroupMappe
     }
 }
 
-impl<F: FilesystemRead + FilesystemAttrsProvider> FilesystemAttrsProvider for GroupMappedFs<F> {
+impl<F: FilesystemRead + FilesystemWrite + FilesystemAttrsProvider> FilesystemAttrsProvider
+    for GroupMappedFs<F>
+{
     fn attrs_fs(&mut self) -> Option<&mut dyn FilesystemAttrsFs> {
         // Support is the wrapped driver's fact; the returned view is the
         // mapped wrapper so authorisation sees the mapped ownership.

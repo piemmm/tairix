@@ -86,7 +86,7 @@ unsafe fn slot(array: *const *const c_char, index: usize) -> *const c_char {
 fn lays_out_argv_and_envp_with_nul_terminators() {
     let block = build_block(
         &[b"prog", b"--flag", b"value"],
-        &[b"PATH=/Apps", b"LANG=C"],
+        &[b"TERM=vt100", b"LANG=C"],
         0xDEAD_BEEF_F00D_CAFE,
     );
     let mut scratch = vec![0u8; 4096];
@@ -103,7 +103,7 @@ fn lays_out_argv_and_envp_with_nul_terminators() {
         assert_eq!(cstr_bytes(slot(rt.argv, 2)), b"value");
         assert!(slot(rt.argv, 3).is_null());
 
-        assert_eq!(cstr_bytes(slot(rt.envp, 0)), b"PATH=/Apps");
+        assert_eq!(cstr_bytes(slot(rt.envp, 0)), b"TERM=vt100");
         assert_eq!(cstr_bytes(slot(rt.envp, 1)), b"LANG=C");
         assert!(slot(rt.envp, 2).is_null());
     }

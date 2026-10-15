@@ -66,3 +66,6 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 tairix-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
     "program",
 ] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

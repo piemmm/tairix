@@ -93,6 +93,9 @@ pub mod net;
 
 pub mod pressure;
 
+mod replace;
+pub use replace::{replace_file, ParentDir};
+
 pub mod servicenotice;
 
 pub mod shm;
@@ -342,6 +345,9 @@ const NUM_HW_SELF_NODE: u64 = SyscallNumber::HW_SELF_NODE.as_u16() as u64;
 
 /// `hw_node_settle` syscall number (as above).
 const NUM_HW_NODE_SETTLE: u64 = SyscallNumber::HW_NODE_SETTLE.as_u16() as u64;
+
+/// `hw_node_key_source` syscall number (as above).
+const NUM_HW_NODE_KEY_SOURCE: u64 = SyscallNumber::HW_NODE_KEY_SOURCE.as_u16() as u64;
 
 /// `console_relocate` syscall number (as above).
 const NUM_CONSOLE_RELOCATE: u64 = SyscallNumber::CONSOLE_RELOCATE.as_u16() as u64;
@@ -1158,6 +1164,25 @@ pub fn hw_node_settle() -> i64 {
     // `CAP_HW_EMIT` and resolves the caller's own matched node on the far side
     // of the trap. The call takes no arguments and no memory operand.
     let ret = unsafe { raw_syscall(NUM_HW_NODE_SETTLE, [0, 0, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Mark the calling driver's own node a key source
+/// (`SyscallNumber::HW_NODE_KEY_SOURCE`), returning the raw signed register:
+/// `0` once recorded, else `-errno`.
+///
+/// A keyboard's driver calls this once its device's key presses reach the
+/// seat, so a boot waiting for a keyboard knows a key can now arrive. Gated by
+/// [`tairix_abi::CapabilityId::INPUT_INJECT`]; the kernel marks the caller's
+/// own matched node only, a caller with none fails closed, and the mark ends
+/// with the driver.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 0-or-`-errno` encoding.
+pub fn hw_node_key_source() -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // `CAP_INPUT_INJECT` and resolves the caller's own matched node on the far
+    // side of the trap. The call takes no arguments and no memory operand.
+    let ret = unsafe { raw_syscall(NUM_HW_NODE_KEY_SOURCE, [0, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 
@@ -6448,6 +6473,24 @@ pub fn create(path: &[u8]) -> Result<File, i64> {
         OpenFlags::WRITE
             .union(OpenFlags::CREATE)
             .union(OpenFlags::TRUNCATE),
+    )
+}
+
+/// Create the file at `path` for writing, refusing any name already taken —
+/// a file, a directory, or a link, which is never followed — rather than
+/// truncating or writing through it.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of [`File::open`]: `-AlreadyExists`
+/// when `path` is taken.
+pub fn create_new(path: &[u8]) -> Result<File, i64> {
+    File::open(
+        path,
+        OpenFlags::WRITE
+            .union(OpenFlags::CREATE)
+            .union(OpenFlags::EXCLUSIVE)
+            .union(OpenFlags::NO_FOLLOW),
     )
 }
 

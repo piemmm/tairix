@@ -41,8 +41,8 @@ applib — 管理桌面的程序库
 隐藏仅关乎展示，而非权限：无论目录如何设置，启动包始终受加载器的签名和
 能力（capability）检查约束。
 
-`applib rescan` 遍历应用程序存储（`/System/Commands`、`/System/Applications`
-和 `/Apps`，或者在指定 `--user` 时遍历调用者自身的 `<home>/Commands` 和
+`applib rescan` 遍历应用程序存储（`/System/Commands` 和 `/System/Applications`，
+或者在指定 `--user` 时遍历调用者自身的 `<home>/Commands` 和
 `<home>/Applications`），读取每个包的清单，
 并注册每一个请求列出且尚未编目的应用程序。现有记录（包括管理员的重命名和屏蔽）
 绝不会被干扰，且清单不可读或畸形的包将被跳过并计数，绝不会因此中止任务。
@@ -71,8 +71,8 @@ applib — 管理桌面的程序库
 
 - `applib` — 按文件夹显示解析后的程序库。
 - `applib list --category Games` — 显示单个文件夹。
-- `applib add /Apps/chess.app` — 按清单要求注册一个包。
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/chess.app` — 按清单要求注册一个包。
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   在一个明确的文件夹下注册一个未声明列出的包。
 - `applib remove os.tairix.chess` — 按标识符删除一个条目。
 - `applib hide os.tairix.chess --user` — 仅从你自己的程序库中隐藏它。

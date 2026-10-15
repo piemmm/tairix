@@ -42,9 +42,10 @@ what is built.
   carries the listed path, the available/total bytes of the volume backing
   it — available, not merely unallocated, so a format withholding a reserve
   does not promise space it would refuse (the System Information API's
-  `MOUNT_LIST` query through the shared `tairix_procinfo` mount walk and its
-  `VolumeBytes` derivation, best-effort: an unreachable service, or a
-  backing mount that tracks no capacity, simply omits the figure) — and the
+  namespace — the volume the binding covering the path shows, through the
+  shared `tairix_procinfo::Namespace` join and its `VolumeBytes`
+  derivation, best-effort: an unreachable service, or a volume that tracks
+  no capacity, simply omits the figure) — and the
   item and tagged counts. A status band below
   the windows shows the active window, sort order, and hidden/filter state,
   and a context command menu lists the active window's keys — or an error
@@ -391,8 +392,8 @@ host-tested end to end.
   volume's optional `tairix_procinfo::VolumeBytes` — the one derivation
   every surface reads a mount record's figures through, so this
   application computes none of its own); the production seam walks the
-  same System Information API `MOUNT_LIST` pages the status line's
-  available-space figure uses (`tairix_procinfo::for_each_mount`). Each
+  System Information API `MOUNT_LIST` pages, one row per attached volume
+  (`tairix_procinfo::for_each_mount`). Each
   row states available of total, matching the header. The overlay lists one row
   per volume (an unreported size renders `-`, never a zero-byte disk),
   Enter re-roots the whole session at the chosen target, and a refused

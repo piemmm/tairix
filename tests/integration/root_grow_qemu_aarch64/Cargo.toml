@@ -1,0 +1,27 @@
+[package]
+name = "tairix-test-root-grow-qemu-aarch64"
+description = "QEMU integration test: boot the production aarch64 pipeline over the encrypted-root image planted on a medium four times its size, and prove the root grows to fill it — its partition to the medium's end, then the volume into the partition."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-root-grow-qemu-aarch64"
+path = "src/main.rs"
+
+# The production aarch64 boot pipeline with only the audit sink swapped, kept
+# in its own bin so the QEMU-exit shortcut can never reach a production build.
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

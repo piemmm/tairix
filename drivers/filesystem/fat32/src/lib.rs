@@ -2536,6 +2536,7 @@ impl<B: Block> FilesystemStats for Fat32<B> {
             u32::try_from(self.layout.bytes_per_cluster).map_err(|_| DriverError::DeviceFault)?;
         Ok(VolumeStats {
             block_size: bytes_per_cluster,
+            in_reserve: false,
             total_blocks: u64::from(self.layout.max_cluster) - 1,
             free_blocks: self.free_clusters,
             avail_blocks: self.free_clusters,

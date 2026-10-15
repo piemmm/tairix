@@ -6,17 +6,11 @@
 //! `cargo xtask cfg-check` clean.
 
 fn main() {
-    for name in [
-        "entry_hygiene",
-        "entry_hygiene_x86_64",
-        "entry_hygiene_aarch64",
-        "entry_hygiene_riscv64",
-    ] {
-        println!("cargo:rustc-check-cfg=cfg({name})");
+    println!("cargo:rustc-check-cfg=cfg(entry_hygiene)");
+    for arch in tairix_buildcfg::NATIVE_ARCHES {
+        println!("cargo:rustc-check-cfg=cfg(entry_hygiene_{arch})");
     }
-    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    if os == "none" && matches!(arch.as_str(), "x86_64" | "aarch64" | "riscv64") {
+    if let Some(arch) = tairix_buildcfg::native_arch() {
         println!("cargo:rustc-cfg=entry_hygiene");
         println!("cargo:rustc-cfg=entry_hygiene_{arch}");
     }

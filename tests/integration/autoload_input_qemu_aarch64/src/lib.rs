@@ -134,7 +134,7 @@ pub const TERMINAL_COMMAND: &str = "sleep 3600\n";
 
 /// The on-disk bundle path the shell loads for [`TERMINAL_COMMAND`]. The
 /// guest attributes the AW4 round-trip witness to *this exact bundle load*
-/// (the `bundle` field of the `appmgr` load record), not to a fragile
+/// (the `bundle` field of the load gate's load record), not to a fragile
 /// cumulative delivery count: `sleep` is loaded only by the shell running
 /// the typed command, so the witness is uniquely and unambiguously that
 /// event. Its load is also the readiness point at which the guest emits

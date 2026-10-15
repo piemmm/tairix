@@ -30,8 +30,8 @@ use crate::ingress::{Admission, Ingress};
 use crate::ratelimit::{DropReport, RateDecision, RateLimiter};
 use crate::record::{CallerContent, LogRecord};
 use crate::segment::{
-    SegmentError, SegmentHeader, SegmentWriter, MAX_RECORD_PAYLOAD, SEGMENT_FOOTER_LEN,
-    SEGMENT_HEADER_LEN,
+    FinishedSegment, SegmentError, SegmentHeader, SegmentWriter, MAX_RECORD_PAYLOAD,
+    SEGMENT_FOOTER_LEN, SEGMENT_HEADER_LEN,
 };
 use crate::stream::Stream;
 use crate::{Level, STREAM_COUNT};
@@ -49,10 +49,14 @@ pub trait SegmentStore {
 
     /// Persist one closed segment image.
     ///
+    /// A segment is immutable once written, so a store refuses an image whose
+    /// place is already taken rather than overwrite it.
+    ///
     /// # Errors
     ///
     /// Returns the store's own error if the segment cannot be persisted. The
-    /// journal propagates it and does not treat the segment as committed.
+    /// journal keeps the segment and offers it again before accepting another
+    /// record on its stream.
     fn store_segment(&mut self, bytes: &[u8]) -> Result<(), Self::Error>;
 }
 
@@ -76,19 +80,28 @@ impl<E> From<SegmentError> for JournalError<E> {
     }
 }
 
+/// What a stream's working buffer holds.
+enum Slot<'a> {
+    /// Nothing: no segment is open.
+    Free(&'a mut [u8]),
+    /// The open segment.
+    Open(SegmentWriter<'a>),
+    /// A closed segment the store has not yet taken. The stream accepts
+    /// nothing more until the store takes it.
+    Unstored(FinishedSegment<'a>),
+}
+
 /// Per-stream persistence state.
 ///
 /// One per closed [`Stream`], indexed by [`Stream::as_u8`]. It holds the
-/// stream's working buffer (either free, or owned by an open writer), the
-/// segment-local string dictionary the open segment encodes through, the
-/// running chain hash a fresh segment continues from (the stream genesis until
-/// the first segment closes, then the last closed segment's hash), and the next
-/// segment id.
+/// stream's working buffer, the segment-local string dictionary the open
+/// segment encodes through, the running chain hash a fresh segment continues
+/// from (the stream genesis until the first segment closes, then the last
+/// closed segment's hash), and the next segment id.
 struct StreamState<'a> {
-    /// The free backing buffer; `None` while [`Self::writer`] holds it.
-    buffer: Option<&'a mut [u8]>,
-    /// The open segment, if any. Holds [`Self::buffer`] while open.
-    writer: Option<SegmentWriter<'a>>,
+    /// The working buffer. Empty only if a segment could not be opened or
+    /// closed over it, which the journal's checks before both rule out.
+    slot: Option<Slot<'a>>,
     /// The open segment's string dictionary (reset on each segment open).
     dict: DictionaryBuilder,
     /// The hash a fresh segment chains from: the stream genesis, then the last
@@ -96,6 +109,36 @@ struct StreamState<'a> {
     prev_hash: Sha256Digest,
     /// The next segment id to assign for this stream.
     next_segment_id: u64,
+}
+
+/// The working buffer the journal service gives each stream, which bounds the
+/// segment it builds there: a full buffer rotates the segment. 64 KiB keeps
+/// rotation infrequent at a modest heap cost across the streams, and the
+/// system volume's reserve is sized over it.
+pub const SEGMENT_BUF_BYTES: usize = 64 * 1024;
+
+/// What ingress stamps one record with: the CPU it arrived on, that CPU's own
+/// record sequence, and the clock readings taken as it was admitted.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Stamp {
+    /// The CPU the record arrived on.
+    pub cpu: u32,
+    /// The record's place in that CPU's own sequence.
+    pub cpu_seq: u64,
+    /// Monotonic time at admission.
+    pub monotonic: Duration64,
+    /// The wall-clock reading at admission, with its trust state.
+    pub wall: WallClockReading,
+}
+
+/// Where and when one record is appended: its stream and the sequence
+/// ingress reserved for it, and the CPU and monotonic time that stamp it.
+#[derive(Copy, Clone)]
+struct Placement {
+    stream: Stream,
+    seq: u64,
+    cpu: u32,
+    monotonic: Duration64,
 }
 
 /// The journal persistence engine.
@@ -152,8 +195,7 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
             // stream agree by construction.
             let stream = Stream::ALL[i];
             StreamState {
-                buffer: bufs[i].take(),
-                writer: None,
+                slot: bufs[i].take().map(Slot::Free),
                 dict: DictionaryBuilder::new(),
                 prev_hash: stream_genesis(&machine_id_hash, stream.genesis_label(), &boot_id),
                 next_segment_id: 0,
@@ -183,6 +225,18 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
     #[must_use]
     pub fn with_rate_limit(mut self, limiter: RateLimiter) -> Self {
         self.limiter = limiter;
+        self
+    }
+
+    /// Number each stream's segments on from `next_ids`, indexed by
+    /// [`Stream::as_u8`]: one past the highest segment a stream already holds
+    /// on disk, so a restart neither reuses nor overwrites one. Use as a
+    /// builder: `Journal::new(..).continuing_segments(ids)`.
+    #[must_use]
+    pub fn continuing_segments(mut self, next_ids: [u64; STREAM_COUNT]) -> Self {
+        for (state, next) in self.streams.iter_mut().zip(next_ids) {
+            state.next_segment_id = next;
+        }
         self
     }
 
@@ -314,50 +368,58 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
     /// [`JournalError::Segment`] if it cannot fit a fresh segment, or
     /// [`JournalError::Store`] if persisting a rotated segment fails. On any
     /// error nothing of this record is committed.
-    #[allow(clippy::too_many_arguments)]
     pub fn commit(
         &mut self,
         admission: &Admission,
-        cpu: u32,
-        cpu_seq: u64,
-        monotonic: Duration64,
-        wall: WallClockReading,
+        stamp: Stamp,
         caller: CallerContent<'_>,
         data: &[(FieldName<'_>, FieldValue<'_>)],
         scratch: &mut [u8],
     ) -> Result<(), JournalError<S::Error>> {
-        self.place(
-            admission.stream(),
-            admission.seq(),
-            admission.origin(),
-            admission.source().as_str(),
-            admission.effective_level(),
+        let Stamp {
             cpu,
             cpu_seq,
             monotonic,
             wall,
+        } = stamp;
+        let at = Placement {
+            stream: admission.stream(),
+            seq: admission.seq(),
+            cpu,
+            monotonic,
+        };
+        let record = LogRecord {
+            effective_level: admission.effective_level(),
+            cpu_seq,
+            wall,
+            origin: admission.origin(),
+            source_name: admission.source().as_str(),
             caller,
             data,
-            scratch,
-        )
+        };
+        self.place(at, &record, scratch)
     }
 
     /// Close every open segment, persisting each to the store.
     ///
     /// Called on shutdown and before anchoring. Each stream keeps its running
     /// chain hash, so the next record reopens a segment that chains onto the
-    /// one just closed.
+    /// one just closed. Every stream is offered to the store even when one
+    /// fails, and a segment the store refuses is kept for the next attempt.
     ///
     /// # Errors
     ///
-    /// [`JournalError::Segment`] if a segment cannot be finalised (an audit or
-    /// security segment with no seal key), or [`JournalError::Store`] if a
-    /// closed segment cannot be persisted.
+    /// The first stream's [`JournalError::Store`] when a closed segment cannot
+    /// be persisted.
     pub fn flush(&mut self) -> Result<(), JournalError<S::Error>> {
+        let mut first = Ok(());
         for stream in Stream::ALL {
-            self.close(stream)?;
+            let closed = self.close(stream);
+            if first.is_ok() {
+                first = closed;
+            }
         }
-        Ok(())
+        first
     }
 
     /// Import a CPU's early-boot ring into the `boot` stream.
@@ -392,16 +454,21 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
             // opaque at the producer's monotonic time. The body already carries
             // its own `cpu_seq`; the ring's `drained.cpu_seq` is consumed only
             // by the eviction loss accounting below.
-            let body_len = drained.body_len;
-            self.append_opaque(
-                Stream::Boot,
+            let at = Placement {
+                stream: Stream::Boot,
                 seq,
                 cpu,
-                drained.monotonic,
-                wall,
-                body_len,
-                scratch,
-            )?;
+                monotonic: drained.monotonic,
+            };
+            let body = scratch.get(..drained.body_len);
+            let appended = match body {
+                Some(body) => self.append_opaque_at(at, wall, body),
+                None => Err(JournalError::Encode(Errno::BufferTooSmall)),
+            };
+            if appended.is_err() {
+                self.ingress.release(Stream::Boot, seq);
+            }
+            appended?;
         }
         if let Some(loss) = ring.take_loss() {
             self.emit_boot_loss(&loss, monotonic, wall, scratch)?;
@@ -433,18 +500,20 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
     /// [`JournalError::Segment`] if a `security` segment cannot be opened or
     /// sealed (e.g. no seal key — it fails closed, never silently drops), or
     /// [`JournalError::Store`] if persisting a rotated segment fails.
-    #[allow(clippy::too_many_arguments)]
     pub fn note_spoof(
         &mut self,
         admission: &Admission,
         requested_stream: Option<Stream>,
         requested_source: Option<&str>,
-        cpu: u32,
-        cpu_seq: u64,
-        monotonic: Duration64,
-        wall: WallClockReading,
+        stamp: Stamp,
         scratch: &mut [u8],
     ) -> Result<(), JournalError<S::Error>> {
+        let Stamp {
+            cpu,
+            cpu_seq,
+            monotonic,
+            wall,
+        } = stamp;
         let seq = self.ingress.reserve(Stream::Security);
         let data = [
             (
@@ -476,49 +545,53 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
             message: "caller spoof attempt rejected",
         };
         let source = self.own_source;
-        let origin = self.own_origin;
-        self.place(
-            Stream::Security,
+        let at = Placement {
+            stream: Stream::Security,
             seq,
-            origin,
-            source.as_str(),
-            Level::Warn,
             cpu,
-            cpu_seq,
             monotonic,
+        };
+        let record = LogRecord {
+            effective_level: Level::Warn,
+            cpu_seq,
             wall,
+            origin: self.own_origin,
+            source_name: source.as_str(),
             caller,
-            &data,
-            scratch,
-        )
+            data: &data,
+        };
+        self.place(at, &record, scratch)
     }
 
-    /// Encode and append one record, rotating on a full segment.
-    #[allow(clippy::too_many_arguments)]
+    /// Encode and append `record` at `at`, rotating on a full segment. A
+    /// record refused here hands its sequence back, so the stream's sequence
+    /// stays gap-free.
     fn place(
         &mut self,
-        stream: Stream,
-        seq: u64,
-        origin: Origin,
-        source: &str,
-        level: Level,
-        cpu: u32,
-        cpu_seq: u64,
-        monotonic: Duration64,
-        wall: WallClockReading,
-        caller: CallerContent<'_>,
-        data: &[(FieldName<'_>, FieldValue<'_>)],
+        at: Placement,
+        record: &LogRecord<'_>,
         scratch: &mut [u8],
     ) -> Result<(), JournalError<S::Error>> {
-        let record = LogRecord {
-            effective_level: level,
-            cpu_seq,
-            wall,
-            origin,
-            source_name: source,
-            caller,
-            data,
-        };
+        let placed = self.place_at(at, record, scratch);
+        if placed.is_err() {
+            self.ingress.release(at.stream, at.seq);
+        }
+        placed
+    }
+
+    fn place_at(
+        &mut self,
+        at: Placement,
+        record: &LogRecord<'_>,
+        scratch: &mut [u8],
+    ) -> Result<(), JournalError<S::Error>> {
+        let Placement {
+            stream,
+            seq,
+            cpu,
+            monotonic,
+        } = at;
+        let wall = record.wall;
         // Never let a single record's payload exceed the segment record cap,
         // so `append_record` never rejects a record that fits `scratch` for
         // being oversized; a genuinely too-large record fails on encode.
@@ -527,8 +600,7 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
         loop {
             self.ensure_open(stream, seq, monotonic, wall)?;
             let st = &mut self.streams[i];
-            // `ensure_open` guarantees the writer is present.
-            let Some(writer) = st.writer.as_mut() else {
+            let Some(Slot::Open(writer)) = st.slot.as_mut() else {
                 return Err(JournalError::Segment(SegmentError::MissingFooter));
             };
             match record.encode(&mut scratch[..cap], &mut st.dict) {
@@ -564,25 +636,22 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
     /// and already carries its own `cpu_seq` in the encoded record body — the
     /// ring's separately-tracked per-record `cpu_seq` drives only the eviction
     /// loss accounting, not this append.
-    #[allow(clippy::too_many_arguments)]
-    fn append_opaque(
+    fn append_opaque_at(
         &mut self,
-        stream: Stream,
-        seq: u64,
-        cpu: u32,
-        monotonic: Duration64,
+        at: Placement,
         wall: WallClockReading,
-        body_len: usize,
-        scratch: &[u8],
+        body: &[u8],
     ) -> Result<(), JournalError<S::Error>> {
-        let body = scratch
-            .get(..body_len)
-            .ok_or(JournalError::Encode(Errno::BufferTooSmall))?;
+        let Placement {
+            stream,
+            seq,
+            cpu,
+            monotonic,
+        } = at;
         let i = stream.as_u8() as usize;
         loop {
             self.ensure_open(stream, seq, monotonic, wall)?;
-            let st = &mut self.streams[i];
-            let Some(writer) = st.writer.as_mut() else {
+            let Some(Slot::Open(writer)) = self.streams[i].slot.as_mut() else {
                 return Err(JournalError::Segment(SegmentError::MissingFooter));
             };
             match writer.append_record(cpu, monotonic, body) {
@@ -634,24 +703,25 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
             requested_stream: Some(Stream::Journal),
             message: "early-boot records lost before import",
         };
-        // `own_source`/`own_origin` are `Copy`; copy them out so the `&mut self`
-        // call below does not overlap a borrow of `self`.
+        // `own_source` is `Copy`; copied out so the record does not borrow
+        // `self` across the `&mut self` call.
         let source = self.own_source;
-        let origin = self.own_origin;
-        self.place(
-            Stream::Journal,
+        let at = Placement {
+            stream: Stream::Journal,
             seq,
-            origin,
-            source.as_str(),
-            Level::Warn,
-            loss.cpu_id,
-            loss.last_seq,
+            cpu: loss.cpu_id,
             monotonic,
+        };
+        let record = LogRecord {
+            effective_level: Level::Warn,
+            cpu_seq: loss.last_seq,
             wall,
+            origin: self.own_origin,
+            source_name: source.as_str(),
             caller,
-            &data,
-            scratch,
-        )
+            data: &data,
+        };
+        self.place(at, &record, scratch)
     }
 
     /// Author one trusted `journal`-stream loss record for a coalesced
@@ -690,26 +760,28 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
             message: "records dropped by rate limit",
         };
         let source = self.own_source;
-        let origin = self.own_origin;
-        self.place(
-            Stream::Journal,
+        let at = Placement {
+            stream: Stream::Journal,
             seq,
-            origin,
-            source.as_str(),
-            Level::Warn,
             cpu,
-            cpu_seq,
             monotonic,
+        };
+        let record = LogRecord {
+            effective_level: Level::Warn,
+            cpu_seq,
             wall,
+            origin: self.own_origin,
+            source_name: source.as_str(),
             caller,
-            &data,
-            scratch,
-        )
+            data: &data,
+        };
+        self.place(at, &record, scratch)
     }
 
     /// Open a fresh segment for `stream` if none is open, seeding its first
     /// append sequence with `seq` so the segment chain and the [`Ingress`]
-    /// counter stay in lockstep.
+    /// counter stay in lockstep. A closed segment the store refused is offered
+    /// to it again first; until it is taken, nothing more is accepted.
     fn ensure_open(
         &mut self,
         stream: Stream,
@@ -717,61 +789,95 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
         monotonic: Duration64,
         wall: WallClockReading,
     ) -> Result<(), JournalError<S::Error>> {
-        let i = stream.as_u8() as usize;
-        if self.streams[i].writer.is_some() {
-            return Ok(());
+        // An audit or security record that could never be sealed is refused
+        // now, rather than accepted into a segment no key can close.
+        if stream.requires_seal() && self.seal_key.is_none() {
+            return Err(JournalError::Segment(SegmentError::SealKeyRequired));
         }
-        let machine_id_hash = self.machine_id_hash;
-        let boot_id = self.boot_id;
-        let st = &mut self.streams[i];
-        let Some(buf) = st.buffer.take() else {
-            // The buffer is only absent while a writer holds it, which the
-            // `is_some` check above already excluded; treat a missing buffer as
-            // a fail-closed configuration error rather than panicking.
-            return Err(JournalError::Segment(SegmentError::BufferTooSmall));
+        let i = stream.as_u8() as usize;
+        let Self {
+            store,
+            streams,
+            machine_id_hash,
+            boot_id,
+            ..
+        } = self;
+        let st = &mut streams[i];
+        let buf = match st.slot.take() {
+            Some(Slot::Free(buf)) => buf,
+            Some(Slot::Unstored(closed)) => match store.store_segment(&closed.buf[..closed.len]) {
+                Ok(()) => closed.buf,
+                Err(e) => {
+                    st.slot = Some(Slot::Unstored(closed));
+                    return Err(JournalError::Store(e));
+                }
+            },
+            open @ Some(Slot::Open(_)) => {
+                st.slot = open;
+                return Ok(());
+            }
+            None => return Err(JournalError::Segment(SegmentError::BufferTooSmall)),
         };
-        // A segment needs room for at least a header and a footer; refuse a
-        // buffer too small to be usable, returning it so the stream is not left
-        // permanently bufferless.
         if buf.len() < SEGMENT_HEADER_LEN + SEGMENT_FOOTER_LEN {
-            st.buffer = Some(buf);
+            st.slot = Some(Slot::Free(buf));
             return Err(JournalError::Segment(SegmentError::BufferTooSmall));
         }
         let header = SegmentHeader {
             stream,
             segment_id: st.next_segment_id,
-            machine_id_hash,
-            boot_id,
+            machine_id_hash: *machine_id_hash,
+            boot_id: *boot_id,
             first_seq: seq,
             prev_segment_hash: st.prev_hash,
             creation_monotonic: monotonic,
             creation_wall: wall,
         };
+        // The buffer holds a header and a footer, which is all `begin` asks.
         let writer = SegmentWriter::begin(buf, &header).map_err(JournalError::Segment)?;
-        st.writer = Some(writer);
+        st.slot = Some(Slot::Open(writer));
         st.dict = DictionaryBuilder::new();
         st.next_segment_id += 1;
         Ok(())
     }
 
-    /// Close the open segment for `stream` (if any), persist it, and advance
-    /// the stream's running chain hash.
+    /// Close the open segment for `stream` (if any), advance the stream's
+    /// running chain hash, and persist the segment. A segment the store
+    /// refuses is kept, and offered again before the stream accepts more.
     fn close(&mut self, stream: Stream) -> Result<(), JournalError<S::Error>> {
         let i = stream.as_u8() as usize;
-        let Some(writer) = self.streams[i].writer.take() else {
-            return Ok(());
+        let Self {
+            store,
+            streams,
+            seal_key,
+            ..
+        } = self;
+        let st = &mut streams[i];
+        let closed = match st.slot.take() {
+            // A sealed stream only opens with its key, so the close can seal.
+            Some(Slot::Open(writer)) => {
+                let finished = writer
+                    .finish(seal_key.as_ref())
+                    .map_err(JournalError::Segment)?;
+                st.prev_hash = finished.segment_hash;
+                st.dict = DictionaryBuilder::new();
+                finished
+            }
+            Some(Slot::Unstored(closed)) => closed,
+            free => {
+                st.slot = free;
+                return Ok(());
+            }
         };
-        let finished = writer
-            .finish(self.seal_key.as_ref())
-            .map_err(JournalError::Segment)?;
-        self.store
-            .store_segment(&finished.buf[..finished.len])
-            .map_err(JournalError::Store)?;
-        let st = &mut self.streams[i];
-        st.prev_hash = finished.segment_hash;
-        st.buffer = Some(finished.buf);
-        st.dict = DictionaryBuilder::new();
-        Ok(())
+        match store.store_segment(&closed.buf[..closed.len]) {
+            Ok(()) => {
+                st.slot = Some(Slot::Free(closed.buf));
+                Ok(())
+            }
+            Err(e) => {
+                st.slot = Some(Slot::Unstored(closed));
+                Err(JournalError::Store(e))
+            }
+        }
     }
 
     /// Close and immediately reopen `stream`'s segment, seeding the new one's
@@ -798,10 +904,10 @@ impl<'a, S: SegmentStore> Journal<'a, S> {
         wall: WallClockReading,
     ) -> Result<(), JournalError<S::Error>> {
         let i = stream.as_u8() as usize;
-        let empty = self.streams[i]
-            .writer
-            .as_ref()
-            .is_none_or(|w| w.record_count() == 0);
+        let empty = match &self.streams[i].slot {
+            Some(Slot::Open(writer)) => writer.record_count() == 0,
+            _ => true,
+        };
         if empty {
             self.streams[i].dict = DictionaryBuilder::new();
             Ok(())
@@ -907,6 +1013,21 @@ mod tests {
     {
         let store = TestStore::new();
         let sink = store.segments.clone();
+        with_store_journal(store, seal, buf_len, body);
+        let out = sink.borrow().clone();
+        out
+    }
+
+    /// Build a journal over `store` and six equally-sized buffers, and run
+    /// `body` with it.
+    fn with_store_journal<S: SegmentStore, F>(
+        store: S,
+        seal: Option<LogAttestationKey>,
+        buf_len: usize,
+        body: F,
+    ) where
+        F: FnOnce(&mut Journal<'_, S>),
+    {
         let mut b: [Vec<u8>; STREAM_COUNT] = core::array::from_fn(|_| alloc::vec![0u8; buf_len]);
         let [b0, b1, b2, b3, b4, b5] = &mut b;
         let bufs: [&mut [u8]; STREAM_COUNT] = [
@@ -926,8 +1047,46 @@ mod tests {
             bufs,
         );
         body(&mut journal);
-        let out = sink.borrow().clone();
-        out
+    }
+
+    /// A store that refuses its next `refusals` segments as a full volume
+    /// would, then takes them.
+    struct FlakyStore {
+        refusals: Rc<core::cell::Cell<u32>>,
+        segments: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl SegmentStore for FlakyStore {
+        type Error = Errno;
+        fn store_segment(&mut self, bytes: &[u8]) -> Result<(), Errno> {
+            if self.refusals.get() > 0 {
+                self.refusals.set(self.refusals.get() - 1);
+                return Err(Errno::NoSpace);
+            }
+            self.segments.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    /// Verify `segments` as one stream's run: each verifies, chains onto its
+    /// predecessor, and continues its append sequence. Returns the records
+    /// they hold.
+    fn verify_run(segments: &[Vec<u8>]) -> u64 {
+        let mut prev: Option<crate::SegmentSummary> = None;
+        let mut total = 0u64;
+        for seg in segments {
+            let s = verify_segment(seg, None).expect("verify");
+            total += s.record_count;
+            if let Some(p) = prev {
+                assert_eq!(
+                    s.header.prev_segment_hash, p.segment_hash,
+                    "chain continues"
+                );
+                assert_eq!(s.first_seq, p.next_seq, "append sequence is continuous");
+            }
+            prev = Some(s);
+        }
+        total
     }
 
     /// Decode every record of one stored segment in order, returning each
@@ -962,10 +1121,12 @@ mod tests {
                 );
                 j.commit(
                     &adm,
-                    0,
-                    0,
-                    Duration64::from_secs(1),
-                    wall(),
+                    Stamp {
+                        cpu: 0,
+                        cpu_seq: 0,
+                        monotonic: Duration64::from_secs(1),
+                        wall: wall(),
+                    },
                     simple_caller(msg),
                     &[],
                     scratch,
@@ -1003,10 +1164,12 @@ mod tests {
                 );
                 j.commit(
                     &adm,
-                    i,
-                    u64::from(i),
-                    Duration64::from_secs(i64::from(i)),
-                    wall(),
+                    Stamp {
+                        cpu: i,
+                        cpu_seq: u64::from(i),
+                        monotonic: Duration64::from_secs(i64::from(i)),
+                        wall: wall(),
+                    },
                     simple_caller("link"),
                     &[],
                     scratch,
@@ -1016,23 +1179,124 @@ mod tests {
             j.flush().expect("flush");
         });
         assert!(segments.len() >= 2, "records span several segments");
-        // Every segment verifies, and each chains onto its predecessor with a
-        // continuous append sequence.
-        let mut prev: Option<crate::SegmentSummary> = None;
-        let mut total = 0u64;
-        for seg in &segments {
-            let s = verify_segment(seg, None).expect("verify");
-            total += s.record_count;
-            if let Some(p) = prev {
-                assert_eq!(
-                    s.header.prev_segment_hash, p.segment_hash,
-                    "chain continues"
+        assert_eq!(
+            verify_run(&segments),
+            8,
+            "no record is lost across rotations"
+        );
+    }
+
+    /// A full volume refuses a segment twice: each record that needed it is
+    /// answered `NoSpace`, the segment is kept and offered again before the
+    /// stream takes another record, and once the volume recovers nothing the
+    /// journal accepted is lost, unchained, or out of sequence.
+    #[test]
+    fn a_refused_segment_is_kept_and_stored_once_the_store_recovers() {
+        let refusals = Rc::new(core::cell::Cell::new(0));
+        let sink = Rc::new(RefCell::new(Vec::new()));
+        let store = FlakyStore {
+            refusals: Rc::clone(&refusals),
+            segments: Rc::clone(&sink),
+        };
+        let small = SEGMENT_HEADER_LEN + SEGMENT_FOOTER_LEN + 300;
+        let (mut accepted, mut refused) = (0u64, 0u32);
+        with_store_journal(store, None, small, |j| {
+            for i in 0..12u32 {
+                if i == 4 {
+                    refusals.set(2);
+                }
+                let adm = j.admit(
+                    &kernel_origin(),
+                    Some("net"),
+                    Some(Stream::Runtime),
+                    None,
+                    None,
                 );
-                assert_eq!(s.first_seq, p.next_seq, "append sequence is continuous");
+                match j.commit(
+                    &adm,
+                    Stamp {
+                        cpu: i,
+                        cpu_seq: u64::from(i),
+                        monotonic: Duration64::from_secs(i64::from(i)),
+                        wall: wall(),
+                    },
+                    simple_caller("link"),
+                    &[],
+                    &mut [0u8; 512],
+                ) {
+                    Ok(()) => accepted += 1,
+                    Err(JournalError::Store(Errno::NoSpace)) => refused += 1,
+                    Err(other) => panic!("unexpected {other:?}"),
+                }
             }
-            prev = Some(s);
+            assert_eq!(j.ingress().next_seq(Stream::Runtime), accepted, "no gap");
+            j.flush().expect("flush");
+        });
+        assert_eq!(refused, 2, "one record per refusal, none after recovery");
+        let segments = sink.borrow();
+        assert_eq!(
+            verify_run(&segments),
+            accepted,
+            "every accepted record is kept"
+        );
+    }
+
+    /// A restarted journal numbers each stream's segments on from the ids it
+    /// is given, so it neither reuses nor overwrites one an earlier run wrote.
+    #[test]
+    fn segments_continue_from_the_given_ids() {
+        let store = TestStore::new();
+        let sink = store.segments.clone();
+        let mut b: [Vec<u8>; STREAM_COUNT] = core::array::from_fn(|_| alloc::vec![0u8; 8192]);
+        let [b0, b1, b2, b3, b4, b5] = &mut b;
+        let bufs: [&mut [u8]; STREAM_COUNT] = [
+            b0.as_mut_slice(),
+            b1.as_mut_slice(),
+            b2.as_mut_slice(),
+            b3.as_mut_slice(),
+            b4.as_mut_slice(),
+            b5.as_mut_slice(),
+        ];
+        let mut next = [0u64; STREAM_COUNT];
+        next[Stream::Runtime.as_u8() as usize] = 7;
+        let mut j = Journal::new(
+            store,
+            machine_id_hash(&MID),
+            boot(),
+            None,
+            kernel_origin(),
+            bufs,
+        )
+        .continuing_segments(next);
+        for _ in 0..2 {
+            let adm = j.admit(
+                &kernel_origin(),
+                Some("net"),
+                Some(Stream::Runtime),
+                None,
+                None,
+            );
+            j.commit(
+                &adm,
+                Stamp {
+                    cpu: 0,
+                    cpu_seq: 0,
+                    monotonic: Duration64::from_secs(1),
+                    wall: wall(),
+                },
+                simple_caller("x"),
+                &[],
+                &mut [0u8; 512],
+            )
+            .expect("commit");
+            j.flush().expect("flush");
         }
-        assert_eq!(total, 8, "no record is lost across rotations");
+        let ids: Vec<u64> = sink
+            .borrow()
+            .iter()
+            .map(|seg| verify_segment(seg, None).expect("verify").header.segment_id)
+            .collect();
+        assert_eq!(ids, [7, 8]);
     }
 
     #[test]
@@ -1049,10 +1313,12 @@ mod tests {
             );
             j.commit(
                 &adm,
-                0,
-                0,
-                Duration64::from_secs(1),
-                wall(),
+                Stamp {
+                    cpu: 0,
+                    cpu_seq: 0,
+                    monotonic: Duration64::from_secs(1),
+                    wall: wall(),
+                },
                 simple_caller("login denied"),
                 &[],
                 scratch,
@@ -1071,52 +1337,44 @@ mod tests {
         );
     }
 
+    /// An audit record no key could ever seal is refused at commit rather than
+    /// accepted into a segment that cannot close, and the stream keeps its
+    /// buffer and its sequence.
     #[test]
-    fn closing_an_audit_segment_without_a_key_fails_closed() {
-        let scratch = &mut [0u8; 512];
-        let store = TestStore::new();
-        let mut b: [Vec<u8>; STREAM_COUNT] = core::array::from_fn(|_| alloc::vec![0u8; 8192]);
-        let [b0, b1, b2, b3, b4, b5] = &mut b;
-        let bufs: [&mut [u8]; STREAM_COUNT] = [
-            b0.as_mut_slice(),
-            b1.as_mut_slice(),
-            b2.as_mut_slice(),
-            b3.as_mut_slice(),
-            b4.as_mut_slice(),
-            b5.as_mut_slice(),
-        ];
-        let mut j = Journal::new(
-            store,
-            machine_id_hash(&MID),
-            boot(),
-            None,
-            kernel_origin(),
-            bufs,
-        );
-        let adm = j.admit(
-            &kernel_origin(),
-            Some("sec"),
-            Some(Stream::Audit),
-            None,
-            None,
-        );
-        j.commit(
-            &adm,
-            0,
-            0,
-            Duration64::from_secs(1),
-            wall(),
-            simple_caller("x"),
-            &[],
-            scratch,
-        )
-        .expect("commit buffers the record");
-        // The seal requirement only bites at close: an audit segment cannot be
-        // finalised without the key.
-        assert_eq!(
-            j.flush(),
-            Err(JournalError::Segment(SegmentError::SealKeyRequired))
-        );
+    fn an_audit_record_without_a_key_is_refused_at_commit() {
+        let segments = with_journal(None, 8192, |j| {
+            for _ in 0..2 {
+                let adm = j.admit(
+                    &kernel_origin(),
+                    Some("sec"),
+                    Some(Stream::Audit),
+                    None,
+                    None,
+                );
+                assert_eq!(
+                    j.commit(
+                        &adm,
+                        Stamp {
+                            cpu: 0,
+                            cpu_seq: 0,
+                            monotonic: Duration64::from_secs(1),
+                            wall: wall(),
+                        },
+                        simple_caller("x"),
+                        &[],
+                        &mut [0u8; 512],
+                    ),
+                    Err(JournalError::Segment(SegmentError::SealKeyRequired))
+                );
+                assert_eq!(j.ingress().next_seq(Stream::Audit), 0, "no gap left");
+            }
+            assert_eq!(
+                j.flush(),
+                Ok(()),
+                "nothing was accepted, so nothing is owed"
+            );
+        });
+        assert!(segments.is_empty());
     }
 
     #[test]
@@ -1134,10 +1392,12 @@ mod tests {
             let err = j
                 .commit(
                     &adm,
-                    0,
-                    0,
-                    Duration64::from_secs(1),
-                    wall(),
+                    Stamp {
+                        cpu: 0,
+                        cpu_seq: 0,
+                        monotonic: Duration64::from_secs(1),
+                        wall: wall(),
+                    },
                     simple_caller(&big),
                     &[],
                     scratch,
@@ -1155,10 +1415,12 @@ mod tests {
             );
             j.commit(
                 &adm2,
-                0,
-                0,
-                Duration64::from_secs(2),
-                wall(),
+                Stamp {
+                    cpu: 0,
+                    cpu_seq: 0,
+                    monotonic: Duration64::from_secs(2),
+                    wall: wall(),
+                },
                 simple_caller("ok"),
                 &[],
                 scratch,
@@ -1184,10 +1446,12 @@ mod tests {
             };
             j.commit(
                 &adm,
-                0,
-                0,
-                Duration64::from_secs(1),
-                wall(),
+                Stamp {
+                    cpu: 0,
+                    cpu_seq: 0,
+                    monotonic: Duration64::from_secs(1),
+                    wall: wall(),
+                },
                 caller,
                 &[],
                 scratch,
@@ -1221,10 +1485,12 @@ mod tests {
             assert!(adm.spoofed());
             j.commit(
                 &adm,
-                0,
-                0,
-                Duration64::from_secs(1),
-                wall(),
+                Stamp {
+                    cpu: 0,
+                    cpu_seq: 0,
+                    monotonic: Duration64::from_secs(1),
+                    wall: wall(),
+                },
                 simple_caller("audit disabled"),
                 &[],
                 scratch,
@@ -1235,10 +1501,12 @@ mod tests {
                 &adm,
                 Some(Stream::Audit),
                 Some("kernel.mem"),
-                0,
-                0,
-                Duration64::from_secs(1),
-                wall(),
+                Stamp {
+                    cpu: 0,
+                    cpu_seq: 0,
+                    monotonic: Duration64::from_secs(1),
+                    wall: wall(),
+                },
                 scratch,
             )
             .expect("note_spoof");
@@ -1378,10 +1646,12 @@ mod tests {
                     let seq = u64::from(admitted);
                     j.commit(
                         &adm,
-                        0,
-                        seq,
-                        Duration64::ZERO,
-                        wall(),
+                        Stamp {
+                            cpu: 0,
+                            cpu_seq: seq,
+                            monotonic: Duration64::ZERO,
+                            wall: wall(),
+                        },
                         simple_caller("f"),
                         &[],
                         scratch,

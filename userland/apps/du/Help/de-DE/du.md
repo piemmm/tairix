@@ -68,7 +68,7 @@ durch Optionen gewählt.
   Verzeichnis.
 - `du -sh /Users/jo` — ein menschenlesbares Total für `/Users/jo`.
 - `du -a docs` — jede Datei und jedes Verzeichnis unter `docs`.
-- `du -d1 -c /Apps /Users` — die erste Ebene jedes Speichers, dann ein
+- `du -d1 -c /System/Applications /Users` — die erste Ebene jedes Speichers, dann ein
   Gesamttotal.
 
 ## EXIT STATUS

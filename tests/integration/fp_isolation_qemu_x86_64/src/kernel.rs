@@ -90,8 +90,8 @@ static KERNEL_FP_RUNS: AtomicU64 = AtomicU64::new(0);
 /// cannot re-enter the test logic.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
-/// Static heap for the bump allocator (per the production bin).
-static mut HEAP: Heap = Heap::ZERO;
+/// The global allocator's arena.
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -99,7 +99,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Per-space page-table pools, one per ring-3 address space.
 static PAGE_TABLE_POOL_A: paging::PageTablePool = paging::PageTablePool::new();

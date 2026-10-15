@@ -148,7 +148,7 @@ mod tests {
     fn elevate_prompts_posts_and_returns_the_exit_code() {
         let elevator = ScriptedElevator::new("hunter2", Ok(42));
         let mut fixture = Fixture::with_elevator(&elevator);
-        let status = fixture.run(&["elevate", "root", "/Apps/Tool.app/Run"]);
+        let status = fixture.run(&["elevate", "root", "/System/Applications/Tool.app/Run"]);
         assert_eq!(status, Some(42));
         assert!(fixture.console.stdout().contains("Password for root: "));
         assert_eq!(
@@ -156,7 +156,7 @@ mod tests {
             &[(
                 "root".to_string(),
                 "hunter2".to_string(),
-                "/Apps/Tool.app/Run".to_string(),
+                "/System/Applications/Tool.app/Run".to_string(),
                 Vec::new(),
             )]
         );
@@ -201,7 +201,7 @@ mod tests {
     fn a_refusal_is_reported_and_fails_the_builtin() {
         let elevator = ScriptedElevator::new("wrong", Err(Errno::PermissionDenied));
         let mut fixture = Fixture::with_elevator(&elevator);
-        let status = fixture.run(&["elevate", "root", "/Apps/Tool.app/Run"]);
+        let status = fixture.run(&["elevate", "root", "/System/Applications/Tool.app/Run"]);
         assert_eq!(status, Some(1));
         assert!(fixture.console.stderr().contains("elevate:"));
     }
@@ -210,7 +210,7 @@ mod tests {
     fn a_failed_secret_read_never_posts() {
         let elevator = ScriptedElevator::failing_read(Errno::PermissionDenied);
         let mut fixture = Fixture::with_elevator(&elevator);
-        let status = fixture.run(&["elevate", "root", "/Apps/Tool.app/Run"]);
+        let status = fixture.run(&["elevate", "root", "/System/Applications/Tool.app/Run"]);
         assert_eq!(status, Some(1));
         assert!(elevator.calls.borrow().is_empty());
     }

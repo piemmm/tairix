@@ -875,7 +875,7 @@ stdin mode:
 
 ```sh
 ls | command schema --stdin
-ls | /Apps/Schema.app/Run --stdin
+ls | /System/Applications/Schema.app/Run --stdin
 ```
 
 If planner introspection is impossible, the utility MUST say so clearly. It
@@ -1160,9 +1160,9 @@ It MUST NOT invent fields.
 
 TAIRiX storage is a **forest of named roots**, not one fixed Unix tree
 (`plans/DRIVES.md`). The shell treats paths accordingly, and it never
-hard-codes a top-level directory set such as `/System`, `/Users`, `/Apps`,
+hard-codes a top-level directory set such as `/System`, `/Users`,
 `/Storage`; those are default *view entries* backed by the path aliases
-`System:`, `Users:`, `Apps:`, `Storage:`, not a frozen list the shell knows.
+`System:`, `Users:`, `Storage:`, not a frozen list the shell knows.
 
 ### Accepted path forms
 

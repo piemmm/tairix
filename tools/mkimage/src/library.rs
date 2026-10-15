@@ -61,6 +61,12 @@ pub fn library_catalog(apps: &[(&[&[u8]], &[u8])]) -> Result<String, MkimageErro
         // a build defect, not a bundle to skip.
         let header = AppInfoHeader::from_bytes(bytes)
             .map_err(|e| fail(&format_args!("manifest does not decode ({e:?})")))?;
+        if header.program_kind() != Some(kind) {
+            return Err(fail(&format_args!(
+                "signed kind does not name the {} store it is planted in",
+                kind.store_dir()
+            )));
+        }
         let Some(category) = header.library_category() else {
             continue;
         };
@@ -90,6 +96,7 @@ pub fn library_catalog(apps: &[(&[&[u8]], &[u8])]) -> Result<String, MkimageErro
 #[cfg(test)]
 pub(crate) fn test_manifest(
     name: &str,
+    kind: ProgramKind,
     listing: Option<tairix_abi::LibraryCategory>,
     icon: Option<&str>,
 ) -> Vec<u8> {
@@ -114,6 +121,7 @@ pub(crate) fn test_manifest(
         capability_count: 0,
         mime_count: 0,
         browse_count: 0,
+        kind: kind.to_wire(),
         reserved: 0,
         id_len,
         name_len,
@@ -153,12 +161,23 @@ mod tests {
     fn listed_bundles_from_both_program_stores_are_catalogued() {
         let files = test_manifest(
             "files",
+            ProgramKind::Application,
             Some(LibraryCategory::Accessories),
             Some("files.png"),
         );
-        let edit = test_manifest("edit", Some(LibraryCategory::Office), None);
-        let ls = test_manifest("ls", None, None);
-        let daemon = test_manifest("fontd", Some(LibraryCategory::Utilities), None);
+        let edit = test_manifest(
+            "edit",
+            ProgramKind::Command,
+            Some(LibraryCategory::Office),
+            None,
+        );
+        let ls = test_manifest("ls", ProgramKind::Command, None, None);
+        let daemon = test_manifest(
+            "fontd",
+            ProgramKind::Service,
+            Some(LibraryCategory::Utilities),
+            None,
+        );
         let run = vec![0u8; 4];
         let apps: Vec<(&[&[u8]], &[u8])> = vec![
             (
@@ -192,8 +211,17 @@ mod tests {
     }
 
     #[test]
+    fn a_bundle_planted_outside_its_signed_kinds_store_fails_the_build_closed() {
+        let ls = test_manifest("ls", ProgramKind::Command, None, None);
+        let apps: Vec<(&[&[u8]], &[u8])> =
+            vec![(&[b"Applications", b"ls.app", b"AppInfo"], ls.as_slice())];
+        let err = library_catalog(&apps).expect_err("must fail closed");
+        assert!(matches!(err, MkimageError::LibraryCatalog(_)));
+    }
+
+    #[test]
     fn no_listed_bundle_derives_the_canonical_empty_document() {
-        let ls = test_manifest("ls", None, None);
+        let ls = test_manifest("ls", ProgramKind::Command, None, None);
         let apps: Vec<(&[&[u8]], &[u8])> =
             vec![(&[b"Commands", b"ls.app", b"AppInfo"], ls.as_slice())];
         assert_eq!(library_catalog(&apps).expect("derives"), "");
@@ -209,7 +237,12 @@ mod tests {
 
     #[test]
     fn two_bundles_claiming_one_identifier_fail_the_build_closed() {
-        let first = test_manifest("edit", Some(LibraryCategory::Accessories), None);
+        let first = test_manifest(
+            "edit",
+            ProgramKind::Command,
+            Some(LibraryCategory::Accessories),
+            None,
+        );
         let apps: Vec<(&[&[u8]], &[u8])> = vec![
             (&[b"Commands", b"edit.app", b"AppInfo"], first.as_slice()),
             (&[b"Commands", b"edit2.app", b"AppInfo"], first.as_slice()),

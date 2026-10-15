@@ -251,7 +251,7 @@ fn the_date_and_time_pane_launches_the_application_that_owns_the_clock() {
     let ShellOutcome::Elevate(asked) = press(&mut shell, NamedKey::Enter) else {
         panic!("offering an account asks for the run");
     };
-    assert_eq!(asked.program, "/System/Applications/datetime.app/Run");
+    assert_eq!(asked.program, tairix_abi::DATETIME_RUN_PATH);
     // Started and left running: the reader then works in it, and a window
     // that waited for its exit would stop drawing for the whole session.
     assert_eq!(asked.mode, RunMode::Leave);

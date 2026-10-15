@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{
-    FilesystemRead, FilesystemWrite, NodeId, NodeKind, WritebackHost,
+    FilesystemRead, FilesystemWrite, NodeId, NodeKind, VolumeHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -301,12 +301,14 @@ enum Publish {
 /// deadline the driver reports has no consumer here.
 struct FrozenTimer;
 
-impl WritebackHost for FrozenTimer {
+impl VolumeHost for FrozenTimer {
     fn now_ns(&self) -> Option<u64> {
         Some(0)
     }
 
     fn writeback_due(&self, _volume: DriverHandle, _deadline_ns: Option<u64>) {}
+
+    fn reserve_crossed(&self, _volume: DriverHandle, _in_reserve: bool) {}
 }
 
 static FROZEN_TIMER: FrozenTimer = FrozenTimer;
@@ -325,7 +327,7 @@ fn volume(
         ARXFS::format(device, 64, Keying::Key(&TEST_KEY), &mut TestEntropy(0x2f)).expect("format");
     let fs = match publish {
         Publish::PerOperation => fs,
-        Publish::Batched => fs.with_writeback_host(
+        Publish::Batched => fs.with_volume_host(
             DriverHandle::from_raw(1).expect("a non-zero test handle"),
             &FROZEN_TIMER,
         ),

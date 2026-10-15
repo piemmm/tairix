@@ -3,7 +3,7 @@
 Stage 7 deliverable (`AGENTS.md` §10, `PLAN.md` Stage 7). The default
 graphical terminal: it hosts the system shell and shows its output on a
 character-cell screen rendered through the shared desktop theme. Installed as
-a `.app` bundle under `/Apps` (`AGENTS.md` §16.5).
+a `.app` bundle in `/System/Applications` (`AGENTS.md` §16.5).
 
 ## What this crate is
 

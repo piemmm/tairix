@@ -1,5 +1,14 @@
 # NEW-NAMESPACE.md — boot namespace assembly from signed policy
 
+| Item | What it is | Status |
+|---|---|---|
+| NS-1 | Attachments apart from projections: the mount table's `Attachment`s, a projection's flags only ever its volume's plus a narrowing, `MOUNT_LIST` once per volume, `VIEW_LIST` once per binding, one shared path-to-volume join | done |
+| NS-2 | Find the `/System` volume by superblock identity, never by partition type | planned |
+| NS-3 | The signed namespace policy on `/System` | planned |
+| NS-4 | `nsmgr`, the user-space namespace manager applying the policy | planned |
+| NS-5 | Root-volume unlock and its driver in user space | planned |
+| NS-6 | Delete the compiled-in boot layout | planned |
+
 Binding under `AGENTS.md`. This plan replaces the compiled-in boot mount
 topology with a signed, per-installation **namespace policy** read off the
 read-only `/System` volume, and splits the two concepts the mount table
@@ -18,15 +27,15 @@ model are unchanged; only how the bindings come into being changes.
 **The hardcode.** `kernel/tairix-kernel/src/system_mount.rs::system_vfs()`
 builds the whole boot topology from two compiled-in definitions:
 
-- `kernel/core/src/fs/vfs.rs::Vfs::with_default_layout` — a fixed six-entry
-  array of `(path, MountFlags)` pairs (`/System`, `/System/Logs`,
-  `/System/Settings`, `/Users`, `/Apps`, `/Storage`) over a default-flagged
-  root mount from `MountTable::new`, plus the in-RAM directory nodes driven by
-  `ROOT_TEMPLATE`.
-- `system_vfs()` — attaches two driver handles to those paths:
-  `SYSTEM_MOUNT_HANDLE` (the read-only `ARXFSSystem` volume) and
-  `ROOT_VOLUME_HANDLE` (the encrypted `ARXFSRoot` volume, rebased onto five
-  same-named subtrees).
+- `kernel/core/src/fs/vfs.rs::Vfs::with_default_layout` — a fixed policy of
+  four projections (`/System` read-only, `/System/Logs` and
+  `/System/Settings` `noexec`, the `/Storage` catalog read-only and `noexec`)
+  over a default-flagged root projection, plus the in-RAM directory nodes of
+  the `ROOT_VIEW` entries.
+- `system_vfs()` — attaches two volumes, `SYSTEM_MOUNT_HANDLE` (the read-only
+  `ARXFSSystem` volume) and `ROOT_VOLUME_HANDLE` (the writable `ARXFSRoot`
+  volume), and backs those projections with them: the root volume at `/` and
+  rebased at `/System/Logs` and `/System/Settings`.
 
 The volume that backs each path is chosen by `parse_partition_table` +
 `first_of_type(PartitionType::ARXFSSystem)` — a positional scan that trusts a
@@ -81,32 +90,33 @@ The mount table has one concept where there are two.
 
 - **Attachment** — a filesystem driver bound to a storage object, producing a
   volume root with a stable `id::` identity. Carries capacity, availability,
-  and medium. Two exist on a default install.
+  medium, and the flags it was attached with. Two exist on a default install.
 - **Projection** — a view path bound to (attachment, subtree) with
   **restricted** flags. Carries no capacity of its own; it is a window onto an
-  attachment. Seven exist on a default install, one per view path including
-  `/` itself, so the view is built uniformly from projections rather than
-  having the root volume placed by a second mechanism.
+  attachment. Five exist on a default install: `/`, `/System`, its two
+  writable subtrees, and the `/Storage` catalog, a projection of no volume.
+  The view is built uniformly from projections rather than having the root
+  volume placed by a second mechanism.
 
-Collapsing them produces the visible symptom: `mount_snapshot`
-(`kernel/core/src/fs/mounted.rs:1463`) emits seven `MountRecord`s for two
-volumes — six of them the same volume, every one reporting identical
-capacity — and `df` carries a `seen_sources` string-comparison heuristic
-(`userland/apps/df/src/client.rs:117`) to guess which rows are real.
-`sysmon`'s storage panel (`userland/apps/sysmon/src/app.rs:576`) has no such
-heuristic and shows all seven.
+The mount table holds both (`kernel/core/src/fs/mount.rs`): `Attachment`s,
+and `MountPoint`s as the projections. The driver registry beside it
+(`LateFilesystem`) keeps each attached volume's source, type, identity and
+availability. `MOUNT_LIST` reports each online attachment once, its
+accounting read once, at the view path showing its root; `VIEW_LIST` reports
+every projection with the identity of the volume it shows, the catalog
+carrying none. Every consumer that resolves a path — `df`, `stat`, `fstree`,
+`stress` — goes through the one `tairix_procinfo::Namespace` join of the
+covering binding to its volume, so `/System/Logs` reports the root volume
+rather than `/System`, and no consumer guesses which rows are real.
 
-Splitting the model deletes the heuristic rather than copying it into the
-other consumers (§2.2).
-
-**It also makes a documented invariant enforceable.** `drives.md` §9 and §15
+**It also makes a documented invariant structural.** `drives.md` §9 and §15
 require that a view binding *"may only preserve or restrict"* its source
-root's flags, and that relaxing needs `CAP_FS_MOUNT_RELAX`. That capability
-has no definition and no enforcement point anywhere in the tree today — it
-cannot have one, because `system_vfs()` writes flags directly into
-`MountTable::mount()` and there is no operation to gate. Once a projection is
-created by a *monotone narrowing* of its attachment's flags, the invariant is
-structural: nothing can hand `/Storage` an exec bit.
+root's flags. A projection's flags are its attachment's with a narrowing
+added, attachments are never re-flagged, and a projection onto an unattached
+volume is refused — so nothing can hand `/Storage` an exec bit. No operation
+widens a projection, so there is nothing for `CAP_FS_MOUNT_RELAX` to gate: it
+is minted with the first such operation, its holder and enforcement point in
+the same change (`AGENTS.md` §5.2), never ahead of them.
 
 ---
 
@@ -182,14 +192,14 @@ attach.root.key        = passphrase
 attach.root.flags      = rw
 
 # A projection: a view path onto an attachment's subtree, flags narrowed.
-project./              = root:/
-project./System        = system:/
-project./Users         = root:/Users        nosuid,nodev
-project./Apps          = root:/Apps         nosuid,nodev
-project./Storage       = root:/Storage      nosuid,nodev,noexec
-project./System/Logs   = root:/System/Logs  nosuid,nodev,noexec
-project./System/Settings = root:/System/Settings nosuid,nodev,noexec
+project./                = root:/
+project./System          = system:/
+project./System/Logs     = root:/System/Logs      noexec
+project./System/Settings = root:/System/Settings  noexec
 ```
+
+The `/Storage` catalog projects no attachment and is not policy: it is part of
+the fixed root view, the place every runtime volume is attached under.
 
 Binding rules, all fail-closed:
 
@@ -205,9 +215,9 @@ Binding rules, all fail-closed:
   is refused unless the caller holds `CAP_FS_MOUNT_RELAX`, and is audited
   (`fs.flags.relax.{allow,deny}`).
 - Every projection's first path component is validated against
-  `ROOT_TEMPLATE`: a policy naming a top-level view entry outside those four
-  is refused, so §16.1's "exactly four" is enforced structurally rather than
-  by convention.
+  `ROOT_VIEW`: a policy naming a top-level view entry outside those three is
+  refused, so §16.1's "exactly three" is enforced structurally rather than by
+  convention.
 - The document carries the machine ID (`/System/Security/MachineId`); a policy
   signed for another machine is refused. Rollback to an older *validly signed*
   policy for the same machine is defeated by measurement where a TPM exists,
@@ -223,33 +233,25 @@ the whole point.
 
 ### NS-1 — Split attachment from projection
 
-- `kernel/core/src/fs/mount.rs`: `MountPoint` splits into `Attachment`
-  (driver handle, volume id, source, fstype, flags) and `Projection` (path,
-  attachment, `backing_subtree`, narrowed flags, permission template).
-  Longest-prefix resolution walks projections; capacity/health/medium come
-  from the attachment.
-- Projection construction takes the narrowing as its only flag input, so
-  widening is unrepresentable without the explicit relax path.
-- **Mint `CAP_FS_MOUNT_RELAX` here, with its enforcement point and its live
-  holder** — never ahead of them (§5.2).
-- `lib/abi/src/sysinfo.rs`: `MountRecord` becomes attachment-only; add
-  `ViewBindingRecord` and the `VIEW_LIST` query. Regenerate the C headers
-  (`cargo xtask c-header --write`).
-- **A `ViewBindingRecord` carries its attachment's volume id**, so a consumer
-  resolving a *path* joins projection → attachment in one step. Without this
-  `df <path>` and `stat` break: both answer "which mount covers this path?",
-  which is a projection question whose answer must report attachment figures.
-- Consumers: `sysmon`, `switchboard`, and `fstree` read attachments; `df` and
-  `stat` read projections to find the covering path and report through the
-  join; `mount` reads both, since it is the `mount(8)` view and must show
-  bindings.
-- **Delete** `df`'s `select_all` duplicate-source heuristic and its
-  `pseudo_or_duplicate_mount` omission record. Capacity-less handling stays —
-  under the new model that means a genuinely unreportable volume, which is a
-  different and still-honest case.
-- `df` default lists attachments; `df -a` adds projections. This *improves*
-  coreutils fidelity (§16.7) rather than bending it — GNU `df -a` is likewise
-  the flag that reveals bind mounts.
+- `kernel/core/src/fs/mount.rs`: `MountTable` holds `Attachment`s (driver,
+  medium, attach flags) and `MountPoint` projections (path, attachment,
+  `backing_subtree`, flags, permission template). Longest-prefix resolution
+  walks projections; capacity, health and medium come from the attachment.
+  Detaching a volume withdraws every projection of it; the root projection's
+  volume cannot be detached.
+- A projection's only flag input is its narrowing; the attachment's flags are
+  added to it, so widening is unrepresentable.
+- `lib/abi/src/sysinfo.rs`: `MountRecord` is one attached volume, its
+  `target` the view path showing its root; `ViewBindingRecord` and
+  `VIEW_LIST` carry each projection with its volume's identity, the join key.
+- Consumers: `sysmon`, `switchboard`, `fstree`'s volume list, the settings
+  storage pane and the file manager's rail read attachments; `df`, `stat`,
+  `fstree`'s free-space figure and `stress` resolve a path through
+  `tairix_procinfo::Namespace`; `mount` lists every binding, a carved-out
+  subtree as `source[/subtree]`.
+- `df` lists one row per volume; `df -a` lists every binding — bind mounts,
+  and the catalog as a pseudo filesystem — as GNU `df -a` does, and the
+  default notes what `-a` would add on fd 3.
 
 ### NS-2 — Bind by volume identity, not partition type
 
@@ -318,8 +320,9 @@ normal path never derives a key in ring 0.
 - **Delete** `Vfs::with_default_layout`, `system_vfs()`, `ROOT_VOLUME_HANDLE`.
 - The kernel attaches exactly one volume: `/System`. Everything else arrives
   through `volume_attach` / `view_bind` from `nsmgr`.
-- `ROOT_TEMPLATE` survives **only** as the §16.1 validation set for policy
-  (the four permitted root-view names), not as a layout generator.
+- `ROOT_VIEW` survives **only** as the §16.1 validation set for policy (the
+  three permitted root-view names) and the source of the catalog, not as a
+  layout generator.
 - `resolve_machine_alias` resolves against the live projection table instead of
   the template.
 
@@ -361,8 +364,8 @@ and no login is offered.
 | Policy tampering | Ed25519 signature; anchored at the installation key, measured where a TPM exists. |
 | Policy substitution from another machine | Machine-ID binding in the document. |
 | Signature-failure downgrade | No fallback layout. `/System`-only recovery session, no login. |
-| Flag relaxation by a future edit | Structurally unrepresentable; widening needs `CAP_FS_MOUNT_RELAX` and is audited. |
-| Fifth root-view entry smuggled in via policy | Validated against `ROOT_TEMPLATE`; refused. |
+| Flag relaxation by a future edit | Structurally unrepresentable: a projection's flags are its volume's plus a narrowing, and no operation widens them. |
+| Fourth root-view entry smuggled in via policy | Validated against `ROOT_VIEW`; refused. |
 | Passphrase or derived key exposed in ring 0 | NS-5 removes it from the normal path; recovery carve-out is justified and zeroes. |
 | A broken projection table hiding a healthy volume | Attachments carry `id::` independently, so `drives.md` §4 invariant 3 is strengthened, not weakened. |
 
@@ -370,10 +373,10 @@ and no login is offered.
 
 ## 9. Required tests
 
-- **Model (NS-1).** A projection may not widen its attachment's flags without
-  the capability; the relax path is audited; `MOUNT_LIST` reports one record
-  per attachment and `VIEW_LIST` one per projection; a default single-volume
-  install yields two attachments and seven projections.
+- **Model (NS-1).** A projection cannot widen its attachment's flags;
+  `MOUNT_LIST` reports one record per online attachment and `VIEW_LIST` one
+  per projection; the default install yields two attachments and five
+  projections.
 - **Consumers (NS-1).** `df` and `sysmon` show one row per volume with no
   dedup heuristic in the code path; `mount` shows attachments and bindings.
 - **Identity (NS-2).** A disk whose GPT type bytes are permuted still resolves
@@ -381,7 +384,7 @@ and no login is offered.
   `ARXFSSystem`-typed partitions and one matching UUID resolves
   deterministically; no match fails closed to Supervisor rather than picking.
 - **Policy (NS-3).** A valid policy applies; a policy with a bad signature, a
-  foreign machine ID, a widening projection, a fifth root-view entry, a
+  foreign machine ID, a widening projection, a fourth root-view entry, a
   partition-index attachment, or a truncated body is each refused with its own
   typed error and leaves only `/System` attached.
 - **Multi-volume (NS-4).** A policy with a separate `/Users` volume produces
@@ -399,9 +402,7 @@ and no login is offered.
 
 ---
 
-## 10. Status
+## 10. Ordering
 
-`planned` — no stage started. Ordering is NS-1 → NS-2 → NS-3 → NS-4 → NS-5 →
-NS-6; each lands complete with its tests and docs (§2.19 — no partial stage
-reported as done). NS-1 is independent of the rest and fixes the visible
-duplicate-mount reporting on its own.
+NS-2 → NS-3 → NS-4 → NS-5 → NS-6; each lands complete with its tests and docs
+(§2.19 — no partial stage reported as done).

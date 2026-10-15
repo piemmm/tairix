@@ -49,3 +49,6 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", optional = true,
     "svg",
 ] }
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0", optional = true }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

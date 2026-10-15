@@ -99,7 +99,7 @@ fn a_refusal_is_delivered_and_served_exactly_like_a_listing() {
 fn an_answer_for_somewhere_the_consumer_left_is_never_served() {
     let mut desk = ListingDesk::new();
     let first = path(&["Users"]);
-    let second = path(&["Apps"]);
+    let second = path(&["Archive"]);
     let _ = desk.take(Consumer::Picker, &first);
     let job = desk.next_job().expect("a job");
     // The user clicks elsewhere while the first read is in flight.
@@ -351,7 +351,7 @@ fn asking_while_a_read_is_under_way_leaves_it_answering() {
 #[test]
 fn two_consumers_listing_different_places_both_settle() {
     let mut desk = ListingDesk::new();
-    let (a, b) = (path(&["Users", "ann"]), path(&["Apps"]));
+    let (a, b) = (path(&["Users", "ann"]), path(&["Archive"]));
     assert_eq!(desk.take(1_u64, &a), Ok(Listing::Pending));
     assert_eq!(desk.take(2_u64, &b), Ok(Listing::Pending));
     for _ in 0..2 {
@@ -377,10 +377,10 @@ fn a_lone_consumer_is_served_again_after_the_round_passes_it() {
     let job = desk.next_job().expect("a job");
     assert!(desk.deliver(job, Ok(entries(&["a"]))));
     let _ = desk.take(Sole::Browser, &home);
-    let _ = desk.take(Sole::Browser, &path(&["Apps"]));
+    let _ = desk.take(Sole::Browser, &path(&["Archive"]));
     assert_eq!(
         handed_out(&mut desk),
-        Some((Sole::Browser, path(&["Apps"]))),
+        Some((Sole::Browser, path(&["Archive"]))),
         "the round wrapped back to it"
     );
 }

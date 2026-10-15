@@ -11,10 +11,10 @@ owns:
 
 - **Layout** — `TaskbarConfig` (edge, thickness, per-region extents) and
   `BarLayout::compute`, which insets the bar by `taskbar_margin` on the three
-  sides facing the screen edge, then lays it out along its main axis: the two
-  permanent leading launcher buttons (**Library**, then **Files** — fixed
-  order, never removable) divided by the **separator** rule, the
-  **application strip** in the middle, the
+  sides facing the screen edge, then lays it out along its main axis: the
+  permanent leading **Library** button divided by the **separator** rule
+  from the **application strip** in the middle — the file manager's slot
+  among them, as the session's autostarted component — the
   notification-icon area packed before the clock, and the clock anchored to
   the trailing end. The margin is scaled through `Scale::scale_length` and
   clamped so a screen too small to hold it still lays out a bar. Every region
@@ -28,7 +28,7 @@ owns:
   along the bar's main axis (floored at one physical pixel so it survives a
   small scale), spanning the cross axis inset by one `control_inset` from
   both long edges, filled in the theme's `border` colour. It sits a
-  `control_gap` past the Library button and pushes Files, the applications, and every
+  `control_gap` past the Library button and pushes the applications and every
   trailing region along by the whole gutter, so the file manager reads as a
   peer of the applications rather than of the library. It is decoration: `hit_test`
   never reports it, and a bar too short to reach it or too thin to inset it

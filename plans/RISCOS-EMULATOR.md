@@ -15,7 +15,8 @@ The first implementation change wires it in (`AGENTS.md` §15.18 table row,
 ## 0. What is being built, and what is emphatically *not*
 
 - **A RISC OS emulator, delivered as a TAIRiX `.app` (§16.5).** The emulator
-  is a normal signed bundle under `/Apps` (e.g. `/Apps/RISCOSEmulator.app`).
+  is a normal signed bundle in `/System/Applications`
+  (`/System/Applications/RISCOSEmulator.app`).
   It is **not** wired into the kernel, a driver, a system service, or the
   desktop session. Nothing in `kernel/*`, `drivers/*`, or `userland/system/*`
   gains an edge to it. It runs as an unprivileged user process holding only
@@ -62,7 +63,8 @@ Before touching a covered area, read the anchor it builds on:
 - **App bundles / loading / ABI** — `AGENTS.md` §9, §16.4, §16.5;
   `lib/abi/src/appinfo.rs` (the signed manifest, the declared
   MIME/file-type associations, `validate_bundle_layout`); `lib/appload`
-  (the signed-bundle load gate); `userland/system/appmgr`; `plans/APPS.md`.
+  (the signed-bundle load gate, through which the kernel's `spawn` loads
+  every bundle); `plans/APPS.md`.
 - **File metadata / RISC OS filetypes** — `lib/fsmeta` and
   `lib/fsmeta/src/preset/acorn.rs` (the `acorn.filetype`,
   `acorn.loadaddr`/`acorn.execaddr`, `acorn.attr`, `acorn.datestamp` keys
@@ -126,12 +128,11 @@ not a magic file"):
 
 - A `lib/openwith` client seam issues an **open-target request** describing
   the target and (optionally) a preferred handler.
-- The request is served by the app-launch owner. **Decision to fold into
-  `userland/system/appmgr`** (it already owns bundle discovery + loading and
-  holds `CAP_PROC_SPAWN`-class authority) rather than add a second service —
-  a new sibling service would duplicate discovery (§2.2). This adds a
-  *run-delegation* responsibility to `appmgr`; the §3 comment for `appmgr`
-  is amended at implementation start.
+- The request is served by a delegation service R0 adds under
+  `userland/system/`, with its §3 entry. No application-manager service
+  exists to fold it into: the kernel's `spawn` loads every bundle through
+  `lib/appload`, and bundle discovery is the shared `lib/appstore` walk, so
+  the service duplicates neither (§2.2).
 - The handler is spawned through the existing signed-bundle load gate
   (`lib/appload`), and receives access to the target **only** as a one-shot
   descriptor handed across the process boundary — the CU6 picker pattern
@@ -152,7 +153,7 @@ hard invariant of the prerequisite, independent of the emulator.
 - `lib/openwith`: association matching, ordering, tie-break determinism,
   fail-closed on unknown/absent handler; host unit tests + a fuzz harness on
   the (untrusted) type-token and association decode (§19.6).
-- `appmgr` delegation: resolve→spawn→one-shot-descriptor happy path; deny
+- The delegation service: resolve→spawn→one-shot-descriptor happy path; deny
   paths (no handler, refused capability, malformed request) each a typed
   reply; the audit-log event ids; a QEMU vertical launching a trivial
   registered handler for a test filetype.
@@ -511,7 +512,7 @@ Each stage lands complete with its tests and docs (§7, §13); no stage begins
 before its dependencies. `[ ]` = not started.
 
 - **R0 — File-run delegation prerequisite (§2).** `[ ]` `lib/openwith` +
-  the `appmgr` delegation responsibility + the anti-auto-run invariant.
+  the delegation service + the anti-auto-run invariant.
   *No RISC OS code.* This is the OS hook the emulator (and every future
   handler app) needs. Depends on: nothing new. Tests per §2.5.
 - **R1 — Emulator skeleton + ARM core (§3, §4).** `[ ]` The

@@ -3,7 +3,9 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::{manifest_header, Errno, APPINFO_WIRE_MAX, SYSTEM_SERVICE_STORE};
+use tairix_abi::{
+    manifest_header, Errno, APPINFO_WIRE_MAX, SYSTEM_COMPONENT_STORE, SYSTEM_SERVICE_STORE,
+};
 
 use crate::{
     bundle_of_entry, entry_path, identity_roots, manifest_path, store_roots, user_roots, walk,
@@ -99,7 +101,6 @@ fn the_roots_are_the_stores_in_resolution_precedence_and_a_homeless_session_gets
         [
             "/System/Commands",
             "/System/Applications",
-            "/Apps",
             "/Users/ada/Commands",
             "/Users/ada/Applications",
         ]
@@ -137,18 +138,19 @@ fn a_home_that_could_name_somewhere_else_contributes_no_store() {
     assert_eq!(user_roots(Some("/Users/a..b")).len(), 2);
 }
 
-/// Resolving a running process walks the service store too — no program word
-/// does — and ranks it with the read-only system stores, ahead of every
-/// writable one, so no planted bundle can claim a shipped service's identity.
+/// Resolving a running process walks the service and component stores too —
+/// no program word does — and ranks them with the read-only system stores,
+/// ahead of every writable one, so no planted bundle can claim a shipped
+/// program's identity.
 #[test]
-fn the_identity_roots_add_the_service_store_among_the_system_stores() {
+fn the_identity_roots_add_the_system_started_stores_among_the_system_stores() {
     assert_eq!(
         identity_roots(Some("/Users/ada")),
         [
             "/System/Commands",
             "/System/Applications",
             "/System/Services",
-            "/Apps",
+            "/System/Components",
             "/Users/ada/Commands",
             "/Users/ada/Applications",
         ]
@@ -156,33 +158,39 @@ fn the_identity_roots_add_the_service_store_among_the_system_stores() {
     assert_eq!(identity_roots(None), IDENTITY_MACHINE_ROOTS);
     let programs: Vec<String> = identity_roots(Some("/Users/ada"))
         .into_iter()
-        .filter(|root| root != SYSTEM_SERVICE_STORE)
+        .filter(|root| root != SYSTEM_SERVICE_STORE && root != SYSTEM_COMPONENT_STORE)
         .collect();
     assert_eq!(
         programs,
         store_roots(Some("/Users/ada")),
-        "the program stores, each at its own rank, and no service store for a program word"
+        "the program stores, each at its own rank, and no system-started store for a program word"
     );
 }
 
 #[test]
 fn the_manifest_sits_inside_the_bundle_directory() {
     assert_eq!(
-        manifest_path("/Apps/Example.app"),
-        "/Apps/Example.app/AppInfo"
+        manifest_path("/Users/ada/Applications/Example.app"),
+        "/Users/ada/Applications/Example.app/AppInfo"
     );
 }
 
 #[test]
 fn the_entry_binary_sits_inside_the_bundle_directory_and_names_it_back() {
-    assert_eq!(entry_path("/Apps/Example.app"), "/Apps/Example.app/Run");
     assert_eq!(
-        bundle_of_entry("/Apps/Example.app/Run"),
-        Some("/Apps/Example.app")
+        entry_path("/Users/ada/Applications/Example.app"),
+        "/Users/ada/Applications/Example.app/Run"
     );
-    assert_eq!(bundle_of_entry("/Apps/Example.app/Runner"), None);
     assert_eq!(
-        bundle_of_entry("/Apps/Example.appRun"),
+        bundle_of_entry("/Users/ada/Applications/Example.app/Run"),
+        Some("/Users/ada/Applications/Example.app")
+    );
+    assert_eq!(
+        bundle_of_entry("/Users/ada/Applications/Example.app/Runner"),
+        None
+    );
+    assert_eq!(
+        bundle_of_entry("/Users/ada/Applications/Example.appRun"),
         None,
         "the entry is a component"
     );
@@ -196,24 +204,32 @@ fn the_entry_binary_sits_inside_the_bundle_directory_and_names_it_back() {
 #[test]
 fn a_walk_finds_nested_bundles_and_never_descends_into_one() {
     let mut tree = MemTree::default();
-    tree.bundle("/Apps", "chess.app", manifest("os.tairix.chess"))
-        .entry("/Apps", "games", true)
-        .entry("/Apps", "README", false);
-    tree.bundle("/Apps/games", "go.app", manifest("os.tairix.go"));
+    tree.bundle(
+        "/Users/ada/Applications",
+        "chess.app",
+        manifest("os.tairix.chess"),
+    )
+    .entry("/Users/ada/Applications", "games", true)
+    .entry("/Users/ada/Applications", "README", false);
+    tree.bundle(
+        "/Users/ada/Applications/games",
+        "go.app",
+        manifest("os.tairix.go"),
+    );
     // A `.app` is a sealed unit: a directory *inside* one is never listed,
     // so a bundle can never contain another.
     tree.bundle(
-        "/Apps/chess.app",
+        "/Users/ada/Applications/chess.app",
         "nested.app",
         manifest("os.tairix.nested"),
     );
 
-    let (seen, scan) = visited(&tree, &["/Apps"]);
+    let (seen, scan) = visited(&tree, &["/Users/ada/Applications"]);
     assert_eq!(
         seen,
         [
-            ("/Apps/chess.app".to_string(), 0),
-            ("/Apps/games/go.app".to_string(), 0),
+            ("/Users/ada/Applications/chess.app".to_string(), 0),
+            ("/Users/ada/Applications/games/go.app".to_string(), 0),
         ]
     );
     assert_eq!(scan.accepted, 2);
@@ -249,10 +265,14 @@ fn each_bundle_carries_the_precedence_of_the_root_it_was_found_under() {
 #[test]
 fn an_absent_root_contributes_nothing_and_a_refused_listing_fails_the_scan_closed() {
     let mut tree = MemTree::default();
-    tree.bundle("/Apps", "chess.app", manifest("os.tairix.chess"));
+    tree.bundle(
+        "/Users/ada/Applications",
+        "chess.app",
+        manifest("os.tairix.chess"),
+    );
 
     // A machine without a per-user store is the ordinary case.
-    let (seen, _) = visited(&tree, &["/Users/ada/Applications", "/Apps"]);
+    let (seen, _) = visited(&tree, &["/Users/ada/Commands", "/Users/ada/Applications"]);
     assert_eq!(seen.len(), 1);
 
     tree.denied("/System/Applications");
@@ -263,18 +283,30 @@ fn an_absent_root_contributes_nothing_and_a_refused_listing_fails_the_scan_close
 #[test]
 fn a_bundle_whose_manifest_cannot_be_used_is_skipped_and_the_scan_carries_on() {
     let mut tree = MemTree::default();
-    tree.bundle("/Apps", "a-good.app", manifest("os.tairix.good"))
-        .bundle("/Apps", "b-garbage.app", b"not a manifest".to_vec())
-        .bundle(
-            "/Apps",
-            "c-huge.app",
-            alloc::vec![0u8; APPINFO_WIRE_MAX + 1],
-        )
-        .manifestless("/Apps", "d-bare.app")
-        .bundle("/Apps", "e-refused.app", manifest("os.tairix.refused"));
+    tree.bundle(
+        "/Users/ada/Applications",
+        "a-good.app",
+        manifest("os.tairix.good"),
+    )
+    .bundle(
+        "/Users/ada/Applications",
+        "b-garbage.app",
+        b"not a manifest".to_vec(),
+    )
+    .bundle(
+        "/Users/ada/Applications",
+        "c-huge.app",
+        alloc::vec![0u8; APPINFO_WIRE_MAX + 1],
+    )
+    .manifestless("/Users/ada/Applications", "d-bare.app")
+    .bundle(
+        "/Users/ada/Applications",
+        "e-refused.app",
+        manifest("os.tairix.refused"),
+    );
 
     let mut seen = Vec::new();
-    let scan = walk(&tree, &["/Apps"], |bundle: Bundle<'_>| {
+    let scan = walk(&tree, &["/Users/ada/Applications"], |bundle: Bundle<'_>| {
         seen.push(bundle.path.to_string());
         if bundle.path.ends_with("e-refused.app") {
             Verdict::Refused
@@ -287,8 +319,8 @@ fn a_bundle_whose_manifest_cannot_be_used_is_skipped_and_the_scan_carries_on() {
     assert_eq!(
         seen,
         [
-            "/Apps/a-good.app".to_string(),
-            "/Apps/e-refused.app".to_string(),
+            "/Users/ada/Applications/a-good.app".to_string(),
+            "/Users/ada/Applications/e-refused.app".to_string(),
         ],
         "only a bundle whose manifest decoded is offered"
     );
@@ -313,7 +345,7 @@ fn the_walk_stops_descending_at_the_depth_bound() {
     let mut tree = MemTree::default();
     // One plain directory per level, with a bundle at every level, so the
     // deepest reachable bundle names the bound rather than the fixture.
-    let mut dir = String::from("/Apps");
+    let mut dir = String::from("/Users/ada/Applications");
     for level in 0..=MAX_WALK_DEPTH {
         tree.bundle(
             &dir,
@@ -324,7 +356,7 @@ fn the_walk_stops_descending_at_the_depth_bound() {
         dir.push_str("/deeper");
     }
 
-    let (seen, _) = visited(&tree, &["/Apps"]);
+    let (seen, _) = visited(&tree, &["/Users/ada/Applications"]);
     let deepest: Vec<&str> = seen.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(
         deepest.len(),
@@ -332,7 +364,7 @@ fn the_walk_stops_descending_at_the_depth_bound() {
         "the root's own level plus {} descents",
         MAX_WALK_DEPTH - 1
     );
-    assert!(deepest.contains(&"/Apps/level0.app"));
+    assert!(deepest.contains(&"/Users/ada/Applications/level0.app"));
     assert!(
         !deepest
             .iter()
@@ -345,10 +377,14 @@ fn the_walk_stops_descending_at_the_depth_bound() {
 fn a_tree_past_the_entry_ceiling_fails_the_whole_scan_closed() {
     let mut tree = MemTree::default();
     for index in 0..=MAX_WALK_ENTRIES {
-        tree.entry("/Apps", &alloc::format!("file{index}"), false);
+        tree.entry(
+            "/Users/ada/Applications",
+            &alloc::format!("file{index}"),
+            false,
+        );
     }
     assert_eq!(
-        walk(&tree, &["/Apps"], |_| Verdict::Accepted),
+        walk(&tree, &["/Users/ada/Applications"], |_| Verdict::Accepted),
         Err(WalkError::TreeTooLarge),
         "an unbelievable tree yields nothing, never a partial answer"
     );
@@ -356,24 +392,44 @@ fn a_tree_past_the_entry_ceiling_fails_the_whole_scan_closed() {
     // One entry under the ceiling still completes.
     let mut inside = MemTree::default();
     for index in 0..MAX_WALK_ENTRIES {
-        inside.entry("/Apps", &alloc::format!("file{index}"), false);
+        inside.entry(
+            "/Users/ada/Applications",
+            &alloc::format!("file{index}"),
+            false,
+        );
     }
-    assert!(walk(&inside, &["/Apps"], |_| Verdict::Accepted).is_ok());
+    assert!(walk(&inside, &["/Users/ada/Applications"], |_| Verdict::Accepted).is_ok());
 }
 
 #[test]
 fn listings_are_consumed_in_sorted_order_so_a_scan_is_deterministic() {
     let mut tree = MemTree::default();
-    tree.bundle("/Apps", "zebra.app", manifest("os.tairix.zebra"))
-        .bundle("/Apps", "apple.app", manifest("os.tairix.apple"))
-        .bundle("/Apps", "mango.app", manifest("os.tairix.mango"));
+    tree.bundle(
+        "/Users/ada/Applications",
+        "zebra.app",
+        manifest("os.tairix.zebra"),
+    )
+    .bundle(
+        "/Users/ada/Applications",
+        "apple.app",
+        manifest("os.tairix.apple"),
+    )
+    .bundle(
+        "/Users/ada/Applications",
+        "mango.app",
+        manifest("os.tairix.mango"),
+    );
 
-    let (seen, _) = visited(&tree, &["/Apps"]);
+    let (seen, _) = visited(&tree, &["/Users/ada/Applications"]);
     assert_eq!(
         seen.iter()
             .map(|(path, _)| path.as_str())
             .collect::<Vec<_>>(),
-        ["/Apps/apple.app", "/Apps/mango.app", "/Apps/zebra.app"]
+        [
+            "/Users/ada/Applications/apple.app",
+            "/Users/ada/Applications/mango.app",
+            "/Users/ada/Applications/zebra.app"
+        ]
     );
 }
 
@@ -381,10 +437,10 @@ fn listings_are_consumed_in_sorted_order_so_a_scan_is_deterministic() {
 fn the_visitor_sees_the_whole_manifest_beside_its_decoded_header() {
     let bytes = manifest("os.tairix.example");
     let mut tree = MemTree::default();
-    tree.bundle("/Apps", "Example.app", bytes.clone());
+    tree.bundle("/Users/ada/Applications", "Example.app", bytes.clone());
 
     let mut saw = None;
-    walk(&tree, &["/Apps"], |bundle: Bundle<'_>| {
+    walk(&tree, &["/Users/ada/Applications"], |bundle: Bundle<'_>| {
         saw = Some((
             bundle.header.bundle_id().to_string(),
             bundle.manifest.to_vec(),

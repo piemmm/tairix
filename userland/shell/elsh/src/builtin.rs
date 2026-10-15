@@ -326,21 +326,21 @@ mod tests {
     #[test]
     fn pwd_prints_cwd() {
         let mut fx = Fixture::new();
-        fx.env.set_cwd("/Apps");
+        fx.env.set_cwd("/Storage");
         assert_eq!(fx.run(&["pwd"]), Some(0));
-        assert_eq!(fx.console.stdout(), "/Apps\n");
+        assert_eq!(fx.console.stdout(), "/Storage\n");
     }
 
     #[test]
     fn export_sets_lists_and_validates() {
         let mut fx = Fixture::new();
-        assert_eq!(fx.run(&["export", "PATH=/Apps"]), Some(0));
-        assert_eq!(fx.env.get("PATH"), Some("/Apps"));
-        assert_eq!(fx.env.exported_vars(), [("PATH", "/Apps")]);
+        assert_eq!(fx.run(&["export", "PATH=/Users/ada/bin"]), Some(0));
+        assert_eq!(fx.env.get("PATH"), Some("/Users/ada/bin"));
+        assert_eq!(fx.env.exported_vars(), [("PATH", "/Users/ada/bin")]);
         // Listing.
         fx.console.clear();
         assert_eq!(fx.run(&["export"]), Some(0));
-        assert_eq!(fx.console.stdout(), "export PATH=/Apps\n");
+        assert_eq!(fx.console.stdout(), "export PATH=/Users/ada/bin\n");
         // Invalid identifier.
         assert_eq!(fx.run(&["export", "1BAD=x"]), Some(1));
     }

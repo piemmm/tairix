@@ -197,21 +197,30 @@ fn panic(info: &PanicInfo<'_>) -> ! {
 /// An allocation the program could not do without failed.
 ///
 /// Reported like a panic, on both channels and without allocating, since the
-/// heap is what failed — but ended with its own status, so a parent can tell
-/// memory running out from a bug and ask again once memory is freed.
+/// heap is what failed — but ended with a status of its own, so a parent can
+/// tell memory running out from a bug, and from the program outgrowing its
+/// own memory bound, which asking again under that bound cannot cure.
 #[alloc_error_handler]
 fn out_of_memory(layout: core::alloc::Layout) -> ! {
     use core::fmt::Write as _;
+    let (status, cause) = if crate::heap::refused_by_own_bound() {
+        (
+            tairix_abi::MEMORY_BOUND_EXIT_STATUS,
+            "would pass the program's memory bound",
+        )
+    } else {
+        (tairix_abi::OOM_EXIT_STATUS, "failed")
+    };
     let mut report = crate::io::FixedFmtBuf::<PANIC_REPORT_BYTES>::new();
     let _ = write!(
         report,
-        "out of memory: an allocation of {} bytes failed",
+        "out of memory: an allocation of {} bytes {cause}",
         layout.size()
     );
     log_fatal_best_effort(crate::OUT_OF_MEMORY_REPORTED, report.as_bytes());
     let _ = report.write_str("\n");
     write_stderr_best_effort(report.as_bytes());
-    exit(tairix_abi::OOM_EXIT_STATUS)
+    exit(status)
 }
 
 /// Read the declared total startup-vector length from its header, so the

@@ -55,3 +55,6 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The cue client PID 1 asks for the machine's start sound with, posted from
 # its one wait-set so a slow or absent sound authority never stalls it.
 tairix-soundtheme = { path = "../../../lib/soundtheme", version = "=0.0.0", default-features = false, features = ["rt"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

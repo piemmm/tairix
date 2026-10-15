@@ -208,8 +208,9 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   (`docs/src/security/sandbox.md`).
 - The worker's memory is bounded: it runs on one thread under an
   `AddressSpaceBytes` ceiling its launcher's `WorkerMemory` names
-  (`memory`), so a runaway decode ends as the worker's own out-of-memory exit
-  rather than the machine's.
+  (`memory`), so a runaway decode ends as the worker's own memory-bound exit
+  rather than the machine's, which the host reports as the request outgrowing
+  that bound rather than as a shortage worth asking again.
 - Fuzzed: `fuzz_sandbox` (the decode, helpdoc, and imagerender service
   request decoders — icon and wallpaper alike — the caller-side reply
   decoders/validators, and the session seam's inbound codec over a hostile

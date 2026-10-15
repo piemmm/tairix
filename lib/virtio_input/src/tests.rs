@@ -78,6 +78,28 @@ fn build_device_reporting(relative: &'static [u16]) -> (MockTransport, EventQueu
     (t, events)
 }
 
+/// [`build_device`] whose configuration answers an `EV_BITS` query for
+/// `EV_KEY` with `keys`, and every other query with nothing.
+fn build_device_with_keys(keys: &'static [u16]) -> (MockTransport, EventQueue) {
+    let (mut t, events) = build_device_with(8, wire::CFG_ANSWER + wire::CFG_ANSWER_LEN);
+    t.install_config_responder(Box::new(move |window: &mut [u8]| {
+        let asked = window[wire::CFG_SELECT] == wire::CFG_EV_BITS
+            && u16::from(window[wire::CFG_SELECT + 1]) == wire::EV_KEY;
+        window[wire::CFG_ANSWER..].fill(0);
+        window[wire::CFG_SIZE] = 0;
+        if asked {
+            let mut len = 0;
+            for &code in keys {
+                let byte = usize::from(code / 8);
+                window[wire::CFG_ANSWER + byte] |= 1 << (code % 8);
+                len = len.max(byte + 1);
+            }
+            window[wire::CFG_SIZE] = u8::try_from(len).unwrap_or(0);
+        }
+    }));
+    (t, events)
+}
+
 /// The mock device, shared by the driver under test and the host playing it.
 type Device = Rc<RefCell<MockTransport>>;
 
@@ -91,6 +113,26 @@ fn open_input(t: MockTransport, host: &MockHost) -> (Box<VirtioInput<'_, Device>
 
 /// Scancode-neutral keycode for the `A` key (Linux `KEY_A`).
 const KEY_A: u16 = 30;
+
+#[test]
+fn a_keyboard_is_told_from_a_pointer_by_a_key_below_the_buttons() {
+    const KEY_RESERVED: u16 = 0;
+    const KEY_ESC: u16 = 1;
+    const BTN_LEFT: u16 = 0x110;
+    const BTN_RIGHT: u16 = 0x111;
+    for (keys, keyboard) in [
+        (&[KEY_ESC, KEY_A][..], true),
+        (&[KEY_A, BTN_LEFT][..], true),
+        (&[BTN_LEFT, BTN_RIGHT, wire::BTN_GEAR_DOWN][..], false),
+        (&[KEY_RESERVED][..], false),
+        (&[][..], false),
+    ] {
+        let host = MockHost::new();
+        let (t, _events) = build_device_with_keys(keys);
+        let (dev, _device) = open_input(t, &host);
+        assert_eq!(dev.is_keyboard(), keyboard, "{keys:?}");
+    }
+}
 
 #[test]
 fn decode_maps_key_press_and_release() {

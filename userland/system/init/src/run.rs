@@ -338,42 +338,15 @@ mod program {
     /// Persist the administrator's override document, creating its directory
     /// if the volume was laid out before this manager existed.
     ///
-    /// Written whole beside the document and renamed over it, so a crash
-    /// leaves the old document or the new one and never a torn mix, which
-    /// would be refused and bring back every service the administrator
+    /// A crash leaves the old document or the new one and never a torn mix,
+    /// which would be refused and bring back every service the administrator
     /// disabled.
     fn write_overrides(text: &str) -> Result<(), Errno> {
-        let path = tairix_abi::SERVICE_OVERRIDES_PATH;
-        let staged = alloc::format!("{path}.new");
-        let file = match tairix_rt::create(staged.as_bytes()) {
-            Ok(file) => file,
-            // `/System/Settings` is system-owned, so an unconditional `mkdir`
-            // would be refused on every provisioned machine and file a denied
-            // mutation record on each request, burying a real denial in noise.
-            Err(ret) if Errno::from_syscall(ret) == Errno::NotFound => {
-                let made = tairix_rt::fs_mkdir(tairix_abi::SERVICE_OVERRIDES_DIR.as_bytes());
-                if made != 0 && Errno::from_syscall(made) != Errno::AlreadyExists {
-                    return Err(Errno::from_syscall(made));
-                }
-                tairix_rt::create(staged.as_bytes()).map_err(Errno::from_syscall)?
-            }
-            Err(ret) => return Err(Errno::from_syscall(ret)),
-        };
-        tairix_rt::fs_write_all(file.fd(), 0, text.as_bytes())?;
-        let synced = tairix_rt::fs_sync(file.fd());
-        if synced != 0 {
-            return Err(Errno::from_syscall(synced));
-        }
-        drop(file);
-        let renamed = tairix_rt::fs_rename(
-            staged.as_bytes(),
-            path.as_bytes(),
-            tairix_abi::RenameFlags::empty(),
-        );
-        if renamed != 0 {
-            return Err(Errno::from_syscall(renamed));
-        }
-        Ok(())
+        tairix_rt::replace_file(
+            tairix_abi::SERVICE_OVERRIDES_PATH.as_bytes(),
+            text.as_bytes(),
+            tairix_rt::ParentDir::CreatedIfMissing,
+        )
     }
 
     /// The [`Services`] backing over the live [`Init`] engine: PID 1's

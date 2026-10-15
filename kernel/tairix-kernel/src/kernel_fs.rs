@@ -20,9 +20,9 @@
 use alloc::boxed::Box;
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, VolumeStats, WritebackHost,
+    AllocationClass, DirEntry, DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider,
+    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -135,8 +135,12 @@ impl FilesystemWrite for Box<dyn KernelFs> {
         (**self).flush()
     }
 
-    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
-        (**self).set_writeback_host(volume, host);
+    fn set_volume_host(&mut self, volume: DriverHandle, host: &'static dyn VolumeHost) {
+        (**self).set_volume_host(volume, host);
+    }
+
+    fn set_allocation_class(&mut self, class: AllocationClass) {
+        (**self).set_allocation_class(class);
     }
 }
 

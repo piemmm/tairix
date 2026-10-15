@@ -63,19 +63,19 @@ use tairix_abi::{
     RandomFlags, ReaddirFrom, RealpathMode, RenameFlags, ResourceLimit, ResourceLimitRecord,
     RxePermission, SchedPriority, Segment, SelfAccountRecord, Severity, Signal, SignalIntakeOp,
     StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Time64,
-    UnlinkFlags, Uptime, UserDirectoryRecord, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1,
-    APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME,
-    BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX,
-    BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE, CAPABILITY_ID_MAX,
-    COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS, DRIVER_MANIFEST_MAGIC,
-    DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC,
-    DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN,
-    ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_MODE_MASK,
-    GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN,
-    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC,
-    KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED, KIND_KEY_RELEASED,
-    KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX, LIBREF_MAX,
-    LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
+    UnlinkFlags, Uptime, UserDirectoryRecord, ViewBindingRecord, WaitFlags, WaitSetOp,
+    WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
+    APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
+    BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE, CALL_DEADLINE_NONE,
+    CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS,
+    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
+    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
+    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_MODE_MASK, GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
+    HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
+    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
+    KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX,
+    LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
     LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
     LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
     MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
@@ -1264,6 +1264,23 @@ const NAMED_KEY_CODES: [(&str, u16); 26] = [
 /// permitted bundle top-level entry names ([`BundleEntry::as_str`]), and the
 /// [`LibraryScope`] discriminants. Every numeric value, name, and discriminant
 /// is read from `lib/abi`, never re-typed; only the C spelling lives here.
+/// The `TAIRIX_PROGRAM_KIND_*` wire values, one per kind.
+fn emit_program_kinds(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* A program's kind, signed in the manifest's `kind` byte: where it may run from. */\n",
+    );
+    for kind in tairix_abi::ProgramKind::ALL {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_PROGRAM_KIND_{} ((uint8_t){}u)",
+            kind.as_str().to_ascii_uppercase(),
+            kind.to_wire()
+        );
+    }
+    out.push('\n');
+}
+
 fn generate_appinfo() -> String {
     use std::fmt::Write as _;
     let mut out = banner("Application-bundle manifest ABI (AGENTS.md sec.16.5, sec.16.4).");
@@ -1362,6 +1379,7 @@ fn generate_appinfo() -> String {
     out.push('\n');
 
     emit_library_listing_bytes(&mut out);
+    emit_program_kinds(&mut out);
 
     out.push_str("/* Signed AppInfo manifest prefix; encoded little-endian on the wire. */\n");
     out.push_str("typedef struct tairix_appinfo_header {\n");
@@ -1392,7 +1410,8 @@ const APPINFO_HEADER_FIELDS: &[(&str, usize)] = &[
     ("uint16_t capability_count", 2),
     ("uint16_t mime_count", 2),
     ("uint16_t browse_count", 2),
-    ("uint16_t reserved", 2),
+    ("uint8_t kind", 1),
+    ("uint8_t reserved", 1),
     ("uint8_t id_len", 1),
     ("uint8_t name_len", 1),
     ("uint8_t version_len", 1),
@@ -2025,6 +2044,10 @@ fn sysinfo_emit_wire_lens(out: &mut String) {
         ("TAIRIX_SYSTEM_IDENTITY_WIRE_LEN", SystemIdentity::WIRE_LEN),
         ("TAIRIX_MOUNT_RECORD_WIRE_LEN", MountRecord::WIRE_LEN),
         (
+            "TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN",
+            ViewBindingRecord::WIRE_LEN,
+        ),
+        (
             "TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN",
             ResourceLimitRecord::WIRE_LEN,
         ),
@@ -2189,6 +2212,22 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint8_t target[TAIRIX_MOUNT_TARGET_MAX];\n\
          \x20   uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];\n\
          } tairix_mount_record_t;\n\n",
+    "/* One view binding: a view path (`target`), the path within an attached\n\
+         * volume it shows (`subtree`, `/` for the volume's root), and the\n\
+         * MountFlags it narrows that volume to. `volume_id` is the attached\n\
+         * volume's, the key of its tairix_mount_record_t; a binding showing no\n\
+         * volume (the /Storage catalog) has an empty subtree and an all-zero\n\
+         * volume_id. The inline target/subtree buffers are valid for their\n\
+         * *_len byte counts. */\n\
+         typedef struct tairix_view_binding_record {\n\
+         \x20   uint32_t flags;\n\
+         \x20   uint8_t target_len;\n\
+         \x20   uint8_t subtree_len;\n\
+         \x20   uint8_t reserved0[2];\n\
+         \x20   uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];\n\
+         \x20   uint8_t target[TAIRIX_MOUNT_TARGET_MAX];\n\
+         \x20   uint8_t subtree[TAIRIX_MOUNT_TARGET_MAX];\n\
+         } tairix_view_binding_record_t;\n\n",
     "/* One row of the RESOURCE_LIMITS response: a resource's effective soft/hard\n\
          * bound (a tairix_resource_limit_t) and the caller's current live usage of it.\n\
          * The full response is TAIRIX_LIMIT_KIND_COUNT records in LimitKind order. */\n\
@@ -2451,8 +2490,6 @@ fn driver_emit_submodule_constants(out: &mut String) {
     );
     for (name, flag) in [
         ("READ_ONLY", MountFlags::READ_ONLY),
-        ("NOSUID", MountFlags::NOSUID),
-        ("NODEV", MountFlags::NODEV),
         ("NOEXEC", MountFlags::NOEXEC),
         ("KNOWN_MASK", MountFlags::KNOWN_MASK),
     ] {
@@ -2749,10 +2786,12 @@ const DRIVER_SUBMODULE_TYPEDEFS: &str = concat!(
          } tairix_dir_entry_t;\n\n",
     "/* A mounted volume's space accounting, in whole blocks of block_size bytes.\n\
          * avail_blocks <= free_blocks <= total_blocks always holds; files/files_free\n\
-         * are 0 when the format tracks no fixed inode table. */\n\
+         * are 0 when the format tracks no fixed inode table. in_reserve is 1 when\n\
+         * the volume is down to its reserve, so an ordinary write may be refused. */\n\
          typedef struct tairix_volume_stats {\n\
          \x20   uint32_t block_size;\n\
-         \x20   uint32_t reserved0;\n\
+         \x20   uint8_t in_reserve;\n\
+         \x20   uint8_t reserved0[3];\n\
          \x20   uint64_t total_blocks;\n\
          \x20   uint64_t free_blocks;\n\
          \x20   uint64_t avail_blocks;\n\
@@ -3555,6 +3594,16 @@ fn emit_wait_contract(out: &mut String) {
         "#define TAIRIX_OOM_EXIT_STATUS ((int32_t){})",
         tairix_abi::OOM_EXIT_STATUS
     );
+    out.push_str(
+        "/* The exit status of a program that ended because an allocation it could\n\
+         * not do without would have passed its own memory bound: asking again\n\
+         * under the same bound fails the same way. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_MEMORY_BOUND_EXIT_STATUS ((int32_t){})",
+        tairix_abi::MEMORY_BOUND_EXIT_STATUS
+    );
     out.push('\n');
 }
 
@@ -4210,6 +4259,10 @@ mod tests {
             ("TAIRIX_LOAD_OOM", tairix_abi::LOAD_OOM),
             ("TAIRIX_FAULT_EXIT_STATUS", tairix_abi::FAULT_EXIT_STATUS),
             ("TAIRIX_OOM_EXIT_STATUS", tairix_abi::OOM_EXIT_STATUS),
+            (
+                "TAIRIX_MEMORY_BOUND_EXIT_STATUS",
+                tairix_abi::MEMORY_BOUND_EXIT_STATUS,
+            ),
         ] {
             assert!(
                 h.contains(&format!("#define {name} ((int32_t){value})")),
@@ -5677,7 +5730,7 @@ mod tests {
             AppInfoHeader, DriverBindKey, DriverManifest, Duration64, IpcMessageHeader,
             KernelMemoryStats, LoadHeader, ManifestHeader, MountRecord, PageRequest, PortName,
             ProcessRecord, ProcessStartHeader, ResourceLimit, ResourceLimitRecord, StringSlot,
-            SysinfoRequestHeader, SystemIdentity, Time64, Uptime,
+            SysinfoRequestHeader, SystemIdentity, Time64, Uptime, ViewBindingRecord,
         };
 
         // (header file, typedef-closing line, type, frozen size, frozen align).
@@ -5702,6 +5755,7 @@ mod tests {
             ("tairix_sysinfo.h", "} tairix_load_average_t;", size_of::<LoadAverage>(), 24, align_of::<LoadAverage>(), 4),
             ("tairix_sysinfo.h", "} tairix_system_identity_t;", size_of::<SystemIdentity>(), 88, align_of::<SystemIdentity>(), 2),
             ("tairix_sysinfo.h", "} tairix_mount_record_t;", size_of::<MountRecord>(), 224, align_of::<MountRecord>(), 8),
+            ("tairix_sysinfo.h", "} tairix_view_binding_record_t;", size_of::<ViewBindingRecord>(), 152, align_of::<ViewBindingRecord>(), 4),
             ("tairix_driver.h", "} tairix_volume_stats_t;", size_of::<VolumeStats>(), 48, align_of::<VolumeStats>(), 8),
             ("tairix_driver.h", "} tairix_driver_manifest_t;", size_of::<DriverManifest>(), 140, align_of::<DriverManifest>(), 4),
             ("tairix_driver.h", "} tairix_driver_bind_key_t;", size_of::<DriverBindKey>(), 80, align_of::<DriverBindKey>(), 4),

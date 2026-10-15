@@ -120,3 +120,6 @@ tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features =
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
     "test-util",
 ] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

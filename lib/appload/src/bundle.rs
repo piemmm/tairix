@@ -17,7 +17,7 @@ use tairix_abi::{Errno, LibraryScope, PublisherId};
 /// Reads an application bundle from storage.
 ///
 /// Every method addresses a bundle by its root path (e.g.
-/// `/Apps/Example.app`). The implementation enforces the filesystem's own
+/// `/System/Applications/Example.app`). The implementation enforces the filesystem's own
 /// permission checks; the loader treats every method as
 /// fallible and **never** assumes a trusted result.
 pub trait BundleStore {

@@ -33,7 +33,7 @@ turns it into a kill. A measured warm run:
 | Stage | Cost | Shape |
 | --- | --- | --- |
 | `fmt --check` | 4 s | sequential, streams live |
-| static gates (`deps-check`, `cfg-check`, `event-ids`, `driver-exits`, `charter-cite`, `spec-review`, `help-lint`, `devids`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
+| static gates (`deps-check`, `cfg-check`, `event-ids`, `driver-exits`, `charter-cite`, `source-text`, `spec-review`, `help-lint`, `devids`, `c-header`, `font-atlas`, `abi-check`, `model-check`, …) | 1 s makespan | concurrent group |
 | `deny` | 1 s | sequential; reads `Cargo.lock`, compiles nothing |
 | `proptest --once` | 3 s | one iteration, logged seed |
 | `crypto-constant-time` | 5 s | `lib/crypto` re-run under release |
@@ -166,6 +166,7 @@ ask — never wave the failure through as transient, load, or environment.
 | `event-ids`   | Rejects an event id outside its crate's range in `tairix_log::registry`, a crate defining ids with no range, and one id defined by two crates |
 | `driver-exits`| Rejects an exit code or `exit` module declared by a crate built on the driver runtime: every driver ends through `tairix_drvrt::exit` |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
+| `source-text` | Rejects a control byte other than tab and newline in source and documents, outside the planning and charter files |
 | `test`        | `cargo test --workspace --all-targets`, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below) |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |

@@ -211,9 +211,6 @@ fn a_publish_replaces_the_document_atomically() {
         .publish(&mut fs, ConfigScope::Private, &document)
         .expect("publishes");
 
-    // The temporary is gone: the rename consumed it, so no half-written
-    // document is ever left where a reader would find one.
-    assert!(!fs.exists(&alloc::format!("{}/settings.conf.new", store_dir())));
     assert_eq!(
         store
             .document(&mut fs, ConfigScope::Private)
@@ -496,10 +493,7 @@ fn the_two_scopes_are_separate_documents() {
 }
 
 #[test]
-fn each_scope_publishes_through_its_own_sibling_temporary() {
-    // The temporary is derived from the live name, so the two scopes can never
-    // contend for it and a crash in one publish cannot corrupt the other's
-    // document.
+fn publishing_one_scope_leaves_the_other_untouched() {
     let mut fs = TestFs::provisioned();
     seed(
         &mut fs,
@@ -508,8 +502,6 @@ fn each_scope_publishes_through_its_own_sibling_temporary() {
         ConfigScope::Public,
         "a = 1\n",
     );
-    assert!(!fs.exists(&alloc::format!("{}/{PUBLIC_FILE}.new", store_dir())));
-    assert!(!fs.exists(&alloc::format!("{}/{SETTINGS_FILE}.new", store_dir())));
     assert!(fs.exists(&alloc::format!("{}/{PUBLIC_FILE}", store_dir())));
     assert!(!fs.exists(&alloc::format!("{}/{SETTINGS_FILE}", store_dir())));
 }
@@ -825,17 +817,6 @@ fn a_sealed_write_creates_the_key_material_and_reads_back() {
         !sealed.windows(7).any(|window| window == b"hunter2"),
         "the plaintext must not be on the volume"
     );
-}
-
-#[test]
-fn a_sealed_write_leaves_no_temporary_behind() {
-    let mut fs = TestFs::provisioned();
-    let store = open(&mut fs, ACCOUNT_UID, &identity(1), true).expect("opens");
-    store
-        .seal_change(&mut fs, &mut entropy(1), "k", Some("v"))
-        .expect("seals");
-    assert!(!fs.exists(&alloc::format!("{}/{VAULT_FILE}.new", store_dir())));
-    assert!(!fs.exists(&alloc::format!("{}/{MASTER_FILE}.new", gated_root())));
 }
 
 #[test]

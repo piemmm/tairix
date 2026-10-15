@@ -33,13 +33,8 @@ mod vertical {
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_wintersun_world::digest;
 
-    /// Static heap the generator's working set is allocated from — the
-    /// same one the bare-metal siblings use, rather than a second
-    /// allocator written for this target.
-    ///
-    /// `static mut` because the allocator hands out disjoint slices via an
-    /// atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -47,7 +42,7 @@ mod vertical {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Nothing here panics; reaching this is the failure the harness
     /// reports, and trapping is how a wasm module says so.

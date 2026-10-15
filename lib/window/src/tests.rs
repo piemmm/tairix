@@ -3019,7 +3019,8 @@ fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let mut sink = QueueSink::default();
     let target = DropTarget {
-        run_path: BundleRunPath::new("/Apps/textedit.app/Run").expect("a valid path"),
+        run_path: BundleRunPath::new("/System/Applications/textedit.app/Run")
+            .expect("a valid path"),
         writes_documents: true,
     };
 

@@ -61,7 +61,7 @@ du — ファイルのディスク使用量を見積もる
 - `du` — 現在のディレクトリのツリー、ディレクトリごとに 1 行。
 - `du -sh /Users/jo` — `/Users/jo` の読みやすい合計を 1 つ。
 - `du -a docs` — `docs` 以下のすべてのファイルとディレクトリ。
-- `du -d1 -c /Apps /Users` — 各ストアの第 1 レベル、その後に総計。
+- `du -d1 -c /System/Applications /Users` — 各ストアの第 1 レベル、その後に総計。
 
 ## EXIT STATUS
 

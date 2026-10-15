@@ -39,9 +39,8 @@
 //! documents a command — one policy, two views, so the page `man` shows
 //! always belongs to the program the shell would run. When that ordered
 //! list finds nothing, `man` falls back to a recursive walk of the roots
-//! [`search_roots`] spells — the machine-wide installed store, then the
-//! user's own two stores — so a bundle filed in a nested subdirectory is
-//! still found (`plans/APPS.md` §7).
+//! [`search_roots`] spells — the user's own two stores — so a bundle filed in
+//! a nested subdirectory is still found (`plans/APPS.md` §7).
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -55,7 +54,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::{
     BundleEntry, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR,
-    INSTALLED_APP_STORE, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
+    SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE, SYSTEM_COMPONENT_STORE,
 };
 
 /// The inherited session values the search order reads: the calling user's
@@ -129,21 +128,19 @@ pub fn bundle_candidates(word: &str, env: CommandEnv<'_>) -> Vec<String> {
 }
 
 /// Compute the roots `man`'s recursive bundle search walks, in order, when
-/// the [`bundle_candidates`] list finds nothing: the machine-wide installed
-/// application store, then the calling user's own command and application
-/// stores. `home` is the inherited `HOME` value, if set.
+/// the [`bundle_candidates`] list finds nothing: the calling user's own
+/// command and application stores. `home` is the inherited `HOME` value, if
+/// set.
 ///
 /// The two system stores are absent by design: they are flat — one
 /// command-named bundle per program — so the ordered candidates already
 /// cover them, and there is nothing nested to walk. Spelling only — the walk
 /// itself (and every permission check) belongs to the caller and the kernel.
-/// An unset or empty `home` simply contributes no per-user root; nothing is
-/// guessed in its place.
+/// An unset or empty `home` contributes no root; nothing is guessed in its
+/// place.
 #[must_use]
 pub fn search_roots(home: Option<&str>) -> Vec<String> {
-    let mut roots = alloc::vec![String::from(INSTALLED_APP_STORE)];
-    roots.extend(home_stores(home));
-    roots
+    home_stores(home)
 }
 
 /// The ordered directories a bare (searchable) command word is resolved
@@ -205,15 +202,36 @@ fn home_stores(home: Option<&str>) -> Vec<String> {
 /// The ordered bundle-directory spellings a bare (searchable) word names:
 /// the `<word>.app` bundle in each [`command_search_dirs`] directory.
 fn bundle_roots(word: &str, env: CommandEnv<'_>) -> Vec<String> {
-    let bundle = if word.ends_with(BUNDLE_SUFFIX) {
-        String::from(word)
-    } else {
-        format!("{word}{BUNDLE_SUFFIX}")
-    };
+    let bundle = bundle_name(word);
     command_search_dirs(env)
         .into_iter()
         .map(|dir| format!("{dir}/{bundle}"))
         .collect()
+}
+
+/// The bundle directory name `word` spells: itself when it carries the
+/// suffix, else with it.
+fn bundle_name(word: &str) -> String {
+    if word.ends_with(BUNDLE_SUFFIX) {
+        String::from(word)
+    } else {
+        format!("{word}{BUNDLE_SUFFIX}")
+    }
+}
+
+/// The bundle directories a word's help is read from, in order: its
+/// [`bundle_candidates`], then the component store's bundle of that name.
+///
+/// No word runs a component, but its help is a page like any other, so `man`
+/// and a component's own help switch find it here — after every program the
+/// word could run, so a component never shadows one.
+#[must_use]
+pub fn help_candidates(word: &str, env: CommandEnv<'_>) -> Vec<String> {
+    let mut candidates = bundle_candidates(word, env);
+    if !word.is_empty() && !word.contains('/') {
+        candidates.push(format!("{SYSTEM_COMPONENT_STORE}/{}", bundle_name(word)));
+    }
+    candidates
 }
 
 /// Split a `PATH` value into its entries.
@@ -249,8 +267,8 @@ fn split_path_entries(path: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundle_candidates, command_search_dirs, resolution_candidates, search_roots,
-        split_path_entries, CommandEnv,
+        bundle_candidates, command_search_dirs, help_candidates, resolution_candidates,
+        search_roots, split_path_entries, CommandEnv,
     };
     use alloc::vec;
     use alloc::vec::Vec;
@@ -342,12 +360,12 @@ mod tests {
     #[test]
     fn explicit_bundle_path_runs_its_entry_point() {
         assert_eq!(
-            resolution_candidates("/Apps/Example.app", CommandEnv::default()),
-            ["/Apps/Example.app/Run"]
+            resolution_candidates("/Users/ada/Applications/Example.app", CommandEnv::default()),
+            ["/Users/ada/Applications/Example.app/Run"]
         );
         assert_eq!(
-            resolution_candidates("Apps:/Example.app", CommandEnv::default()),
-            ["Apps:/Example.app/Run"]
+            resolution_candidates("System:/Applications/Example.app", CommandEnv::default()),
+            ["System:/Applications/Example.app/Run"]
         );
     }
 
@@ -411,15 +429,37 @@ mod tests {
         );
     }
 
+    /// A component's help is found after every program the word could run,
+    /// and no component is ever a candidate to run.
+    #[test]
+    fn help_reaches_the_component_store_after_the_programs() {
+        assert_eq!(
+            help_candidates("settings", CommandEnv::default()),
+            [
+                "/System/Commands/settings.app",
+                "/System/Applications/settings.app",
+                "/System/Components/settings.app",
+            ]
+        );
+        assert!(resolution_candidates("settings", CommandEnv::default())
+            .iter()
+            .all(|run| !run.starts_with("/System/Components/")));
+        assert_eq!(
+            help_candidates("/Users/ada/Applications/Example.app", CommandEnv::default()),
+            ["/Users/ada/Applications/Example.app"]
+        );
+        assert!(help_candidates("", CommandEnv::default()).is_empty());
+    }
+
     #[test]
     fn explicit_bundle_path_names_its_bundle() {
         assert_eq!(
-            bundle_candidates("/Apps/Example.app", ada(Some("/opt"))),
-            ["/Apps/Example.app"]
+            bundle_candidates("/Users/ada/Applications/Example.app", ada(Some("/opt"))),
+            ["/Users/ada/Applications/Example.app"]
         );
         assert_eq!(
-            bundle_candidates("Apps:/Example.app", CommandEnv::default()),
-            ["Apps:/Example.app"]
+            bundle_candidates("System:/Applications/Example.app", CommandEnv::default()),
+            ["System:/Applications/Example.app"]
         );
     }
 
@@ -444,23 +484,23 @@ mod tests {
     }
 
     #[test]
-    fn search_roots_are_the_installed_store_then_the_users_own() {
+    fn search_roots_are_the_users_own_stores() {
         assert_eq!(
             search_roots(Some("/Users/ada")),
-            ["/Apps", "/Users/ada/Commands", "/Users/ada/Applications"]
+            ["/Users/ada/Commands", "/Users/ada/Applications"]
         );
         // A trailing slash on HOME must not double the separator.
         assert_eq!(
             search_roots(Some("/Users/ada/")),
-            ["/Apps", "/Users/ada/Commands", "/Users/ada/Applications"]
+            ["/Users/ada/Commands", "/Users/ada/Applications"]
         );
     }
 
     #[test]
     fn a_missing_or_empty_home_contributes_no_per_user_root() {
-        assert_eq!(search_roots(None), ["/Apps"]);
-        assert_eq!(search_roots(Some("")), ["/Apps"]);
-        assert_eq!(search_roots(Some("/")), ["/Apps"]);
+        assert!(search_roots(None).is_empty());
+        assert!(search_roots(Some("")).is_empty());
+        assert!(search_roots(Some("/")).is_empty());
         for home in [None, Some(""), Some("/")] {
             assert_eq!(
                 command_search_dirs(CommandEnv {

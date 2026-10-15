@@ -22,3 +22,6 @@ host-seam = []
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

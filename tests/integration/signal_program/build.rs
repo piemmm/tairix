@@ -1,23 +1,7 @@
-//! Build script: enable the `freestanding` cfg when the signal fixture program
-//! is built for a bare-metal target (`target_os = "none"`), so `src/main.rs`
-//! compiles as a freestanding pure-Rust program there and as an inert host
-//! stub everywhere else (mirrors `tests/integration/wait_program`).
-//!
-//! It is deliberately self-contained — it does not depend on the
-//! `tests/integration` harness — and keys only off the OS component of the
-//! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
-//! cfg-check` stays clean.
-//!
-//! The consuming vertical (`signal_qemu_aarch64`) sets `TAIRIX_SIGNAL_ROLE`
-//! when it compiles this program (once per role), so a changed role must force
-//! a recompile; declare that dependency here.
+//! Enables the `freestanding` cfg on a bare-metal target, and rebuilds the
+//! program when the role `signal_qemu_aarch64` compiles it with changes.
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(freestanding)");
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os == "none" {
-        println!("cargo:rustc-cfg=freestanding");
-    }
+    tairix_buildcfg::emit_freestanding();
     println!("cargo:rerun-if-env-changed=TAIRIX_SIGNAL_ROLE");
-    println!("cargo:rerun-if-changed=build.rs");
 }

@@ -94,9 +94,8 @@ impl SystemRow {
 /// installed.
 pub const TASK_SHELL_BUNDLE: &str = "os.tairix.terminal";
 
-/// The Settings bundle's signed identifier: the catalog entry the
-/// *Settings…* row opens, on the same terms as [`TASK_SHELL_BUNDLE`], and the
-/// identity the desktop trusts Settings by.
+/// The Settings component's signed identifier: the identity the desktop
+/// trusts Settings by.
 pub const SETTINGS_BUNDLE: &str = "os.tairix.settings";
 
 /// The system menu, in order. This is the single definition of the menu's
@@ -202,8 +201,8 @@ pub struct SystemPermits {
     /// Whether the terminal bundle the Task Shell row launches is present
     /// in the desktop's catalog.
     pub task_shell_installed: bool,
-    /// Whether the settings bundle the Settings row opens is present in the
-    /// desktop's catalog.
+    /// Whether the session attested that the Settings component the Settings
+    /// row opens is installed.
     pub settings_installed: bool,
     /// Whether this session can put a password prompt in front of the
     /// screen — that is, whether it runs on a console whose login
@@ -299,11 +298,7 @@ pub(crate) fn response_at(index: usize) -> Option<TaskbarResponse> {
         SystemAction::TaskShell => TaskbarResponse::LibraryLaunch {
             entry: EntryId::new(TASK_SHELL_BUNDLE).ok()?,
         },
-        // The bar's one launch response, so the session gains no second path
-        // to a program on its account.
-        SystemAction::Settings => TaskbarResponse::LibraryLaunch {
-            entry: EntryId::new(SETTINGS_BUNDLE).ok()?,
-        },
+        SystemAction::Settings => TaskbarResponse::OpenSettings,
         SystemAction::Lock => TaskbarResponse::LockSession,
         SystemAction::SwitchUser => TaskbarResponse::SwitchUser,
         SystemAction::LogOut => TaskbarResponse::LogOut,

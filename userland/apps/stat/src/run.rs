@@ -29,15 +29,14 @@ mod program {
 
     use alloc::format;
     use alloc::string::String;
-    use alloc::vec::Vec;
 
     use tairix_abi::fs::{OpenFlags, FS_PATH_MAX, FS_SYMLINK_MAX};
     use tairix_abi::{Errno, FileStat, RealpathMode};
     use tairix_help::BundleHelp;
-    use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
+    use tairix_procinfo::{IpcTransport, Namespace};
     use tairix_rt::io::{write_stderr_line, Stderr, Stdout, Write};
     use tairix_rt::File;
-    use tairix_stat::{parse, run, Filesystem, Mount, Mounts, Names, Reporter, USAGE};
+    use tairix_stat::{parse, run, Filesystem, Mounts, Names, Reporter, USAGE};
 
     /// The production [`Filesystem`]: the kernel-authorised `fs_*` view. It
     /// adds no authority — every path resolution, per-inode permission, and
@@ -93,26 +92,16 @@ mod program {
         Ok(String::from(text))
     }
 
-    /// The production [`Mounts`]: the `sysinfo-v1` `MOUNT_LIST` query, read
-    /// through the one shared client `df` uses.
+    /// The production [`Mounts`]: the `sysinfo-v1` `MOUNT_LIST` and
+    /// `VIEW_LIST` queries, read through the one shared client `df` uses.
     struct RtMounts;
 
     impl Mounts for RtMounts {
-        fn list(&self) -> Result<Vec<Mount>, Errno> {
-            let mut mounts = Vec::new();
-            for_each_mount(&IpcTransport, |record| {
-                mounts.push(Mount {
-                    target: String::from_utf8_lossy(record.target_bytes()).into_owned(),
-                    fstype: String::from_utf8_lossy(record.fstype_bytes()).into_owned(),
-                    usage: record.usage(),
-                });
-                Ok(WalkStep::Continue)
-            })
-            // A snapshot the caller cannot read leaves the mount-derived
+        fn namespace(&self) -> Result<Namespace, Errno> {
+            // A namespace the caller cannot read leaves the mount-derived
             // fields unknown rather than failing the whole report, so the
-                // walk's reason collapses onto one refusal here.
-            .map_err(|_| Errno::NotImplemented)?;
-            Ok(mounts)
+            // walk's reason collapses onto one refusal here.
+            Namespace::read(&IpcTransport).map_err(|_| Errno::NotImplemented)
         }
     }
 

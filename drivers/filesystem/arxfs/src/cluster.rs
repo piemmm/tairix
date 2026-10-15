@@ -33,31 +33,31 @@ use crate::integrity::{DataFault, StoredForm, LOGICAL_HASH_LEN};
 use crate::xform;
 use crate::{
     as_u32, as_usize, extent_spec, is_all_zero, Block, Extent, Inode, RunStage, ARXFS,
-    COMPRESS_CLUSTER_BLOCKS, MAX_BLOCK_SIZE, METADATA_RESERVE, RING_BLOCKS,
+    COMPRESS_CLUSTER_BLOCKS, MAX_BLOCK_SIZE, RING_BLOCKS,
 };
 
 impl<B: Block> ARXFS<B> {
     /// Allocate `run` physically contiguous free data blocks, scanning upward
-    /// from the low end exactly like the single-block data allocator and
-    /// honouring the same metadata reserve. Returns the first block of the
-    /// run; every block is claimed (txn-private, rollback-recorded).
+    /// from the low end exactly like the single-block data allocator and, like
+    /// it, never from the reserve. Returns the first block of the run; every
+    /// block is claimed (txn-private, rollback-recorded).
     ///
     /// # Errors
     ///
     /// [`DriverError::NoSpace`] when no contiguous free run of `run` blocks
-    /// exists above the reserve — the caller falls back to per-block storage,
-    /// so fragmentation degrades compression, never correctness.
+    /// exists outside the reserve — the caller falls back to per-block
+    /// storage, so fragmentation degrades compression, never correctness.
     pub(crate) fn alloc_data_run(&mut self, run: u64) -> Result<u64, DriverError> {
         self.map_fold_pending()?;
-        if run == 0 || self.free_count < METADATA_RESERVE.saturating_add(run) {
+        if run == 0 || !self.has_ordinary_space()? {
             return Err(DriverError::NoSpace);
         }
         let start = RING_BLOCKS;
         let total = self.total_blocks;
         let cursor = self.allocator()?.alloc_cursor.max(start);
-        let found = match self.map_find_free_run(run, cursor, total)? {
+        let found = match self.find_ordinary_run(run, cursor, total)? {
             Some(block) => Some(block),
-            None => self.map_find_free_run(run, start, cursor)?,
+            None => self.find_ordinary_run(run, start, cursor)?,
         };
         let block = found.ok_or(DriverError::NoSpace)?;
         self.claim_run(block, run);

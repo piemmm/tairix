@@ -56,6 +56,7 @@ use tairix_supervisor::{
 use tairix_users::{GroupsDb, UsersDb};
 
 use crate::kernel_fs::KernelFs;
+use crate::transform_cache::SharedClusterCache;
 use crate::user_admin_backing::RootAdminBacking;
 use crate::volume_policy::LateStorageGid;
 use zeroize::{Zeroize, Zeroizing};
@@ -676,12 +677,15 @@ pub fn prefetch_root<Disk: Block>(mut disk: Disk) {
 /// aborts the boot.
 ///
 /// * `disk` — the whole-disk [`Block`] device the board brought up.
+/// * `audit` — the sink every decision is logged through. No secret is consumed or logged.
+/// * `cache` — the volume's transform cache, shared with its other mounts, for
+///   a window that reads bundles; `None` for one that only lists.
 /// * `f` — the continuation run against the mounted read-only `/System`
 ///   volume.
-/// * `audit` — the sink every decision is logged through. No secret is consumed or logged.
 pub fn with_system_volume<Disk: Block, R>(
     disk: &mut Disk,
     audit: &dyn Sink,
+    cache: Option<SharedClusterCache>,
     f: impl FnOnce(&mut dyn RootVolume) -> R,
 ) -> Option<R> {
     let Ok(table) = parse_partition_table(&mut *disk) else {
@@ -701,6 +705,9 @@ pub fn with_system_volume<Disk: Block, R>(
         system_volume_unavailable(audit, "system_mount_failed");
         return None;
     };
+    if let Some(cache) = cache {
+        system = system.with_cluster_cache(alloc::boxed::Box::new(cache));
+    }
     // Confirm it is a real `/System` volume: its root carries the
     // `Drivers` store directory the continuation reads.
     let root = system.root();
@@ -3552,7 +3559,7 @@ mod tests {
         let mut disk = success_disk();
         let sink = RecordingSink::new();
 
-        let found_store = with_system_volume(&mut disk, &sink, |volume| {
+        let found_store = with_system_volume(&mut disk, &sink, None, |volume| {
             let root = volume.root();
             volume.lookup(root, b"Drivers").is_ok()
         });
@@ -3575,7 +3582,7 @@ mod tests {
         let mut disk = FatVecBlock::new(64);
         let sink = RecordingSink::new();
 
-        let ran = with_system_volume(&mut disk, &sink, |_volume| {
+        let ran = with_system_volume(&mut disk, &sink, None, |_volume| {
             panic!("the continuation must not run when no /System volume mounts");
         });
 

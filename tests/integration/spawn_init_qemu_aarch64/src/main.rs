@@ -78,17 +78,8 @@ mod kernel {
     // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-    /// Static boot heap.
-    ///
-    /// Lives in `.bss` (zeroed by the boot trampoline) exactly as the
-    /// production aarch64 kernel binary's heap does: the `aarch64-virt.ld`
-    /// script brackets `.bss` with `__bss_start`/`__bss_end` and places
-    /// `__kernel_end` *after* it, so `boot_aarch64`'s `BootMemoryMap`
-    /// reserves the whole `[ram_base, __kernel_end)` span — the heap
-    /// included — and never hands a heap frame to the allocator. `static
-    /// mut` because the bump allocator hands out disjoint slices via an
-    /// atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -96,7 +87,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// `EventId` emitted by `spawn_and_enter` once the PID 1 image is built
     /// and it is about to `eret` into EL0. Pinned by the

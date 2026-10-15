@@ -349,6 +349,39 @@ impl HwTreeStore {
         Ok(())
     }
 
+    /// Mark the live, driven, non-root node `node_id` a key source, bumping
+    /// the generation and waking every parked `hw_tree_wait` caller when that
+    /// changes, so a boot waiting for a keyboard learns one has come.
+    ///
+    /// Only a node a driver holds can be one, and its driver's release or
+    /// replacement forgets it, so the mark never outlives the driver whose
+    /// keys it announces.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] if no live, driven, non-root node has id `node_id`.
+    pub fn mark_key_source(&self, node_id: u32) -> Result<(), Errno> {
+        let changed = {
+            let mut inner = self.inner.lock();
+            let Some(node) = inner
+                .node_mut(node_id)
+                .filter(|node| !node.is_root() && node.is_driven())
+            else {
+                return Err(Errno::NotFound);
+            };
+            let changed = !node.is_key_source();
+            if changed {
+                node.set_key_source(true);
+                inner.generation += 1;
+            }
+            changed
+        };
+        if changed {
+            tairix_kernel_core::hw_tree_wake();
+        }
+        Ok(())
+    }
+
     /// Record whether the live non-root node `node_id` is serving its `role`
     /// endpoint, bumping the generation and waking every parked
     /// `hw_tree_wait` caller when that changes, so the device manager binds
@@ -588,10 +621,12 @@ impl HwDriverTree for HwTreeStore {
             };
             let changed = !node.is_driven()
                 || node.is_settled() == publishes
+                || node.is_key_source()
                 || node.driver_ending() != DriverEnding::None
                 || node.fault_health() != FaultDomainState::Healthy;
             node.set_driven(true);
             node.set_settled(!publishes);
+            node.set_key_source(false);
             node.set_driver_ending(DriverEnding::None);
             node.set_fault_health(FaultDomainState::Healthy);
             inner.driven.insert(node_id, generation);
@@ -617,6 +652,7 @@ impl HwDriverTree for HwTreeStore {
             };
             node.set_driven(false);
             node.set_settled(false);
+            node.set_key_source(false);
             node.set_driver_ending(ending);
             inner.generation += 1;
             true
@@ -702,6 +738,10 @@ impl HwTreeSource for HwTreeStoreSource {
 
     fn settle(&self, node_id: u32) -> Result<(), Errno> {
         HW_TREE.set_settled(node_id, true)
+    }
+
+    fn mark_key_source(&self, node_id: u32) -> Result<(), Errno> {
+        HW_TREE.mark_key_source(node_id)
     }
 }
 
@@ -1282,14 +1322,47 @@ mod tests {
         forged.set_serves(LinkRole::Clock, true);
         forged.set_fault_health(FaultDomainState::Offline);
         forged.set_settled(true);
+        forged.set_key_source(true);
         forged.set_removable(true);
         let id = store.publish_child(2, forged).expect("published");
         let node = store.node(id).expect("live");
         assert!(!node.serves(LinkRole::Clock));
         assert_eq!(node.fault_health(), FaultDomainState::Healthy);
         assert!(!node.is_settled());
+        assert!(!node.is_key_source());
         assert!(!node.is_hot_arrival());
         assert!(node.is_removable(), "what the emitter describes stands");
+    }
+
+    /// A key source is a driven node's: marking one no driver holds fails
+    /// closed, and the mark goes with the driver that made it, whether it
+    /// ends or is replaced.
+    #[test]
+    fn a_key_source_is_marked_only_while_driven_and_forgotten_with_its_driver() {
+        let store = HwTreeStore::new();
+        store.seed(seed_tree()).expect("seeds");
+        let marked = |store: &HwTreeStore| store.node(2).is_some_and(|node| node.is_key_source());
+        assert_eq!(store.mark_key_source(2), Err(Errno::NotFound), "no driver");
+        assert_eq!(store.mark_key_source(1), Err(Errno::NotFound), "the root");
+        assert_eq!(store.mark_key_source(4242), Err(Errno::NotFound));
+
+        store.driver_admitted(2, 1, false);
+        let before = store.generation();
+        assert_eq!(store.mark_key_source(2), Ok(()));
+        assert!(marked(&store));
+        assert_eq!(store.generation(), before + 1, "a waiting boot is woken");
+        assert_eq!(store.mark_key_source(2), Ok(()));
+        assert_eq!(store.generation(), before + 1, "no change, no wake");
+
+        store.driver_released(2, 1, DriverEnding::Failed);
+        assert!(!marked(&store), "an ended driver delivers no keys");
+
+        store.driver_admitted(2, 2, false);
+        assert_eq!(store.mark_key_source(2), Ok(()));
+        let before = store.generation();
+        store.driver_admitted(2, 3, false);
+        assert!(!marked(&store), "a successor has said nothing yet");
+        assert!(store.generation() > before);
     }
 
     #[test]

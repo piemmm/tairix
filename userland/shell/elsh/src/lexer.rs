@@ -706,8 +706,8 @@ mod tests {
     #[test]
     fn splits_words_on_whitespace() {
         assert_eq!(
-            tokenize("ls  -l   /Apps").unwrap(),
-            vec![expandable("ls"), expandable("-l"), expandable("/Apps")]
+            tokenize("ls  -l   /Storage").unwrap(),
+            vec![expandable("ls"), expandable("-l"), expandable("/Storage")]
         );
     }
 

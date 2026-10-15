@@ -2,12 +2,13 @@
 
 A `plans/APPS.md` command app (`AGENTS.md` §3 `userland/apps/`),
 registered as the system command store bundle `df.app` so the shell resolves
-the bare word `df` to it. `df` reports, one row per mounted filesystem,
+the bare word `df` to it. `df` reports, one row per attached volume,
 the volume's size, the space used, the space available, the percentage
-used, and the mount point; with `file` operands it reports the
-filesystem containing each operand. The option surface follows GNU
-coreutils (`AGENTS.md` §16.7): `-a` shows the pseudo/duplicate mounts
-the default hides, `-T`/`-t`/`-x` add and filter by filesystem type,
+used, and the view path showing it; with `file` operands it reports the
+binding covering each operand, from the volume that binding shows. The
+option surface follows GNU coreutils (`AGENTS.md` §16.7): `-a` lists
+every binding, so a volume's bind mounts and the `/Storage` catalog
+appear, `-T`/`-t`/`-x` add and filter by filesystem type,
 `-i` reports inodes, `-P` selects the POSIX portable wording, `--total`
 appends a summary row, `-l` accepts the local-only filter (every TAIRiX
 mount is local), and `-k`/`-h`/`-H`/`--si`/`-B <size>` select the scale
@@ -17,15 +18,16 @@ through the shared GNU size vocabulary in `lib/util`
 tree through the shared `lib/help` engine (`plans/APPS.md` §4).
 
 Live system state is read exclusively through the System Information
-API (`AGENTS.md` §16.6): the ungated `sysinfo-v1` `MOUNT_LIST` query
-served by `sysinfod`, whose rows carry each backing volume's space
-accounting (`VolumeStats`) as the mounted filesystem driver reports it —
-the shared `tairix_procinfo::for_each_mount` walk the `mount` tool uses,
-never a second query client and never a `/proc`-style scrape. A volume
-with a dynamic inode table reports zero inode figures (the honest
-"untracked" answer). When the default view hides capacity-less or
-duplicate mounts, the omission is noted on fd 3
-(`fs.mounts_omitted`, `AGENTS.md` §20.1), never in the table.
+API (`AGENTS.md` §16.6): the ungated `sysinfo-v1` `MOUNT_LIST` and
+`VIEW_LIST` queries served by `sysinfod`, whose volume records carry each
+volume's space accounting (`VolumeStats`) as the mounted filesystem driver
+reports it — joined by the shared `tairix_procinfo::Namespace` the `mount`
+tool uses, never a second query client and never a `/proc`-style scrape.
+A volume with a dynamic inode table reports zero inode figures (the
+honest "untracked" answer). When the default view leaves out rows `-a`
+shows — a volume reporting no capacity, a further binding, the catalog —
+the omission is noted on fd 3 (`fs.mounts_omitted`, `AGENTS.md` §20.1),
+never in the table.
 
 Documented divergences from GNU `df`: the `--output` field list and
 `--sync`/`--no-sync` are not yet available; a relative `file` operand is

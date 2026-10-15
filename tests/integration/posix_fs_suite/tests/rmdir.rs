@@ -13,14 +13,19 @@ fn rmdir_removes_an_empty_directory() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("empty"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("empty")), &mut fs)
         .expect("mkdir");
-    vfs.remove_via_secured(&owner, &vol_path("empty"), &mut fs, true)
+    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("empty")), &mut fs, true)
         .expect("rmdir");
 
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("empty"), &mut fs, FinalLink::Follow)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("empty")),
+            &mut fs,
+            FinalLink::Follow
+        )
+        .map(|info| info.kind),
         Err(VfsError::NotFound)
     );
 }
@@ -31,13 +36,13 @@ fn rmdir_of_non_empty_directory_is_not_empty() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("populated"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("populated")), &mut fs)
         .expect("mkdir");
-    vfs.create_via_secured(&owner, &vol_path("populated/child"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("populated/child")), &mut fs)
         .expect("create child");
 
     assert_eq!(
-        vfs.remove_via_secured(&owner, &vol_path("populated"), &mut fs, true),
+        vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("populated")), &mut fs, true),
         Err(VfsError::NotEmpty)
     );
 }
@@ -48,13 +53,13 @@ fn rmdir_succeeds_once_the_directory_is_emptied() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("d"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("d")), &mut fs)
         .expect("mkdir");
-    vfs.create_via_secured(&owner, &vol_path("d/child"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("d/child")), &mut fs)
         .expect("create child");
-    vfs.remove_via_secured(&owner, &vol_path("d/child"), &mut fs, false)
+    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("d/child")), &mut fs, false)
         .expect("remove child");
-    vfs.remove_via_secured(&owner, &vol_path("d"), &mut fs, true)
+    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("d")), &mut fs, true)
         .expect("rmdir once emptied");
 }
 
@@ -64,15 +69,20 @@ fn rmdir_of_a_file_is_not_a_directory() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("plain"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("plain")), &mut fs)
         .expect("create");
     assert_eq!(
-        vfs.remove_via_secured(&owner, &vol_path("plain"), &mut fs, true),
+        vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("plain")), &mut fs, true),
         Err(VfsError::NotADirectory)
     );
     // The refused removal left the file untouched.
-    vfs.stat_via_secured(&owner, &vol_path("plain"), &mut fs, FinalLink::Follow)
-        .expect("file survives");
+    vfs.stat_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("plain")),
+        &mut fs,
+        FinalLink::Follow,
+    )
+    .expect("file survives");
 }
 
 #[test]
@@ -82,7 +92,7 @@ fn rmdir_missing_directory_is_not_found() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     assert_eq!(
-        vfs.remove_via_secured(&owner, &vol_path("nope"), &mut fs, true),
+        vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("nope")), &mut fs, true),
         Err(VfsError::NotFound)
     );
 }

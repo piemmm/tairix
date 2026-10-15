@@ -13,11 +13,11 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags,
-    NodeId, NodeKind as DriverNodeKind,
+    AllocationClass, DirVisit, FilesystemAttrs, FilesystemRead, FilesystemSecurity,
+    FilesystemWrite, MountFlags, NodeId, NodeKind as DriverNodeKind,
 };
 use tairix_abi::fs::{RealpathMode, RenameFlags, FS_PATH_MAX};
-use tairix_abi::CapabilityId;
+use tairix_abi::{CapabilityId, ROOT_VIEW, STORAGE_CATALOG};
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -25,10 +25,10 @@ use super::delegate::{
     DelegatedEntry, DelegatedFs, DelegatedInfo, DelegatedRef, FinalLink, MountProjection,
 };
 use super::listing::{DirPosition, ListEnd};
-use super::mount::MountTable;
-use super::path::{spell, Path, MAX_PATH_COMPONENTS, ROOT_TEMPLATE};
+use super::mount::{CoveredPair, CoveredPath, MountPoint, MountTable};
+use super::path::{spell, Path, MAX_PATH_COMPONENTS};
 use super::perm::{Access, Credentials, Metadata, Mode};
-use super::VfsError;
+use super::{BoundedReadError, VfsError};
 
 /// A node's payload: a directory (name → child) or a file (bytes).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,6 +60,18 @@ impl Node {
     }
 }
 
+/// What an operation does with what a mount serves, which the mount's flags
+/// may refuse.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum MountUse {
+    /// Read or inspect, which every mount allows.
+    Read,
+    /// Change, which a read-only mount refuses.
+    Write,
+    /// Read as a program to run, which a `noexec` mount refuses.
+    Run,
+}
+
 /// An in-RAM virtual filesystem tree.
 ///
 /// The mount table lives behind its own [`RwLock`] so a runtime volume
@@ -83,18 +95,19 @@ impl Vfs {
         }
     }
 
-    /// Construct a VFS pre-populated with the default
-    /// layout: exactly the four permitted top-level directories
-    /// (`/System`, `/Users`, `/Apps`, `/Storage`), the two writable
-    /// exceptions under `/System` (`/System/Logs`, `/System/Settings`),
-    /// and the matching mount policy.
+    /// Construct a VFS pre-populated with the default layout: the root-view
+    /// entries ([`ROOT_VIEW`]), the two writable exceptions under `/System`
+    /// (`/System/Logs`, `/System/Settings`), and the mount policy.
+    ///
+    /// `/Users` is a plain directory of whatever backs `/`. `/Storage` is a
+    /// mount with no backing: the catalog of the volumes attached beneath it,
+    /// read-only so nothing can be stored in it. A mount exists only where a
+    /// different volume, or a narrower policy, applies.
     ///
     /// `owner`/`group` own the system directories. The layout is fixed and
     /// correct by construction.
     #[must_use]
     pub fn with_default_layout(owner: UserId, group: GroupId) -> Self {
-        let nosuid_nodev = MountFlags::NOSUID.union(MountFlags::NODEV);
-        let nosuid_nodev_noexec = nosuid_nodev.union(MountFlags::NOEXEC);
         let dir_meta = || Metadata::new(owner, group, Mode::from_bits(0o755));
 
         let mut system = Node::directory(dir_meta());
@@ -105,7 +118,7 @@ impl Vfs {
 
         let mut root = Node::directory(dir_meta());
         if let NodeKind::Directory(entries) = &mut root.kind {
-            for name in ROOT_TEMPLATE {
+            for name in ROOT_VIEW {
                 let node = if name == "System" {
                     system.clone()
                 } else {
@@ -119,17 +132,26 @@ impl Vfs {
         // The longest-prefix resolution in `MountTable` lets the writable
         // `/System/Logs` and `/System/Settings` child mounts shadow the
         // read-only `/System`.
+        let catalog = alloc::format!("/{STORAGE_CATALOG}");
+        // The two writable grafts take the system's own writes, so those may
+        // draw on their volume's reserve once users have filled it.
         let policy = [
-            ("/System", MountFlags::READ_ONLY),
-            ("/System/Logs", nosuid_nodev_noexec),
-            ("/System/Settings", nosuid_nodev_noexec),
-            ("/Users", nosuid_nodev),
-            ("/Apps", nosuid_nodev),
-            ("/Storage", nosuid_nodev_noexec),
+            ("/System", MountFlags::READ_ONLY, AllocationClass::Ordinary),
+            ("/System/Logs", MountFlags::NOEXEC, AllocationClass::System),
+            (
+                "/System/Settings",
+                MountFlags::NOEXEC,
+                AllocationClass::System,
+            ),
+            (
+                catalog.as_str(),
+                MountFlags::READ_ONLY.union(MountFlags::NOEXEC),
+                AllocationClass::Ordinary,
+            ),
         ];
-        for (path, flags) in policy {
+        for (path, flags, class) in policy {
             if let Ok(p) = Path::parse(path) {
-                let _ = mounts.mount(p, flags, None);
+                let _ = mounts.mount_classed(p, flags, None, class);
             }
         }
 
@@ -148,6 +170,20 @@ impl Vfs {
         self.mounts.read()
     }
 
+    /// `path` with the mount covering it, for an operation served by the one
+    /// volume driver the caller holds: a boot-time read, or a test.
+    #[must_use]
+    pub fn cover(&self, path: &Path) -> CoveredPath {
+        self.mounts.read().cover(path.clone())
+    }
+
+    /// `first` and `second` with the mounts covering them, read together, as
+    /// [`Self::cover`] for a two-path operation.
+    #[must_use]
+    pub fn cover_pair(&self, first: &Path, second: &Path) -> CoveredPair {
+        self.mounts.read().cover_pair(first.clone(), second.clone())
+    }
+
     /// The mount table, write-locked, for wiring a block-backed filesystem
     /// driver into a subtree or adding/retracting a runtime mount.
     pub fn mounts_write(&self) -> RwLockWriteGuard<'_, MountTable> {
@@ -164,12 +200,15 @@ impl Vfs {
     /// Read from a file under a driver-backed mount, delegating the I/O to
     /// `fs`.
     ///
-    /// The covering mount must be driver-backed (its
-    /// [`backing`](super::MountPoint::backing) is `Some`); the caller maps
-    /// that handle to the live `fs`. Resolution walks the in-RAM tree to the
-    /// mount point — authorising search permission on every ancestor — and
-    /// then delegates the remaining components to `fs`, applying the mount
-    /// point's [`Metadata`] as the permission template (see [`DelegatedFs`]).
+    /// `covered` is the path with the mount that covered it, and that mount
+    /// must be driver-backed (its [`backing`](super::MountPoint::backing) is
+    /// `Some`); `fs` is the driver behind it, looked up under the same
+    /// reading of the table ([`MountTable::cover`]), so the operation is
+    /// judged against the mount whose volume serves it. Resolution walks the
+    /// in-RAM tree to the mount point — authorising search permission on
+    /// every ancestor — and then delegates the remaining components to `fs`,
+    /// applying the mount point's [`Metadata`] as the permission template
+    /// (see [`DelegatedFs`]).
     ///
     /// # Errors
     ///
@@ -182,13 +221,13 @@ impl Vfs {
     pub fn read_via(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut dyn FilesystemRead,
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new(fs, mount).read(cred, &remainder, offset, buf)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new(fs, mount).read(cred, covered.remainder(), offset, buf)
     }
 
     /// List a directory under a driver-backed mount, delegating to `fs`.
@@ -216,14 +255,14 @@ impl Vfs {
     pub fn list_via(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut dyn FilesystemRead,
         final_link: FinalLink,
         at: &mut DirPosition,
         each: &mut dyn FnMut(&DelegatedRef<'_>) -> DirVisit,
     ) -> Result<ListEnd, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new(fs, mount).list_from(cred, &remainder, final_link, at, each)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new(fs, mount).list_from(cred, covered.remainder(), final_link, at, each)
     }
 
     /// Every entry of the directory at `path`, owned, for a walk that keeps
@@ -237,7 +276,7 @@ impl Vfs {
     pub fn list_all_via(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut dyn FilesystemRead,
         final_link: FinalLink,
         limit: usize,
@@ -245,7 +284,7 @@ impl Vfs {
         collect_listing(limit, |each| {
             self.list_via(
                 cred,
-                path,
+                covered,
                 fs,
                 final_link,
                 &mut DirPosition::default(),
@@ -268,12 +307,12 @@ impl Vfs {
     pub fn stat_via(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut dyn FilesystemRead,
         final_link: FinalLink,
     ) -> Result<DelegatedInfo, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new(fs, mount).stat(cred, &remainder, final_link)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new(fs, mount).stat(cred, covered.remainder(), final_link)
     }
 
     /// Read the stored target of the symbolic link at `path` under a
@@ -295,11 +334,11 @@ impl Vfs {
     pub fn readlink_via(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut dyn FilesystemRead,
     ) -> Result<String, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new(fs, mount).read_link(cred, &remainder)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new(fs, mount).read_link(cred, covered.remainder())
     }
 
     /// Canonicalise `path` under a driver-backed mount, delegating to `fs`:
@@ -330,14 +369,13 @@ impl Vfs {
     pub fn realpath_via(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut dyn FilesystemRead,
         mode: RealpathMode,
     ) -> Result<String, VfsError> {
-        let mount_path = self.covering_mount_path(path);
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        let below = DelegatedFs::new(fs, mount).canonicalize(cred, &remainder, mode)?;
-        Self::spell_canonical(&mount_path, below)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        let below = DelegatedFs::new(fs, mount).canonicalize(cred, covered.remainder(), mode)?;
+        Self::spell_canonical(covered.mount().path(), below)
     }
 
     /// Per-inode counterpart of [`Vfs::realpath_via`].
@@ -348,19 +386,14 @@ impl Vfs {
     pub fn realpath_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         mode: RealpathMode,
     ) -> Result<String, VfsError> {
-        let mount_path = self.covering_mount_path(path);
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        let below = DelegatedFs::new_secured(fs, mount).canonicalize(cred, &remainder, mode)?;
-        Self::spell_canonical(&mount_path, below)
-    }
-
-    /// The path of the mount covering `path`, read under a short lock.
-    fn covering_mount_path(&self, path: &Path) -> Path {
-        self.mounts.read().resolve(path).path().clone()
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        let below =
+            DelegatedFs::new_secured(fs, mount).canonicalize(cred, covered.remainder(), mode)?;
+        Self::spell_canonical(covered.mount().path(), below)
     }
 
     /// Spell the canonical `/`-view path of `below` beneath the mount point
@@ -406,13 +439,13 @@ impl Vfs {
     pub fn create_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
         DelegatedFs::new(fs, mount).create(
             cred,
-            &remainder,
+            covered.remainder(),
             DriverNodeKind::RegularFile,
             FinalLink::Follow,
         )
@@ -436,12 +469,12 @@ impl Vfs {
     pub fn symlink_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         target: &str,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new(fs, mount).create_link(cred, &remainder, target)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new(fs, mount).create_link(cred, covered.remainder(), target)
     }
 
     /// Add `link` as a second name for the node `existing` already names
@@ -466,13 +499,17 @@ impl Vfs {
     pub fn link_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        existing: &Path,
-        link: &Path,
+        pair: &CoveredPair,
         fs: &mut F,
         existing_link: FinalLink,
     ) -> Result<(), VfsError> {
-        let (mount, existing_rem, link_rem) = self.delegate_pair_context(cred, existing, link)?;
-        DelegatedFs::new(fs, mount).link(cred, &existing_rem, &link_rem, existing_link)
+        let mount = self.delegate_pair_context(cred, pair)?;
+        DelegatedFs::new(fs, mount).link(
+            cred,
+            pair.first().remainder(),
+            pair.second().remainder(),
+            existing_link,
+        )
     }
 
     /// Per-inode counterpart of [`Vfs::link_via`].
@@ -483,13 +520,17 @@ impl Vfs {
     pub fn link_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        existing: &Path,
-        link: &Path,
+        pair: &CoveredPair,
         fs: &mut F,
         existing_link: FinalLink,
     ) -> Result<(), VfsError> {
-        let (mount, existing_rem, link_rem) = self.delegate_pair_context(cred, existing, link)?;
-        DelegatedFs::new_secured(fs, mount).link(cred, &existing_rem, &link_rem, existing_link)
+        let mount = self.delegate_pair_context(cred, pair)?;
+        DelegatedFs::new_secured(fs, mount).link(
+            cred,
+            pair.first().remainder(),
+            pair.second().remainder(),
+            existing_link,
+        )
     }
 
     /// Create a directory under a driver-backed mount, delegating to `fs`.
@@ -504,13 +545,13 @@ impl Vfs {
     pub fn mkdir_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
         DelegatedFs::new(fs, mount).create(
             cred,
-            &remainder,
+            covered.remainder(),
             DriverNodeKind::Directory,
             FinalLink::Keep,
         )
@@ -534,13 +575,13 @@ impl Vfs {
     pub fn write_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         offset: u64,
         data: &[u8],
     ) -> Result<usize, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new(fs, mount).write(cred, &remainder, offset, data)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new(fs, mount).write(cred, covered.remainder(), offset, data)
     }
 
     /// Set the length of a file under a driver-backed mount, delegating to
@@ -554,12 +595,12 @@ impl Vfs {
     pub fn truncate_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         size: u64,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new(fs, mount).truncate(cred, &remainder, size)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new(fs, mount).truncate(cred, covered.remainder(), size)
     }
 
     /// Unlink a child under a driver-backed mount, delegating to `fs`.
@@ -581,26 +622,13 @@ impl Vfs {
     pub fn remove_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         dir_only: bool,
     ) -> Result<Option<NodeId>, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new(fs, mount).remove(cred, &remainder, dir_only)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new(fs, mount).remove(cred, covered.remainder(), dir_only)
     }
-
-    // -----------------------------------------------------------------
-    // Per-inode (`FilesystemSecurity`) variants.
-    //
-    // These mirror the `*_via` methods above but judge every delegated
-    // node against the driver's *own* stored record rather than the
-    // uniform mount-point template. The kernel
-    // host calls these for a driver such as `arxfs` that stores full
-    // per-inode ownership, mode, ACL, and capability gate; the
-    // template-based `*_via` methods remain for drivers (e.g. FAT) that
-    // store no per-file owner. The driver still makes no permission
-    // decision — the VFS applies the model to the record it reports.
-    // -----------------------------------------------------------------
 
     /// Per-inode counterpart of [`Vfs::read_via`].
     ///
@@ -610,13 +638,52 @@ impl Vfs {
     pub fn read_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).read(cred, &remainder, offset, buf)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).read(cred, covered.remainder(), offset, buf)
+    }
+
+    /// [`Self::read_via_secured`] for a file read as a program to run.
+    ///
+    /// # Errors
+    ///
+    /// [`VfsError::PermissionDenied`] when the mount serving `path` is
+    /// `noexec`, judged on the mount the bytes are read from: a link never
+    /// resolves outside its own mount. Otherwise as
+    /// [`Self::read_via_secured`].
+    pub fn read_program_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        covered: &CoveredPath,
+        fs: &mut F,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, VfsError> {
+        let mount = self.delegate_context(cred, covered, MountUse::Run)?;
+        DelegatedFs::new_secured(fs, mount).read(cred, covered.remainder(), offset, buf)
+    }
+
+    /// Per-inode bounded read of the file at `path`
+    /// ([`DelegatedFs::read_bounded`]): the path is resolved once.
+    ///
+    /// # Errors
+    ///
+    /// As [`DelegatedFs::read_bounded`].
+    pub fn read_bounded_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        covered: &CoveredPath,
+        fs: &mut F,
+        max: u64,
+        len: usize,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), BoundedReadError> {
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).read_bounded(cred, covered.remainder(), max, len, buf)
     }
 
     /// Per-inode counterpart of [`Vfs::list_via`].
@@ -627,14 +694,20 @@ impl Vfs {
     pub fn list_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         final_link: FinalLink,
         at: &mut DirPosition,
         each: &mut dyn FnMut(&DelegatedRef<'_>) -> DirVisit,
     ) -> Result<ListEnd, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).list_from(cred, &remainder, final_link, at, each)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).list_from(
+            cred,
+            covered.remainder(),
+            final_link,
+            at,
+            each,
+        )
     }
 
     /// Per-inode counterpart of [`Vfs::list_all_via`].
@@ -645,7 +718,7 @@ impl Vfs {
     pub fn list_all_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         final_link: FinalLink,
         limit: usize,
@@ -653,7 +726,7 @@ impl Vfs {
         collect_listing(limit, |each| {
             self.list_via_secured(
                 cred,
-                path,
+                covered,
                 fs,
                 final_link,
                 &mut DirPosition::default(),
@@ -671,13 +744,18 @@ impl Vfs {
     pub fn lookup_entries_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         final_link: FinalLink,
         names: &[&[u8]],
     ) -> Result<(NodeId, Vec<Option<DelegatedEntry>>), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).lookup_entries(cred, &remainder, final_link, names)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).lookup_entries(
+            cred,
+            covered.remainder(),
+            final_link,
+            names,
+        )
     }
 
     /// Per-inode counterpart of [`Vfs::stat_via`].
@@ -688,12 +766,12 @@ impl Vfs {
     pub fn stat_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         final_link: FinalLink,
     ) -> Result<DelegatedInfo, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).stat(cred, &remainder, final_link)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).stat(cred, covered.remainder(), final_link)
     }
 
     /// Per-inode counterpart of [`Vfs::readlink_via`].
@@ -704,11 +782,11 @@ impl Vfs {
     pub fn readlink_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
     ) -> Result<String, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).read_link(cred, &remainder)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).read_link(cred, covered.remainder())
     }
 
     /// Per-inode counterpart of [`Vfs::create_via`].
@@ -719,13 +797,13 @@ impl Vfs {
     pub fn create_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
         DelegatedFs::new_secured(fs, mount).create(
             cred,
-            &remainder,
+            covered.remainder(),
             DriverNodeKind::RegularFile,
             FinalLink::Follow,
         )
@@ -741,12 +819,12 @@ impl Vfs {
     >(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         target: &str,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, mount).create_link(cred, &remainder, target)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).create_link(cred, covered.remainder(), target)
     }
 
     /// Per-inode counterpart of [`Vfs::mkdir_via`].
@@ -757,13 +835,13 @@ impl Vfs {
     pub fn mkdir_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
         DelegatedFs::new_secured(fs, mount).create(
             cred,
-            &remainder,
+            covered.remainder(),
             DriverNodeKind::Directory,
             FinalLink::Keep,
         )
@@ -777,13 +855,13 @@ impl Vfs {
     pub fn write_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         offset: u64,
         data: &[u8],
     ) -> Result<usize, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, mount).write(cred, &remainder, offset, data)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).write(cred, covered.remainder(), offset, data)
     }
 
     /// Per-inode counterpart of [`Vfs::truncate_via`].
@@ -796,12 +874,12 @@ impl Vfs {
     >(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         size: u64,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, mount).truncate(cred, &remainder, size)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).truncate(cred, covered.remainder(), size)
     }
 
     /// Per-inode counterpart of [`Vfs::remove_via`].
@@ -812,12 +890,12 @@ impl Vfs {
     pub fn remove_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         dir_only: bool,
     ) -> Result<Option<NodeId>, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, mount).remove(cred, &remainder, dir_only)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).remove(cred, covered.remainder(), dir_only)
     }
 
     /// Set the permission bits of the node at `path` to `mode` under a
@@ -836,15 +914,17 @@ impl Vfs {
     /// * [`VfsError::PermissionDenied`] if the caller is not the node's
     ///   owner or fails a search/capability check on the way to it.
     /// * [`VfsError::NotADirectory`] or [`VfsError::Io`].
-    pub fn set_mode_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+    pub fn set_mode_via_secured<
+        F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized,
+    >(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         mode: u32,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, mount).set_mode(cred, &remainder, mode)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).set_mode(cred, covered.remainder(), mode)
     }
 
     /// Set the owning user and/or group of the node at `path` under a
@@ -868,16 +948,18 @@ impl Vfs {
     ///   for the requested change or fails a search/capability check on the
     ///   way to the node.
     /// * [`VfsError::NotADirectory`] or [`VfsError::Io`].
-    pub fn set_owner_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+    pub fn set_owner_via_secured<
+        F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized,
+    >(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         uid: u32,
         gid: u32,
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, mount).set_owner(cred, &remainder, uid, gid)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).set_owner(cred, covered.remainder(), uid, gid)
     }
 
     /// Read one extended attribute of the node at `path` under a
@@ -898,13 +980,13 @@ impl Vfs {
     >(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         key: &[u8],
         value_out: &mut [u8],
     ) -> Result<usize, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).get_attr(cred, &remainder, key, value_out)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).get_attr(cred, covered.remainder(), key, value_out)
     }
 
     /// Set one extended attribute of the node at `path` under a writable
@@ -916,17 +998,17 @@ impl Vfs {
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * As [`DelegatedFs::set_attr`](super::delegate::DelegatedFs::set_attr).
     pub fn set_attr_via_secured<
-        F: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized,
+        F: FilesystemRead + FilesystemSecurity + FilesystemAttrs + FilesystemWrite + ?Sized,
     >(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         key: &[u8],
         value: &[u8],
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, mount).set_attr(cred, &remainder, key, value)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).set_attr(cred, covered.remainder(), key, value)
     }
 
     /// Yield the `index`-th visible extended-attribute key of the node at
@@ -941,13 +1023,13 @@ impl Vfs {
     >(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         index: u64,
         key_out: &mut [u8],
     ) -> Result<Option<usize>, VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).list_attr(cred, &remainder, index, key_out)
+        let mount = self.delegate_context(cred, covered, MountUse::Read)?;
+        DelegatedFs::new_secured(fs, mount).list_attr(cred, covered.remainder(), index, key_out)
     }
 
     /// Remove one extended attribute of the node at `path` under a writable
@@ -959,16 +1041,16 @@ impl Vfs {
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * As [`DelegatedFs::remove_attr`](super::delegate::DelegatedFs::remove_attr).
     pub fn remove_attr_via_secured<
-        F: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized,
+        F: FilesystemRead + FilesystemSecurity + FilesystemAttrs + FilesystemWrite + ?Sized,
     >(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
+        covered: &CoveredPath,
         fs: &mut F,
         key: &[u8],
     ) -> Result<(), VfsError> {
-        let (mount, remainder) = self.delegate_context(cred, path, true)?;
-        DelegatedFs::new_secured(fs, mount).remove_attr(cred, &remainder, key)
+        let mount = self.delegate_context(cred, covered, MountUse::Write)?;
+        DelegatedFs::new_secured(fs, mount).remove_attr(cred, covered.remainder(), key)
     }
 
     /// Move `src` to `dst` under a driver-backed mount, delegating to `fs`.
@@ -991,13 +1073,17 @@ impl Vfs {
     pub fn rename_via<F: FilesystemRead + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        src: &Path,
-        dst: &Path,
+        pair: &CoveredPair,
         fs: &mut F,
         flags: RenameFlags,
     ) -> Result<Option<NodeId>, VfsError> {
-        let (mount, src_rem, dst_rem) = self.delegate_pair_context(cred, src, dst)?;
-        DelegatedFs::new(fs, mount).rename(cred, &src_rem, &dst_rem, flags)
+        let mount = self.delegate_pair_context(cred, pair)?;
+        DelegatedFs::new(fs, mount).rename(
+            cred,
+            pair.first().remainder(),
+            pair.second().remainder(),
+            flags,
+        )
     }
 
     /// Per-inode counterpart of [`Vfs::rename_via`].
@@ -1008,18 +1094,21 @@ impl Vfs {
     pub fn rename_via_secured<F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>(
         &self,
         cred: &Credentials<'_>,
-        src: &Path,
-        dst: &Path,
+        pair: &CoveredPair,
         fs: &mut F,
         flags: RenameFlags,
     ) -> Result<Option<NodeId>, VfsError> {
-        let (mount, src_rem, dst_rem) = self.delegate_pair_context(cred, src, dst)?;
-        DelegatedFs::new_secured(fs, mount).rename(cred, &src_rem, &dst_rem, flags)
+        let mount = self.delegate_pair_context(cred, pair)?;
+        DelegatedFs::new_secured(fs, mount).rename(
+            cred,
+            pair.first().remainder(),
+            pair.second().remainder(),
+            flags,
+        )
     }
 
-    /// Resolve the driver-backed mount covering *both* `first` and `second`
-    /// for a two-path mutation, returning what that mount projects and the
-    /// components of each path below the shared mount point.
+    /// What the one writable driver-backed mount covering both paths of
+    /// `pair` projects, for a two-path mutation.
     ///
     /// Both paths must be covered by the same writable driver-backed mount.
     /// The two callers need that for the same reason — a rename preserves
@@ -1027,85 +1116,68 @@ impl Vfs {
     /// one inode, and neither can span two independent backings — so a pair
     /// that crosses mounts is refused with [`VfsError::CrossVolume`], the
     /// dedicated refusal a mover falls back to copy-then-remove on.
-    fn delegate_pair_context(
+    fn delegate_pair_context<'a>(
         &self,
         cred: &Credentials<'_>,
-        first: &Path,
-        second: &Path,
-    ) -> Result<(MountProjection, Vec<String>, Vec<String>), VfsError> {
-        // Copy the mount facts out under a short read lock; nothing below
-        // holds the guard.
-        let (mount_depth, mount_path, subtree, mount_template) = {
-            let mounts = self.mounts.read();
-            let first_mount = mounts.resolve(first);
-            let second_mount = mounts.resolve(second);
-            if first_mount.backing().is_none() || second_mount.backing().is_none() {
-                return Err(VfsError::NotFound);
-            }
-            if first_mount.is_read_only() || second_mount.is_read_only() {
-                return Err(VfsError::ReadOnly);
-            }
-            if first_mount.path() != second_mount.path() {
-                return Err(VfsError::CrossVolume);
-            }
-            (
-                first_mount.path().depth(),
-                first_mount.path().clone(),
-                first_mount.backing_subtree().to_vec(),
-                first_mount.template().cloned(),
-            )
-        };
-        let template = self.mount_point_template(cred, &mount_path, mount_template)?;
-        let below = |path: &Path| path.components()[mount_depth..].to_vec();
-        Ok((
-            MountProjection { template, subtree },
-            below(first),
-            below(second),
-        ))
+        pair: &'a CoveredPair,
+    ) -> Result<MountProjection<'a>, VfsError> {
+        let (first, second) = (pair.first().mount(), pair.second().mount());
+        if first.backing().is_none() || second.backing().is_none() {
+            return Err(VfsError::NotFound);
+        }
+        if first.is_read_only() || second.is_read_only() {
+            return Err(VfsError::ReadOnly);
+        }
+        if first.path() != second.path() {
+            return Err(VfsError::CrossVolume);
+        }
+        self.projection(cred, first)
     }
 
-    /// Resolve the driver-backed mount covering `path`, returning what that
-    /// mount projects — the permission template for delegated nodes and its
-    /// root on the backing volume — and the path components below the mount
-    /// point.
-    ///
-    /// Walking to the mount point through [`Vfs::resolve`] authorises
-    /// search permission on every ancestor directory; the mount point's own
-    /// metadata becomes the template, and search permission on the mount
-    /// point itself is enforced by the delegated walk (it is the template's
-    /// `Execute` bit).
+    /// What the driver-backed mount covering `covered` projects — the
+    /// permission template for delegated nodes and its root on the backing
+    /// volume — refusing a `purpose` the mount's flags forbid: a write on a
+    /// read-only mount, a program read on a `noexec` one.
     ///
     /// The mount's `backing_subtree` stays a property of the *mount* rather
-    /// than being folded into the returned components: it is the floor the
+    /// than being folded into the path's remainder: it is the floor the
     /// delegated walk clamps to, so a link stored inside a sub-mount cannot
     /// resolve to a node outside what the mount projects.
-    fn delegate_context(
+    fn delegate_context<'a>(
         &self,
         cred: &Credentials<'_>,
-        path: &Path,
-        require_writable: bool,
-    ) -> Result<(MountProjection, Vec<String>), VfsError> {
-        // Copy the mount facts out under a short read lock; nothing below
-        // holds the guard.
-        let (mount_depth, mount_path, subtree, mount_template) = {
-            let mounts = self.mounts.read();
-            let mount = mounts.resolve(path);
-            if mount.backing().is_none() {
-                return Err(VfsError::NotFound);
+        covered: &'a CoveredPath,
+        purpose: MountUse,
+    ) -> Result<MountProjection<'a>, VfsError> {
+        let mount = covered.mount();
+        if mount.backing().is_none() {
+            return Err(VfsError::NotFound);
+        }
+        match purpose {
+            MountUse::Write if mount.is_read_only() => return Err(VfsError::ReadOnly),
+            MountUse::Run if mount.flags().contains(MountFlags::NOEXEC) => {
+                return Err(VfsError::PermissionDenied);
             }
-            if require_writable && mount.is_read_only() {
-                return Err(VfsError::ReadOnly);
-            }
-            (
-                mount.path().depth(),
-                mount.path().clone(),
-                mount.backing_subtree().to_vec(),
-                mount.template().cloned(),
-            )
-        };
-        let template = self.mount_point_template(cred, &mount_path, mount_template)?;
-        let remainder = path.components()[mount_depth..].to_vec();
-        Ok((MountProjection { template, subtree }, remainder))
+            MountUse::Read | MountUse::Write | MountUse::Run => {}
+        }
+        self.projection(cred, mount)
+    }
+
+    /// What `mount` projects. Walking to the mount point through
+    /// [`Vfs::resolve`] authorises search permission on every ancestor
+    /// directory; the mount point's own metadata becomes the template, and
+    /// search permission on the mount point itself is enforced by the
+    /// delegated walk (it is the template's `Execute` bit).
+    fn projection<'a>(
+        &self,
+        cred: &Credentials<'_>,
+        mount: &'a MountPoint,
+    ) -> Result<MountProjection<'a>, VfsError> {
+        Ok(MountProjection {
+            template: self.mount_point_template(cred, mount.path(), mount.template().cloned())?,
+            subtree: mount.backing_subtree(),
+            class: mount.class(),
+        })
     }
 
     /// The permission template the delegated walk applies at and below a

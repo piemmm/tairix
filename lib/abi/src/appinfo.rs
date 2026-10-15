@@ -1,7 +1,7 @@
 //! Application-bundle (`.app`) manifest and loader policy — the ABI surface.
 //!
-//! An installed application is a `/Apps/<Name>.app/` directory with a
-//! **fixed** top-level layout: a signed `AppInfo`
+//! An application is a `<Name>.app/` directory in one of the program stores
+//! with a **fixed** top-level layout: a signed `AppInfo`
 //! manifest, a `Run` entry-point binary, and a closed set of optional
 //! sub-directories. This module owns three frozen pieces of that contract:
 //!
@@ -496,16 +496,6 @@ pub const HOME_COMMAND_STORE_DIR: &str = "Commands";
 /// [`HOME_COMMAND_STORE_DIR`].
 pub const HOME_APPLICATION_STORE_DIR: &str = "Applications";
 
-/// Absolute path of the **installed application store**: the machine-wide
-/// directory for locally-installed application bundles. Unlike the system
-/// stores it is writable under a capability (never system-signed) and its
-/// bundles may be organised in nested plain subdirectories; `man`'s
-/// recursive bundle search walks it — after the ordered candidates — so an
-/// installed app's help is found wherever its bundle was filed
-/// (`plans/APPS.md` §7). Launch stays explicit: the shell searches it only
-/// if the user adds it to `PATH`.
-pub const INSTALLED_APP_STORE: &str = "/Apps";
-
 /// Absolute path of the **system service store**: the OS-provided,
 /// read-only, system-signed service bundles (`login.app`, `devmgr.app`,
 /// `sysinfod.app`, …). A service is an app: each ships as the same
@@ -515,19 +505,39 @@ pub const INSTALLED_APP_STORE: &str = "/Apps";
 /// startup config, and the image builds, so they cannot drift.
 pub const SYSTEM_SERVICE_STORE: &str = "/System/Services";
 
+/// Absolute path of the **system component store**: the bundles that are
+/// parts of the OS rather than programs a user launches — the desktop session
+/// and the file manager, settings and date-and-time setter it starts. Not
+/// searched: the OS starts a component by its path.
+pub const SYSTEM_COMPONENT_STORE: &str = "/System/Components";
+
+/// The entry point of the desktop session component.
+pub const DESKTOP_RUN_PATH: &str = "/System/Components/desktop.app/Run";
+
+/// The entry point of the file manager component the session starts.
+pub const FILES_RUN_PATH: &str = "/System/Components/files.app/Run";
+
+/// The entry point of the Settings component.
+pub const SETTINGS_RUN_PATH: &str = "/System/Components/settings.app/Run";
+
+/// The entry point of the elevated Date & Time setter component.
+pub const DATETIME_RUN_PATH: &str = "/System/Components/datetime.app/Run";
+
 /// The directory-name suffix every application bundle carries
 /// (`<name>.app`). Command resolution appends it to a bare command word and
 /// recognises it on an explicitly-typed bundle name (`plans/APPS.md` §9).
 pub const BUNDLE_SUFFIX: &str = ".app";
 
 /// What a program *is*, and therefore which OS-provided store its bundle is
-/// planted in.
+/// planted in and may run from.
 ///
-/// A bundle declares its kind once, in its `AppInfo.toml` manifest source,
-/// and the build plants it accordingly — there is no list anywhere of which
-/// programs are commands and which are applications. The set is closed:
-/// an unrecognised spelling is a packaging defect the build refuses, never a
-/// guessed default.
+/// A bundle declares its kind once, in its `AppInfo.toml` manifest source;
+/// the build signs it into the manifest ([`AppInfoHeader::kind`]) and plants
+/// the bundle accordingly, and the load gate refuses a bundle launched from a
+/// store its signed kind does not name ([`Self::launchable_from`]) — there is
+/// no list anywhere of which programs are commands and which are
+/// applications. The set is closed: an unrecognised spelling is a packaging
+/// defect the build refuses, never a guessed default.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ProgramKind {
     /// A command app: a program whose interface is the standard streams,
@@ -539,14 +549,18 @@ pub enum ProgramKind {
     /// A long-running system service (a service is an app), planted in
     /// [`SYSTEM_SERVICE_STORE`].
     Service,
+    /// A part of the OS the system starts by path, planted in
+    /// [`SYSTEM_COMPONENT_STORE`].
+    Component,
 }
 
 impl ProgramKind {
     /// Every kind, in canonical order — the closed set.
-    pub const ALL: [ProgramKind; 3] = [
+    pub const ALL: [ProgramKind; 4] = [
         ProgramKind::Command,
         ProgramKind::Application,
         ProgramKind::Service,
+        ProgramKind::Component,
     ];
 
     /// The canonical `kind = "…"` spelling a manifest source declares.
@@ -556,7 +570,27 @@ impl ProgramKind {
             ProgramKind::Command => "command",
             ProgramKind::Application => "application",
             ProgramKind::Service => "service",
+            ProgramKind::Component => "component",
         }
+    }
+
+    /// The kind's byte in a signed manifest ([`AppInfoHeader::kind`]). No
+    /// kind is zero, so a manifest that declares none decodes to nothing.
+    #[must_use]
+    pub const fn to_wire(self) -> u8 {
+        match self {
+            ProgramKind::Command => 1,
+            ProgramKind::Application => 2,
+            ProgramKind::Service => 3,
+            ProgramKind::Component => 4,
+        }
+    }
+
+    /// The kind a manifest's kind byte names, or `None` for a byte naming
+    /// none.
+    #[must_use]
+    pub fn from_wire(byte: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.to_wire() == byte)
     }
 
     /// Decode a manifest `kind` value, or `None` for an unrecognised
@@ -573,6 +607,7 @@ impl ProgramKind {
             ProgramKind::Command => SYSTEM_COMMAND_STORE,
             ProgramKind::Application => SYSTEM_APPLICATION_STORE,
             ProgramKind::Service => SYSTEM_SERVICE_STORE,
+            ProgramKind::Component => SYSTEM_COMPONENT_STORE,
         }
     }
 
@@ -587,8 +622,8 @@ impl ProgramKind {
 
     /// `true` when a user launches programs of this kind **by name**: both
     /// program stores are on the fixed search prefix, so a command and a
-    /// graphical application are each typeable, while a service is started
-    /// by the system, never by a typed word.
+    /// graphical application are each typeable, while a service or a
+    /// component is started by the system, never by a typed word.
     ///
     /// This is the one predicate that separates the user-facing programs
     /// from the system's own, so the help gates — every named program ships
@@ -597,6 +632,25 @@ impl ProgramKind {
     #[must_use]
     pub const fn is_searched(self) -> bool {
         matches!(self, ProgramKind::Command | ProgramKind::Application)
+    }
+
+    /// Whether a bundle of this kind may run from `bundle`, an absolute
+    /// bundle path.
+    ///
+    /// Each system store holds only its own kind, and the kinds the system
+    /// starts — services and components — run only from their own store, so
+    /// a system-signed service copied anywhere else is not a command. A
+    /// command or application may also run from outside every system store:
+    /// a user's own stores, or a directory on `PATH`.
+    #[must_use]
+    pub fn launchable_from(self, bundle: &str) -> bool {
+        match Self::ALL
+            .into_iter()
+            .find(|kind| is_within(bundle, kind.store()))
+        {
+            Some(store) => store == self,
+            None => self.is_searched(),
+        }
     }
 }
 
@@ -784,7 +838,8 @@ impl core::fmt::Display for LibraryError {
 /// records which root matched; the path itself is unchanged.
 ///
 /// `bundle_libraries_dir` is the absolute path of the bundle's `Libraries`
-/// directory (e.g. `/Apps/Example.app/Libraries`); a trailing `/` is
+/// directory (e.g. `/System/Applications/Example.app/Libraries`); a
+/// trailing `/` is
 /// tolerated.
 ///
 /// # Errors
@@ -871,9 +926,13 @@ pub struct AppInfoHeader {
     /// link-local discovery may ever grant it. Capped at
     /// [`APPINFO_MAX_BROWSE`].
     pub browse_count: u16,
+    /// The program's kind ([`ProgramKind::to_wire`]), signed with the rest so
+    /// where a bundle may run is the publisher's statement, not the directory
+    /// it was found in. A byte naming no kind is refused.
+    pub kind: u8,
     /// Always zero, so the header has no padding and its in-memory image is
     /// its wire image; a non-zero value is refused.
-    pub reserved: u16,
+    pub reserved: u8,
     /// Valid byte count of the inline `id` buffer (`<= BUNDLE_ID_MAX`).
     pub id_len: u8,
     /// Valid byte count of the inline `name` buffer (`<= BUNDLE_NAME_MAX`).
@@ -955,7 +1014,8 @@ impl AppInfoHeader {
     const OFF_CAP_COUNT: usize = 12;
     const OFF_MIME_COUNT: usize = 14;
     const OFF_BROWSE_COUNT: usize = 16;
-    const OFF_RESERVED: usize = 18;
+    const OFF_KIND: usize = 18;
+    const OFF_RESERVED: usize = 19;
     const OFF_ID_LEN: usize = 20;
     const OFF_NAME_LEN: usize = 21;
     const OFF_VERSION_LEN: usize = 22;
@@ -1006,8 +1066,8 @@ impl AppInfoHeader {
             .copy_from_slice(&self.mime_count.to_le_bytes());
         out[Self::OFF_BROWSE_COUNT..Self::OFF_BROWSE_COUNT + 2]
             .copy_from_slice(&self.browse_count.to_le_bytes());
-        out[Self::OFF_RESERVED..Self::OFF_RESERVED + 2]
-            .copy_from_slice(&self.reserved.to_le_bytes());
+        out[Self::OFF_KIND] = self.kind;
+        out[Self::OFF_RESERVED] = self.reserved;
         out[Self::OFF_ID_LEN] = self.id_len;
         out[Self::OFF_NAME_LEN] = self.name_len;
         out[Self::OFF_VERSION_LEN] = self.version_len;
@@ -1044,8 +1104,8 @@ impl AppInfoHeader {
     ///
     /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
     /// * [`Errno::BadMagic`] if the magic word does not match, if `flags`
-    ///   sets a bit outside [`APPINFO_FLAG_MASK`], or if `reserved` is not
-    ///   zero.
+    ///   sets a bit outside [`APPINFO_FLAG_MASK`], if `kind` names no
+    ///   [`ProgramKind`], or if `reserved` is not zero.
     /// * [`Errno::AbiVersionUnsupported`] if `abi_version` is not
     ///   [`crate::ABI_VERSION_CURRENT`].
     /// * [`Errno::LengthOutOfRange`] if `capability_count`, `mime_count`,
@@ -1088,8 +1148,9 @@ impl AppInfoHeader {
         if browse_count > APPINFO_MAX_BROWSE {
             return Err(Errno::LengthOutOfRange);
         }
-        let reserved = read_u16(bytes, Self::OFF_RESERVED);
-        if reserved != 0 {
+        let kind = bytes[Self::OFF_KIND];
+        let reserved = bytes[Self::OFF_RESERVED];
+        if ProgramKind::from_wire(kind).is_none() || reserved != 0 {
             return Err(Errno::BadMagic);
         }
         let id_len = bytes[Self::OFF_ID_LEN];
@@ -1109,6 +1170,7 @@ impl AppInfoHeader {
             capability_count,
             mime_count,
             browse_count,
+            kind,
             reserved,
             id_len,
             name_len,
@@ -1182,6 +1244,13 @@ impl AppInfoHeader {
     #[must_use]
     pub fn bundle_version(&self) -> &str {
         inline_str(&self.version, self.version_len)
+    }
+
+    /// The program's signed kind. `None` only for a hand-built header:
+    /// [`Self::from_bytes`] refuses a byte naming no kind.
+    #[must_use]
+    pub fn program_kind(&self) -> Option<ProgramKind> {
+        ProgramKind::from_wire(self.kind)
     }
 
     /// The program-library folder this bundle asks to be listed under, or
@@ -1609,6 +1678,7 @@ pub fn manifest_header(id: &str, name: &str) -> AppInfoHeader {
         capability_count: 0,
         mime_count: 0,
         browse_count: 0,
+        kind: ProgramKind::Application.to_wire(),
         reserved: 0,
         id_len,
         name_len,
@@ -1643,10 +1713,11 @@ mod tests {
         PublisherBinding, PublisherId, APPINFO_FLAG_DOCUMENT_WRITE, APPINFO_FLAG_MASK,
         APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE,
         APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_CONTENT_DIGEST_MAGIC,
-        BUNDLE_ID_MAX, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN,
-        MIME_TYPE_MAX, PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT,
-        PUBLISHER_ID_LEN, PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE,
-        SYSTEM_COMMAND_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
+        BUNDLE_ID_MAX, BUNDLE_SUFFIX, DATETIME_RUN_PATH, DESKTOP_RUN_PATH, FILES_RUN_PATH,
+        HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX,
+        PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
+        PUBLISHER_ID_PREIMAGE_LEN, SETTINGS_RUN_PATH, SYSTEM_APPLICATION_STORE,
+        SYSTEM_COMMAND_STORE, SYSTEM_COMPONENT_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     };
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
     use crate::{Errno, ABI_VERSION_CURRENT};
@@ -1673,6 +1744,7 @@ mod tests {
             capability_count: 2,
             mime_count: 1,
             browse_count: 1,
+            kind: ProgramKind::Application.to_wire(),
             reserved: 0,
             id_len,
             name_len,
@@ -1724,12 +1796,97 @@ mod tests {
     }
 
     /// Exactly the two program stores are reached by a typed word; a
-    /// service is never named by a user.
+    /// service or a component is never named by a user.
     #[test]
     fn only_the_program_stores_are_searched_by_name() {
         assert!(ProgramKind::Command.is_searched());
         assert!(ProgramKind::Application.is_searched());
         assert!(!ProgramKind::Service.is_searched());
+        assert!(!ProgramKind::Component.is_searched());
+    }
+
+    #[test]
+    fn a_kind_has_one_non_zero_wire_byte() {
+        for kind in ProgramKind::ALL {
+            assert_ne!(kind.to_wire(), 0);
+            assert_eq!(ProgramKind::from_wire(kind.to_wire()), Some(kind));
+        }
+        assert_eq!(ProgramKind::from_wire(0), None);
+        assert_eq!(
+            ProgramKind::from_wire(u8::try_from(ProgramKind::ALL.len() + 1).unwrap()),
+            None
+        );
+    }
+
+    /// Regression: a bundle's kind was only the directory it sat in, so a
+    /// system-signed service copied into a user's store ran as a command.
+    #[test]
+    fn a_bundle_runs_only_from_where_its_signed_kind_may() {
+        use ProgramKind::{Application, Command, Component, Service};
+        for (kind, bundle, allowed) in [
+            (Command, "/System/Commands/ps.app", true),
+            (Application, "/System/Applications/terminal.app", true),
+            (Service, "/System/Services/sysinfod.app", true),
+            (Component, "/System/Components/desktop.app", true),
+            // A system store holds only its own kind.
+            (Application, "/System/Commands/terminal.app", false),
+            (Command, "/System/Services/ps.app", false),
+            (Component, "/System/Applications/desktop.app", false),
+            // What the system starts runs only from its own store.
+            (Service, "/Users/ada/Commands/sysinfod.app", false),
+            (Component, "/Users/ada/Applications/desktop.app", false),
+            (Service, "/Storage/stick/sysinfod.app", false),
+            // A program a user launches runs from anywhere else too.
+            (Command, "/Users/ada/Commands/tool.app", true),
+            (Application, "/Users/ada/Applications/games/chess.app", true),
+            (Command, "/Users/ada/bin/tool.app", true),
+            // A sibling that shares a store's prefix is not inside it.
+            (Command, "/System/CommandsEvil/ps.app", true),
+            (Service, "/System/ServicesEvil/x.app", false),
+        ] {
+            assert_eq!(
+                kind.launchable_from(bundle),
+                allowed,
+                "{kind:?} at {bundle}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_manifest_without_a_kind_is_refused() {
+        for kind in [0, 5, u8::MAX] {
+            let mut h = sample();
+            h.kind = kind;
+            assert_eq!(
+                AppInfoHeader::from_bytes(&h.to_le_bytes()),
+                Err(Errno::BadMagic),
+                "kind byte {kind}"
+            );
+        }
+        let mut h = sample();
+        h.kind = ProgramKind::Service.to_wire();
+        let decoded = AppInfoHeader::from_bytes(&h.to_le_bytes()).expect("decodes");
+        assert_eq!(decoded.program_kind(), Some(ProgramKind::Service));
+    }
+
+    /// Each component's entry point is spelled under the component store.
+    #[test]
+    fn every_component_runs_from_the_component_store() {
+        for run in [
+            DESKTOP_RUN_PATH,
+            FILES_RUN_PATH,
+            SETTINGS_RUN_PATH,
+            DATETIME_RUN_PATH,
+        ] {
+            let bundle = run.strip_suffix("/Run").expect("an entry point");
+            assert!(bundle.ends_with(BUNDLE_SUFFIX), "{run}");
+            assert!(ProgramKind::Component.launchable_from(bundle), "{run}");
+            assert_eq!(
+                bundle.rsplit_once('/').map(|(store, _)| store),
+                Some(SYSTEM_COMPONENT_STORE),
+                "{run}"
+            );
+        }
     }
 
     /// Each kind names a distinct store, and the `/System`-relative
@@ -1739,9 +1896,11 @@ mod tests {
         assert_eq!(ProgramKind::Command.store(), SYSTEM_COMMAND_STORE);
         assert_eq!(ProgramKind::Application.store(), SYSTEM_APPLICATION_STORE);
         assert_eq!(ProgramKind::Service.store(), SYSTEM_SERVICE_STORE);
+        assert_eq!(ProgramKind::Component.store(), SYSTEM_COMPONENT_STORE);
         assert_eq!(ProgramKind::Command.store_dir(), "Commands");
         assert_eq!(ProgramKind::Application.store_dir(), "Applications");
         assert_eq!(ProgramKind::Service.store_dir(), "Services");
+        assert_eq!(ProgramKind::Component.store_dir(), "Components");
         for kind in ProgramKind::ALL {
             let store = kind.store();
             assert_eq!(
@@ -1814,9 +1973,12 @@ mod tests {
 
     #[test]
     fn library_resolves_against_both_roots() {
-        let bundle_libs = "/Apps/Example.app/Libraries";
+        let bundle_libs = "/System/Applications/Example.app/Libraries";
         assert_eq!(
-            resolve_library("/Apps/Example.app/Libraries/libui.so", bundle_libs),
+            resolve_library(
+                "/System/Applications/Example.app/Libraries/libui.so",
+                bundle_libs
+            ),
             Ok(LibraryScope::Bundle)
         );
         assert_eq!(
@@ -1826,8 +1988,8 @@ mod tests {
         // A trailing slash on the bundle directory is tolerated.
         assert_eq!(
             resolve_library(
-                "/Apps/Example.app/Libraries/sub/libx.so",
-                "/Apps/Example.app/Libraries/"
+                "/System/Applications/Example.app/Libraries/sub/libx.so",
+                "/System/Applications/Example.app/Libraries/"
             ),
             Ok(LibraryScope::Bundle)
         );
@@ -1835,14 +1997,17 @@ mod tests {
 
     #[test]
     fn library_refuses_outside_policy_and_traversal() {
-        let bundle_libs = "/Apps/Example.app/Libraries";
+        let bundle_libs = "/System/Applications/Example.app/Libraries";
         assert_eq!(
             resolve_library("/System/Kernel/secret", bundle_libs),
             Err(LibraryError::OutsidePolicy)
         );
         // A sibling that merely shares the prefix is not "within".
         assert_eq!(
-            resolve_library("/Apps/Example.app/LibrariesEvil/x.so", bundle_libs),
+            resolve_library(
+                "/System/Applications/Example.app/LibrariesEvil/x.so",
+                bundle_libs
+            ),
             Err(LibraryError::OutsidePolicy)
         );
         assert_eq!(
@@ -2405,6 +2570,7 @@ mod tests {
             capability_count => AppInfoHeader::OFF_CAP_COUNT,
             mime_count => AppInfoHeader::OFF_MIME_COUNT,
             browse_count => AppInfoHeader::OFF_BROWSE_COUNT,
+            kind => AppInfoHeader::OFF_KIND,
             reserved => AppInfoHeader::OFF_RESERVED,
             id_len => AppInfoHeader::OFF_ID_LEN,
             name_len => AppInfoHeader::OFF_NAME_LEN,

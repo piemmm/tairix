@@ -85,7 +85,7 @@ impl RxeView {
 ///
 /// This summarises what the manifest *says*; it does not verify the
 /// Ed25519 signature (verification needs the install's authority key and
-/// belongs to the kernel/`appmgr` load gate). The signer public key and
+/// belongs to the bundle load gate, `lib/appload`). The signer public key and
 /// signature bytes are surfaced through [`ManifestSummary::header`] so a
 /// renderer can display them.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -3,11 +3,6 @@
 //! `src/main.rs` compiles as a freestanding pure-Rust program there and as an
 //! inert host stub everywhere else (mirrors `tests/integration/wait_program`).
 //!
-//! It is deliberately self-contained — it does not depend on the
-//! `tests/integration` harness — and keys only off the OS component of the
-//! target (bare-metal vs hosted), never the instruction set, so `cargo xtask
-//! cfg-check` stays clean.
-//!
 //! The consuming verticals (`file_map_qemu_aarch64` / `…_riscv64`) pin the
 //! fixture geometry through the `TAIRIX_FM_*` environment variables when they
 //! compile this program, so a changed geometry must force a recompile;
@@ -25,13 +20,8 @@ const GEOMETRY_ENV: &[&str] = &[
 ];
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(freestanding)");
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os == "none" {
-        println!("cargo:rustc-cfg=freestanding");
-    }
+    tairix_buildcfg::emit_freestanding();
     for name in GEOMETRY_ENV {
         println!("cargo:rerun-if-env-changed={name}");
     }
-    println!("cargo:rerun-if-changed=build.rs");
 }

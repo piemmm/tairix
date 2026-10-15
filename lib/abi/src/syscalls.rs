@@ -3520,6 +3520,18 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::HW_NODE_KEY_SOURCE,
+        name: "hw_node_key_source",
+        arg_count: 0,
+        args: [AbiType::Unit; SYSCALL_MAX_ARGS],
+        ret: AbiType::Errno,
+        // Only a driver whose keys reach the seat has them to announce. A
+        // readiness report that changes no authority, once per driver, so it
+        // is no decision worth a record.
+        required_capability: Some(CapabilityId::INPUT_INJECT),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -3841,6 +3853,11 @@ mod tests {
             assert_eq!(spec.required_capability, Some(CapabilityId::INPUT_INJECT));
             assert!(!spec.audit, "input injection must not audit per event");
         }
+        // hw_node_key_source announces that a driver's key presses reach the
+        // seat, so it takes the grant they are delivered under.
+        let spec = spec_for(SyscallNumber::HW_NODE_KEY_SOURCE).unwrap();
+        assert_eq!(spec.required_capability, Some(CapabilityId::INPUT_INJECT));
+        assert!(!spec.audit);
         // display_acquire / display_release own the display and keyboard
         // focus, gated on CAP_DISPLAY and audited per call — re-routing the
         // keyboard stream is a security-relevant ownership change.

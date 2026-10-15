@@ -55,7 +55,7 @@ governato dai controlli di firma e capacità del loader,
 indipendentemente dal catalogo.
 
 `applib rescan` esamina gli archivi delle applicazioni
-(`/System/Commands`, `/System/Applications` e `/Apps`, o i
+(`/System/Commands` e `/System/Applications`, o i
 `<home>/Commands` e `<home>/Applications` del chiamante con `--user`),
 legge il manifesto di ogni pacchetto e registra ogni applicazione che
 richiede di essere elencata e non è ancora catalogata. I record
@@ -97,9 +97,9 @@ può ignorare.
 
 - `applib` — mostra la libreria risolta, cartella per cartella.
 - `applib list --category Games` — mostra una singola cartella.
-- `applib add /Apps/chess.app` — registra un pacchetto come richiesto
+- `applib add /System/Applications/chess.app` — registra un pacchetto come richiesto
   dal suo manifesto.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   registra un pacchetto che non dichiara alcuna elencazione, sotto una
   cartella esplicita.
 - `applib remove os.tairix.chess` — rimuove una voce per

@@ -32,12 +32,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::boxed::Box;
 
 use tairix_abi::driver::filesystem::{
-    DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeId, NodeKind, NodeSecurity, WritebackHost,
+    AllocationClass, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
+    FilesystemStats, FilesystemWrite, NodeId, NodeKind, NodeSecurity, VolumeHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 
-use super::memfs::RwMockFs;
+use super::memfs::{RwMockFs, SYSTEM_ONLY_NAME};
 
 /// The regular file the fixture holds, with [`FILE_BODY`] as its contents.
 pub const FILE_NAME: &[u8] = b"file";
@@ -182,18 +182,19 @@ pub fn assert_write_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapp
         .remove(root, b"renamed")
         .expect("`remove` is not being forwarded");
     wrapper.flush().expect("`flush` is not being forwarded");
-    assert_writeback_host_forwards(wrapper);
+    assert_volume_host_forwards(wrapper);
+    assert_allocation_class_forwards(wrapper);
 }
 
 /// The mount handle the suite installs its write-back timer under.
 const CONFORMANCE_VOLUME: u64 = 0x5742;
 
-/// A [`WritebackHost`] recording the handle the innermost driver reported
+/// A [`VolumeHost`] recording the handle the innermost driver reported
 /// against, so the forwarding is observed through the host rather than
 /// through an inner driver the wrapper hides.
 struct RecordingHost(AtomicU64);
 
-impl WritebackHost for RecordingHost {
+impl VolumeHost for RecordingHost {
     fn now_ns(&self) -> Option<u64> {
         Some(0)
     }
@@ -201,24 +202,51 @@ impl WritebackHost for RecordingHost {
     fn writeback_due(&self, volume: DriverHandle, _deadline_ns: Option<u64>) {
         self.0.store(volume.as_u64(), Ordering::Release);
     }
+
+    fn reserve_crossed(&self, _volume: DriverHandle, _in_reserve: bool) {}
 }
 
-/// [`FilesystemWrite::set_writeback_host`] reaches the inner driver.
+/// [`FilesystemWrite::set_volume_host`] reaches the inner driver.
 ///
 /// Its trait default is a silent no-op, so a wrapper that drops it costs no
 /// error and no test failure anywhere else — the inner driver simply never
 /// defers a commit again, and the batching win disappears without a trace.
 /// The fixture reports to the host as it is installed, so an unforwarded
 /// call leaves the host with nothing recorded.
-fn assert_writeback_host_forwards<W: FilesystemWrite + ?Sized>(wrapper: &mut W) {
+fn assert_volume_host_forwards<W: FilesystemWrite + ?Sized>(wrapper: &mut W) {
     let host: &'static RecordingHost = Box::leak(Box::new(RecordingHost(AtomicU64::new(0))));
     let volume = DriverHandle::from_raw(CONFORMANCE_VOLUME).expect("non-zero handle");
-    wrapper.set_writeback_host(volume, host);
+    wrapper.set_volume_host(volume, host);
     assert_eq!(
         host.0.load(Ordering::Acquire),
         CONFORMANCE_VOLUME,
-        "`set_writeback_host` is not being forwarded: the inner driver never          learned of the timer, so it will publish every operation instead of          batching"
+        "`set_volume_host` is not being forwarded: the inner driver never          learned of the timer, so it will publish every operation instead of          batching"
     );
+}
+
+/// [`FilesystemWrite::set_allocation_class`] reaches the inner driver.
+///
+/// Its trait default is a silent no-op too, so a wrapper that drops it takes
+/// the system's own writes off the reserve and nothing else notices. The
+/// fixture keeps one name for the system, so an unforwarded class leaves that
+/// create refused.
+fn assert_allocation_class_forwards<W: FilesystemRead + FilesystemWrite + ?Sized>(wrapper: &mut W) {
+    let root = wrapper.root();
+    assert_eq!(
+        wrapper.create(root, SYSTEM_ONLY_NAME, NodeKind::RegularFile),
+        Err(DriverError::NoSpace),
+        "an ordinary create of the system's name is refused"
+    );
+    wrapper.set_allocation_class(AllocationClass::System);
+    let created = wrapper.create(root, SYSTEM_ONLY_NAME, NodeKind::RegularFile);
+    wrapper.set_allocation_class(AllocationClass::Ordinary);
+    created.expect(
+        "`set_allocation_class` is not being forwarded: the system's own \
+         writes have lost the reserve",
+    );
+    wrapper
+        .remove(root, SYSTEM_ONLY_NAME)
+        .expect("`remove` is not being forwarded");
 }
 
 /// Both [`FilesystemSecurity`] methods reach the inner driver, and a

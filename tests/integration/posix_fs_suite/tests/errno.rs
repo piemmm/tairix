@@ -36,7 +36,12 @@ fn a_real_missing_lookup_surfaces_enoent() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     let err = vfs
-        .stat_via_secured(&owner, &vol_path("absent"), &mut fs, FinalLink::Follow)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("absent")),
+            &mut fs,
+            FinalLink::Follow,
+        )
         .map(|info| info.size)
         .expect_err("a missing path fails");
     assert_eq!(err.to_errno(), Errno::NotFound);
@@ -48,7 +53,7 @@ fn a_real_permission_denial_surfaces_eacces() {
     let caps = CapabilitySet::empty();
     let admin = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&admin, &vol_path("guarded"), &mut fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&vol_path("guarded")), &mut fs)
         .expect("create");
     let node = root_node_id(&mut fs, b"guarded");
     fs.set_security(node, NodeSecurity::new(0o600, 1000, 1000))
@@ -57,7 +62,13 @@ fn a_real_permission_denial_surfaces_eacces() {
     let mut buf = [0u8; 4];
     let stranger = cred(2000, 2000, &caps);
     let err = vfs
-        .read_via_secured(&stranger, &vol_path("guarded"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &stranger,
+            &vfs.cover(&vol_path("guarded")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect_err("a stranger is denied");
     assert_eq!(err.to_errno(), Errno::PermissionDenied);
 }
@@ -75,21 +86,20 @@ fn each_structural_conflict_surfaces_its_own_errno() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("outer"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("outer")), &mut fs)
         .expect("mkdir outer");
-    vfs.mkdir_via_secured(&owner, &vol_path("outer/inner"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("outer/inner")), &mut fs)
         .expect("mkdir inner");
-    vfs.mkdir_via_secured(&owner, &vol_path("spare"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("spare")), &mut fs)
         .expect("mkdir spare");
 
     let taken = vfs
-        .mkdir_via_secured(&owner, &vol_path("outer"), &mut fs)
+        .mkdir_via_secured(&owner, &vfs.cover(&vol_path("outer")), &mut fs)
         .expect_err("the name is taken");
     let populated = vfs
         .rename_via_secured(
             &owner,
-            &vol_path("spare"),
-            &vol_path("outer"),
+            &vfs.cover_pair(&vol_path("spare"), &vol_path("outer")),
             &mut fs,
             tairix_abi::RenameFlags::empty(),
         )
@@ -97,8 +107,7 @@ fn each_structural_conflict_surfaces_its_own_errno() {
     let cycle = vfs
         .rename_via_secured(
             &owner,
-            &vol_path("outer"),
-            &vol_path("outer/inner/outer"),
+            &vfs.cover_pair(&vol_path("outer"), &vol_path("outer/inner/outer")),
             &mut fs,
             tairix_abi::RenameFlags::empty(),
         )

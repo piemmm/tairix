@@ -2208,25 +2208,8 @@ impl AddressSpaceRegistry {
         self.pinned.contains(&task)
     }
 
-    /// `task`'s pinned footprint in bytes: its mapped address space plus
-    /// its committed stack.
-    ///
-    /// The one measure the `PinnedMemoryBytes` bound is enforced
-    /// against — the same accounting the `AddressSpaceBytes` ceiling
-    /// uses ([`Self::mapped_aspace_bytes`]) plus the demand-grown stack,
-    /// so the bounds can never drift apart. File-backed pages are
-    /// counted although the compressed tier never takes them: counting
-    /// them only tightens the cap, and splitting the accounting would
-    /// mean a second running total to keep honest. Saturating: a
-    /// miscount can overstate, never understate, usage.
-    #[must_use]
-    pub fn pinned_footprint_bytes(&self, task: ProcessId) -> u64 {
-        self.mapped_aspace_bytes(task)
-            .saturating_add(self.stack_committed_bytes(task))
-    }
-
     /// The system-wide pinned aggregate: the summed
-    /// [`Self::pinned_footprint_bytes`] of every pinned task.
+    /// [`Self::mapped_aspace_bytes`] of every pinned task.
     ///
     /// Read by the observability export (`RAMZIP_STATS.pinned_bytes`,
     /// `stats:mem/pinned`) so an operator can see how much memory
@@ -2235,40 +2218,63 @@ impl AddressSpaceRegistry {
     #[must_use]
     pub fn pinned_total_bytes(&self) -> u64 {
         self.pinned.iter().fold(0u64, |sum, task| {
-            sum.saturating_add(self.pinned_footprint_bytes(*task))
+            sum.saturating_add(self.mapped_aspace_bytes(*task))
         })
     }
 
-    /// `task`'s running total of mapped address space — anonymous memory
-    /// plus demand-paged file regions — in bytes, or `0` when it has mapped
-    /// none.
+    /// `task`'s running total of mapped address space — anonymous memory,
+    /// demand-paged file regions, and every thread's committed stack — in
+    /// bytes, or `0` when it has mapped none.
     ///
-    /// The `mem_map` and `file_map` handlers read this to check a request
-    /// against the `LimitKind::AddressSpaceBytes` ceiling before mapping.
-    /// The `task` argument is the kernel-trusted caller id.
+    /// The one measure both the `LimitKind::AddressSpaceBytes` ceiling and,
+    /// while the process is pinned, the `LimitKind::PinnedMemoryBytes`
+    /// budget are enforced against ([`Self::try_charge_aspace_bytes`]). The
+    /// `task` argument is the kernel-trusted caller id.
     #[must_use]
     pub fn mapped_aspace_bytes(&self, task: ProcessId) -> u64 {
         self.mapped_aspace_bytes.get(&task).copied().unwrap_or(0)
     }
 
-    /// Accrue `bytes` against `task`'s mapped-address-space total.
+    /// Charge `bytes` more mapped address space to `process` if its bounds
+    /// admit them: the `AddressSpaceBytes` soft bound and, while it is
+    /// pinned, the `PinnedMemoryBytes` one. The check and the charge are one
+    /// step under the registry's write lock, so threads of one process
+    /// growing at once cannot pass a bound together. Charged before the
+    /// memory is mapped; a map that then fails credits the charge back.
     ///
-    /// Called by the `mem_map`/`file_map` handlers *after* a map succeeds and only once
-    /// the request has been admitted against the task's
-    /// `LimitKind::AddressSpaceBytes` ceiling, so the saturating add never
-    /// loses accounting in practice; it saturates rather than wraps purely
-    /// so a future miscount can never silently understate usage (fail
-    /// closed, never a panic). The `task` argument is the kernel-trusted
-    /// caller id.
-    pub fn charge_aspace_bytes(&mut self, task: ProcessId, bytes: u64) {
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] when a bound would be passed; nothing is charged.
+    pub fn try_charge_aspace_bytes(&mut self, process: ProcessId, bytes: u64) -> Result<(), Errno> {
+        let limits = self.limits(process);
+        let projected = self
+            .mapped_aspace_bytes(process)
+            .checked_add(bytes)
+            .ok_or(Errno::OutOfRange)?;
+        if projected > limits.get(LimitKind::AddressSpaceBytes).soft
+            || (self.is_pinned(process)
+                && projected > limits.get(LimitKind::PinnedMemoryBytes).soft)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        self.charge_aspace_bytes(process, bytes);
+        Ok(())
+    }
+
+    /// Accrue `bytes` against `task`'s mapped-address-space total, unchecked:
+    /// the first thread's initial stack, which the spawn layout placed before
+    /// the process could map anything. Saturating, so a miscount can never
+    /// silently understate usage.
+    fn charge_aspace_bytes(&mut self, task: ProcessId, bytes: u64) {
         let entry = self.mapped_aspace_bytes.entry(task).or_insert(0);
         *entry = entry.saturating_add(bytes);
     }
 
     /// Release `bytes` from `task`'s mapped-address-space total.
     ///
-    /// Called by the `mem_unmap`/`file_unmap` handlers *after* an unmap succeeds, so
-    /// `bytes` corresponds to pages that were actually backed and charged.
+    /// Called *after* an unmap succeeds or a thread's stack is withdrawn, and
+    /// by a map that fails after its [`Self::try_charge_aspace_bytes`], so
+    /// `bytes` is always memory that was charged.
     /// The subtraction saturates at zero (it can never underflow into a
     /// bogus huge total that would wrongly deny later maps) and drops the
     /// entry once it reaches zero so a task that frees everything holds no
@@ -2294,6 +2300,7 @@ impl AddressSpaceRegistry {
     /// the admission path minted, never a caller-supplied value.
     pub fn set_stack_span(&mut self, process: ProcessId, thread: TaskId, span: StackSpan) {
         self.record_thread_stack(process, thread, span, None);
+        self.charge_aspace_bytes(process, span.committed_bytes());
     }
 
     /// Record a runtime-created thread's stack span **and** the resources the
@@ -2303,7 +2310,9 @@ impl AddressSpaceRegistry {
     /// The `thread_create` counterpart of [`Self::set_stack_span`]: a thread
     /// the kernel reserved a stack for owns that reservation, so the extent
     /// travels with the span rather than in a second map that could fall out
-    /// of step with it.
+    /// of step with it. The span's committed pages were charged by thread
+    /// creation's [`Self::try_charge_aspace_bytes`]; from here the record owns
+    /// that charge, and the thread's withdrawal credits it.
     pub fn set_owned_thread_stack(
         &mut self,
         process: ProcessId,
@@ -2355,6 +2364,7 @@ impl AddressSpaceRegistry {
                 self.stack_committed.remove(&process);
             }
         }
+        self.credit_aspace_bytes(process, bytes);
     }
 
     /// Resolve `task`'s recorded stack span, or `None` when none was
@@ -2372,22 +2382,26 @@ impl AddressSpaceRegistry {
     /// path backed that page.
     ///
     /// Called *after* the producer mapped the page, so the record only ever
-    /// names frames the task actually holds. Monotonic: a `page_va` at or
+    /// names frames the task actually holds. The growth path charged the
+    /// page to the mapped total before mapping it. Returns the bytes this
+    /// call committed, so a growth that raced another commits each page once
+    /// and gives the rest of its charge back. Monotonic: a `page_va` at or
     /// above the current committed base (the benign already-resident race,
     /// or a hole above the low-water mark) leaves the record unchanged, and
     /// one below the reserve base is refused — the record can never claim
     /// pages outside the span (fail closed).
-    pub fn commit_stack_page(&mut self, thread: TaskId, page_va: u64) {
+    pub fn commit_stack_page(&mut self, thread: TaskId, page_va: u64) -> u64 {
         let Some(held) = self.stack_spans.get_mut(&thread) else {
-            return;
+            return 0;
         };
         if page_va < held.span.reserve_base || page_va >= held.span.committed_base {
-            return;
+            return 0;
         }
         let grown = held.span.committed_base - page_va;
         let process = held.process;
         held.span.committed_base = page_va;
         *self.stack_committed.entry(process).or_default() += grown;
+        grown
     }
 
     /// Bytes of `task`'s stack currently committed, or `0` when no span is
@@ -3968,22 +3982,59 @@ mod tests {
     }
 
     #[test]
-    fn pinned_footprint_sums_mapped_bytes_and_committed_stack() {
+    fn the_mapped_total_holds_every_committed_stack_page() {
+        let page = PAGE_SIZE as u64;
         let mut reg = AddressSpaceRegistry::new();
         let task = ProcessId(4);
-        assert_eq!(reg.pinned_footprint_bytes(task), 0);
-        reg.charge_aspace_bytes(task, 3 * PAGE_SIZE as u64);
-        assert_eq!(reg.pinned_footprint_bytes(task), 3 * PAGE_SIZE as u64);
-        // Commit one stack page inside a recorded span: the committed
-        // extent joins the footprint.
+        assert_eq!(reg.mapped_aspace_bytes(task), 0);
+        reg.try_charge_aspace_bytes(task, 3 * page)
+            .expect("under the default bounds");
+        // The first thread's initial commit joins the total with its span.
         let top = 0x8000_0000u64;
-        let span = StackSpan::new(top - 16 * PAGE_SIZE as u64, top - PAGE_SIZE as u64, top)
-            .expect("well-formed span");
+        let span = StackSpan::new(top - 16 * page, top - page, top).expect("well-formed span");
         reg.set_stack_span(task, task.leader_task(), span);
+        assert_eq!(reg.mapped_aspace_bytes(task), 4 * page);
+        // A growth page is charged before it is committed, and committed once.
+        reg.try_charge_aspace_bytes(task, page).expect("room");
         assert_eq!(
-            reg.pinned_footprint_bytes(task),
-            3 * PAGE_SIZE as u64 + PAGE_SIZE as u64
+            reg.commit_stack_page(task.leader_task(), top - 2 * page),
+            page
         );
+        assert_eq!(
+            reg.commit_stack_page(task.leader_task(), top - 2 * page),
+            0,
+            "a page committed by a racing growth is not committed twice"
+        );
+        assert_eq!(reg.mapped_aspace_bytes(task), 5 * page);
+        assert_eq!(reg.stack_committed_bytes(task), 2 * page);
+        // Withdrawing the thread credits its whole committed stack.
+        assert!(reg.withdraw_thread(task.leader_task()));
+        assert_eq!(reg.mapped_aspace_bytes(task), 3 * page);
+        assert_eq!(reg.stack_committed_bytes(task), 0);
+    }
+
+    #[test]
+    fn a_charge_past_a_bound_is_refused_whole() {
+        let page = PAGE_SIZE as u64;
+        let mut reg = AddressSpaceRegistry::new();
+        let task = ProcessId(4);
+        let bound = ResourceLimit::new(4 * page, 4 * page).expect("well-formed");
+        reg.set_limit(task, LimitKind::AddressSpaceBytes, bound);
+        reg.try_charge_aspace_bytes(task, 3 * page).expect("fits");
+        assert_eq!(
+            reg.try_charge_aspace_bytes(task, 2 * page),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(reg.mapped_aspace_bytes(task), 3 * page, "nothing charged");
+        reg.try_charge_aspace_bytes(task, page)
+            .expect("exactly at the bound");
+        let pinned = ResourceLimit::new(page, page).expect("well-formed");
+        reg.set_limit(task, LimitKind::PinnedMemoryBytes, pinned);
+        reg.credit_aspace_bytes(task, 4 * page);
+        reg.set_pinned(task);
+        reg.try_charge_aspace_bytes(task, page)
+            .expect("within the pinned budget");
+        assert_eq!(reg.try_charge_aspace_bytes(task, 1), Err(Errno::OutOfRange));
     }
 
     #[test]

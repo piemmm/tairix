@@ -824,10 +824,10 @@ fn a_row_launched_from_a_bundle_names_the_application_icon() {
 
 #[test]
 fn a_rows_bundle_is_carried_to_the_paint_that_resolves_its_picture() {
-    let sb = on_tasks(&one_task_from(Some("/Apps/Terminal.app")));
+    let sb = on_tasks(&one_task_from(Some("/System/Applications/Terminal.app")));
     assert_eq!(
         sb.tasks.entries[0].bundle.as_deref(),
-        Some("/Apps/Terminal.app")
+        Some("/System/Applications/Terminal.app")
     );
 }
 
@@ -836,7 +836,7 @@ fn a_row_draws_its_icon_whether_or_not_a_cache_answers() {
     // `NoArtwork` holds no cache, so the row falls back to the inline glyph
     // arithmetic. Either way the leading gutter must carry ink.
     let theme = Theme::dark();
-    let mut sb = on_tasks(&one_task_from(Some("/Apps/Terminal.app")));
+    let mut sb = on_tasks(&one_task_from(Some("/System/Applications/Terminal.app")));
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
@@ -872,7 +872,7 @@ impl tairix_icon::IconArtwork for RecordingArtwork {
 #[test]
 fn every_drawn_row_asks_the_cache_for_its_own_picture() {
     let theme = Theme::dark();
-    let mut sb = on_tasks(&one_task_from(Some("/Apps/Terminal.app")));
+    let mut sb = on_tasks(&one_task_from(Some("/System/Applications/Terminal.app")));
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     let mut artwork = RecordingArtwork::default();

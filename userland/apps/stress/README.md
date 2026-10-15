@@ -23,7 +23,8 @@ entry-point binary of the `stress.app` bundle:
   typed-refusal exit status.
 - `src/sizing.rs` — the byte-target policy over discovered RAM
   (`boot_facts`) and the scratch volume's free space (the unprivileged
-  `MOUNT_LIST` walk), with documented conservative fallbacks — a
+  `MOUNT_LIST` and `VIEW_LIST` walks, joined by `tairix_procinfo::Namespace`),
+  with documented conservative fallbacks — a
   policy over discovered hardware, never a frozen scalar.
 - `src/load.rs` — the five bounded, restartable load units; the
   disk-touching ones run over the injected `Scratch` seam so host

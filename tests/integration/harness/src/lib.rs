@@ -94,7 +94,7 @@ const TARGET_ARCH_KEY: &str = "CARGO_CFG_TARGET_ARCH";
 /// the compiler unconditionally so `--cfg`-aware lints accept the gates
 /// even on host builds where none of them are active.
 pub const KNOWN_CFGS: &[&str] = &[
-    "freestanding",
+    tairix_buildcfg::FREESTANDING,
     "itest_x86_64",
     "itest_riscv64",
     "itest_aarch64",
@@ -104,10 +104,10 @@ pub const KNOWN_CFGS: &[&str] = &[
 /// Classify a target into the conditional-compilation names its
 /// freestanding integration binary should enable.
 ///
-/// Bare-metal targets (`os == "none"`) are freestanding; the matching
-/// per-port name is added when the instruction set is one the QEMU
-/// verticals cover. Hosted targets enable nothing, leaving the binary as
-/// an inert stub.
+/// Bare-metal targets ([`tairix_buildcfg::is_freestanding`]) are
+/// freestanding; the matching per-port name is added when the instruction set
+/// is one the QEMU verticals cover. Hosted targets enable nothing, leaving the
+/// binary as an inert stub.
 #[must_use]
 pub fn active_cfgs(os: &str, arch: &str) -> Vec<&'static str> {
     // The wasm32 browser target (`wasm32-unknown-unknown`, `os =
@@ -117,10 +117,10 @@ pub fn active_cfgs(os: &str, arch: &str) -> Vec<&'static str> {
     if os == "unknown" && arch == "wasm32" {
         return vec!["itest_wasm32"];
     }
-    if os != "none" {
+    if !tairix_buildcfg::is_freestanding(os) {
         return Vec::new();
     }
-    let mut cfgs = vec!["freestanding"];
+    let mut cfgs = vec![tairix_buildcfg::FREESTANDING];
     match arch {
         "x86_64" => cfgs.push("itest_x86_64"),
         "riscv64" => cfgs.push("itest_riscv64"),

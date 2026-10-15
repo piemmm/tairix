@@ -15,9 +15,9 @@
 //! The system has two `ARXFS` volumes on the one bootstrap-floor disk:
 //!
 //! * the **writable root volume** (`ARXFSRoot`), plaintext or encrypted —
-//!   the persistent home of every writable path: `/` itself, `/Users`,
-//!   `/Apps`, `/Storage`, and the two writable `/System` exceptions
-//!   `/System/Logs` and `/System/Settings`; and
+//!   the persistent home of every writable path: `/` itself, `/Users`, and
+//!   the two writable `/System` exceptions `/System/Logs` and
+//!   `/System/Settings`; and
 //! * the **read-only, plaintext `/System` volume** (`ARXFSSystem`) — the
 //!   immutable kernel image, drivers, and libraries.
 //!
@@ -27,9 +27,9 @@
 //! the writable volume. `MountTable` longest-prefix resolution stitches the
 //! two into one tree with **no path served by both volumes** — a read of
 //! `/System/Drivers/...` resolves to the read-only volume, a write under
-//! `/Users`, `/Apps`, `/Storage`, `/System/Logs`, or `/System/Settings`
-//! resolves to the writable volume, and everything else resolves to `/` on
-//! the writable volume. This is disjoint sub-mounting, never a union/overlay
+//! `/System/Logs` or `/System/Settings` resolves to the writable volume, and
+//! everything else but the `/Storage` catalog resolves to `/` on the writable
+//! volume. This is disjoint sub-mounting, never a union/overlay
 //! "merge" of two `/System` trees (which would need whiteouts, copy-up, and
 //! ambiguous write targets — the opposite of the charter's fail-closed,
 //! deterministic resolution).
@@ -69,14 +69,15 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    MountFlags,
 };
 use tairix_abi::DriverHandle;
 use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::{
-    CachedFs, LateFilesystem, MountBacking, MountedFilesystemService, Path, SleepLock, Vfs,
-    VfsError, VolumeForest,
+    Attachment, CachedFs, LateFilesystem, MountedFilesystemService, Path, SleepLock, Vfs, VfsError,
+    VolumeForest,
 };
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -85,7 +86,7 @@ use tairix_reclaim::{CacheBudget, MemoryPressure, ReclaimOwner};
 
 use crate::root_mount::LATE_IDENTITY;
 use crate::shared_block::DriverStoreService;
-use crate::transform_cache::TransformClusterCache;
+use crate::transform_cache::{SharedClusterCache, TransformClusterCache};
 
 pub use crate::kernel_fs::KernelFs;
 
@@ -180,8 +181,8 @@ pub static FS_SERVICE: MountedFilesystemService<Box<dyn KernelFs>> =
 const SYSTEM_MOUNT_HANDLE: u64 = 0x5959_5359; // "YYSY"
 
 /// Opaque driver handle the **writable root volume** carries in the mount
-/// table — the root mount `/` and every writable sub-mount of it (`/Users`,
-/// `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`).
+/// table — the root mount `/` and its two writable sub-mounts,
+/// `/System/Logs` and `/System/Settings`.
 ///
 /// All of these are the *one* root volume (the persistent writable
 /// partition), so they share a single handle — one driver, one per-mount
@@ -193,14 +194,31 @@ const SYSTEM_MOUNT_HANDLE: u64 = 0x5959_5359; // "YYSY"
 /// unlock path charges the volume's transform cache to the same identity.
 pub(crate) const ROOT_VOLUME_HANDLE: u64 = 0x524F_4F54; // "ROOT"
 
+/// Files in [`SYSTEM_WRITE_SET`].
+const SYSTEM_WRITE_SET_LEN: usize = 6 + 2 * tairix_log::STREAM_COUNT;
+
+/// The largest size of each file the system rewrites on the root volume on its
+/// own: both account databases, the largest settings documents, and a journal
+/// segment per stream, twice over for rotation. The root's system reserve is
+/// sized over it, so moving one of these caps moves the reserve.
+pub(crate) const SYSTEM_WRITE_SET: [u64; SYSTEM_WRITE_SET_LEN] = {
+    let mut set = [tairix_log::SEGMENT_BUF_BYTES as u64; SYSTEM_WRITE_SET_LEN];
+    set[0] = tairix_users::MAX_DB_LEN as u64;
+    set[1] = tairix_users::MAX_GROUPS_DB_LEN as u64;
+    set[2] = tairix_enrolment::MAX_DOCUMENT_LEN as u64;
+    set[3] = tairix_abi::appdata_ipc::APPDATA_DOCUMENT_MAX as u64;
+    set[4] = tairix_netconfig::MAX_CONFIG_LEN as u64;
+    set[5] = tairix_sysconfig::MAX_CONFIG_LEN as u64;
+    set
+};
+
 /// Audit event: the read-only `/System` volume was published as the `fs_*`
 /// mount, so userland file reads under `/System` now resolve to a live
 /// volume.
 const SYSTEM_FS_MOUNTED: EventId = EventId(4143);
 
 /// Audit event: the writable root driver was registered as the
-/// backing for `/` and its writable subtrees (`/Users`, `/Apps`,
-/// `/Storage`, `/System/Logs`, `/System/Settings`), so userland writes to
+/// backing for `/` and its writable `/System` subtrees, so userland writes to
 /// the persistent volume now resolve to a live driver.
 const SYSTEM_FS_WRITABLE_MOUNTED: EventId = EventId(4145);
 
@@ -283,26 +301,24 @@ pub(crate) fn publish_volume_identity(
 
 /// Build the production VFS policy layer: the writable root volume mounted
 /// as `/`, the read-only `/System` volume shadowing it, and the writable
-/// `/System` exceptions plus the flag-bearing top-level subtrees carved back
-/// out of the writable volume.
+/// `/System` exceptions carved back out of the writable volume.
 ///
-/// Starts from the shared default layout (the four top-level directories and
-/// their mount policy — one definition of the paths *and* their
-/// `ro`/`nosuid`/`nodev`/`noexec` flags) and attaches a backing volume to each
-/// mount, leaving the layout's flags untouched:
+/// Starts from the shared default layout (the root-view entries and their
+/// mount policy — one definition of the paths *and* their `ro`/`noexec`
+/// flags) and attaches a backing volume to each mount, leaving the layout's
+/// flags untouched:
 ///
 /// * `/` — the writable root volume ([`ROOT_VOLUME_HANDLE`]): the
-///   persistent home of `/Users`, `/Apps`, `/Storage`, and `/` itself.
+///   persistent home of `/Users` and `/` itself.
 /// * `/System` — read-only, the `ARXFSSystem` volume
 ///   ([`SYSTEM_MOUNT_HANDLE`], whole-volume so no rebasing): the kernel
 ///   image, drivers, and libraries are immutable at runtime and shadow the
 ///   writable root at `/System` (longest-prefix resolution).
-/// * `/System/Logs`, `/System/Settings`, `/Users`, `/Apps`, `/Storage` — the
-///   *same* writable root volume ([`ROOT_VOLUME_HANDLE`]), each rebased onto
-///   its own same-named path on that volume so the one driver resolves from
-///   its own root. They exist as their own mounts only to carry stricter
-///   flags than `/` and, for `/System/Logs` / `/System/Settings`, to shadow
-///   the read-only `/System` (the only writable paths beneath it).
+/// * `/System/Logs`, `/System/Settings` — the *same* writable root volume,
+///   each rebased onto its own same-named path there: the only writable
+///   paths beneath the read-only `/System`.
+///
+/// `/Storage` stays unbacked: the catalog of the volumes attached beneath it.
 ///
 /// The writable root driver is registered by [`register_writable_state`]
 /// only after the root is mounted; until then `/` and its
@@ -318,36 +334,22 @@ fn system_vfs() -> Result<Vfs, VfsError> {
     let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
     let system_handle = DriverHandle::from_raw(SYSTEM_MOUNT_HANDLE).map_err(|_| VfsError::Io)?;
     let root_handle = DriverHandle::from_raw(ROOT_VOLUME_HANDLE).map_err(|_| VfsError::Io)?;
-    // The bootstrap-floor volumes are brought up before any classified block
-    // client exists, so their storage medium is recorded as unknown rather
-    // than assumed from the disk they happen to boot from.
-    let root_backing = MountBacking::new(root_handle, None);
     {
         let mut mounts = vfs.mounts_write();
+        // The bootstrap-floor volumes are brought up before any classified
+        // block client exists, so their storage medium is recorded as unknown
+        // rather than assumed from the disk they happen to boot from.
+        mounts.attach(Attachment::new(root_handle, None, MountFlags::default()))?;
+        mounts.attach(Attachment::new(system_handle, None, MountFlags::READ_ONLY))?;
         // The writable root volume *is* `/`.
-        mounts.back_root(root_backing)?;
-        // The read-only `/System` volume shadows `/` at `/System`; its
-        // content is the volume's own root, so it is a whole-volume mount
-        // (no rebasing).
-        mounts.set_backing(
-            &Path::parse("/System")?,
-            MountBacking::new(system_handle, None),
-            Vec::new(),
-        )?;
-        // The writable `/System` exceptions and the flag-bearing top-level
-        // subtrees are the *same* writable root volume, each rebased onto
-        // its own same-named path there so the one driver resolves from its
-        // own root.
-        for sub in [
-            "/System/Logs",
-            "/System/Settings",
-            "/Users",
-            "/Apps",
-            "/Storage",
-        ] {
+        mounts.back_root(root_handle)?;
+        // The read-only `/System` volume shadows `/` at `/System` from its own
+        // root.
+        mounts.set_backing(&Path::parse("/System")?, system_handle, Vec::new())?;
+        for sub in ["/System/Logs", "/System/Settings"] {
             let path = Path::parse(sub)?;
             let subtree = path.components().to_vec();
-            mounts.set_backing(&path, root_backing, subtree)?;
+            mounts.set_backing(&path, root_handle, subtree)?;
         }
     }
     Ok(vfs)
@@ -364,6 +366,9 @@ fn system_vfs() -> Result<Vfs, VfsError> {
 /// one disk are serialised park-safely by the device `SleepLock` — and of the
 /// root-unlock window.
 ///
+/// Answers the mounted volume's transform cache, which every other window onto
+/// the volume shares rather than decompressing its bundles again.
+///
 /// Every step is fail-soft and fail-closed: a disk with no `ARXFSSystem`
 /// partition, an out-of-range window, an unmountable volume, or a VFS/install
 /// refusal leaves the `fs_*` syscalls failing closed (`NotImplemented`) and is
@@ -374,7 +379,7 @@ pub fn install_system_mount<B: Block + 'static>(
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
     watches: Option<&'static WatchRegistry>,
-) {
+) -> Option<SharedClusterCache> {
     // Wire the runtime volume attach/detach service with the same audit
     // sink and pressure gauge the boot mounts use; until the mount table
     // below is published its operations still fail closed. The service
@@ -388,11 +393,11 @@ pub fn install_system_mount<B: Block + 'static>(
         let mut probe = store.window();
         let Ok(table) = parse_partition_table(&mut probe) else {
             unavailable(audit, "partition_table_invalid");
-            return;
+            return None;
         };
         let Some(extent) = table.first_of_type(PartitionType::ARXFSSystem) else {
             unavailable(audit, "no_system_partition");
-            return;
+            return None;
         };
         extent
     };
@@ -400,28 +405,29 @@ pub fn install_system_mount<B: Block + 'static>(
     // A bounds-checked, owned `'static` window onto the `/System` extent.
     let Ok(window) = PartitionBlock::from_partition(store.window(), &extent) else {
         unavailable(audit, "system_window_out_of_range");
-        return;
+        return None;
     };
     // Read-only: the kernel can never mutate the store through this handle.
     // Its compressed clusters (driver bundles, libraries) are served through
     // the SMART3 transform cache, charged to this mount's identity.
     let Ok(fs) = ARXFS::open_read_only(window, Keying::Plaintext) else {
         unavailable(audit, "system_mount_failed");
-        return;
+        return None;
     };
-    let fs = fs.with_cluster_cache(TransformClusterCache::for_volume(
+    let cache = SharedClusterCache::new(TransformClusterCache::for_volume(
         SYSTEM_MOUNT_HANDLE,
         pressure,
         audit,
     ));
+    let fs = fs.with_cluster_cache(Box::new(cache.clone()));
     let volume_uuid = fs.volume_uuid();
     let Ok(vfs) = system_vfs() else {
         unavailable(audit, "system_vfs_build_failed");
-        return;
+        return None;
     };
     let Ok(system_handle) = DriverHandle::from_raw(SYSTEM_MOUNT_HANDLE) else {
         unavailable(audit, "system_handle_invalid");
-        return;
+        return None;
     };
     // Publish the shared VFS layout once, then register the read-only
     // `/System` driver against its handle. The writable root driver (the
@@ -429,7 +435,7 @@ pub fn install_system_mount<B: Block + 'static>(
     // by `register_writable_state`, once the root is mounted.
     if LATE_FILESYSTEM.install_vfs(vfs).is_err() {
         unavailable(audit, "already_installed");
-        return;
+        return None;
     }
     let (driver, watch) = cached(
         fs,
@@ -454,7 +460,7 @@ pub fn install_system_mount<B: Block + 'static>(
         // returned lock is not needed here: nothing else in the kernel
         // writes the read-only `/System` volume.
         unavailable(audit, "already_installed");
-        return;
+        return None;
     }
     // Attach the boot disk's fold, so the three per-volume queries report
     // this volume's device rather than omitting the disk the machine is
@@ -474,8 +480,8 @@ pub fn install_system_mount<B: Block + 'static>(
     // audited and leaves the volume reachable through the `/` view.
     let _ = publish_volume_identity(volume_uuid, &["System"], "ARXFSSystem", audit);
     // The on-disk application store is now readable. Install its semantic
-    // launch cache — budgeted from the kernel heap arena exactly like the
-    // volume caches above and governed by the same pressure gauge
+    // launch cache — budgeted from discovered RAM exactly like the volume
+    // caches above and governed by the same pressure gauge
     // (`plans/SMARTRAM.md` SMART4) — then resolve the readiness latch so a
     // `spawn` parked on a pending store wakes and proceeds through the
     // load gate (`plans/APPS.md` deliverable 8).
@@ -486,12 +492,13 @@ pub fn install_system_mount<B: Block + 'static>(
         audit,
     );
     crate::app_store::APP_STORE.note_available();
+    Some(cache)
 }
 
 /// Register the live, writable root driver as the backing for the
-/// writable root volume — the root mount `/` and every writable sub-mount of
-/// it (`/Users`, `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`),
-/// which all share the one `ROOT_VOLUME_HANDLE`.
+/// writable root volume — the root mount `/` and its writable sub-mounts
+/// `/System/Logs` and `/System/Settings`, which all share the one
+/// `ROOT_VOLUME_HANDLE`.
 ///
 /// Called once by the root-unlock path after the root volume is mounted,
 /// with a read-write [`KernelFs`] over that volume (a second,

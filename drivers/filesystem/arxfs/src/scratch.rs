@@ -45,7 +45,7 @@ use crate::allocmap::{bit_get, bit_set};
 use crate::header::{BlockHeader, BlockType, ReservedOwner, HEADER_LEN};
 use crate::pagecache::{page_payload_len, BlockCache};
 use crate::superblock::RING_BLOCKS;
-use crate::{as_usize, ARXFS, MAX_BLOCK_SIZE, METADATA_RESERVE};
+use crate::{as_usize, ARXFS, MAX_BLOCK_SIZE};
 
 /// Share of the volume's free space one scratch array may occupy.
 ///
@@ -276,13 +276,8 @@ impl<B: Block> ARXFS<B> {
         if elements == 0 || per_page == 0 || run == 0 {
             return Ok(None);
         }
-        // The metadata reserve is what lets a shrinking transaction
-        // copy-on-write itself on a full volume; a verification pass must not
-        // eat into it.
-        if self.free_count.saturating_sub(run) <= METADATA_RESERVE {
-            return Ok(None);
-        }
-        let Some(start) = self.map_find_free_run(run, RING_BLOCKS, self.total_blocks)? else {
+        // A verification pass must not eat into the reserve.
+        let Some(start) = self.find_ordinary_run(run, RING_BLOCKS, self.total_blocks)? else {
             return Ok(None);
         };
         self.mark_range_used(start, run)?;

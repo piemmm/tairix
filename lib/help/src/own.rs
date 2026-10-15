@@ -59,8 +59,8 @@ mod rt_source {
     //! per-inode permission, and mount-flag check happens kernel-side under
     //! the caller's attested identity.
     //!
-    //! The bundle is located through the one shared bundle-resolution policy
-    //! (`tairix_cmdres::bundle_candidates`), the same order `man` walks, so a
+    //! The bundle is located through the one shared help order
+    //! (`tairix_cmdres::help_candidates`), the same order `man` walks, so a
     //! program's own `-h` and `man <program>` can never serve different
     //! documents. It is resolved with an *empty* environment: a program's own
     //! bundle is a system-store bundle, and consulting the caller's `HOME` or
@@ -73,7 +73,7 @@ mod rt_source {
 
     use tairix_abi::fs::{DirEntries, FileKind};
     use tairix_abi::{BundleEntry, Errno};
-    use tairix_cmdres::{bundle_candidates, CommandEnv};
+    use tairix_cmdres::{help_candidates, CommandEnv};
 
     use crate::doc::MAX_DOC_LEN;
     use crate::locale::{HelpSource, SourceError};
@@ -100,7 +100,7 @@ mod rt_source {
         /// The candidate `<bundle>/Help` directories for this program's own
         /// word, in the one shared resolution order.
         fn help_roots(&self) -> Vec<String> {
-            bundle_candidates(self.word, CommandEnv::default())
+            help_candidates(self.word, CommandEnv::default())
                 .into_iter()
                 .map(|bundle| format!("{bundle}/{}", BundleEntry::Help.as_str()))
                 .collect()

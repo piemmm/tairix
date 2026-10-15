@@ -2312,7 +2312,7 @@ mod program {
         }
 
         /// Launch the application bundle whose directory is `bundle_path` (the
-        /// validated absolute path the activation named, e.g. `/Apps/Notes.app`)
+        /// validated absolute path the activation named, e.g. `/System/Applications/Notes.app`)
         /// by spawning its own `Run` binary through the ordinary signed
         /// app-load gate — never a private path.
         ///
@@ -2566,7 +2566,7 @@ mod program {
     }
 
     /// The last non-empty component of a `/`-separated path
-    /// (`/Apps/Notes.app` → `Notes.app`, `/Users/me/notes.txt` → `notes.txt`) —
+    /// (`/System/Applications/Notes.app` → `Notes.app`, `/Users/me/notes.txt` → `notes.txt`) —
     /// the leaf the user already sees, carrying no path prefix. An empty or
     /// `/`-only path (which the validated activation paths never produce) falls
     /// back to the whole string rather than an empty name.
@@ -2576,7 +2576,7 @@ mod program {
             .unwrap_or(path)
     }
 
-    /// The bundle directory's leaf name (`/Apps/Notes.app` → `Notes.app`) — the
+    /// The bundle directory's leaf name (`/System/Applications/Notes.app` → `Notes.app`) — the
     /// label the fail-loud launch diagnosis names.
     fn bundle_leaf(bundle_path: &str) -> String {
         String::from(path_leaf(bundle_path))
@@ -5980,10 +5980,7 @@ mod program {
             let stat = reader
                 .stat()
                 .map_err(|_| "a source file could not be read")?;
-            let create = OpenFlags::WRITE
-                .union(OpenFlags::CREATE)
-                .union(OpenFlags::EXCLUSIVE);
-            let writer = tairix_rt::File::open(dest_spelled.as_bytes(), create)
+            let writer = tairix_rt::create_new(dest_spelled.as_bytes())
                 .map_err(|_| "a destination of that name already exists")?;
             Ok(Self {
                 reader,
@@ -7583,14 +7580,9 @@ mod program {
                 0 => Ok(()),
                 ret => Err(Errno::from_syscall(ret)),
             },
-            NewEntry::Document(_) => {
-                let create = OpenFlags::WRITE
-                    .union(OpenFlags::CREATE)
-                    .union(OpenFlags::EXCLUSIVE);
-                tairix_rt::File::open(path.as_bytes(), create)
-                    .map(drop)
-                    .map_err(Errno::from_syscall)
-            }
+            NewEntry::Document(_) => tairix_rt::create_new(path.as_bytes())
+                .map(drop)
+                .map_err(Errno::from_syscall),
         });
         match made {
             Ok(()) if browser.focus_pending().is_some() => {

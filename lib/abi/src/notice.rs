@@ -72,7 +72,8 @@ pub enum NoticeTopic {
     Desktop = 0,
     /// What the mount table reports changed: a mount point was attached,
     /// re-backed, or removed, or the volume behind one came online — an
-    /// unlocked root — went, or became unavailable. Payload-less — the
+    /// unlocked root — went, became unavailable, or ran down to its reserve
+    /// or came back out of it. Payload-less — the
     /// generation *is* the news, and what is mounted is then read through the
     /// System Information API under the caller's own authority. Published by
     /// the kernel alone.

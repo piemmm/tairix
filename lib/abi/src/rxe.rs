@@ -1093,7 +1093,7 @@ mod tests {
         }
         .seg(RawSeg::code(0x1000, 0x1000))
         .needed("/System/Libraries/libros-sys.so")
-        .needed("/Apps/Example.app/Libraries/private.so")
+        .needed("/System/Applications/Example.app/Libraries/private.so")
         .build();
         let image = LoadImage::parse(&bytes, &TAG).expect("valid");
         let names: Vec<&str> = image.needed_libraries().collect();
@@ -1101,7 +1101,7 @@ mod tests {
             names,
             [
                 "/System/Libraries/libros-sys.so",
-                "/Apps/Example.app/Libraries/private.so",
+                "/System/Applications/Example.app/Libraries/private.so",
             ]
         );
     }

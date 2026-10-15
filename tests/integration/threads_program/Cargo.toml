@@ -26,3 +26,6 @@ tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The fork-join worker pool the `parallel` role drives on real threads.
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

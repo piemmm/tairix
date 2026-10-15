@@ -71,7 +71,7 @@ kernel-resolved state, through the one shared naming rule
 (`ProcName::from_path`): a bundle's generic `Run` entry point never names a
 process — every bundle shares that leaf — so a final `Run` component attests
 the owning bundle directory's stem instead (`.app` suffix stripped:
-`/Apps/Example.app/Run` → `Example`, a driver bundle
+`/System/Applications/Example.app/Run` → `Example`, a driver bundle
 `/System/Drivers/input/usb_hid/Run` → `usb_hid`); any other path attests its
 final non-empty component, and a path from which no name is derivable keeps
 the whole path bytes so a listing always shows something truthful. The

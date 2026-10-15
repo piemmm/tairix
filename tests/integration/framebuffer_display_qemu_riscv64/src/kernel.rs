@@ -32,10 +32,10 @@ use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_log::{Event, EventId, Sink};
 use tairix_test_riscv64_boot::boot;
 
-/// Static boot heap, in the linker's NOLOAD `.heap` section so the boot
-/// trampoline neither zeroes nor includes it in the usable memory map.
+/// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+/// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static mut HEAP: Heap = Heap::ZERO;
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -43,7 +43,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// `EventId(4004)` — `AuditEvent::BootCompleted`. Pinned by the
 /// `event_ids_are_unique` test in `kernel/core/src/audit.rs`.

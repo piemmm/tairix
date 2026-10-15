@@ -36,6 +36,7 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-kernel-sched-mlfq = { path = "../../../kernel/sched/mlfq", version = "=0.0.0" }
 
 [build-dependencies]

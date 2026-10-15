@@ -61,14 +61,8 @@ mod kernel {
     /// `setTimeout`-driven tick loop.
     const WORKER_TASKS: u64 = 4;
 
-    /// Per-instance boot heap. Each WebAssembly instance (the main thread
-    /// and every worker) has its own linear memory, so each carries its
-    /// own copy of this static — no cross-instance aliasing is possible
-    /// (the wasm32 isolation boundary).
-    ///
-    /// `static mut` because the bump allocator hands out disjoint slices
-    /// via an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -76,7 +70,7 @@ mod kernel {
     /// is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// This instance's published `Scheduler<WasmArch>` raw pointer, which
     /// the frame-tick and IPI callbacks consult. Each instance publishes

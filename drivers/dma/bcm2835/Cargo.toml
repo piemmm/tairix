@@ -44,3 +44,6 @@ tairix-devmatch = { path = "../../../lib/devmatch", version = "=0.0.0" }
 tairix-dmaengine = { path = "../../../lib/dmaengine", version = "=0.0.0" }
 # `_start` and the driver's own node record.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

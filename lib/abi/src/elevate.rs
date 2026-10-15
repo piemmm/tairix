@@ -949,7 +949,7 @@ mod tests {
         let req = ElevateRequest::Launch {
             username: "root",
             password: "hunter2",
-            program: "/System/Applications/datetime.app/Run",
+            program: crate::DATETIME_RUN_PATH,
         };
         let mut buf = [0u8; ELEVATE_MAX_REQUEST];
         let len = req.encode(&mut buf).expect("encodes");

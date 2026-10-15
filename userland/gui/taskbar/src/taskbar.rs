@@ -170,6 +170,8 @@ pub struct Taskbar {
     clock_room: Measured<(BitmapFont, u32)>,
     elevation_available: bool,
     switch_user_available: bool,
+    /// Whether the session attested the Settings component is installed.
+    settings_installed: bool,
     repaint: TaskbarRepaint,
 }
 
@@ -204,6 +206,7 @@ impl Taskbar {
             clock_room: Measured::default(),
             elevation_available: false,
             switch_user_available: false,
+            settings_installed: false,
             repaint: TaskbarRepaint::NONE,
         }
     }
@@ -516,7 +519,7 @@ impl Taskbar {
     pub(crate) fn network_menu(&self, anchor: Rect, scale: Scale) -> MenuRequest {
         MenuRequest {
             subject: MenuSubject::Network,
-            model: menu::network_menu(self.installed(system::SETTINGS_BUNDLE)),
+            model: menu::network_menu(self.settings_installed),
             placement: self.menu_placement(anchor, scale),
         }
     }
@@ -733,6 +736,16 @@ impl Taskbar {
     /// changes with it.
     pub fn set_switch_user_available(&mut self, available: bool) {
         self.switch_user_available = available;
+    }
+
+    /// Adopt the session's attestation that the Settings component is
+    /// installed, so the rows that open it are actionable only where it is.
+    ///
+    /// Settings is a component, never a library entry, so its presence is
+    /// what the session found in the component store; it defaults to absent,
+    /// so a bar that was never told offers no row that could only fail.
+    pub fn set_settings_installed(&mut self, installed: bool) {
+        self.settings_installed = installed;
     }
 
     /// Feed a primary press or release `event` to the Switchboard readout's
@@ -1217,7 +1230,7 @@ impl Taskbar {
         let permits = SystemPermits {
             power: self.tray.power_capable(),
             task_shell_installed: self.installed(system::TASK_SHELL_BUNDLE),
-            settings_installed: self.installed(system::SETTINGS_BUNDLE),
+            settings_installed: self.settings_installed,
             lock_available: self.elevation_available,
             switch_user_available: self.switch_user_available,
         };

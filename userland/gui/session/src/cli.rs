@@ -1,18 +1,17 @@
-//! The `desktop` command's argument grammar (`plans/APPS.md`).
+//! The desktop session component's argument grammar (`plans/APPS.md`).
 //!
-//! The desktop is a system command app: a shell user types `desktop` to
-//! start the graphical session, and a graphical login spawns the same
-//! bundle. The tool starts the session or serves its own short help —
-//! nothing else — so the grammar is deliberately closed: it takes no
-//! operands and no options beyond the reserved short-help switches, and
-//! anything outside it is a usage error (fail closed), never a guess.
+//! A graphical login starts the component; it starts the session or serves
+//! its own short help — nothing else — so the grammar is deliberately
+//! closed: it takes no operands and no options beyond the reserved
+//! short-help switches, and anything outside it is a usage error (fail
+//! closed), never a guess.
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when the bundle's own Help tree is
 /// unavailable.
 pub const USAGE: &str = "usage: desktop [-h | -?]";
 
-/// One thing the `desktop` command can do.
+/// One thing the desktop session component can do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     /// Start the graphical desktop session.

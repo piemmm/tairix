@@ -33,11 +33,8 @@ mod kernel {
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_wintersun_world::digest::{self, REFERENCE_DIGEST};
 
-    /// Static boot heap. The generator's coarse field, its flood queues
-    /// and the chunk arrays all live here. `static mut` because the
-    /// allocator hands out disjoint slices via an atomic cursor; the
-    /// storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -45,7 +42,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Entry point for the freestanding kernel. Called by
     /// `tairix_arch_x86_64`'s boot trampoline after the multiboot magic

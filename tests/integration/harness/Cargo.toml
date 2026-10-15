@@ -25,6 +25,9 @@ driver-image = ["dep:tairix-crypto"]
 app-image = ["dep:tairix-crypto", "dep:tairix-syshelp"]
 
 [dependencies]
+# The one definition of the `freestanding` classification, which the
+# per-port `itest_*` names refine.
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0" }
 # The single source of truth for the `rxe` load-image wire format, reused so
 # the ELF->rxe converter never re-encodes the header/segment layout by hand.
 # `tairix-abi` is `no_std` but builds on the host, which

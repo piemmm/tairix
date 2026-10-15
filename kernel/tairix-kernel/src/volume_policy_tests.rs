@@ -138,6 +138,7 @@ impl FilesystemStats for TwoNodeFs {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
         Ok(VolumeStats {
             block_size: 512,
+            in_reserve: false,
             total_blocks: 100,
             free_blocks: 50,
             avail_blocks: 50,

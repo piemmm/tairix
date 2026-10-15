@@ -9,16 +9,10 @@ use tairix_kernel::riscv64::boot as boot_riscv64;
 use tairix_kernel_core::AuditEvent;
 use tairix_log::{Event, FieldValue, Sink};
 
-/// Static boot heap.
-///
-/// Placed in the linker's dedicated `.heap` (NOLOAD) section so the boot
-/// trampoline does not zero its bytes (the bump allocator does not require
-/// zeroed backing) and the boot pipeline excludes it from the usable
-/// physical-memory map, exactly as the production riscv64 kernel binary's
-/// heap does. `static mut` because the bump allocator hands out disjoint
-/// slices via an atomic cursor; the storage is otherwise never aliased.
+/// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+/// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static mut HEAP: Heap = Heap::ZERO;
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -26,7 +20,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
 /// to QEMU the first time an `AuditEvent::InputDelivered` record with

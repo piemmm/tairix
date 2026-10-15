@@ -33,7 +33,8 @@
 //! # Budgets and hysteresis
 //!
 //! A [`CacheBudget`] is derived from the size of the backing resource
-//! (the kernel heap arena), never a free-standing magic number. Growth
+//! (for the kernel's caches, discovered RAM), never a free-standing magic
+//! number. Growth
 //! and shrink use two watermarks so a cache does not oscillate on one
 //! threshold: an insert that would push usage past the *hard* limit
 //! forces eviction down to the *low* watermark.
@@ -466,14 +467,9 @@ pub struct CacheBudget {
 
 /// The backing-resource fraction one bounded cache may occupy.
 ///
-/// Each cache is capped at 1/16 of the kernel heap arena: with the
-/// fixed 64 MiB heap this is 4 MiB per cache. A boot volume carries two
-/// (the clean filesystem cache and the transform cache), so the two
-/// boot volumes' four caches together stay at or under 1/4 of the heap
-/// and cache growth can never be the cause of kernel-heap exhaustion
-/// (`plans/SMARTRAM.md` section 7 — reserves are preserved by
-/// construction, and the pressure gauge stops growth long before the
-/// ceiling matters).
+/// The ceiling bounds one cache. The caches together are kept from
+/// exhausting memory by the pressure gauge, which admits growth only above
+/// the reserve floor (`plans/SMARTRAM.md` section 7).
 const BACKING_DIVISOR: usize = 16;
 
 /// The shrink watermark as a fraction of the hard limit: a forced
@@ -505,8 +501,7 @@ pub const UI_CACHE_RESERVE_BYTES: usize = 1024 * 1024;
 
 impl CacheBudget {
     /// Derive the budget for one cache from the byte size of the
-    /// resource backing it (the kernel heap arena), per the documented
-    /// policy fractions. A tiny backing yields a tiny budget; zero
+    /// resource backing it, per the documented policy fractions. A tiny backing yields a tiny budget; zero
     /// yields zero, which admits nothing (fail closed, never a panic).
     #[must_use]
     pub const fn from_backing(backing_bytes: usize) -> Self {

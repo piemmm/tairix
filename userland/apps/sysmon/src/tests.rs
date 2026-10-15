@@ -404,6 +404,7 @@ fn healthy_mounts() -> Vec<MountRecord> {
             MountFlags::READ_ONLY,
             VolumeStats {
                 block_size: 4096,
+                in_reserve: false,
                 total_blocks: 5 * 1024 * 1024,
                 free_blocks: 4 * 1024 * 1024,
                 avail_blocks: 4 * 1024 * 1024,
@@ -1242,6 +1243,7 @@ fn a_hundred_terabyte_volume_keeps_its_figures_inside_their_columns() {
     const BLOCK: u32 = 4096;
     let volume = |bytes: u64, free: u64| VolumeStats {
         block_size: BLOCK,
+        in_reserve: false,
         total_blocks: bytes / u64::from(BLOCK),
         free_blocks: free / u64::from(BLOCK),
         avail_blocks: free / u64::from(BLOCK),

@@ -69,7 +69,8 @@ does not.
 Byte targets are **policies over discovered hardware, never frozen
 scalars**: the vm workers share half the boot-attested installed RAM
 (`boot_facts`), the hdd workers half the scratch volume's free space
-(the unprivileged `MOUNT_LIST` walk, longest-covering-mount match);
+(the unprivileged namespace walks: the volume the binding covering the
+scratch directory shows);
 `--overcommit P` rescales the discovered targets to `P` percent of the
 resource (over 100 pushes into pressure); explicit
 `--vm-bytes`/`--hdd-bytes` win outright. When a discovery is

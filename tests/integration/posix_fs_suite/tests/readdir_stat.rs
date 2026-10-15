@@ -9,15 +9,21 @@ fn readdir_lists_created_children() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("alpha"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("alpha")), &mut fs)
         .expect("create alpha");
-    vfs.create_via_secured(&owner, &vol_path("beta"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("beta")), &mut fs)
         .expect("create beta");
-    vfs.mkdir_via_secured(&owner, &vol_path("gamma"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("gamma")), &mut fs)
         .expect("mkdir gamma");
 
     let mut names: Vec<(NodeKind, String)> = vfs
-        .list_all_via_secured(&owner, &path(MOUNT), &mut fs, FinalLink::Follow, usize::MAX)
+        .list_all_via_secured(
+            &owner,
+            &vfs.cover(&path(MOUNT)),
+            &mut fs,
+            FinalLink::Follow,
+            usize::MAX,
+        )
         .expect("list mount root")
         .into_iter()
         .map(|mut entry| (entry.info.kind, core::mem::take(&mut entry.name)))
@@ -39,12 +45,12 @@ fn readdir_of_a_file_is_not_a_directory() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("file"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("file")), &mut fs)
         .expect("create");
     assert_eq!(
         vfs.list_all_via_secured(
             &owner,
-            &vol_path("file"),
+            &vfs.cover(&vol_path("file")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX
@@ -59,12 +65,12 @@ fn readdir_of_empty_directory_is_empty() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("empty"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("empty")), &mut fs)
         .expect("mkdir");
     let names = vfs
         .list_all_via_secured(
             &owner,
-            &vol_path("empty"),
+            &vfs.cover(&vol_path("empty")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX,
@@ -79,13 +85,24 @@ fn stat_reports_size_after_writes() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("sized"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("sized")), &mut fs)
         .expect("create");
-    vfs.write_via_secured(&owner, &vol_path("sized"), &mut fs, 0, b"twelve bytes")
-        .expect("write");
+    vfs.write_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("sized")),
+        &mut fs,
+        0,
+        b"twelve bytes",
+    )
+    .expect("write");
 
     let info = vfs
-        .stat_via_secured(&owner, &vol_path("sized"), &mut fs, FinalLink::Follow)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("sized")),
+            &mut fs,
+            FinalLink::Follow,
+        )
         .expect("stat");
     assert_eq!(info.kind, NodeKind::RegularFile);
     assert_eq!(info.size, 12);
@@ -98,8 +115,13 @@ fn stat_of_a_missing_path_is_not_found() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("ghost"), &mut fs, FinalLink::Follow)
-            .map(|info| info.size),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("ghost")),
+            &mut fs,
+            FinalLink::Follow
+        )
+        .map(|info| info.size),
         Err(VfsError::NotFound)
     );
 }

@@ -57,7 +57,7 @@ use tairix_users::{
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{read_bootstrap_file, BootstrapFile, BootstrapReadError, VfsError};
+use crate::fs::{read_bootstrap_file, BootstrapFile, BoundedReadError, VfsError};
 
 /// Absolute path of the group registry on the root volume.
 pub const GROUPS_DB_PATH: &str = "/System/Security/Groups";
@@ -194,14 +194,14 @@ impl GroupsLoadError {
     }
 }
 
-impl From<BootstrapReadError> for GroupsLoadError {
-    fn from(err: BootstrapReadError) -> Self {
+impl From<BoundedReadError> for GroupsLoadError {
+    fn from(err: BoundedReadError) -> Self {
         match err {
-            BootstrapReadError::Vfs(err) => Self::Vfs(err),
-            BootstrapReadError::NotAFile => Self::NotAFile,
-            BootstrapReadError::TooLarge => Self::TooLarge,
-            BootstrapReadError::ShortRead => Self::ShortRead,
-            BootstrapReadError::OutOfMemory => Self::OutOfMemory,
+            BoundedReadError::Vfs(err) => Self::Vfs(err),
+            BoundedReadError::NotAFile => Self::NotAFile,
+            BoundedReadError::TooLarge => Self::TooLarge,
+            BoundedReadError::ShortRead => Self::ShortRead,
+            BoundedReadError::OutOfMemory => Self::OutOfMemory,
         }
     }
 }

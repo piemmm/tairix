@@ -68,3 +68,6 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features
 
 [lints]
 workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

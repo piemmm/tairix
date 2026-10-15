@@ -3,8 +3,8 @@
 //! [`DirectorySource`] is the one thing the browser needs from the outside
 //! world: the children of an absolute path. Keeping it a trait means the
 //! navigation and rendering logic is exhaustively testable against an
-//! in-memory tree without a kernel, exactly as `appmgr`'s `BundleStore` and
-//! `ps`'s transport are injected seams.
+//! in-memory tree without a kernel, exactly as the load gate's `BundleStore`
+//! and `ps`'s transport are injected seams.
 //!
 //! On a running system the source is backed by the VFS: a `list` call is a
 //! capability-checked directory read, so the permission decision and the

@@ -279,7 +279,7 @@ mod tests {
             source,
             target,
             b"fat32",
-            MountFlags::NOSUID,
+            MountFlags::NOEXEC,
             MountVolumeState {
                 usage: VolumeStats::default(),
                 availability,

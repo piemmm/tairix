@@ -115,6 +115,17 @@ impl Ingress {
         seq
     }
 
+    /// Hand back `seq`, the newest sequence reserved on `stream`, for a record
+    /// that committed nothing, so the stream's sequence stays gap-free. Any
+    /// other sequence is left consumed: a later one has already been handed
+    /// out.
+    pub fn release(&mut self, stream: Stream, seq: u64) {
+        let index = stream.as_u8() as usize;
+        if seq.checked_add(1) == Some(self.next_seq[index]) {
+            self.next_seq[index] = seq;
+        }
+    }
+
     /// Admit one record: resolve its authoritative stream, source, effective
     /// level, and append sequence from the attested `origin` and the caller's
     /// requests.
@@ -307,6 +318,24 @@ mod tests {
 
     fn wall() -> WallClockReading {
         WallClockReading::new(Time64::from_secs(1_700_000_000), WallTimeState::Trusted)
+    }
+
+    #[test]
+    fn only_the_newest_reservation_is_handed_back() {
+        let mut ingress = Ingress::new();
+        assert_eq!(ingress.reserve(Stream::Runtime), 0);
+        let overtaken = ingress.reserve(Stream::Runtime);
+        let refused = ingress.reserve(Stream::Runtime);
+        ingress.release(Stream::Runtime, overtaken);
+        assert_eq!(
+            ingress.next_seq(Stream::Runtime),
+            refused + 1,
+            "a sequence a later one followed stays consumed"
+        );
+        ingress.release(Stream::Runtime, refused);
+        assert_eq!(ingress.next_seq(Stream::Runtime), refused, "reused, no gap");
+        ingress.release(Stream::Audit, 0);
+        assert_eq!(ingress.next_seq(Stream::Audit), 0, "nothing was reserved");
     }
 
     #[test]

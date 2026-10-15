@@ -55,7 +55,7 @@ use tairix_log::{Field, Level, Sink};
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{Credentials, DirPosition, FinalLink, Path, Vfs, VfsError};
+use crate::fs::{BoundedReadError, Credentials, DirPosition, FinalLink, Path, Vfs, VfsError};
 
 /// Canonical, global absolute path of the signed-driver store
 /// (drivers live under `/System/Drivers/`).
@@ -183,7 +183,7 @@ fn walk_dir<F>(
     let mut unheld = false;
     let listed = vfs.list_via_secured(
         cred,
-        &dir_path,
+        &vfs.cover(&dir_path),
         fs,
         FinalLink::Follow,
         &mut DirPosition::default(),
@@ -315,9 +315,8 @@ pub enum DriverImageError {
     NotAFile,
     /// The file is larger than [`MAX_DRIVER_IMAGE_LEN`].
     TooLarge,
-    /// The driver reported a different byte count than its stated size
-    /// between `stat` and `read` (a short read); the partial bytes are
-    /// discarded.
+    /// The driver read fewer bytes than the file's stated size (a short
+    /// read); the partial bytes are discarded.
     ShortRead,
     /// The kernel heap could not hold the bytes asked for.
     OutOfMemory,
@@ -342,6 +341,18 @@ impl DriverImageError {
             Self::ShortRead => Errno::NotImplemented,
             Self::OutOfMemory => Errno::OutOfMemory,
             Self::Vfs(err) => err.to_errno(),
+        }
+    }
+}
+
+impl From<BoundedReadError> for DriverImageError {
+    fn from(err: BoundedReadError) -> Self {
+        match err {
+            BoundedReadError::Vfs(err) => Self::Vfs(err),
+            BoundedReadError::NotAFile => Self::NotAFile,
+            BoundedReadError::TooLarge => Self::TooLarge,
+            BoundedReadError::ShortRead => Self::ShortRead,
+            BoundedReadError::OutOfMemory => Self::OutOfMemory,
         }
     }
 }
@@ -454,42 +465,15 @@ impl DriverImageReader {
         let caps = CapabilitySet::empty();
         let cred = bootstrap_credentials(&caps);
         let parsed = Path::parse(path)?;
-
-        // Bound the bundle against the validation maximum before reading a
-        // single byte.
-        let info = self
-            .vfs
-            .stat_via_secured(&cred, &parsed, fs, FinalLink::Follow)?;
-        if info.kind != NodeKind::RegularFile {
-            return Err(DriverImageError::NotAFile);
-        }
-        if info.size > MAX_DRIVER_IMAGE_LEN as u64 {
-            return Err(DriverImageError::TooLarge);
-        }
-        let size = usize::try_from(info.size)
-            .map_err(|_| DriverImageError::TooLarge)?
-            .min(len);
-
-        // Append into `buf`; unwind the reservation on any short read or
-        // driver refusal so the buffer is unchanged on error.
-        let start = buf.len();
-        buf.try_reserve_exact(size)
-            .map_err(|_| DriverImageError::OutOfMemory)?;
-        buf.resize(start + size, 0);
-        match self
-            .vfs
-            .read_via_secured(&cred, &parsed, fs, 0, &mut buf[start..])
-        {
-            Ok(read) if read == size => Ok(()),
-            Ok(_) => {
-                buf.truncate(start);
-                Err(DriverImageError::ShortRead)
-            }
-            Err(err) => {
-                buf.truncate(start);
-                Err(DriverImageError::from(err))
-            }
-        }
+        self.vfs.read_bounded_via_secured(
+            &cred,
+            &self.vfs.cover(&parsed),
+            fs,
+            MAX_DRIVER_IMAGE_LEN as u64,
+            len,
+            buf,
+        )?;
+        Ok(())
     }
 }
 

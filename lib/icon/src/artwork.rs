@@ -1506,7 +1506,7 @@ const MASK_COLOR: Color = Color::rgba(255, 255, 255, 255);
 /// picture a system program wears.
 ///
 /// Not the command-search order (`lib/cmdres`): a running image can have come
-/// from the service store or `/Apps`, and never from a `PATH` entry. Only the
+/// from the service store, and never from a `PATH` entry. Only the
 /// asking session's home is searched, so no account chooses the picture
 /// another's task wears. `None` when the heap refuses the paths, rather than a
 /// shorter list that would let a later store's bundle answer for an earlier's.

@@ -3180,6 +3180,7 @@ impl<B: Block> FilesystemStats for Ext4<B> {
         let free_blocks = u64::from(le32(&sb, 0x0C)) | hi(0x158);
         Ok(VolumeStats {
             block_size: self.layout.block_size,
+            in_reserve: false,
             total_blocks,
             free_blocks,
             // Blocks reserved for the superuser are free but not available

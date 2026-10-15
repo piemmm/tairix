@@ -71,7 +71,7 @@ options seules.
   répertoire.
 - `du -sh /Users/jo` — un total lisible pour `/Users/jo`.
 - `du -a docs` — chaque fichier et répertoire sous `docs`.
-- `du -d1 -c /Apps /Users` — le premier niveau de chaque magasin,
+- `du -d1 -c /System/Applications /Users` — le premier niveau de chaque magasin,
   puis un total général.
 
 ## EXIT STATUS

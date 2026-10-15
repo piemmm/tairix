@@ -13,48 +13,43 @@ use super::system_vfs;
 
 #[test]
 fn system_vfs_mounts_the_writable_volume_as_root() {
-    // The corrected layering: the writable root volume *is* `/`,
-    // so `/` itself and the persistent top-level trees (`/Users`, `/Apps`,
-    // `/Storage`) resolve to a writable, driver-backed mount — not the
-    // volatile in-RAM tree, and not the read-only `/System` volume. This is
-    // the regression guard for the "writes outside /System/{Logs,Settings}
-    // were non-persistent" defect.
+    // The writable root volume *is* `/`, and `/Users` is a plain directory
+    // of it rather than a second mount of the same volume, so a rename
+    // between `/` and `/Users` stays on one mount.
     let vfs = system_vfs().expect("the production VFS builds");
     let mounts = vfs.mounts();
     let root = mounts.resolve(&Path::parse("/").expect("valid"));
     assert_eq!(root.path(), &Path::parse("/").expect("valid"));
     assert!(!root.is_read_only(), "/ is writable");
-    let root_handle = root
-        .backing()
-        .expect("/ is driver-backed by the writable root volume");
-    // The whole-volume root mount roots at the volume's own root.
+    assert!(
+        root.backing().is_some(),
+        "/ is driver-backed by the writable root volume"
+    );
     assert!(
         root.backing_subtree().is_empty(),
         "/ is a whole-volume mount (no rebasing)"
     );
+    let home = mounts.resolve(&Path::parse("/Users/alice/file").expect("valid"));
+    assert_eq!(home.path(), &Path::root(), "/Users is a directory of /");
+}
 
-    for top in ["/Users", "/Apps", "/Storage"] {
-        let under = Path::parse(&alloc::format!("{top}/alice/file")).expect("valid path");
-        let mount = mounts.resolve(&under);
-        assert_eq!(
-            mount.path(),
-            &Path::parse(top).expect("valid"),
-            "{top} is its own mount"
-        );
-        assert!(!mount.is_read_only(), "{top} is writable (persistent)");
-        assert_eq!(
-            mount.backing(),
-            Some(root_handle),
-            "{top} is backed by the one writable root volume"
-        );
-        // Rebased onto the volume's own same-named directory so the one
-        // driver resolves from its own root.
-        assert_eq!(
-            mount.backing_subtree(),
-            &[alloc::string::String::from(top.trim_start_matches('/'))],
-            "{top} is rebased onto the volume's own {top}"
-        );
-    }
+/// `/Storage` is the catalog of attached volumes: unbacked, so nothing is
+/// stored in it, and read-only, so nothing can be.
+#[test]
+fn system_vfs_leaves_the_storage_catalog_unbacked() {
+    let vfs = system_vfs().expect("the production VFS builds");
+    let mounts = vfs.mounts();
+    let catalog = mounts.resolve(&Path::parse("/Storage/stick/file").expect("valid"));
+    assert_eq!(catalog.path(), &Path::parse("/Storage").expect("valid"));
+    assert_eq!(catalog.backing(), None);
+    assert!(catalog.is_read_only());
+    assert!(
+        mounts
+            .resolve(&Path::parse("/Apps/x").expect("valid"))
+            .path()
+            .is_root(),
+        "there is no /Apps mount"
+    );
 }
 
 #[test]
@@ -93,7 +88,7 @@ fn system_vfs_carves_logs_and_settings_back_to_the_writable_volume() {
     use tairix_abi::driver::filesystem::MountFlags;
 
     // `/System/Logs` and `/System/Settings` are the only writable paths
-    // beneath `/System`: each is a `nosuid,nodev,noexec` writable sub-mount of
+    // beneath `/System`: each is a `noexec` writable sub-mount of
     // the *writable root volume* (the same handle that backs `/`), rebased
     // onto that volume's own `/System/<name>` directory. `MountTable`
     // longest-prefix resolution makes the writable child shadow the read-only
@@ -110,9 +105,6 @@ fn system_vfs_carves_logs_and_settings_back_to_the_writable_volume() {
         .backing()
         .expect("/System is driver-backed");
 
-    let nosuid_nodev_noexec = MountFlags::NOSUID
-        .union(MountFlags::NODEV)
-        .union(MountFlags::NOEXEC);
     let mounts = vfs.mounts();
     for name in ["Logs", "Settings"] {
         let under = Path::parse(&alloc::format!("/System/{name}/file")).expect("valid path");
@@ -125,8 +117,8 @@ fn system_vfs_carves_logs_and_settings_back_to_the_writable_volume() {
         assert!(!mount.is_read_only(), "/System/{name} is writable");
         assert_eq!(
             mount.flags(),
-            nosuid_nodev_noexec,
-            "/System/{name} is mounted nosuid,nodev,noexec"
+            MountFlags::NOEXEC,
+            "/System/{name} is mounted noexec"
         );
         let handle = mount
             .backing()
@@ -149,4 +141,85 @@ fn system_vfs_carves_logs_and_settings_back_to_the_writable_volume() {
             "/System/{name} is rebased onto the volume's own /System/{name}"
         );
     }
+}
+
+/// The default install is two volumes and five projections: the root volume
+/// at `/` and carved out at the two writable `/System` subtrees, the system
+/// volume at `/System`, and the catalog showing no volume. Each volume is
+/// attached once, with the flags its every projection keeps.
+#[test]
+fn system_vfs_attaches_two_volumes_under_five_projections() {
+    use tairix_abi::driver::filesystem::MountFlags;
+
+    let vfs = system_vfs().expect("the production VFS builds");
+    let mounts = vfs.mounts();
+    let volumes = mounts.volumes();
+    let shown: alloc::vec::Vec<_> = volumes
+        .iter()
+        .map(|(volume, at)| (volume.flags(), at.clone()))
+        .collect();
+    let path = |text: &str| Path::parse(text).expect("valid");
+    assert_eq!(
+        shown,
+        [
+            (MountFlags::default(), Some(path("/"))),
+            (MountFlags::READ_ONLY, Some(path("/System"))),
+        ]
+    );
+    let projections: alloc::vec::Vec<_> = mounts
+        .iter()
+        .map(|mount| {
+            (
+                mount.path().clone(),
+                mount.flags(),
+                mount.backing().is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        projections,
+        [
+            (path("/"), MountFlags::default(), true),
+            (path("/System"), MountFlags::READ_ONLY, true),
+            (path("/System/Logs"), MountFlags::NOEXEC, true),
+            (path("/System/Settings"), MountFlags::NOEXEC, true),
+            (
+                path("/Storage"),
+                MountFlags::READ_ONLY.union(MountFlags::NOEXEC),
+                false
+            ),
+        ]
+    );
+}
+
+/// The root volume's reserve over the system's own write set, at the sizes
+/// `docs/src/filesystem/arxfs-spec.md` states for 512-byte blocks.
+#[test]
+fn the_root_reserve_over_the_system_write_set_matches_its_stated_sizes() {
+    use tairix_drv_fs_arxfs::system_reserve_blocks;
+
+    use super::SYSTEM_WRITE_SET;
+
+    const MIB: u64 = 1 << 20;
+    let reserve = |volume: u64| system_reserve_blocks(512, volume / 512, &SYSTEM_WRITE_SET) * 512;
+    assert_eq!(reserve(MIB), 128 * 1024);
+    assert_eq!(reserve(64 * MIB), 8 * MIB);
+    assert_eq!(reserve(512 * MIB), 16 * MIB);
+    assert_eq!(reserve(4 << 30), 128 * MIB);
+    assert_eq!(reserve(100 << 40), 128 * MIB);
+}
+
+/// The two writable grafts take the system's own writes; every other
+/// projection's writes are ordinary.
+#[test]
+fn the_system_grafts_write_under_the_system_class() {
+    use tairix_abi::driver::filesystem::AllocationClass;
+
+    let vfs = system_vfs().expect("the production VFS builds");
+    let mounts = vfs.mounts();
+    let class = |path: &str| mounts.resolve(&Path::parse(path).expect("valid")).class();
+    assert_eq!(class("/System/Logs/x"), AllocationClass::System);
+    assert_eq!(class("/System/Settings/x"), AllocationClass::System);
+    assert_eq!(class("/Users/ada/x"), AllocationClass::Ordinary);
+    assert_eq!(class("/x"), AllocationClass::Ordinary);
 }

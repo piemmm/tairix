@@ -620,7 +620,7 @@ crt0 crate `README.md`.
 ### Stage CC4 — Loader / bundle integration for native programs
 
 A C-compiled `.app` bundle loads through the
-language-agnostic application-bundle loader (`userland/system/appmgr`), which
+language-agnostic bundle load gate (`lib/appload`), which
 validates its `Run` `rxe` image and resolves the `tairix_sys_*` runtime **only**
 from the curated `/System/Libraries/` class or the app's own bundle
 `Libraries/`. **Depended on** CC2, CC3, and `PLAN.md` Stage 6 (the
@@ -640,7 +640,7 @@ green).
   and `cargo xtask c-header --write` regenerated `include/tairix/tairix_rxe.h`
   (`TAIRIX_LOAD_MAX_NEEDED` / `TAIRIX_LIBREF_MAX` / `TAIRIX_NEEDED_LIBRARY_WIRE_LEN` +
   the `needed_count` field). 6 new rxe tests.
-- **The loader resolves the runtime, fail-closed.** `userland/system/appmgr`
+- **The loader resolves the runtime, fail-closed.** `lib/appload`
   gained a `read_run` `BundleStore` seam; `AppLoader::load` now reads the
   `Run` binary, validates it through `LoadImage::parse` with the kernel's
   syscall hash as the **expected CFI tag** (so the §19.2 PIE / W^X / CFI-tag
@@ -651,14 +651,14 @@ green).
   resolves as `LibraryScope::System`; a bundle-private library as
   `LibraryScope::Bundle`; anything else (or a `..`) fails closed
   (`AppError::Library`). The resolved set is returned in `LoadedApp::libraries`.
-  New audit event `APP_RUN_IMAGE_INVALID` (`11010`). 5 new appmgr tests.
+  New audit event `APP_RUN_IMAGE_INVALID` (`11010`). 5 new load-gate tests.
 - **No new ambient authority.** A hosted C program still receives only the
   intersection of its signed `AppInfo` request and the launching user's
   grants; the runtime is not a privileged path (the kernel re-checks every
   syscall on the far side of the trap, §4 / §5.4).
 - **Docs:** `docs/src/abi/c-abi.md` (the "Bundles and the dynamic-loader
   policy" section), `docs/src/security/rxe_loader.md` (the "Needed shared
-  libraries" section), and the appmgr `lib.rs`/`README.md`.
+  libraries" section), and the `lib/appload` `lib.rs`/`README.md`.
 
 **Deliverables**
 - Confirm and, where needed, extend the `rxe` loader and the §16.4/§16.5

@@ -471,15 +471,25 @@ fn a_malformed_locale_preference_degrades_to_default_silently() {
 /// nested folders.
 const MOOSE_DOC: &str = "## NAME\n\nmoose — a filed-away app\n\n## SYNOPSIS\n\n`moose`\n\n## DESCRIPTION\n\nFound by the recursive search.\n";
 
+/// The system stores are flat, one bundle per program, so the recursive
+/// fallback walks only the user's own stores, where nesting is the user's.
 #[test]
-fn a_nested_apps_bundle_is_found_by_the_recursive_search() {
+fn the_recursive_search_walks_the_users_stores_and_not_the_flat_system_ones() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
-        dir: "/Apps/somefolder/anotherfolder/moose.app",
+        dir: "/System/Applications/somefolder/anotherfolder/moose.app",
         docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
     });
     let console = FixtureConsole::stream();
-    run(&page("moose"), &Request::default(), &store, &console).expect("page renders");
+    let err = run(&page("moose"), &ada(), &store, &console).unwrap_err();
+    assert_eq!(err, ManError::CommandNotFound(String::from("moose")));
+
+    store.bundles.push(Bundle {
+        dir: "/Users/ada/Applications/somefolder/anotherfolder/moose.app",
+        docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
+    });
+    let console = FixtureConsole::stream();
+    run(&page("moose"), &ada(), &store, &console).expect("page renders");
     assert!(console.output().contains("filed-away app"));
 }
 
@@ -506,6 +516,17 @@ fn the_users_own_command_store_is_searched_after_the_shared_store() {
     assert_eq!(err, ManError::CommandNotFound(String::from("moose")));
 }
 
+/// A request from the user whose home is `/Users/ada`, so the recursive
+/// fallback has that user's two stores to walk.
+fn ada() -> Request<'static> {
+    Request {
+        locale: None,
+        path: None,
+        home: Some("/Users/ada"),
+        term: None,
+    }
+}
+
 #[test]
 fn the_users_own_application_store_is_also_searched() {
     let mut store = FixtureStore::with_ps();
@@ -525,16 +546,16 @@ fn the_users_own_application_store_is_also_searched() {
 }
 
 /// Precedence between the stores one word can match in. The user's own
-/// command store is on the fixed lookup prefix, so a bundle filed there
-/// answers ahead of the machine-wide installed store, which a bare word
-/// reaches only through the recursive fallback. The system stores stay
-/// unshadowable: a user-writable bundle of the same name can never answer
-/// for a system command.
+/// stores are on the fixed lookup prefix, so a bundle filed directly in one
+/// answers ahead of a copy nested deeper, which a bare word reaches only
+/// through the recursive fallback. The system stores stay unshadowable: a
+/// user-writable bundle of the same name can never answer for a system
+/// command.
 #[test]
 fn the_lookup_prefix_orders_the_stores_a_word_can_match_in() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
-        dir: "/Apps/moose.app",
+        dir: "/Users/ada/Commands/filed/moose.app",
         docs: alloc::vec![(
             "en-US",
             "moose.md",
@@ -542,7 +563,7 @@ fn the_lookup_prefix_orders_the_stores_a_word_can_match_in() {
         )],
     });
     store.bundles.push(Bundle {
-        dir: "/Users/ada/Commands/moose.app",
+        dir: "/Users/ada/Applications/moose.app",
         docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
     });
     let request = Request {
@@ -575,7 +596,7 @@ fn the_lookup_prefix_orders_the_stores_a_word_can_match_in() {
 fn a_shallower_bundle_beats_a_deeper_lexicographically_earlier_one() {
     let mut store = FixtureStore::with_ps();
     store.bundles.push(Bundle {
-        dir: "/Apps/aaa/deep/moose.app",
+        dir: "/Users/ada/Applications/aaa/deep/moose.app",
         docs: alloc::vec![(
             "en-US",
             "moose.md",
@@ -583,11 +604,11 @@ fn a_shallower_bundle_beats_a_deeper_lexicographically_earlier_one() {
         )],
     });
     store.bundles.push(Bundle {
-        dir: "/Apps/zzz/moose.app",
+        dir: "/Users/ada/Applications/zzz/moose.app",
         docs: alloc::vec![("en-US", "moose.md", MOOSE_DOC)],
     });
     let console = FixtureConsole::stream();
-    run(&page("moose"), &Request::default(), &store, &console).expect("page renders");
+    run(&page("moose"), &ada(), &store, &console).expect("page renders");
     assert!(console.output().contains("filed-away app"));
     assert!(!console.output().contains("deep copy"));
 }
@@ -598,7 +619,7 @@ fn the_search_never_descends_into_another_bundle() {
     // A bundle filed *inside* another bundle's directory is not installed;
     // a bundle is a sealed unit, not a container of further apps.
     store.bundles.push(Bundle {
-        dir: "/Apps/outer.app",
+        dir: "/Users/ada/Applications/outer.app",
         docs: alloc::vec![(
             "en-US",
             "outer.md",
@@ -606,11 +627,11 @@ fn the_search_never_descends_into_another_bundle() {
         )],
     });
     store.bundles.push(Bundle {
-        dir: "/Apps/outer.app/Code/inner.app",
+        dir: "/Users/ada/Applications/outer.app/Code/inner.app",
         docs: alloc::vec![("en-US", "inner.md", MOOSE_DOC)],
     });
     let console = FixtureConsole::stream();
-    let err = run(&page("inner"), &Request::default(), &store, &console).unwrap_err();
+    let err = run(&page("inner"), &ada(), &store, &console).unwrap_err();
     assert_eq!(err, ManError::CommandNotFound(String::from("inner")));
 }
 
@@ -620,14 +641,16 @@ fn an_exhausted_search_budget_is_reported_not_swallowed() {
     // More walkable directories than the whole-invocation budget: the
     // truncation must surface as its own error, never as "not found".
     for i in 0..5000usize {
-        store.dirs.push(alloc::format!("/Apps/d{i:04}"));
+        store
+            .dirs
+            .push(alloc::format!("/Users/ada/Commands/d{i:04}"));
     }
     let console = FixtureConsole::stream();
-    let err = run(&page("moose"), &Request::default(), &store, &console).unwrap_err();
+    let err = run(&page("moose"), &ada(), &store, &console).unwrap_err();
     assert_eq!(
         err,
         ManError::SearchTruncated {
-            root: String::from("/Apps"),
+            root: String::from("/Users/ada/Commands"),
         }
     );
 }

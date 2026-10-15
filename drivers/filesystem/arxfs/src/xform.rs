@@ -56,11 +56,14 @@ pub const MAX_CLUSTER_PLAINTEXT: usize =
 /// Host-provided retention of verified, decrypted, decompressed
 /// cluster plaintext. See the module docs for the coherence contract.
 pub trait ClusterCache: Send {
-    /// The retained plaintext of the cluster whose stored run starts at
-    /// `phys`, or `None` when the cluster is not retained. The returned
-    /// slice is the whole cluster (`ext.len` logical blocks of content
-    /// capacity), exactly as `read_data_cluster` produced it.
-    fn get(&mut self, phys: u64) -> Option<&[u8]>;
+    /// Lend `read` the retained plaintext of the cluster whose stored run
+    /// starts at `phys` — the whole cluster (`ext.len` logical blocks of
+    /// content capacity), exactly as `read_data_cluster` produced it — and
+    /// answer what it returned, or `None` when the cluster is not retained.
+    ///
+    /// Lent rather than returned, so the plaintext can stay behind a lock
+    /// when several mounts of one volume share the cache.
+    fn lend(&mut self, phys: u64, read: &mut dyn FnMut(&[u8]) -> usize) -> Option<usize>;
 
     /// Offer the cluster plaintext for retention. `stored` is the run
     /// length in physical blocks (`[phys, phys + stored)`), so the

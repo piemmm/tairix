@@ -39,7 +39,7 @@
 /* Canonical query-registry encoding constants (the hashable registry image). */
 #define TAIRIX_SYSINFO_QUERY_NAME_MAX 20u
 #define TAIRIX_SYSINFO_QUERY_RECORD_LEN 26u
-#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1352u
+#define TAIRIX_SYSINFO_ENCODED_QUERY_TABLE_LEN 1378u
 #define TAIRIX_SYSINFO_LOAD_FIXED_SHIFT 11u
 
 /* Well-known sysinfo-v1 query identifiers (uint16_t). Do not renumber. */
@@ -95,6 +95,7 @@
 #define TAIRIX_SYSINFO_QUERY_GLOBAL_AUDIO_STREAMS ((uint16_t)49u)
 #define TAIRIX_SYSINFO_QUERY_NET_NEIGHBORS ((uint16_t)50u)
 #define TAIRIX_SYSINFO_QUERY_NET_ROUTES ((uint16_t)51u)
+#define TAIRIX_SYSINFO_QUERY_VIEW_LIST ((uint16_t)52u)
 
 /* Process lifecycle state carried in a process record (uint8_t). */
 #define TAIRIX_PROCESS_STATE_RUNNABLE ((uint8_t)0u)
@@ -177,6 +178,7 @@
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
 #define TAIRIX_SYSTEM_IDENTITY_WIRE_LEN 88u
 #define TAIRIX_MOUNT_RECORD_WIRE_LEN 224u
+#define TAIRIX_VIEW_BINDING_RECORD_WIRE_LEN 152u
 #define TAIRIX_RESOURCE_LIMIT_RECORD_WIRE_LEN 32u
 #define TAIRIX_USER_DIRECTORY_RECORD_WIRE_LEN 40u
 #define TAIRIX_GROUP_DIRECTORY_RECORD_WIRE_LEN 40u
@@ -309,6 +311,23 @@ typedef struct tairix_mount_record {
     uint8_t target[TAIRIX_MOUNT_TARGET_MAX];
     uint8_t fstype[TAIRIX_MOUNT_FSTYPE_MAX];
 } tairix_mount_record_t;
+
+/* One view binding: a view path (`target`), the path within an attached
+* volume it shows (`subtree`, `/` for the volume's root), and the
+* MountFlags it narrows that volume to. `volume_id` is the attached
+* volume's, the key of its tairix_mount_record_t; a binding showing no
+* volume (the /Storage catalog) has an empty subtree and an all-zero
+* volume_id. The inline target/subtree buffers are valid for their
+* *_len byte counts. */
+typedef struct tairix_view_binding_record {
+    uint32_t flags;
+    uint8_t target_len;
+    uint8_t subtree_len;
+    uint8_t reserved0[2];
+    uint8_t volume_id[TAIRIX_MOUNT_VOLUME_ID_LEN];
+    uint8_t target[TAIRIX_MOUNT_TARGET_MAX];
+    uint8_t subtree[TAIRIX_MOUNT_TARGET_MAX];
+} tairix_view_binding_record_t;
 
 /* One row of the RESOURCE_LIMITS response: a resource's effective soft/hard
 * bound (a tairix_resource_limit_t) and the caller's current live usage of it.

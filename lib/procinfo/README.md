@@ -45,9 +45,12 @@ The crate provides:
   delta arithmetic.
 - `for_each_process` / `PROCESS_HEADER` / `render_process` / `state_char` —
   the paged process-list walk and its fixed-column rendering.
-- `for_each_mount` / `render_mount` / `render_options` — the paged
-  mount-table walk and its `source on target type fstype (options)`
-  rendering.
+- `for_each_mount` / `for_each_view` / `Namespace` / `render_binding` /
+  `render_options` — the paged walks of the attached volumes and the view
+  bindings onto them, the join that resolves a path to the binding covering
+  it and that binding to its volume (one definition `df`, `stat`, `mount`,
+  `fstree` and `stress` all resolve through), and the
+  `source on target type fstype (options)` row.
 - `volume` — the one mount-record view model every surface turns a record
   into facts with: `VolumeBytes` (`total`/`free`/`available`, with `used`,
   `usable`, the `used_permille` share of the whole medium, and a saturating

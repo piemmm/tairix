@@ -30,6 +30,9 @@ pub enum AppError {
     /// The bundle's contents do not match the content hash the signature
     /// covers.
     ContentHashMismatch,
+    /// The bundle was launched from a store its signed kind does not run from
+    /// ([`tairix_abi::ProgramKind::launchable_from`]).
+    Misplaced,
     /// A shared-library reference violated the dynamic-loader policy.
     Library(LibraryError),
     /// The entry-point `Run` binary is not a valid `rxe` load image, or its
@@ -47,6 +50,9 @@ impl core::fmt::Display for AppError {
             Self::Signature => f.write_str("manifest signature did not verify"),
             Self::PublisherCert => f.write_str("publisher delegation certificate did not verify"),
             Self::ContentHashMismatch => f.write_str("bundle contents do not match signed hash"),
+            Self::Misplaced => {
+                f.write_str("bundle is not a program of the store it was launched from")
+            }
             Self::Library(e) => write!(f, "shared-library reference refused: {e}"),
             Self::RunImage(e) => write!(f, "entry-point binary refused: {e}"),
         }

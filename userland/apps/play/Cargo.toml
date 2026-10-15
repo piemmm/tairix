@@ -56,3 +56,6 @@ tairix-audio = { path = "../../../lib/audio", version = "=0.0.0", features = ["r
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
 tairix-curses = { path = "../../../lib/curses", version = "=0.0.0", features = ["program"] }
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

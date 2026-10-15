@@ -35,8 +35,7 @@ read the settings but not change them.
   service starts for an authenticated user. `graphical` (the default)
   starts the desktop session directly after authentication, degrading
   to the text login on a machine that cannot run one; `text` starts the
-  account's shell — the desktop can still be started on demand with the
-  `desktop` command.
+  account's shell — the desktop runs only from a graphical login.
 - `cache.all` — `on` or `off`: the master caching switch. `on` (the
   default) lets each cache class below follow its own setting; `off`
   is a ceiling that disables every memory cache regardless of the

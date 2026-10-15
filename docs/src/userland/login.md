@@ -12,8 +12,8 @@ Which session runs is **system policy, never a per-login prompt**: the
 graphical desktop by default, when the effective session type is graphical
 **and** a graphical session is available this round, otherwise the
 authenticated account's text shell. A graphical choice the round cannot
-honour degrades to text — never crashed, never errored — and a shell user
-starts the desktop on demand with the `desktop` command.
+honour degrades to text — never crashed, never errored. The desktop is a
+component the graphical login starts; no typed word runs it.
 
 The **effective session type** comes from `effective_session_kind`, the
 one definition of the precedence (`plans/NEW-DESKTOP-LOGIN.md` G1):
@@ -490,10 +490,9 @@ program PID 1 `init`'s `session` directive launches and supervises
     honest answer — nothing could authenticate either.
 - **`SessionLauncher`** over the `spawn`/`wait` syscalls: the chosen
   session's program — the record's shell of choice for a text session,
-  the OS `desktop` application
-  (`tairix_login::DESKTOP_SESSION_PATH`,
-  `/System/Applications/desktop.app/Run` — the same bundle the shell's
-  `desktop` command word resolves to) for a graphical one
+  the desktop session component
+  (`tairix_abi::DESKTOP_RUN_PATH`, `/System/Components/desktop.app/Run`)
+  for a graphical one
   (`session_program`, one mapping defined beside `SessionKind`) — is
   spawned **as the authenticated user** and supervised;
   its exit code closes the session. The session environment

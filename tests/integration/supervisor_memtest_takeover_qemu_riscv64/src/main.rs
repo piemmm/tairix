@@ -68,12 +68,10 @@ mod kernel {
     use tairix_supervisor::Report;
     use tairix_test_riscv64_boot::boot;
 
-    /// Static boot heap, placed in the linker's dedicated `.heap` (NOLOAD)
-    /// section (excluded from the usable physical-memory map, so the
-    /// whole-RAM sweep never overwrites it). `static mut` because the
-    /// bump allocator hands out disjoint slices via an atomic cursor.
+    /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+    /// trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static mut HEAP: Heap = Heap::ZERO;
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -81,7 +79,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// `EventId` emitted by `kernel_core::kernel_main` once every init phase
     /// completed (the Supervisor system is published in an earlier phase, so

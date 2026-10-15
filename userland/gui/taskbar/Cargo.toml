@@ -1,6 +1,6 @@
 [package]
 name = "tairix-taskbar"
-description = "TAIRiX traditional desktop icon bar: edge-pinned layout, permanent Library/Files launchers with the program-library popup, a per-application slot strip with an app-declared menu and hover window picker, and the notification area + clock (PLAN.md Stage 7)."
+description = "TAIRiX traditional desktop icon bar: edge-pinned layout, the Library launcher with the program-library popup, a per-application slot strip with an app-declared menu and hover window picker, and the notification area + clock (PLAN.md Stage 7)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

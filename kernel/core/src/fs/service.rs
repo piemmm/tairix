@@ -28,7 +28,7 @@ use super::listing::Listing;
 use tairix_abi::driver::filesystem::DirVisit;
 
 use tairix_abi::sysinfo::{
-    MountRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    MountRecord, ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{
@@ -192,6 +192,25 @@ pub trait FilesystemService: Send + Sync {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, Errno>;
+
+    /// [`Self::read`] for a file read as a program to run, which every file
+    /// of a bundle the spawn path loads is.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] when the mount serving `path` is
+    /// `noexec`; otherwise as [`Self::read`]. The default fails closed with
+    /// [`Errno::NotImplemented`].
+    fn read_program(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        _path: &str,
+        _offset: u64,
+        _buf: &mut [u8],
+    ) -> Result<usize, Errno> {
+        Err(Errno::NotImplemented)
+    }
 
     /// Write `data` to `path` at byte `offset`, or at the current end of file
     /// when `append`, returning the number of bytes written.
@@ -632,9 +651,9 @@ pub trait FilesystemService: Send + Sync {
         key: &[u8],
     ) -> Result<(), Errno>;
 
-    /// Snapshot the system mount table as wire-ready [`MountRecord`]s, in a
-    /// stable order (the permanent root mount first), for the System
-    /// Information introspection feed.
+    /// Snapshot every attached volume whose driver is online as a wire-ready
+    /// [`MountRecord`], in attach order, for the System Information
+    /// introspection feed.
     ///
     /// This is a read-only, system-wide, secret-free observation — it names
     /// the mounted volumes and their permission flags, never file contents —
@@ -645,6 +664,16 @@ pub trait FilesystemService: Send + Sync {
     /// [`NullFilesystemService`]) truthfully reports "no mounts" rather than
     /// fabricating one.
     fn mount_snapshot(&self) -> Vec<MountRecord> {
+        Vec::new()
+    }
+
+    /// Snapshot every view binding as a wire-ready [`ViewBindingRecord`], in
+    /// mount-table order: each onto a volume [`mount_snapshot`] reports, and
+    /// each policy-only binding showing none. Ungated and empty by default on
+    /// the same terms.
+    ///
+    /// [`mount_snapshot`]: Self::mount_snapshot
+    fn view_snapshot(&self) -> Vec<ViewBindingRecord> {
         Vec::new()
     }
 

@@ -1212,9 +1212,8 @@ mod tests {
         CapabilityId::NET_ADMIN,
     ];
 
-    // The `desktop` command app — the graphical desktop session
-    // (plans/DISPLAY.md D7c, plans/APPWIN.md AW3/AW5), started by a
-    // graphical login or by the shell's `desktop` command word: the
+    // The desktop session component (plans/DISPLAY.md D7c,
+    // plans/APPWIN.md AW3/AW5), started by a graphical login: the
     // boot seat's revocable lease (CAP_DISPLAY), the owner-gated seat
     // input drains (CAP_INPUT_READ), the zero-copy frame regions it
     // creates for the display service and maps from each served app
@@ -1614,8 +1613,8 @@ mod tests {
         ("confd", ProgramKind::Service, CONFD_MANIFEST),
         ("configure", ProgramKind::Command, CONFIGURE_REQUEST),
         ("cp", ProgramKind::Command, FILE_TOOL_REQUEST),
-        ("datetime", ProgramKind::Application, DATETIME_REQUEST),
-        ("desktop", ProgramKind::Application, DESKTOP_SESSION_REQUEST),
+        ("datetime", ProgramKind::Component, DATETIME_REQUEST),
+        ("desktop", ProgramKind::Component, DESKTOP_SESSION_REQUEST),
         ("devmgr", ProgramKind::Service, DEVMGR_MANIFEST),
         ("df", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("dirname", ProgramKind::Command, PURE_TOOL_REQUEST),
@@ -1625,7 +1624,7 @@ mod tests {
         ("edit", ProgramKind::Command, FILE_TOOL_REQUEST),
         ("elsh", ProgramKind::Command, SHELL_MANIFEST),
         ("false", ProgramKind::Command, PURE_TOOL_REQUEST),
-        ("files", ProgramKind::Application, FILES_BROWSER_REQUEST),
+        ("files", ProgramKind::Component, FILES_BROWSER_REQUEST),
         ("flock", ProgramKind::Command, LOCK_RUNNER_REQUEST),
         ("fontd", ProgramKind::Service, FONTD_MANIFEST),
         ("fstree", ProgramKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
@@ -1664,7 +1663,7 @@ mod tests {
         ("seatmgr", ProgramKind::Service, SEATMGR_MANIFEST),
         ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("servicectl", ProgramKind::Command, SERVICECTL_TOOL_REQUEST),
-        ("settings", ProgramKind::Application, WINDOWED_APP_REQUEST),
+        ("settings", ProgramKind::Component, WINDOWED_APP_REQUEST),
         ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
         ("soundd", ProgramKind::Service, SOUNDD_REQUEST),
         ("ss", ProgramKind::Command, SS_TOOL_REQUEST),

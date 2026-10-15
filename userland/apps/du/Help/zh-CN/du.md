@@ -53,7 +53,7 @@ du — 估算文件占用的磁盘空间
 - `du` — 当前目录的树，每个目录一行。
 - `du -sh /Users/jo` — `/Users/jo` 的一个易读总计。
 - `du -a docs` — `docs` 下的每个文件和目录。
-- `du -d1 -c /Apps /Users` — 每个存储区的第一层，然后是总计。
+- `du -d1 -c /System/Applications /Users` — 每个存储区的第一层，然后是总计。
 
 ## EXIT STATUS
 

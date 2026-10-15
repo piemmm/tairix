@@ -10,22 +10,16 @@ use tairix_abi::IrqHandle;
 use tairix_arch_aarch64::gic::{self, ActiveGic, GicController, MAX_INTID};
 use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::FreeListAllocator;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel_irq::{IrqController, IrqTable, MaskError, WaitStep};
 use tairix_kernel_sec::{ProcessId, TaskId};
 use tairix_log::{log, Event, EventId, Level};
 
-/// Bump heap backing the `IrqTable` allocations (one `bind`, two
-/// per-line flag vectors). A few hundred bytes suffice; 256 KiB is
-/// generous headroom. It lives in `.bss` (zeroed by the boot
-/// trampoline); the table's `Vec`s are populated explicitly.
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 256 * 1024;
 
-/// Page-aligned backing store for the bump heap.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -33,7 +27,7 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 // --- PL031 RTC (the `virt` board's GICv2 SPI device) --------------
 

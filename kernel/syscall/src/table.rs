@@ -2073,6 +2073,22 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Mark the calling driver's own node a key source: its device's key
+    /// presses now reach the seat.
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::INPUT_INJECT`]. The implementation resolves the
+    /// caller's own matched node from its task id (never a caller-supplied
+    /// id) and fails closed for a caller with no loaded node. Returns `Ok(0)`
+    /// once recorded.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn hw_node_key_source(&self, _caller: &CallerContext<'_>) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Move the kernel's framebuffer console off the firmware's memory onto a
     /// block the kernel owns below the caller's device's DMA reach, writing
     /// that surface into `(buf, len)` as one framebuffer
@@ -4213,6 +4229,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers.foreground_held(caller, decode_u32(args.0[0]))
             }
             SyscallNumber::HW_NODE_SETTLE => self.handlers.hw_node_settle(caller),
+            SyscallNumber::HW_NODE_KEY_SOURCE => self.handlers.hw_node_key_source(caller),
             SyscallNumber::CONSOLE_RELOCATE => {
                 // args[0] is a non-null `UserPtr` (dispatcher-checked); args[1]
                 // is the buffer capacity.
@@ -5550,6 +5567,11 @@ mod tests {
 
         fn hw_node_settle(&self, _c: &CallerContext<'_>) -> SyscallResult {
             self.record("hw_node_settle");
+            Ok(0)
+        }
+
+        fn hw_node_key_source(&self, _c: &CallerContext<'_>) -> SyscallResult {
+            self.record("hw_node_key_source");
             Ok(0)
         }
 

@@ -185,11 +185,16 @@ which kind of ending it was:
 | --- | --- | --- |
 | A panic | `EXIT_PANIC` (`101`) | `PANIC_REPORTED` (`26000`) |
 | An allocation the program could not do without failed | `tairix_abi::OOM_EXIT_STATUS` (`134`) | `OUT_OF_MEMORY_REPORTED` (`26001`) |
+| An allocation the program could not do without would pass its own memory bound | `tairix_abi::MEMORY_BOUND_EXIT_STATUS` (`135`) | `OUT_OF_MEMORY_REPORTED` (`26001`) |
 
 A null return from the heap reaches a fallible allocation (`try_reserve`) as an
 error. It reaches the allocation-failure handler only for an allocation the
-program had no way to refuse, such as a `Vec` growing. The separate status lets
-a parent tell memory running out from a bug and ask again once memory is freed.
+program had no way to refuse, such as a `Vec` growing. The heap keeps why the
+failed allocation's pages were refused, so the handler tells the two causes
+apart: memory running short, which may pass once memory is freed, and the
+program outgrowing its own `address-space-bytes` bound (or pinned budget),
+which asking again under that bound cannot cure. Both statuses differ from a
+bug's.
 The sandbox host does exactly that with a worker's status
 (`docs/src/security/sandbox.md`). `lib/rt` owns the `26000..27000` event-id
 range.
@@ -244,9 +249,20 @@ document with one `fs_stat` — `None` for anything but a regular file, whose
 declared length says nothing about a read. A program names
 a descriptor, never a device (`AGENTS.md` §20). Every capability, identity, and
 per-inode check stays kernel-side behind the secured VFS (`AGENTS.md` §5.4); a
-refusal surfaces as the raw `-errno`. The `open` / `create` / `open_dir` free
-functions are the common-case openers (read-only, write+create+truncate, and
+refusal surfaces as the raw `-errno`. The `open` / `create` / `create_new` /
+`open_dir` free functions are the common-case openers (read-only,
+write+create+truncate, write+create refusing an existing file, and
 directory-listing respectively).
+
+`replace_file` is the one way a program replaces a whole document, so a crash
+or power loss at any point leaves the old contents or the new, never an empty
+or torn file: the bytes go to a sibling temporary named for that replace alone,
+which takes the original's owner, group and mode, is synced, and is renamed
+over the original, and a second sync puts the rename on the medium.
+`ParentDir::CreatedIfMissing` creates the document's directory only when the
+replace finds it missing. A file's ACL and capability gate are not visible to
+a program, so neither survives a replace: it is not for a file carrying
+either.
 
 `File::open` is the one **open-by-name** path, and it applies the shared
 `lib/resref` spelling rule (`names_resource_reference`) before any lookup: a

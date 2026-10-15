@@ -1,5 +1,5 @@
-//! on-disk-layout enforcement: the four permitted
-//! top-level directories, the read-only `/System` subtree with its writable
+//! on-disk-layout enforcement: the three root-view
+//! entries, the read-only `/System` subtree with its writable
 //! `/System/Logs` and `/System/Settings` exceptions, and the
 //! read-only-mount refusal on a driver-backed volume.
 
@@ -13,14 +13,14 @@ const LEGACY_NAMES: &[&str] = &[
 ];
 
 #[test]
-fn default_layout_exposes_exactly_the_four_top_level_directories() {
+fn default_layout_exposes_exactly_the_root_view() {
     let vfs = default_layout_vfs();
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     let mut top = vfs.list(&owner, &path("/")).expect("list root");
     top.sort();
-    assert_eq!(top, ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(top, ["Storage", "System", "Users"]);
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn write_to_a_read_only_mount_is_refused() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     assert_eq!(
-        vfs.create_via_secured(&owner, &vol_path("nope"), &mut fs),
+        vfs.create_via_secured(&owner, &vfs.cover(&vol_path("nope")), &mut fs),
         Err(VfsError::ReadOnly)
     );
 }

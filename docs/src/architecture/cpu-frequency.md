@@ -143,7 +143,7 @@ be idle and no utilisation accrues at all. So the kernel commits to the
 maximum for one window at the point it starts an executable.
 
 There is exactly one `spawn` syscall, so every launch goes through it: the
-shell, the taskbar, the file manager, `appmgr` starting a bundle, and `devmgr`
+shell, the taskbar, the file manager starting a bundle, and `devmgr`
 autoloading a driver. The stamp sits behind *both* of the spawn path's
 authority checks, so a caller the kernel refused cannot raise the machine's
 clock by asking — and it grants nothing a caller did not already have, since a

@@ -84,7 +84,7 @@ pub struct BuiltAppBundle {
 }
 
 /// One `/System`-volume-relative file a built bundle plants, as owned path
-/// components plus bytes (e.g. `Apps/ls.app/AppInfo`). `Clone` so a
+/// components plus bytes (e.g. `Commands/ls.app/AppInfo`). `Clone` so a
 /// vertical-specific plant list can extend the shared composed set without
 /// re-composing it.
 #[derive(Clone)]

@@ -27,10 +27,13 @@
 //! * [`for_each_process`], the paged process-list walk, plus
 //!   [`PROCESS_HEADER`], [`render_process`], and [`state_char`] — the
 //!   shared columnar rendering.
-//! * [`for_each_mount`] and [`render_mount`], the paged mount-table walk and
-//!   its `source on target type fstype (options)` row rendering, over the
-//!   [`volume`] view model every surface turns a mount record into facts
-//!   with: [`VolumeBytes`], the availability spellings, and the medium name.
+//! * [`for_each_mount`] and [`for_each_view`], the paged walks of the attached
+//!   volumes and the view bindings onto them; [`Namespace`], the join that
+//!   resolves a path to the binding covering it and that binding's volume;
+//!   [`render_binding`], the `source on target type fstype (options)` row;
+//!   and the [`volume`] view model every surface turns a mount record into
+//!   facts with: [`VolumeBytes`], the availability spellings, and the medium
+//!   name.
 //! * [`for_each_net_socket`], the paged open-socket-table walk the `ss`
 //!   socket-statistics tool renders.
 //! * [`for_each_raid_array`] and [`for_each_raid_member`], the paged
@@ -172,7 +175,9 @@ pub use kstats::{
     RECLAIM_PAGE,
 };
 pub use list::{field_lossy, walk_pages, walk_pages_with, walk_records, ListError, WalkStep};
-pub use mount::{for_each_mount, render_mount, render_options, MOUNT_PAGE};
+pub use mount::{
+    for_each_mount, for_each_view, render_binding, render_options, Namespace, MOUNT_PAGE, VIEW_PAGE,
+};
 pub use netaddr::{
     render_if_addr, render_ip, render_mac, render_neighbor, render_route, render_server,
 };

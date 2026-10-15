@@ -420,10 +420,13 @@ states as an absent reading, never as a fabricated one.
 **How full a device is, is the share of the whole medium.** A storage
 pane's capacity block reads `used / total`, where used is
 the capacity less what is *unallocated* — so a format that withholds a
-metadata reserve is not reported as having spent it. The block states the
+reserve is not reported as having spent it. The block states the
 reserve plainly by naming its rows for the figures they carry: `Capacity` is
 used of total, and `Available` is what an ordinary allocation may still
-consume, which on a reserved format is the smaller number. This is
+consume, which on a reserved format is the smaller number. A device holding a
+volume that is down to its reserve says so in a `Space` row, and that volume's
+own line in the volumes block ends "down to its reserve": ordinary writes may
+now be refused while the system's own still go on. This is
 deliberately not `df`'s `Use%`, which divides by what a caller may allocate
 rather than by the medium and so reads higher on a reserved format; both
 derive from the one shared `lib/procinfo` model, which names each so neither

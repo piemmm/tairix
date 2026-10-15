@@ -72,7 +72,7 @@ mod program {
     use tairix_greeter_service::events::{
         ACCOUNTS_UNAVAILABLE, AUTHORITY_UNREACHABLE, DISPLAY_ASLEEP, DISPLAY_KEPT_BLACK,
         DISPLAY_WAKE_REFUSED, POINTER_UNAVAILABLE, RIBBON_UNAVAILABLE, SCREEN_READY,
-        SCREEN_UNAVAILABLE, VERDICT_RECEIVED,
+        SCREEN_READY_MESSAGE, SCREEN_UNAVAILABLE, VERDICT_RECEIVED,
     };
     use tairix_greeter_service::frame::{Present, Scanout};
     use tairix_greeter_service::screen::LoginScreen;
@@ -533,7 +533,7 @@ mod program {
         // below runs the fade off the same deadline as every other animation.
         let opening = screen.open(tairix_rt::clock_get(), wall_now());
         show(&mut display, screen.frame(), opening);
-        record(SCREEN_READY, Level::Info, "greeter: the login screen is up");
+        record(SCREEN_READY, Level::Info, SCREEN_READY_MESSAGE);
 
         if tairix_rt::waitset_ctl(
             set,

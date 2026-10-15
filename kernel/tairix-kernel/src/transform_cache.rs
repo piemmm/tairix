@@ -13,8 +13,10 @@
 //! driver's own read path and also covers the large sequential reads
 //! (bundle loads) that bypass `CachedFs` entirely and `CachedFs`'s misses,
 //! both of which otherwise re-run the whole transform per call. The
-//! driver-store server's own `/System` window is mounted without it
-//! (`plans/OPEN-DEFECTS.md` D993).
+//! `/System` mount and the driver-store server's own window onto the same
+//! volume share one cache ([`SharedClusterCache`]), so a bundle devmgr's
+//! scan or a driver load decompressed is not decompressed again by the
+//! other.
 //!
 //! # Classification, budget, pressure
 //!
@@ -48,13 +50,12 @@
 //! buffer is volatilely wiped before its entry is released — on
 //! invalidation, eviction, purge, replacement, and teardown.
 
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_drv_fs_arxfs::{ClusterCache, MAX_CLUSTER_PLAINTEXT};
-use tairix_kernel_core::{CacheClass, CacheControl, CACHE_CONTROL};
+use tairix_kernel_core::{CacheClass, CacheControl, SleepLock, CACHE_CONTROL};
 use tairix_log::Sink;
 use tairix_reclaim::{
     log_cache_poisoned, log_cache_refused, shrink_target, CacheAccounting, CacheBudget,
@@ -165,16 +166,15 @@ impl TransformClusterCache {
         self
     }
 
-    /// The boxed cache a mounted volume installs into its driver,
-    /// budgeted from the kernel heap arena exactly like the volume's
-    /// clean filesystem cache and charged to the volume identified by
-    /// its stable per-boot mount handle.
+    /// The cache a mounted volume installs into its driver, budgeted from
+    /// discovered RAM exactly like the volume's clean filesystem cache and
+    /// charged to the volume identified by its stable per-boot mount handle.
     #[must_use]
     pub fn for_volume(
         volume: u64,
         pressure: &'static MemoryPressure,
         sink: &'static (dyn Sink + Sync),
-    ) -> Box<dyn ClusterCache> {
+    ) -> Self {
         let cache = Self::new(
             // Budget from discovered physical RAM (the growable kernel heap's
             // bootstrap size is no longer the memory to size a cache against);
@@ -192,7 +192,7 @@ impl TransformClusterCache {
         if let Some(ledger) = cache.ledger() {
             tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
         }
-        Box::new(cache)
+        cache
     }
 
     /// The cache's byte ledger and event counters.
@@ -337,10 +337,10 @@ impl TransformClusterCache {
             self.evict_until(target);
         }
     }
-}
 
-impl ClusterCache for TransformClusterCache {
-    fn get(&mut self, phys: u64) -> Option<&[u8]> {
+    /// The retained plaintext of the cluster whose stored run starts at
+    /// `phys`, marked most recently used, or `None` when it is not retained.
+    pub fn get(&mut self, phys: u64) -> Option<&[u8]> {
         if self.poisoned {
             return None;
         }
@@ -357,6 +357,12 @@ impl ClusterCache for TransformClusterCache {
         }
         self.accounting.record_hit(ReclaimClass::TransformCache);
         self.entries.get(&phys).map(|entry| entry.plain.as_slice())
+    }
+}
+
+impl ClusterCache for TransformClusterCache {
+    fn lend(&mut self, phys: u64, read: &mut dyn FnMut(&[u8]) -> usize) -> Option<usize> {
+        self.get(phys).map(read)
     }
 
     fn put(&mut self, phys: u64, stored: u64, plaintext: &[u8]) {
@@ -467,6 +473,43 @@ impl Drop for TransformClusterCache {
         for entry in self.entries.values_mut() {
             Self::wipe(&mut entry.plain);
         }
+    }
+}
+
+/// One [`TransformClusterCache`] that several mounts of a volume share, so
+/// plaintext one of them decompressed serves the others' reads under a
+/// single budget and ledger.
+///
+/// Each clone is a handle installed into one mount's driver. The lock is held
+/// for one lookup, offer or invalidation and never across a device read; its
+/// contenders park rather than spin, since a pressure shrink can wipe the
+/// whole cache under it.
+#[derive(Clone)]
+pub struct SharedClusterCache(Arc<SleepLock<TransformClusterCache>>);
+
+impl SharedClusterCache {
+    /// Share `cache` between the mounts given clones of the result.
+    #[must_use]
+    pub fn new(cache: TransformClusterCache) -> Self {
+        Self(Arc::new(SleepLock::new(cache)))
+    }
+}
+
+impl ClusterCache for SharedClusterCache {
+    fn lend(&mut self, phys: u64, read: &mut dyn FnMut(&[u8]) -> usize) -> Option<usize> {
+        self.0.lock().lend(phys, read)
+    }
+
+    fn put(&mut self, phys: u64, stored: u64, plaintext: &[u8]) {
+        self.0.lock().put(phys, stored, plaintext);
+    }
+
+    fn invalidate_run(&mut self, phys: u64, len: u64) {
+        self.0.lock().invalidate_run(phys, len);
+    }
+
+    fn purge(&mut self) {
+        self.0.lock().purge();
     }
 }
 

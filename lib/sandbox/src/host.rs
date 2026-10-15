@@ -76,6 +76,9 @@ pub enum WorkerEnd {
     /// allocation it could not do without failed, or the kernel could not
     /// load it at all.
     OutOfMemory,
+    /// The request outgrew the memory bound its launcher gave the worker:
+    /// a worker under the same bound fails it the same way.
+    OverBound,
     /// The kernel killed it for a fault it could not resolve.
     Crashed,
     /// It was still running and was killed: it had not answered in time, or
@@ -103,6 +106,7 @@ impl WorkerEnd {
             None if code == tairix_abi::LOAD_OOM || code == tairix_abi::OOM_EXIT_STATUS => {
                 Self::OutOfMemory
             }
+            None if code == tairix_abi::MEMORY_BOUND_EXIT_STATUS => Self::OverBound,
             None if code == tairix_abi::FAULT_EXIT_STATUS => Self::Crashed,
             None if matches!(Signal::Kill.termination_status(), Some(kill) if kill == code) => {
                 Self::Killed
@@ -116,6 +120,7 @@ impl WorkerEnd {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::OutOfMemory => "out of memory",
+            Self::OverBound => "the request outgrew its memory bound",
             Self::Crashed => "crashed",
             Self::Killed => "killed",
             Self::TransportFailed => "its transport failed",
@@ -636,6 +641,10 @@ mod tests {
                 WorkerEnd::TransportFailed,
             ),
             (Some(WorkerExit::Finished.code()), WorkerEnd::Unknown),
+            (
+                Some(tairix_abi::MEMORY_BOUND_EXIT_STATUS),
+                WorkerEnd::OverBound,
+            ),
             (Some(tairix_abi::LOAD_UNVERIFIED), WorkerEnd::Unknown),
             (None, WorkerEnd::Unknown),
         ];
@@ -649,6 +658,7 @@ mod tests {
         assert!(SandboxError::WorkerFailed(WorkerEnd::OutOfMemory).out_of_memory());
         assert!(SandboxError::WorkerUnavailable(Errno::OutOfMemory).out_of_memory());
         for broken in [
+            SandboxError::WorkerFailed(WorkerEnd::OverBound),
             SandboxError::WorkerFailed(WorkerEnd::Crashed),
             SandboxError::WorkerFailed(WorkerEnd::Killed),
             SandboxError::WorkerFailed(WorkerEnd::TransportFailed),

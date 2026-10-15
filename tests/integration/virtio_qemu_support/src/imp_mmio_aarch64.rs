@@ -32,7 +32,7 @@ use tairix_caps::CapabilitySet;
 use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use tairix_drv_bus_virtio::MmioTransport;
 use tairix_fdt::Fdt;
-use tairix_kalloc::FreeListAllocator;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel_irq::{IrqController, IrqTable, IrqWaitAbort, IrqWaiter, MaskError};
 use tairix_kernel_mem::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 use tairix_kernel_mem::{
@@ -67,17 +67,11 @@ pub use tairix_arch_aarch64::{
 
 // --- Global allocator (static `.bss` bump heap) ----------------------
 
-/// Size of the static bump heap. The driver host, the page-table `Box`es,
-/// and the `IrqTable` flag vectors allocate here; 8 MiB is generous
-/// headroom for the whole vertical.
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 8 * 1024 * 1024;
 
-/// Page-aligned backing store for the bump heap. Lives in `.bss` (zeroed
-/// by the boot trampoline) and is exclusively the allocator's.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -85,7 +79,7 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 // --- Static DMA frame pool -------------------------------------------
 

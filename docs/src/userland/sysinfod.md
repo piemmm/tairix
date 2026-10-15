@@ -48,6 +48,7 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `SYSTEM_IDENTITY`        | none                 | no      | `SystemIdentity`                    |
 | `UPTIME`                 | none                 | no      | `Uptime`                            |
 | `MOUNT_LIST`             | none                 | no      | packed `MountRecord`s               |
+| `VIEW_LIST`              | none                 | no      | packed `ViewBindingRecord`s         |
 | `RESOURCE_LIMITS`        | none                 | no      | packed `ResourceLimitRecord`s       |
 | `PROCESS_IDENTITY`       | none                 | no      | the caller's own `Origin`           |
 | `LOAD_AVERAGE`           | none                 | no      | `LoadAverage`                       |

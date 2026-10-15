@@ -61,7 +61,7 @@ variables are not read — the scale is selected by options alone.
 - `du` — the current directory's tree, one row per directory.
 - `du -sh /Users/jo` — one human-readable total for `/Users/jo`.
 - `du -a docs` — every file and directory under `docs`.
-- `du -d1 -c /Apps /Users` — the first level of each store, then a
+- `du -d1 -c /System/Applications /Users` — the first level of each store, then a
   grand total.
 
 ## EXIT STATUS

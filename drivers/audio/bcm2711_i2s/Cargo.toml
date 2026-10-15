@@ -37,3 +37,6 @@ tairix-audiochan = { path = "../../../lib/audiochan", version = "=0.0.0", featur
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # `_start`.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

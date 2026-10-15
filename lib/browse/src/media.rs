@@ -49,7 +49,7 @@
 use alloc::string::String;
 
 use tairix_abi::fs::{DirEntry, FileKind};
-use tairix_abi::SYSTEM_SERVICE_STORE;
+use tairix_abi::ProgramKind;
 use tairix_icon::{
     DocumentStamp, FolderSample, IconKind, IconRequest, Reading, SampleCard, Thumbnail,
 };
@@ -67,7 +67,8 @@ pub enum MediaType {
     InodeDirectory,
     /// A `<Name>.app` application bundle (`application/x-tairix-app`).
     TairixApp,
-    /// A `<Name>.app` bundle listed from the system service store
+    /// A `<Name>.app` bundle listed from a store of programs the system
+    /// starts — the service or component store
     /// (`application/x-tairix-service`).
     TairixService,
     /// The TAIRiX executable envelope (`application/x-tairix-rxe`).
@@ -609,7 +610,7 @@ pub fn folder_sample<'n>(
         count: u32,
         first: u32,
     }
-    let service_store = is_system_service_store(folder);
+    let service_store = is_system_started_store(folder);
     let classify = |record: &DirEntry<'n>| {
         let name = core::str::from_utf8(record.name).ok()?;
         let media = media_for_named(
@@ -996,14 +997,15 @@ impl BlankDocument {
 ///
 /// A directory classifies as [`InodeDirectory`](MediaType::InodeDirectory)
 /// regardless of its name; a bundle classifies as
-/// [`TairixService`](MediaType::TairixService) when `parent` is the system
-/// service store and [`TairixApp`](MediaType::TairixApp) otherwise; a regular
+/// [`TairixService`](MediaType::TairixService) when `parent` is a store of
+/// programs the system starts and [`TairixApp`](MediaType::TairixApp)
+/// otherwise; a regular
 /// file takes its extension's type, or
 /// [`ApplicationOctetStream`](MediaType::ApplicationOctetStream) when the
 /// extension is unrecognised (or absent) — fail closed to the generic type.
 #[must_use]
 pub fn media_for_entry(entry: &Entry, parent: &[String]) -> MediaType {
-    media_for_named(entry.name(), entry.kind(), is_system_service_store(parent))
+    media_for_named(entry.name(), entry.kind(), is_system_started_store(parent))
 }
 
 /// The media type of a node known only by its `name` and `kind` — what a
@@ -1101,23 +1103,26 @@ pub fn entry_icon<'a>(
     (kind, request)
 }
 
-/// Whether `parent`'s root-first components are exactly the system service
-/// store ([`SYSTEM_SERVICE_STORE`]).
+/// Whether `parent`'s root-first components are exactly the store of a kind
+/// of program the system starts — a service or a component — which no user
+/// launches.
 ///
-/// The store path is spelled once in `lib/abi`; this compares against that one
-/// definition component-wise rather than carrying a second literal.
-fn is_system_service_store(parent: &[String]) -> bool {
-    let mut expected = SYSTEM_SERVICE_STORE
-        .split('/')
-        .filter(|part| !part.is_empty());
-    let mut got = parent.iter();
-    loop {
-        match (expected.next(), got.next()) {
-            (Some(want), Some(have)) if want == have => {}
-            (None, None) => return true,
-            _ => return false,
-        }
-    }
+/// The stores are spelled once in `lib/abi`; this compares against those
+/// definitions component-wise rather than carrying a second literal.
+fn is_system_started_store(parent: &[String]) -> bool {
+    [ProgramKind::Service, ProgramKind::Component]
+        .into_iter()
+        .any(|kind| {
+            let mut expected = kind.store().split('/').filter(|part| !part.is_empty());
+            let mut got = parent.iter();
+            loop {
+                match (expected.next(), got.next()) {
+                    (Some(want), Some(have)) if want == have => {}
+                    (None, None) => return true,
+                    _ => return false,
+                }
+            }
+        })
 }
 
 /// `media` followed by every broader type it is a subclass of, most specific

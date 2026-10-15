@@ -1173,11 +1173,10 @@ squatting publisher is therefore refused before it can put anything in front of
 readers of the real app's published document — the pin does double duty as an
 integrity guarantee for the sharing channel, not only for the private one.
 
-**A publish is per document, and the temporary name is derived from it.** The
-sibling a publish writes before renaming is the live name plus `.new`, computed
-rather than declared per scope: it is then always a sibling in the app's own
-store directory, two scopes can never contend for it, and the rename can never
-cross a volume. Two constants would have been two things to keep in step.
+**A publish is per document.** It replaces the live document through the one
+shared `tairix_rt::replace_file`, whose temporary is a sibling named for that
+replace alone: always in the app's own store directory, never contended by
+another scope, and never renamed across a volume.
 
 **A foreign read sees committed data only.** A published value is what every
 *other* app sees, so it is the committed document; a publisher's staging is its
@@ -1486,7 +1485,7 @@ one across the tree.
 
 **The desktop session runs under an attested app identity, and that is what
 made the whole scope possible.** It is spawned from
-`/System/Applications/desktop.app/Run` through the same signed load gate every
+`/System/Components/desktop.app/Run` through the same signed load gate every
 other bundle is, so it is `os.tairix.desktop` to the store exactly as the
 terminal is `os.tairix.terminal`. The question §3.11 left open therefore has
 an unremarkable answer, and no fallback for an identity-less session was built

@@ -31,7 +31,7 @@ Two image profiles exist (`--profile`, default `debug`):
 | Sector 0 | MBR: three primary partitions, `0x55AA` signature |
 | Partition 1 (`0x0C`, FAT32, 64 MiB at sector 2048) | `start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb`, `overlays/disable-bt.dtbo`, generated `config.txt`, `kernel8.img`, and `root.unlock` for an encrypted root only |
 | Partition 2 (`0x7E`, ARXFS, sized to its content, directly after partition 1) | read-only, signed-bundle `/System` volume (the §16.2 skeleton), plaintext — integrity rests on the per-bundle signatures, `AGENTS.md` §18.6 — and mounted read-only before the root (the design-B pre-unlock driver store, `plans/PI.md`) |
-| Partition 3 (`0x7F`, ARXFS, 64 MiB, directly after partition 2) | data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/Apps`, `/Storage`, `/System/Security`), plus — for a debug image — the seeded `Users` database and `Groups` registry; plaintext, or encrypted under a passphrase-derived key with `--encrypt-root` |
+| Partition 3 (`0x7F`, ARXFS, 64 MiB as built, directly after partition 2, grown to the end of the card at the first boot) | data-root volume with the `AGENTS.md` §16 skeleton (`/Users`, `/System/Logs`, `/System/Settings`, `/System/Security`), plus — for a debug image — the seeded `Users` database and `Groups` registry; plaintext, or encrypted under a passphrase-derived key with `--encrypt-root` |
 
 The read-only `/System` volume carries, beside its signed driver and app
 bundles, the **discovered system payload**: each command app's

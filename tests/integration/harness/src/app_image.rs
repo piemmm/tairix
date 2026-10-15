@@ -309,13 +309,12 @@ impl AppManifestSource {
         if let Some(title) = &self.title {
             check_len(ctx, "title", title, BUNDLE_TITLE_MAX)?;
         }
-        if self.library.is_some() && self.kind == ProgramKind::Service {
-            // A service is a daemon, not a user-facing application; listing
-            // one in the launcher would offer a user a bundle that opens no
-            // surface.
+        if self.library.is_some() && !self.kind.is_searched() {
+            // The library offers programs a user launches; a service opens no
+            // surface and a component is started by the OS itself.
             return Err(AppImageError::new(
                 ctx,
-                "a `service` cannot declare `library`",
+                format!("a `{}` cannot declare `library`", self.kind.as_str()),
             ));
         }
         Ok(())
@@ -743,6 +742,7 @@ pub fn compose_signed_appinfo(
         capability_count,
         mime_count,
         browse_count,
+        kind: manifest.kind.to_wire(),
         reserved: 0,
         id_len: inline_len(ctx, "id", &manifest.id, BUNDLE_ID_MAX)?,
         name_len: inline_len(ctx, "name", &manifest.name, BUNDLE_NAME_MAX)?,
@@ -1101,6 +1101,7 @@ mod tests {
             ("command", ProgramKind::Command, "Commands"),
             ("application", ProgramKind::Application, "Applications"),
             ("service", ProgramKind::Service, "Services"),
+            ("component", ProgramKind::Component, "Components"),
         ] {
             let text = GOOD.replace("\"command\"", &format!("\"{key}\""));
             let manifest = AppManifestSource::parse(&text).expect("valid");

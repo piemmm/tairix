@@ -82,12 +82,8 @@ mod kernel {
     };
     use tairix_log::{Event, Sink};
 
-    /// Static heap for the bump allocator (identical to the production bin's
-    /// declaration; `#[global_allocator]` is per-binary).
-    ///
-    /// `static mut` because the bump allocator hands out disjoint slices via
-    /// an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -95,7 +91,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// The kernel **log** sink: it replays every record through
     /// [`SERIAL_SINK`] and reports PASS to QEMU once the three ordered

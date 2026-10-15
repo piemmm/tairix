@@ -59,7 +59,7 @@ mod kernel {
     use tairix_arch_aarch64::{exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
     use tairix_arch_api::mmu::AddressSpace as _;
     use tairix_itest_finisher::fail_point;
-    use tairix_kalloc::{FreeListAllocator, HeapSource};
+    use tairix_kalloc::{FreeListAllocator, Heap, HeapSource};
     use tairix_kernel_mem::{
         BootMemoryMap, DirectPhysMap, FrameAllocator, FramePages, MemoryRegion, PhysAddr, PhysMap,
         RegionKind,
@@ -77,16 +77,11 @@ mod kernel {
     /// Failure finisher code. One site: every check reports through `fail`.
     const FAIL_CHECK: NonZeroU16 = fail_point!(2);
 
-    /// Bootstrap heap region, the `.bss` arena every freestanding image
-    /// starts on. 2 MiB is ample for this vertical's own allocations and for
-    /// the pages the slab carves out of it before the supply is installed.
+    /// The test's heap, in bytes.
     const HEAP_BYTES: usize = 2 * 1024 * 1024;
 
-    /// Page-aligned backing store for the bootstrap heap.
-    #[repr(C, align(4096))]
-    struct HeapStore([u8; HEAP_BYTES]);
-
-    static mut HEAP: HeapStore = HeapStore([0; HEAP_BYTES]);
+    /// The global allocator's arena.
+    static HEAP: Heap<HEAP_BYTES> = Heap::ZERO;
 
     /// The allocator under test, registered exactly as a real image does.
     ///
@@ -94,7 +89,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Frames the test's physical pool holds (1 MiB), plenty for a handful of
     /// slab pages per class.
@@ -217,7 +212,7 @@ mod kernel {
 
         // The slab has no supply yet, so it carves its pages out of the
         // bootstrap region — the kernel has a heap from the first allocation.
-        let heap_base = core::ptr::addr_of!(HEAP) as usize;
+        let heap_base = HEAP.as_mut_ptr().addr();
         let early = alloc(layout(64), "early allocation before any page supply");
         check(
             (early as usize).wrapping_sub(heap_base) < HEAP_BYTES,

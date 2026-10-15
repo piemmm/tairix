@@ -19,6 +19,21 @@ use crate::le::{put_u32, put_u64, read_u32, read_u64};
 use crate::time::Time64;
 use crate::Errno;
 
+/// The entries of the default root view `/`, and the machine aliases of the
+/// same names (`System:`, …): every top-level directory the OS lays out.
+pub const ROOT_VIEW: [&str; 3] = ["System", "Users", STORAGE_CATALOG];
+
+/// The root-view entry that is the catalog of attached volumes: it lists the
+/// volumes attached beneath it and is stored on none of them.
+pub const STORAGE_CATALOG: &str = "Storage";
+
+/// The root-view entries a root volume stores: every one but the catalog.
+pub fn stored_root_entries() -> impl Iterator<Item = &'static str> {
+    ROOT_VIEW
+        .into_iter()
+        .filter(|&name| name != STORAGE_CATALOG)
+}
+
 /// Maximum length, in bytes, of a single path passed to a filesystem
 /// syscall.
 ///

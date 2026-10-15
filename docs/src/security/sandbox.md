@@ -38,9 +38,9 @@ encoder:
   `AddressSpaceBytes` and `Threads` limits to finite hard bounds
   (`SpawnAttach::sandbox` sets the ceiling its caller names and a single
   thread), so a decoder's runaway allocation — a file it under-forecast, or a
-  worker an attacker now drives — ends as the worker's own out-of-memory exit
-  rather than squeezing the machine, and no stack beyond its own escapes the
-  ceiling.
+  worker an attacker now drives — ends as the worker's own memory-bound exit
+  rather than squeezing the machine. Its stack counts toward the ceiling like
+  any other mapping.
 - **No reserved flag bits.** Any undefined `flags` bit refuses the block.
 
 A worker is re-spawned from its owner's own program, so the process list
@@ -147,16 +147,19 @@ sandboxes a parse imports it:
   failure — crash, protocol violation, oversize reply, exit without
   answering, no answer in time — is contained identically: the worker is
   killed if it still runs and reaped, and its exit status says how it
-  ended (`WorkerEnd`: out of memory, crashed, killed, transport failed, or
-  unknown). A worker whose transport has failed has no other channel left,
-  so it exits with a status naming the failure (`WorkerExit`); the
-  runtime's allocation-failure status (`OOM_EXIT_STATUS`) and the kernel's
-  fault status (`FAULT_EXIT_STATUS`) are read the same way. The caller
+  ended (`WorkerEnd`: out of memory, over its memory bound, crashed,
+  killed, transport failed, or unknown). A worker whose transport has failed
+  has no other channel left, so it exits with a status naming the failure
+  (`WorkerExit`); the runtime's allocation-failure statuses
+  (`OOM_EXIT_STATUS`, and `MEMORY_BOUND_EXIT_STATUS` for a request that
+  outgrew the ceiling) and the kernel's fault status (`FAULT_EXIT_STATUS`)
+  are read the same way. The caller
   receives `SandboxError::WorkerFailed` carrying that end, and the event is
   logged with its cause under a stable id (`EventId(6000)` worker crashed,
   `EventId(6001)` worker unavailable; the crate owns `6000..7000`). Only a
   failure for want of memory is worth asking again
-  (`SandboxError::out_of_memory`). The replacement is started by the next
+  (`SandboxError::out_of_memory`): a request that outgrew the worker's bound
+  fails the same way in every fresh worker, so it is not. The replacement is started by the next
   request that needs a worker, not at the failure, so a worker that ran
   out of memory is not followed at once by a fresh one competing for the
   same memory, and a replacement that cannot start is reported to the

@@ -49,8 +49,9 @@ pub const RLIMIT_INFINITY: u64 = u64::MAX;
 #[repr(u32)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum LimitKind {
-    /// Maximum total bytes of anonymous memory the process may map into its
-    /// own address space (the `mem_map` capacity, `plans/SPAWN.md` SP5).
+    /// Maximum total bytes the process may map into its own address space:
+    /// anonymous regions, file regions, and every thread's committed stack
+    /// (`plans/SPAWN.md` SP5).
     AddressSpaceBytes = 0,
     /// Maximum number of open standard-stream descriptors the process may
     /// hold (the descriptor-table capacity).

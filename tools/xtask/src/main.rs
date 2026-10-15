@@ -77,6 +77,8 @@
 //! - `fuzz`         — drive the in-tree fuzz harnesses for a wall-clock
 //!   budget: `--quick` (≥ 60 s each, the `ci` budget) or
 //!   `--soak` (≥ 24 h each, nightly)
+//! - `source-text`  — reject a control byte other than tab and newline in
+//!   source text, which `grep` and its kin then read as binary
 //! - `charter-cite` — reject a comment or package description that cites a
 //!   charter section number in place of the reason it states; a reference to
 //!   another document (a plan, a `docs/` page, an RFC, a hardware manual)
@@ -101,8 +103,8 @@
 //! - `ci`           — the full pipeline a PR must pass, ordered cheapest-first
 //!   so a failing PR fails fast: `fmt --check`, then the concurrent
 //!   static-gate group (`deps-check`, `cfg-check`, `event-ids`, `driver-exits`, `help-lint`,
-//!   `spec-review`, `charter-cite`, `supply-chain`, `abi-check`, `c-header`,
-//!   `font-atlas`, `devids`, `model-check` —
+//!   `spec-review`, `charter-cite`, `source-text`, `supply-chain`, `abi-check`,
+//!   `c-header`, `font-atlas`, `devids`, `model-check` —
 //!   all read-only, non-compiling checks run at once so their costs overlap),
 //!   then `docs-check` (rustdoc/link failures are the common first trip and
 //!   need only a doc build, so they run ahead of the compile-heavy stages),

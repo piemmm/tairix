@@ -13,7 +13,7 @@ use tairix_test_posix_fs_suite::*;
 fn make_link(vfs: &Vfs, fs: &mut LiveFs, link: &str, target: &str) {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
-    vfs.symlink_via_secured(&owner, &vol_path(link), fs, target)
+    vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path(link)), fs, target)
         .unwrap_or_else(|e| panic!("create the link {link} -> {target}: {e:?}"));
 }
 
@@ -23,12 +23,12 @@ fn a_created_link_reads_its_target_back_verbatim() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("target"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
         .expect("create the target");
     make_link(&vfs, &mut fs, "link", "target");
 
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("link"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs),
         Ok(String::from("target"))
     );
 }
@@ -44,7 +44,7 @@ fn a_relative_target_carrying_dotdot_is_stored_as_typed() {
 
     make_link(&vfs, &mut fs, "up", "../elsewhere/x");
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("up"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("up")), &mut fs),
         Ok(String::from("../elsewhere/x"))
     );
 }
@@ -55,23 +55,23 @@ fn readlink_refuses_anything_that_is_not_a_link() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("plain"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("plain")), &mut fs)
         .expect("create");
-    vfs.mkdir_via_secured(&owner, &vol_path("dir"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dir")), &mut fs)
         .expect("mkdir");
 
     // A name that is not a link has no target to read: the same domain
     // refusal for a file and for a directory.
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("plain"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("plain")), &mut fs),
         Err(VfsError::InvalidPath)
     );
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("dir"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("dir")), &mut fs),
         Err(VfsError::InvalidPath)
     );
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("absent"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("absent")), &mut fs),
         Err(VfsError::NotFound)
     );
 }
@@ -85,28 +85,49 @@ fn lstat_describes_the_link_and_stat_describes_its_target() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("target"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
         .expect("create the target");
-    vfs.write_via_secured(&owner, &vol_path("target"), &mut fs, 0, b"0123456789")
-        .expect("write the target");
+    vfs.write_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("target")),
+        &mut fs,
+        0,
+        b"0123456789",
+    )
+    .expect("write the target");
     make_link(&vfs, &mut fs, "link", "target");
 
     let kept = vfs
-        .stat_via_secured(&owner, &vol_path("link"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("link")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("lstat the link");
     assert_eq!(kept.kind, NodeKind::Symlink);
     // A link's own length is the length of the path it stores.
     assert_eq!(kept.size, "target".len() as u64);
 
     let followed = vfs
-        .stat_via_secured(&owner, &vol_path("link"), &mut fs, FinalLink::Follow)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("link")),
+            &mut fs,
+            FinalLink::Follow,
+        )
         .expect("stat the target");
     assert_eq!(followed.kind, NodeKind::RegularFile);
     assert_eq!(followed.size, 10);
     // Two different nodes, not one node described twice.
     assert_ne!(kept.node, followed.node);
     let target = vfs
-        .stat_via_secured(&owner, &vol_path("target"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("target")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("lstat the target");
     assert_eq!(followed.node, target.node);
 }
@@ -121,18 +142,28 @@ fn a_dangling_link_is_describable_only_without_following() {
     make_link(&vfs, &mut fs, "dangling", "nowhere");
 
     let kept = vfs
-        .stat_via_secured(&owner, &vol_path("dangling"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("dangling")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("lstat the dangling link");
     assert_eq!(kept.kind, NodeKind::Symlink);
     // Following it reports exactly what `stat(2)` reports: absent.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("dangling"), &mut fs, FinalLink::Follow)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("dangling")),
+            &mut fs,
+            FinalLink::Follow
+        )
+        .map(|info| info.kind),
         Err(VfsError::NotFound)
     );
     // Its target still reads back: the link itself is perfectly readable.
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("dangling"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs),
         Ok(String::from("nowhere"))
     );
 }
@@ -143,27 +174,44 @@ fn a_write_through_a_link_reaches_the_target_and_leaves_the_link_a_link() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("target"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
         .expect("create the target");
     make_link(&vfs, &mut fs, "link", "target");
 
-    vfs.write_via_secured(&owner, &vol_path("link"), &mut fs, 0, b"through")
-        .expect("write through the link");
+    vfs.write_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("link")),
+        &mut fs,
+        0,
+        b"through",
+    )
+    .expect("write through the link");
 
     // The bytes landed in the target.
     let mut buf = [0u8; 16];
     let read = vfs
-        .read_via_secured(&owner, &vol_path("target"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("target")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("read the target");
     assert_eq!(&buf[..read], b"through");
     // The link is still a link — a write never replaces it.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("link"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("link")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::Symlink)
     );
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("link"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs),
         Ok(String::from("target"))
     );
 }
@@ -174,24 +222,40 @@ fn a_truncate_through_a_link_reaches_the_target() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("target"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
         .expect("create the target");
-    vfs.write_via_secured(&owner, &vol_path("target"), &mut fs, 0, b"0123456789")
-        .expect("write the target");
+    vfs.write_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("target")),
+        &mut fs,
+        0,
+        b"0123456789",
+    )
+    .expect("write the target");
     make_link(&vfs, &mut fs, "link", "target");
 
-    vfs.truncate_via_secured(&owner, &vol_path("link"), &mut fs, 4)
+    vfs.truncate_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs, 4)
         .expect("truncate through the link");
 
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("target"), &mut fs, FinalLink::Keep)
-            .map(|info| info.size),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("target")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.size),
         Ok(4)
     );
     // And the link is untouched.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("link"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("link")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::Symlink)
     );
 }
@@ -205,17 +269,22 @@ fn a_write_or_truncate_through_a_dangling_link_is_not_found_and_creates_nothing(
     make_link(&vfs, &mut fs, "dangling", "nowhere");
 
     assert_eq!(
-        vfs.write_via_secured(&owner, &vol_path("dangling"), &mut fs, 0, b"x"),
+        vfs.write_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs, 0, b"x"),
         Err(VfsError::NotFound)
     );
     assert_eq!(
-        vfs.truncate_via_secured(&owner, &vol_path("dangling"), &mut fs, 0),
+        vfs.truncate_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs, 0),
         Err(VfsError::NotFound)
     );
     // Neither call left the target behind.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("nowhere"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("nowhere")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Err(VfsError::NotFound)
     );
 }
@@ -231,24 +300,39 @@ fn a_create_through_a_dangling_link_creates_the_target() {
 
     make_link(&vfs, &mut fs, "dangling", "made");
 
-    vfs.create_via_secured(&owner, &vol_path("dangling"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs)
         .expect("create through the dangling link");
 
     // The *target* now exists as a regular file...
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("made"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("made")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::RegularFile)
     );
     // ...and the link is still a link, now resolving to it.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("dangling"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("dangling")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::Symlink)
     );
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("dangling"), &mut fs, FinalLink::Follow)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("dangling")),
+            &mut fs,
+            FinalLink::Follow
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::RegularFile)
     );
 }
@@ -261,24 +345,29 @@ fn mkdir_over_a_link_is_already_exists_live_or_dangling() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("real"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("real")), &mut fs)
         .expect("mkdir the target");
     make_link(&vfs, &mut fs, "live", "real");
     make_link(&vfs, &mut fs, "dead", "nowhere");
 
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vol_path("live"), &mut fs),
+        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("live")), &mut fs),
         Err(VfsError::AlreadyExists)
     );
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vol_path("dead"), &mut fs),
+        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dead")), &mut fs),
         Err(VfsError::AlreadyExists)
     );
     // Both links survive the refusal.
     for name in ["live", "dead"] {
         assert_eq!(
-            vfs.stat_via_secured(&owner, &vol_path(name), &mut fs, FinalLink::Keep)
-                .map(|info| info.kind),
+            vfs.stat_via_secured(
+                &owner,
+                &vfs.cover(&vol_path(name)),
+                &mut fs,
+                FinalLink::Keep
+            )
+            .map(|info| info.kind),
             Ok(NodeKind::Symlink)
         );
     }
@@ -290,16 +379,21 @@ fn symlink_never_replaces_an_existing_name() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("taken"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("taken")), &mut fs)
         .expect("create");
     assert_eq!(
-        vfs.symlink_via_secured(&owner, &vol_path("taken"), &mut fs, "elsewhere"),
+        vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path("taken")), &mut fs, "elsewhere"),
         Err(VfsError::AlreadyExists)
     );
     // The file it would have replaced is still a file.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("taken"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("taken")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::RegularFile)
     );
 }
@@ -310,23 +404,34 @@ fn unlink_removes_the_link_and_never_its_target() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("target"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
         .expect("create the target");
-    vfs.write_via_secured(&owner, &vol_path("target"), &mut fs, 0, b"kept")
+    vfs.write_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs, 0, b"kept")
         .expect("write the target");
     make_link(&vfs, &mut fs, "link", "target");
 
-    vfs.remove_via_secured(&owner, &vol_path("link"), &mut fs, false)
+    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs, false)
         .expect("unlink the link");
 
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("link"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("link")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Err(VfsError::NotFound)
     );
     let mut buf = [0u8; 8];
     let read = vfs
-        .read_via_secured(&owner, &vol_path("target"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("target")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("the target survived");
     assert_eq!(&buf[..read], b"kept");
 }
@@ -337,14 +442,13 @@ fn rename_moves_the_link_not_what_it_names() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("target"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
         .expect("create the target");
     make_link(&vfs, &mut fs, "link", "target");
 
     vfs.rename_via_secured(
         &owner,
-        &vol_path("link"),
-        &vol_path("moved"),
+        &vfs.cover_pair(&vol_path("link"), &vol_path("moved")),
         &mut fs,
         tairix_abi::RenameFlags::empty(),
     )
@@ -352,23 +456,38 @@ fn rename_moves_the_link_not_what_it_names() {
 
     // The new name is the link, holding the same target.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("moved"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("moved")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::Symlink)
     );
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("moved"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("moved")), &mut fs),
         Ok(String::from("target"))
     );
     // The old name is gone and the target never moved.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("link"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("link")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Err(VfsError::NotFound)
     );
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("target"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("target")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::RegularFile)
     );
 }
@@ -386,22 +505,37 @@ fn a_cycle_is_refused_rather_than_walked() {
     make_link(&vfs, &mut fs, "b", "a");
 
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("a"), &mut fs, FinalLink::Follow)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("a")),
+            &mut fs,
+            FinalLink::Follow
+        )
+        .map(|info| info.kind),
         Err(VfsError::LinkLoop)
     );
     // A self-cycle is the same answer.
     make_link(&vfs, &mut fs, "self", "self");
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("self"), &mut fs, FinalLink::Follow)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("self")),
+            &mut fs,
+            FinalLink::Follow
+        )
+        .map(|info| info.kind),
         Err(VfsError::LinkLoop)
     );
     // Each link is still perfectly describable as itself.
     for name in ["a", "b", "self"] {
         assert_eq!(
-            vfs.stat_via_secured(&owner, &vol_path(name), &mut fs, FinalLink::Keep)
-                .map(|info| info.kind),
+            vfs.stat_via_secured(
+                &owner,
+                &vfs.cover(&vol_path(name)),
+                &mut fs,
+                FinalLink::Keep
+            )
+            .map(|info| info.kind),
             Ok(NodeKind::Symlink)
         );
     }
@@ -413,12 +547,18 @@ fn a_link_is_listed_as_a_link_by_its_parent() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("target"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("target")), &mut fs)
         .expect("create the target");
     make_link(&vfs, &mut fs, "link", "target");
 
     let listing = vfs
-        .list_all_via_secured(&owner, &path(MOUNT), &mut fs, FinalLink::Follow, usize::MAX)
+        .list_all_via_secured(
+            &owner,
+            &vfs.cover(&path(MOUNT)),
+            &mut fs,
+            FinalLink::Follow,
+            usize::MAX,
+        )
         .expect("list the volume root");
     let link = listing
         .iter()
@@ -441,7 +581,7 @@ fn a_link_is_not_byte_readable() {
 
     let mut buf = [0u8; 16];
     assert_eq!(
-        vfs.read_via_secured(&owner, &vol_path("link"), &mut fs, 0, &mut buf),
+        vfs.read_via_secured(&owner, &vfs.cover(&vol_path("link")), &mut fs, 0, &mut buf),
         Err(VfsError::NotFound)
     );
 }
@@ -454,26 +594,38 @@ fn an_interior_link_is_always_followed() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("real"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("real")), &mut fs)
         .expect("mkdir");
-    vfs.create_via_secured(&owner, &vol_path("real/inner"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("real/inner")), &mut fs)
         .expect("create inside it");
-    vfs.write_via_secured(&owner, &vol_path("real/inner"), &mut fs, 0, b"deep")
-        .expect("write");
+    vfs.write_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("real/inner")),
+        &mut fs,
+        0,
+        b"deep",
+    )
+    .expect("write");
     make_link(&vfs, &mut fs, "door", "real");
 
     // Both postures resolve the interior `door`; only the final component's
     // treatment differs, and `inner` is not a link either way.
     for links in [FinalLink::Keep, FinalLink::Follow] {
         assert_eq!(
-            vfs.stat_via_secured(&owner, &vol_path("door/inner"), &mut fs, links)
+            vfs.stat_via_secured(&owner, &vfs.cover(&vol_path("door/inner")), &mut fs, links)
                 .map(|info| info.kind),
             Ok(NodeKind::RegularFile)
         );
     }
     let mut buf = [0u8; 8];
     let read = vfs
-        .read_via_secured(&owner, &vol_path("door/inner"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("door/inner")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("read through the interior link");
     assert_eq!(&buf[..read], b"deep");
 }
@@ -492,20 +644,32 @@ fn dotdot_in_a_target_is_resolved_physically() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("here"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("here")), &mut fs)
         .expect("mkdir here");
-    vfs.mkdir_via_secured(&owner, &vol_path("there"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("there")), &mut fs)
         .expect("mkdir there");
     // Two files of the same leaf name, one at the volume root and one beside
     // the link: physical resolution must reach the first, lexical the second.
-    vfs.create_via_secured(&owner, &vol_path("prize"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("prize")), &mut fs)
         .expect("create the root prize");
-    vfs.write_via_secured(&owner, &vol_path("prize"), &mut fs, 0, b"physical")
-        .expect("write the root prize");
-    vfs.create_via_secured(&owner, &vol_path("here/prize"), &mut fs)
+    vfs.write_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("prize")),
+        &mut fs,
+        0,
+        b"physical",
+    )
+    .expect("write the root prize");
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("here/prize")), &mut fs)
         .expect("create the decoy");
-    vfs.write_via_secured(&owner, &vol_path("here/prize"), &mut fs, 0, b"lexical!")
-        .expect("write the decoy");
+    vfs.write_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("here/prize")),
+        &mut fs,
+        0,
+        b"lexical!",
+    )
+    .expect("write the decoy");
 
     // `here/door` names `there`; `there/out` names its parent's `prize`.
     make_link(&vfs, &mut fs, "here/door", "/there");
@@ -516,7 +680,13 @@ fn dotdot_in_a_target_is_resolved_physically() {
     // landing at the volume root.
     let mut buf = [0u8; 16];
     let read = vfs
-        .read_via_secured(&owner, &vol_path("here/door/out"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("here/door/out")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("read through the link chain");
     assert_eq!(
         &buf[..read],
@@ -534,23 +704,33 @@ fn a_link_cannot_escape_the_volume_that_stores_it() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("inside"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("inside")), &mut fs)
         .expect("create inside the volume");
     // Spelled as if it named the system security store.
     make_link(&vfs, &mut fs, "escape", "/System/Security/Users");
     // Nothing of that name exists *on this volume*, so it dangles rather than
     // reaching the real tree.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("escape"), &mut fs, FinalLink::Follow)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("escape")),
+            &mut fs,
+            FinalLink::Follow
+        )
+        .map(|info| info.kind),
         Err(VfsError::NotFound)
     );
     // Climbing out of the volume root with `..` lands back at the root, as
     // POSIX specifies for `/..`.
     make_link(&vfs, &mut fs, "climb", "/../../inside");
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("climb"), &mut fs, FinalLink::Follow)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("climb")),
+            &mut fs,
+            FinalLink::Follow
+        )
+        .map(|info| info.kind),
         Ok(NodeKind::RegularFile)
     );
 }
@@ -563,7 +743,12 @@ fn creating_a_link_needs_a_writable_mount_and_an_authorised_parent() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
     assert_eq!(
-        read_only.symlink_via_secured(&owner, &vol_path("nope"), &mut fs, "target"),
+        read_only.symlink_via_secured(
+            &owner,
+            &read_only.cover(&vol_path("nope")),
+            &mut fs,
+            "target"
+        ),
         Err(VfsError::ReadOnly)
     );
 
@@ -571,12 +756,17 @@ fn creating_a_link_needs_a_writable_mount_and_an_authorised_parent() {
     // A principal who may not write the parent cannot create a name in it.
     let stranger = cred(ROOT_UID + 7, ROOT_GID + 7, &caps);
     assert_eq!(
-        vfs.symlink_via_secured(&stranger, &vol_path("nope"), &mut fs, "target"),
+        vfs.symlink_via_secured(&stranger, &vfs.cover(&vol_path("nope")), &mut fs, "target"),
         Err(VfsError::PermissionDenied)
     );
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("nope"), &mut fs, FinalLink::Keep)
-            .map(|info| info.kind),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("nope")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|info| info.kind),
         Err(VfsError::NotFound)
     );
 }
@@ -593,13 +783,18 @@ fn an_unwalkable_target_is_refused_rather_than_stored() {
     let over_long = "x".repeat(tairix_abi::FS_SYMLINK_MAX + 1);
     for (target, why) in [("", "empty"), (over_long.as_str(), "over the bound")] {
         assert!(
-            vfs.symlink_via_secured(&owner, &vol_path("bad"), &mut fs, target)
+            vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path("bad")), &mut fs, target)
                 .is_err(),
             "a {why} target must be refused"
         );
         assert_eq!(
-            vfs.stat_via_secured(&owner, &vol_path("bad"), &mut fs, FinalLink::Keep)
-                .map(|info| info.kind),
+            vfs.stat_via_secured(
+                &owner,
+                &vfs.cover(&vol_path("bad")),
+                &mut fs,
+                FinalLink::Keep
+            )
+            .map(|info| info.kind),
             Err(VfsError::NotFound),
             "a refused {why} target must leave no name behind"
         );

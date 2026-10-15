@@ -12,7 +12,7 @@
 //! preference from the inherited environment (plans/APPS.md §5 — the shell
 //! exports it; the tool invents no second source), and runs the parsed
 //! command against the production seams: the shared
-//! `tairix_procinfo::IpcTransport` for the `sysinfo-v1` `MOUNT_LIST` query,
+//! `tairix_procinfo::IpcTransport` for the `sysinfo-v1` list queries,
 //! `RtProbe`, which confirms a `file` operand through the kernel-authorised
 //! `fs_*` syscalls (every per-inode and mount check stays kernel-side), the
 //! shared `tairix_help::BundleHelp` for the short-help switches, and

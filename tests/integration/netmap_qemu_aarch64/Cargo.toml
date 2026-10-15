@@ -41,7 +41,7 @@ tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
 # The kernel/ipc audit vocabulary: the `CallReplied` event id whose `endpoint`
 # field attributes a served reply to the window channel (the window witness).
 tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-# The appmgr audit vocabulary: the `APP_LOADED` event id whose `bundle` field
+# The load gate's audit vocabulary: the `APP_LOADED` event id whose `bundle` field
 # names the loaded bundle — the launch witness.
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
 # The bundle-name reading every guest sink shares.

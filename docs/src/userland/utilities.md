@@ -362,7 +362,9 @@ halves take deliberately different paths. **Listing** the mounted
 filesystems is a *read* of live system state, so — like `ps` — it goes
 through the System Information API (`AGENTS.md` §16.6): there is no
 `/proc` and no mount-table file, so `mount` issues the ungated
-`sysinfo-v1` `MOUNT_LIST` query served by `/System/Services/sysinfod.app/Run`.
+`sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries served by
+`/System/Services/sysinfod.app/Run`. No `mount` bundle ships, and nothing
+implements the attach seam outside the tests (`plans/OPEN-DEFECTS.md`).
 **Attaching** a filesystem is privileged (it needs `CAP_FS_MOUNT`,
 `AGENTS.md` §5.2), and the kernel — not this tool — makes that decision
 (`AGENTS.md` §5.4).
@@ -382,7 +384,7 @@ mount [-r] [-t TYPE] [-o OPTIONS] [--] [SOURCE TARGET]
   SOURCE TARGET        mount SOURCE at TARGET (needs CAP_FS_MOUNT)
   -r, --read-only      mount read-only (same as -o ro)
   -t, --types TYPE     filesystem type (probed when omitted)
-  -o, --options LIST   comma-separated: ro,rw,nosuid,nodev,noexec
+  -o, --options LIST   comma-separated: ro,rw,noexec
   -h, --help           show the usage banner
 ```
 
@@ -390,17 +392,22 @@ With no operands `mount` lists the table; with exactly `SOURCE TARGET` it
 attaches. Value options accept their value attached (`-text4`,
 `--types=ext4`) or as the following argument; `-r` may cluster with other
 toggles. `--` ends option parsing. The recognised `-o` names map onto the
-frozen `MountFlags` bitmap (`ro`/`rw` plus the `nosuid`/`nodev`/`noexec`
-restrictions, `AGENTS.md` §5.3).
+`MountFlags` bitmap (`ro`/`rw` plus the `noexec` restriction). GNU `mount`'s
+`nosuid` and `nodev` are refused: TAIRiX has no setuid programs or device
+files for them to restrict.
 
 ### Listing — a client of the mount-list query
 
-A listing pages the `MOUNT_LIST` reply through the same `lib/procinfo`
-machinery `ps` uses — the `Transport`/`Output` seams, the request framing,
-and the generic `offset`/`limit` page walk — so none of it is copied
-(`AGENTS.md` §2.2). The shared renderer prints one familiar
-`source on target type fstype (options)` line per mount; the option list
-opens with `ro`/`rw` and then names each restriction in force, and a
+A listing reads the attached volumes (`MOUNT_LIST`) and the view bindings
+onto them (`VIEW_LIST`) through the same `lib/procinfo` machinery `ps`
+uses — the `Transport`/`Output` seams, the request framing, the generic
+`offset`/`limit` page walk, and the `Namespace` join of each binding to its
+volume by identity — so none of it is copied (`AGENTS.md` §2.2). The
+shared renderer prints one familiar `source on target type fstype
+(options)` line per binding, a carved-out subtree as `source[/subtree]`
+(as `findmnt` writes it) and the `/Storage` catalog, which shows no volume,
+as `none on /Storage type none`. The option list opens with `ro`/`rw` and
+then names each restriction in force, and a
 surprise-removed volume carries a trailing ` [unavailable-dirty]` /
 ` [unavailable-lost]` marker (`plans/DEVICES.md` D4b), a re-inserted
 volume whose non-mutation could not be proven carries
@@ -441,7 +448,7 @@ the volume by probing; `mount` never guesses one (`AGENTS.md` §2.1).
 in-memory `sysinfod` fixture, a recording output, and an in-memory
 mounter: the command grammar (list vs mount vs help, every option form,
 attached/space values, the read-only shorthand, `--`, and the
-usage/bad-option rejections), the mount-table listing and its query
+usage/bad-option rejections), the binding listing and its query
 routing, the empty table, the service- and output-failure paths, the
 attach request reaching the mounter with the right fields, and the denied
 attach mapping to `MountError::Mount`. The shared page walk and the
@@ -617,18 +624,20 @@ the bundled `Help/` documents.
 ## `df` — report filesystem space usage (`userland/apps/df`)
 
 `tairix-df` is the GNU coreutils `df` (`plans/APPS.md` §12.1 Stage C,
-`AGENTS.md` §16.7): one row per mounted filesystem — the volume's size,
-used and available space, use percentage, and mount point — or, with
-`file` operands, the filesystem containing each operand (chosen by the
-longest mount-point prefix, one row per filesystem). Like `mount`'s
-listing, the data is a read of live system state through the ungated
-`sysinfo-v1` `MOUNT_LIST` query (the shared
-`tairix_procinfo::for_each_mount` walk — never a second query client and
-never a `/proc`), whose rows carry each backing volume's `VolumeStats`
-as the mounted driver reports its own accounting. The default view hides
-capacity-less mounts (the in-RAM view bindings) and further mounts of an
-already-listed volume, noting the hidden count on fd 3
-(`fs.mounts_omitted`, `AGENTS.md` §20.1); `-a` shows everything.
+`AGENTS.md` §16.7): one row per attached volume — its size, used and
+available space, use percentage, and the view path showing it — or, with
+`file` operands, the binding covering each operand (the longest view path
+prefixing it, one row per binding) reported from the volume that binding
+shows, so `/System/Logs`, carved out of the root volume, reports the root
+volume's figures rather than `/System`'s. Like `mount`'s listing, the data
+is a read of live system state through the ungated `sysinfo-v1`
+`MOUNT_LIST` and `VIEW_LIST` queries (the shared `tairix_procinfo::Namespace`
+join — never a second query client and never a `/proc`), whose volume
+records carry each volume's `VolumeStats` as the mounted driver reports
+its own accounting. The default view leaves out a volume reporting no
+capacity; `-a` lists every binding instead, a volume's bind mounts and the
+`/Storage` catalog (a `none` pseudo filesystem) included, and the hidden
+count is noted on fd 3 (`fs.mounts_omitted`, `AGENTS.md` §20.1).
 `-T`/`-t`/`-x` add and filter by filesystem type, `-i` reports inode
 counts (a dynamic-inode volume reports the honest zeros), `-P` selects
 the POSIX portable wording, `--total` appends a summed row, `-l` accepts
@@ -642,7 +651,7 @@ that leave nothing report the GNU `no file systems processed` error.
 `--output` and `--sync`/`--no-sync` are not yet available (documented in
 the bundle's `Help/`). Manifest: `CAP_CONSOLE_WRITE` + `CAP_FS_ACCESS`,
 exactly as `ps`. `cargo test -p tairix-df` drives the parser, the
-selection/filter/duplicate rules, every column format, the operand
+selection/filter/binding rules, every column format, the operand
 paths, the fd-3 record, and the failure paths against in-memory
 `sysinfod`/probe fixtures, plus the thirteen-locale `OPTIONS` pinning.
 
@@ -1392,10 +1401,12 @@ there, before any path is touched. A directive carries the printf flags,
 width, and precision (`%-10s`, `%06i`, `%.3n`); the default and terse forms
 are themselves formats, so one renderer serves every form.
 
-`%m` and `%o` come from the System Information mount snapshot, keyed on the
-**canonical** path (`fs_realpath`) and matched by whole components — so a link
-into another volume reports the volume it lands on, and `/vol` never claims
-`/volume/x`. `%U` comes from the ungated user directory `whoami` reads.
+`%m` and `%o` come from the System Information namespace — the binding
+covering the **canonical** path (`fs_realpath`), matched by whole components,
+and the volume that binding shows — so a link into another volume reports the
+volume it lands on, `/vol` never claims `/volume/x`, and `/System/Logs`,
+carved out of the root volume, reports the root volume rather than
+`/System`'s. `%U` comes from the ungated user directory `whoami` reads.
 Neither adds a capability. A fact that cannot be read renders `?`, or GNU's
 `UNKNOWN` for a name, never a plausible substitute.
 
@@ -2810,15 +2821,15 @@ bundle directory that exists (`NotFound` moves on; any other refusal is
 final, mirroring the shell's launch rule), so the page shown always
 documents the program the shell would run for the same word. When no
 ordered candidate matches a bare word, `man` falls back to a **recursive
-bundle search** of the app stores — the machine-wide `/Apps`, then the
-user's own `<HOME>/Commands` and `<HOME>/Applications`
-(`tairix_cmdres::search_roots`) — walked breadth-first over sorted
+bundle search** of the user's own `<HOME>/Commands` and
+`<HOME>/Applications` (`tairix_cmdres::search_roots`; the system stores are
+flat, so the ordered candidates already cover them) — walked breadth-first over sorted
 listings so the shallowest match wins deterministically. The walk never
 descends into another bundle's `.app` directory (a bundle is a sealed
 unit), is bounded in depth and by a whole-invocation directory budget (an
 exhausted budget is reported as a truncated search, never silently as
 "not found"), and a missing root simply lists nothing. `man moose`
-therefore finds `/Apps/somefolder/anotherfolder/moose.app`'s help wherever
+therefore finds `<HOME>/Applications/somefolder/anotherfolder/moose.app`'s help wherever
 the bundle was filed; launching stays the shell's fixed-prefix-then-`PATH`
 rule, unchanged. The document is located, locale-selected, parsed, and
 rendered by `lib/help`, the one shared engine; `man` owns only its
@@ -2860,7 +2871,7 @@ every `Help/` read per-inode under the caller's attested identity.
 `BundleStore`/`Console` fixtures: the grammar and its refusals, the
 fixed-prefix-shadows-`PATH` order, the final-refusal rule,
 `.app`/explicit-path words, the recursive app-store search (nested finds,
-`/Apps`-before-home order, shallowest-match determinism, the sealed-`.app`
+the user's stores alone, shallowest-match determinism, the sealed-`.app`
 rule, and the reported budget truncation), topics, locale exact/fallback
 plus the fd-3 advisory, the pager's key handling, and the `-h` fallback.
 `man`'s own `Help/` tree is authored

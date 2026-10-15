@@ -39,8 +39,8 @@ pub struct LoginConfig<'a> {
     /// [`graphical_available`](Self::graphical_available) holds, so a
     /// headless system degrades to text, never an error;
     /// [`SessionKind::Text`] starts the authenticated account's shell.
-    /// There is no per-login prompt: a shell user starts the desktop on
-    /// demand with the `desktop` command.
+    /// There is no per-login prompt, and the desktop runs only from a
+    /// graphical login.
     pub session_default: SessionKind,
     /// Whether an untouched username prompt may give way to a graphical login
     /// that becomes available while it waits: set for a text round chosen

@@ -116,3 +116,6 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = [
     "test-util",
     "svg",
 ] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

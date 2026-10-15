@@ -235,6 +235,53 @@ pub fn encode(parts: &[Partition]) -> Result<[u8; MBR_SECTOR_LEN], MbrError> {
     Ok(sector)
 }
 
+/// Extend the data root's entry in the MBR `sector` to end at `disk_blocks`,
+/// when it is the partition nearest the disk's end and the disk reaches past
+/// it, leaving every other byte as it was.
+///
+/// Answers the grown extent, or `None` when there is nothing to grow: no
+/// root, a partition after it, or no room past it. An MBR addresses at most
+/// `u32::MAX` sectors, so on a larger disk the root ends there.
+///
+/// # Errors
+///
+/// An [`MbrError`] if `sector` is not a valid MBR.
+pub fn grow_root(
+    sector: &mut [u8; MBR_SECTOR_LEN],
+    disk_blocks: u64,
+) -> Result<Option<Partition>, MbrError> {
+    let table = parse(sector)?;
+    let Some(root) = table.first_of_type(PartitionType::ARXFSRoot) else {
+        return Ok(None);
+    };
+    if table
+        .partitions()
+        .iter()
+        .any(|other| other.start_lba > root.start_lba)
+    {
+        return Ok(None);
+    }
+    let grown = disk_blocks
+        .min(u64::from(u32::MAX))
+        .saturating_sub(root.start_lba);
+    if grown <= root.block_count {
+        return Ok(None);
+    }
+    let slot = (0..MAX_PRIMARY_PARTITIONS)
+        .find(|&i| sector[PARTITION_TABLE_OFFSET + i * PARTITION_ENTRY_LEN + 4] == PART_TYPE_ARXFS)
+        .ok_or(MbrError::NoPartitions)?;
+    let entry =
+        &mut sector[PARTITION_TABLE_OFFSET + slot * PARTITION_ENTRY_LEN..][..PARTITION_ENTRY_LEN];
+    // The new end lies past any CHS address, so it takes the "use LBA" form.
+    entry[5..8].fill(0xff);
+    let sectors = u32::try_from(grown).map_err(|_| MbrError::ExtentTooLarge)?;
+    entry[12..16].copy_from_slice(&sectors.to_le_bytes());
+    Ok(Some(Partition {
+        block_count: grown,
+        ..root
+    }))
+}
+
 /// `true` if `sector` is at least [`MBR_SECTOR_LEN`] bytes and carries the
 /// `0x55AA` boot signature.
 #[must_use]

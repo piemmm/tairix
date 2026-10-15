@@ -38,7 +38,7 @@ The design direction is:
   `alias::Home/path`, `fs::arxfs/<root>/path`.
 - User-facing shorthand uses `Alias:/path`, e.g. `Home:/Documents/spec.md`.
 - The first-class user idea is the alias: a named root binding such as
-  `System:`, `Users:`, `Home:`, `Apps:`, `Backup:`, or `CameraCard:`.
+  `System:`, `Users:`, `Home:`, `Backup:`, or `CameraCard:`.
 - `/` remains available only as a synthetic session compatibility view assembled
   from aliases; it must never be the canonical identity of storage.
 - `/Storage/<volume>` compatibility remains possible only as a view projection
@@ -59,7 +59,7 @@ current AGENTS.md rule it changes or preserves.
 
 TAIRiX currently wants a clean filesystem layout, but the existing AGENTS.md
 wording is still Unix-shaped in one important respect: the installed system is
-described as a single `/` tree containing `/System`, `/Users`, `/Apps`, and
+described as a single `/` tree containing `/System`, `/Users`, and
 `/Storage`.
 
 That is familiar, but it recreates the central fault-tolerance weakness the new
@@ -108,9 +108,9 @@ There is still no `/proc` and no `/sys`. Runtime storage information must be
 available through typed System Information API queries, not a virtual filesystem
 made of text files.
 
-The default installed layout remains secure: OS files read-only, user files
-`nosuid,nodev`, applications capability-gated, removable or extra storage
-`nosuid,nodev,noexec` unless explicitly relaxed by capability.
+The default installed layout remains secure: OS files read-only, applications
+capability-gated, removable or extra storage `noexec` unless explicitly relaxed
+by capability.
 
 The existing driver-store model remains: loadable drivers live under the signed
 installed driver store and are discovered by the device manager. The bootstrap
@@ -118,15 +118,14 @@ floor exists only to reach the store and must stay minimal.
 
 ### 3.2 Amend
 
-AGENTS.md §16.1 currently says TAIRiX has exactly four top-level directories:
-`/System`, `/Users`, `/Apps`, and `/Storage`. The new spec should replace this
-with exactly four default **view entries** in the default session root view,
-backed by first-class aliases:
+AGENTS.md §16.1 names the top-level directories `/System`, `/Users`, and
+`/Storage`. The new spec should replace this with exactly that many default
+**view entries** in the default session root view, backed by first-class
+aliases:
 
 ```text
 /System   -> System:/
 /Users    -> Users:/
-/Apps     -> Apps:/
 /Storage  -> Storage:/       # synthetic catalog/view, not a storage parent
 ```
 
@@ -135,7 +134,7 @@ The canonical storage names become aliases and IDs, not `/` paths:
 ```text
 System:/Kernel/tairix.rxe
 Users:/ian/Documents/design.md
-Apps:/Example.app/Run
+System:/Applications/Example.app/Run
 Backup:/snapshots/2026-06-20
 id::b7f2e4e6-8d7a-4ef8-a13e-d3b84d4e8001/snapshots/2026-06-20
 ```
@@ -248,7 +247,6 @@ Examples:
 System:/
 Users:/
 Home:/
-Apps:/
 Backup:/
 CameraCard:/
 ```
@@ -312,7 +310,7 @@ System:/Kernel/tairix.rxe
 System:/Drivers/storage/arxfs/Driver.rxe
 Users:/ian/Documents/DRIVES.md
 Home:/Documents/DRIVES.md
-Apps:/Editor.app/Run
+System:/Applications/Editor.app/Run
 Backup:/snapshots/latest/Users/ian
 CameraCard:/DCIM/100MEDIA/IMG_0001.RAW
 ```
@@ -440,7 +438,6 @@ Recommended default view:
 /
 ├── System/   -> System:/
 ├── Users/    -> Users:/
-├── Apps/     -> Apps:/
 └── Storage/  -> Storage:/
 ```
 
@@ -465,7 +462,6 @@ Configured by the installer, updater, or administrator. Examples:
 ```text
 System:
 Users:
-Apps:
 Storage:
 EFI:
 Recovery:
@@ -631,20 +627,19 @@ Option B.
 
 ### Option A: keep §16 literally and add aliases on top
 
-`/System`, `/Users`, `/Apps`, and `/Storage` remain canonical directories on a
-root volume. Aliases are convenience names pointing into that root.
+`/System`, `/Users`, and `/Storage` remain canonical directories on a root
+volume. Aliases are convenience names pointing into that root.
 
 This is not recommended. It preserves too much of the Unix single-root failure
 model.
 
 ### Option B: make §16 a default view, not storage identity
 
-The four names become view entries and aliases:
+The names become view entries and aliases:
 
 ```text
 System:/
 Users:/
-Apps:/
 Storage:/
 ```
 
@@ -653,7 +648,6 @@ The default `/` view projects them as:
 ```text
 /System
 /Users
-/Apps
 /Storage
 ```
 
@@ -663,9 +657,9 @@ as the dependency through which all storage must be reached.
 Recommended AGENTS.md amendment shape:
 
 ```text
-TAIRiX exposes exactly four entries in the default session root view: /System,
-/Users, /Apps, and /Storage. These are synthetic view bindings backed by the
-first-class aliases System:, Users:, Apps:, and Storage:. The canonical storage
+TAIRiX exposes exactly three entries in the default session root view: /System,
+/Users, and /Storage. These are synthetic view bindings backed by the
+first-class aliases System:, Users:, and Storage:. The canonical storage
 identity is the root ID or alias path, not the / view path. Creating additional
 entries in the default root view is forbidden unless AGENTS.md is amended.
 ```
@@ -675,7 +669,6 @@ Then define:
 ```text
 /System/*   view of System:/*
 /Users/*    view of Users:/*
-/Apps/*     view of Apps:/*
 /Storage/*  view/catalog of published non-core aliases
 ```
 
@@ -765,7 +758,7 @@ CAP_FS_ATTACH          attach a filesystem driver to a storage object
 CAP_FS_PUBLISH_ROOT    publish a discovered root into a namespace
 CAP_FS_ALIAS_ADMIN     create, delete, or alter persistent aliases
 CAP_FS_VIEW_ADMIN      alter default / view projections
-CAP_FS_MOUNT_RELAX     relax nosuid/nodev/noexec/ro policy
+CAP_FS_MOUNT_RELAX     relax noexec/ro policy
 CAP_FS_RAW_DEVICE      open raw storage through dev::
 CAP_FS_RECOVERY        access recovery-only resolver operations
 CAP_SYSINFO_STORAGE    query privileged storage inventory through sysinfo
@@ -796,8 +789,6 @@ The existing flags remain relevant:
 
 ```text
 ro
-nosuid
-nodev
 noexec
 ```
 
@@ -949,7 +940,6 @@ The final spec should define default aliases created by the installer.
 ```text
 System:    OS-provided files; read-only except projected writable service roots
 Users:     user account roots
-Apps:      installed application bundles
 Storage:   synthetic catalog/view of non-core storage roots
 ```
 
@@ -1108,7 +1098,7 @@ Alias: Backup:
 Stable ID: id::<uuid>
 Filesystem: arxfs
 Device: dev::<diagnostic-id>
-Flags: nosuid,nodev,noexec
+Flags: noexec
 ```
 
 ### 17.4 Recent files
@@ -1159,7 +1149,6 @@ Recommended default roles:
 ```text
 System:   read-only OS root
 Users:    user data root
-Apps:     application bundle root
 Storage:  synthetic catalog
 Home:     session alias generated after first user login
 ```
@@ -1173,7 +1162,6 @@ All required aliases target subroots of one encrypted ARXFS volume:
 ```text
 System: -> id::<root>/System
 Users:  -> id::<root>/Users
-Apps:   -> id::<root>/Apps
 ```
 
 This is permitted, but the namespace model still treats them as aliases.
@@ -1185,7 +1173,6 @@ Each major alias may target a separate root:
 ```text
 System: -> id::<system-volume>/
 Users:  -> id::<users-volume>/
-Apps:   -> id::<apps-volume>/
 Logs:   -> id::<logs-volume>/
 ```
 
@@ -1198,7 +1185,6 @@ The installer/session manager projects aliases into the default `/` view:
 ```text
 /System -> System:/
 /Users  -> Users:/
-/Apps   -> Apps:/
 /Storage -> Storage:/
 ```
 
@@ -1364,7 +1350,7 @@ The final spec should require at least these tests.
 
 - Publishing a root requires capability.
 - Creating or changing a persistent alias requires capability.
-- A view binding cannot relax `ro`, `nosuid`, `nodev`, or `noexec` without the
+- A view binding cannot relax `ro` or `noexec` without the
   explicit relax capability.
 - Driver-backed resolvers do not bypass ACLs, capability gates, or mount flags.
 - Raw `dev::` access is denied without explicit authority.
@@ -1417,7 +1403,7 @@ A normal desktop user sees:
 
 ```text
 Home:/Documents
-Apps:/Editor.app
+System:/Applications/Editor.app
 Storage:/CameraCard
 Backup:/snapshots/latest
 ```
@@ -1427,7 +1413,6 @@ The file manager may show:
 ```text
 System
 Home
-Apps
 Storage
 Backup
 CameraCard
@@ -1437,7 +1422,7 @@ A shell can still use view paths:
 
 ```text
 /Users/ian/Documents
-/Apps/Editor.app
+/System/Applications/Editor.app
 /Storage/CameraCard/DCIM
 ```
 

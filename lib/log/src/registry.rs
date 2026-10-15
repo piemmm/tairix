@@ -78,7 +78,7 @@ pub const INIT: EventRange = EventRange::new(9_000, 10_000);
 /// The session authority.
 pub const LOGIN: EventRange = EventRange::new(10_000, 11_000);
 /// The application-bundle load gate.
-pub const APPMGR: EventRange = EventRange::new(11_000, 12_000);
+pub const APPLOAD: EventRange = EventRange::new(11_000, 12_000);
 /// ARXFS.
 pub const ARXFS: EventRange = EventRange::new(12_000, 13_000);
 /// The device manager.
@@ -193,7 +193,7 @@ pub const OWNERS: &[Owner] = &[
         crates: &["userland/session/login"],
     },
     Owner {
-        range: APPMGR,
+        range: APPLOAD,
         crates: &["lib/appload"],
     },
     Owner {

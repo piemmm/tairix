@@ -70,3 +70,6 @@ tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # This crate with its consistency oracle switched on, for the fuzz harness.
 tairix-discoveryd = { path = ".", version = "=0.0.0", default-features = false, features = ["test-support"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

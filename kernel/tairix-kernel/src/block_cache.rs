@@ -240,9 +240,9 @@ impl<B: Block> BlockCache<B> {
     }
 
     /// The cache the boot path wraps the one brought-up disk in before
-    /// the block-sharing layer, budgeted from the kernel heap arena
-    /// exactly like the volume caches above it and governed by the
-    /// system `pressure` gauge.
+    /// the block-sharing layer, budgeted from discovered RAM exactly like
+    /// the volume caches above it and governed by the system `pressure`
+    /// gauge.
     ///
     /// # Errors
     ///

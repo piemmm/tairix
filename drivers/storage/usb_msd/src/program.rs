@@ -680,11 +680,10 @@ fn publish_luns<T: ScsiTransport>(
                     return Ok(None);
                 }
             };
-            let blk_endpoint =
-                bind_blk_endpoint(blk_block, lun).ok_or(end(DriverExit::NoService, &[]))?;
-            let (window, shm_id) = create_window().ok_or(end(DriverExit::NoService, &[]))?;
-            let node_id =
-                emit_lun_node(blk_endpoint, shm_id).ok_or(end(DriverExit::NoService, &[]))?;
+            let no_service = || end(DriverExit::NoService, &[]);
+            let blk_endpoint = bind_blk_endpoint(blk_block, lun).ok_or_else(no_service)?;
+            let (window, shm_id) = create_window().ok_or_else(no_service)?;
+            let node_id = emit_lun_node(blk_endpoint, shm_id).ok_or_else(no_service)?;
             log_hex_event(
                 MSD_LUN_READY,
                 Level::Info,

@@ -12,11 +12,12 @@ This spec also defers to its companions and MUST stay consistent with them:
 - **Application bundles / ABI** — `AGENTS.md` §9, §16.4, §16.5 and
   `lib/abi/src/appinfo.rs` (`BundleEntry`, `validate_bundle_layout`,
   `AppInfoHeader`) own the signed manifest, the fixed top-level layout, and the
-  dynamic-loader library policy. `userland/system/appmgr` owns loading.
+  dynamic-loader library policy. The kernel's `spawn` loads every bundle through
+  the shared gate, `lib/appload`.
 - **Shell** — `plans/SHELL.md` owns command parsing, builtins, job control,
   and the standard-stream model. This document adds command *resolution* and
   the `man`/`-h` help surface the shell exposes.
-- **Paths / aliases** — `plans/DRIVES.md` (path spelling, `System:`/`Apps:`)
+- **Paths / aliases** — `plans/DRIVES.md` (path spelling, `System:`/`Users:`)
   and `plans/ALIAS.md` (resource references). No second path or reference
   parser is defined here (§2.2).
 - **Terminal stack** — `plans/CURSES.md` (`lib/vt`, `lib/termcap`,
@@ -29,8 +30,9 @@ are implementation requirements.
 
 - **App bundle** — a `<Name>.app` directory under a program store (§16.5).
 - **Program kind** — what a bundle's manifest declares itself to be:
-  `command`, `application`, or `service`. It alone decides the store the
-  bundle is planted in; no list of "which programs are commands" exists.
+  `command`, `application`, `service`, or `component`. Signed in the
+  manifest, it alone decides the store the bundle is planted in and the
+  stores it may run from; no list of "which programs are commands" exists.
 - **Command app** — an app whose interface is the standard streams, so a
   user can run it by typing its command name at the shell.
 - **System command store** — the OS-provided, read-only, system-signed set of
@@ -330,7 +332,7 @@ The fixed top-level layout of `AGENTS.md` §16.5 carries one documentation
 entry, `Help/` (the former `Documentation/`, merged into it):
 
 ```
-/System/Commands/top.app/        # (or /Apps/Example.app for installed apps)
+/System/Commands/top.app/        # (or /System/Applications/Example.app)
 ├── AppInfo            # Signed manifest. Required.
 ├── Run                # Entry-point rxe binary. Required.
 ├── Code/              # Additional rxe binaries / plugins.
@@ -521,7 +523,7 @@ list) per the `lib/*` rules (§6).
 
 - Locates a bundle's `Help/` tree and applies the §5 selection chain over an
   injected read-only file seam (it performs no ambient I/O; the caller supplies
-  the capability-scoped reader, mirroring `appmgr`'s `BundleStore`).
+  the capability-scoped reader, mirroring the load gate's `BundleStore`).
 - Parses the structured Markdown into the fixed §3 section model with **hard,
   fixed security bounds** (maximum document size, section count, nesting depth,
   line length, table size) that fail closed on violation (§24.4, §19.5). These
@@ -579,10 +581,9 @@ troff/roff man format (TAIRiX ships none), it renders the `Help/` Markdown.
   document for `<cmd>` in the active locale (§5) through `lib/help`.
 - When the ordered candidates (§8) find nothing for a bare word, `man` falls
   back to a **recursive bundle search** of the stores that may nest bundles:
-  the machine-wide `/Apps`, then the user's own `<HOME>/Commands` and
-  `<HOME>/Applications` (`tairix_cmdres::search_roots` — the roots are
-  spelled once, over `tairix_abi::INSTALLED_APP_STORE` and the home store
-  names). The two system stores are absent by design: they are flat, so the
+  the user's own `<HOME>/Commands` and `<HOME>/Applications`
+  (`tairix_cmdres::search_roots` — the roots are spelled once, over the home
+  store names). The two system stores are absent by design: they are flat, so the
   ordered candidates already cover them. The walk is breadth-first over sorted
   listings, so the shallowest match wins deterministically; it never
   descends into another bundle's `.app` directory (a bundle is a sealed
@@ -590,7 +591,7 @@ troff/roff man format (TAIRiX ships none), it renders the `Help/` Markdown.
   is final; and it is bounded (depth and a whole-invocation directory
   budget) — an exhausted budget is reported as a truncated search, never
   silently as "command not found". `man moose` therefore finds
-  `/Apps/somefolder/anotherfolder/moose.app` or
+  `/Users/<u>/Applications/somefolder/anotherfolder/moose.app` or
   `/Users/<u>/Commands/somefolder/moose.app`. This search is `man`'s only:
   the shell's *launch* resolution (§8) is unchanged.
 - `man <cmd> <topic>` selects `Help/<locale>/<topic>.md` within `<cmd>`'s
@@ -631,10 +632,9 @@ never read from the environment. Two consequences are load-bearing:
   rather than searched again, so late `PATH` text cannot read as moving a
   store later in the order. This is a security property, not a convenience.
 - **A session needs no `PATH` at all.** With neither `HOME` nor `PATH` set,
-  every system program still resolves. A login session's default `PATH` is
-  therefore only what is genuinely additional (`/Apps`); repeating a store
-  that is already built in would be duplication and would imply, falsely,
-  that the store is overridable.
+  every system program still resolves, so login exports none; repeating a
+  store that is already built in would be duplication and would imply,
+  falsely, that the store is overridable.
 
 Steps 3 and 4 are spelled unconditionally whenever `HOME` is set: a store a
 user never created simply matches nothing and the search moves on — existence
@@ -646,7 +646,7 @@ alias delimiter, not a separator — so an alias root entry is written `Home:/`,
 never a bare `Home:`. An empty entry is skipped (never a silent
 current-directory search). Each entry is resolved through the single shared
 path parser (`plans/DRIVES.md`), and every candidate is a `<word>.app` bundle
-launched through `appmgr` (signature + capability + interface-hash checks,
+launched through the bundle load gate (signature + capability + interface-hash checks,
 `AGENTS.md` §16.5) — never a raw loose binary (§1).
 
 The candidate *policy* is one pure, exhaustively-tested function,
@@ -660,12 +660,11 @@ deterministic first-match search, nothing ran), any other refusal is final
 — and the kernel authorises every launch.
 
 Which store a shipped bundle lands in is decided by its own signed manifest's
-declared kind (`tairix_abi::ProgramKind`: `command`, `application`, or
-`service`) and nothing else; the build refuses two bundles claiming one name,
-so one store cannot shadow a name in another. Machine-wide *installed*
-application bundles live in `/Apps` (`AGENTS.md` §16.3) and are launched by
-the desktop/`appmgr`; they reach the shell command path only if the user adds
-`/Apps` (or a bundle path) to `PATH`.
+declared kind (`tairix_abi::ProgramKind`: `command`, `application`,
+`service`, or `component`) and nothing else; the build refuses two bundles claiming one name,
+so one store cannot shadow a name in another. Machine-wide application
+bundles live only in `/System/Applications` (`AGENTS.md` §16.3), written by
+the installer and the updater.
 
 Resolution is deterministic and fails closed: an unresolved name is
 `command not found` (`127`), and a resolved-but-non-executable bundle is
@@ -710,7 +709,7 @@ name:
 - `top.app` — the bundle name; the shell recognises a trailing `.app` on a
   command word, resolves the bundle directly, and runs it identically.
 
-Both forms run the same `Run` binary through `appmgr` and are subject to the
+Both forms run the same `Run` binary through the load gate and are subject to the
 identical signature and capability checks (§16.5); the `.app` spelling is a
 convenience, never a privileged bypass (§5.4).
 
@@ -817,7 +816,7 @@ Every mechanism here obeys the charter's fail-closed, least-authority model:
 
 - **Signed, verified, capability-gated launch.** Resolving and running a
   command app — from the store or `PATH`, as `top` or `top.app` — always goes
-  through `appmgr`'s signature, content-hash, interface-hash, and capability
+  through the load gate's signature, content-hash, interface-hash, and capability
   intersection checks (§16.5, §5.2). No path bypasses them.
 - **System store precedes `PATH`.** A user cannot shadow a system command
   (§8).
@@ -966,9 +965,12 @@ platform floor).
   header. `fstree`'s `a` mode editor is the second caller.
   **Remaining, blocked on kernel prerequisites:** `chown` needs the fs
   owner-set syscall, `getcap`/`setcap` need per-inode
-  capability-requirement get/set syscalls, and `mount` needs the mount
-  syscall — none exists yet, and a stubbed production seam is forbidden;
-  each tool registers in the change that lands its syscall.
+  capability-requirement get/set syscalls, and `mount` needs a user-facing
+  attach: `volume_attach` attaches a block-service partition under
+  `/Storage/<name>`, but nothing lets a user name an unattached storage
+  object to attach (`plans/DRIVES.md` §5.8's discover/attach/publish verbs),
+  so its `Mounter` has no implementation. A stubbed production seam is
+  forbidden; each tool registers in the change that lands its kernel half.
 - **Stage C — missing coreutils commands (in progress; all wanted).**
   Every GNU coreutils command implementable on the current floor, in
   prioritised batches. **Done: `true`, `false`, `yes`, `basename`,
@@ -1075,7 +1077,7 @@ platform floor).
   from the ungated `MOUNT_LIST` rows, which now carry each volume's
   `VolumeStats` — the support work: a new versioned `FilesystemStats`
   driver-ABI extension (`stats() -> VolumeStats`, arxfs reports its
-  live accounting with the metadata reserve withheld from
+  live accounting with its reserve withheld from
   `avail_blocks` and the honest zero inode pair), `MountRecord` evolved
   in place to embed the usage block (invariant-checked on construct and
   decode; C header regenerated), and the kernel mount snapshot now
@@ -1331,12 +1333,12 @@ second escape table, colour list, or glyph set anywhere (§2.2).
 
 ## 13. Deliverables and required `AGENTS.md` amendments
 
-Staged work (dependencies: the bundle/`appmgr` stack and `plans/CURSES.md`,
+Staged work (dependencies: the bundle/load-gate stack and `plans/CURSES.md`,
 both landed; `plans/SHELL.md` command execution):
 
 1. **`lib/abi` — `BundleEntry::Help`** — **done.** The maintainer chose the
    merge, so `Documentation` was renamed to `Help` in place (§2.13):
-   enum/`ALL`/`as_str`, rustdoc, the `appinfo` and `appmgr` fixtures,
+   enum/`ALL`/`as_str`, rustdoc, the `appinfo` and load-gate fixtures,
    `docs/src/abi/appinfo.md`, and the regenerated C header
    (`TAIRIX_BUNDLE_ENTRY_HELP`); the retired name now fails
    `validate_bundle_layout` closed.
@@ -1358,8 +1360,8 @@ both landed; `plans/SHELL.md` command execution):
    `userland/apps/man` resolves the word over `tairix_cmdres::
    bundle_candidates` (first existing bundle wins; `NotFound` moves on, any
    other refusal is final) and then, for a bare word no candidate matched,
-   over the §7 bounded recursive search of `/Apps` and the user's own two
-   stores (`tairix_cmdres::search_roots`), loads and renders through `lib/help`,
+   over the §7 bounded recursive search of the user's own two stores
+   (`tairix_cmdres::search_roots`), loads and renders through `lib/help`,
    reads `LANG`/`PATH`/`HOME` from the inherited environment, pages on a
    geometry-attested console (space/return/`q`, echo suppressed) and
    streams otherwise, and emits the §7 `stdinfo` `context` record
@@ -1463,8 +1465,7 @@ both landed; `plans/SHELL.md` command execution):
    canonical bundle content-hash framing (`lib/abi`), the per-crate
    `AppInfo.toml` discovery walk + composer signing under the dedicated
    `SYSTEM_APP_SIGNING_SEED`, the image/fixture planting of every signed
-   bundle, the shared `lib/appload` verification engine (`appmgr`
-   re-exports it), and the `spawn` syscall loading + verifying store
+   bundle, the shared `lib/appload` verification engine, and the `spawn` syscall loading + verifying store
    bundles from the mounted volume through `tairix_appload` — deriving the
    child's capability request from the on-disk manifest, parking a
    boot-race spawn on the `AppStore` readiness latch, and dropping every

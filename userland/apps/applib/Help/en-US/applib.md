@@ -46,8 +46,8 @@ cannot resurrect it — and `applib show` re-shows it. Hiding is
 presentation, never authority: launching a bundle is still governed by
 the loader's signature and capability checks regardless of the catalog.
 
-`applib rescan` walks the application stores (`/System/Commands`,
-`/System/Applications`, and `/Apps`, or the caller's own
+`applib rescan` walks the application stores (`/System/Commands` and
+`/System/Applications`, or the caller's own
 `<home>/Commands` and `<home>/Applications` under `--user`), reads each
 bundle's manifest, and registers every application that asks to be
 listed and is not yet catalogued. Existing records — including a
@@ -84,8 +84,8 @@ everything else may ignore.
 
 - `applib` — show the resolved library, folder by folder.
 - `applib list --category Games` — show one folder.
-- `applib add /Apps/chess.app` — register a bundle as its manifest asks.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/chess.app` — register a bundle as its manifest asks.
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   register a bundle that declares no listing, under an explicit folder.
 - `applib remove os.tairix.chess` — drop an entry by identifier.
 - `applib hide os.tairix.chess --user` — hide it from your own library

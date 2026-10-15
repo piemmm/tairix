@@ -6,7 +6,8 @@ use crate::command::parse;
 use alloc::vec;
 use core::cell::RefCell;
 
-use tairix_abi::driver::filesystem::{NodeTimes, VolumeStats};
+use tairix_abi::driver::filesystem::{MountFlags, NodeTimes, VolumeStats};
+use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState, ViewBindingRecord};
 use tairix_abi::FileId;
 use tairix_help::SourceError;
 
@@ -56,13 +57,16 @@ impl Filesystem for MockFs {
     }
 }
 
-/// A mount table fixture; an empty one stands for a caller who cannot read
-/// the snapshot.
-struct MockMounts(Vec<Mount>);
+/// A namespace fixture: each volume shown from its root at its own path. An
+/// empty one stands for a caller who cannot read the namespace.
+struct MockMounts(Vec<(MountRecord, ViewBindingRecord)>);
 
 impl Mounts for MockMounts {
-    fn list(&self) -> Result<Vec<Mount>, Errno> {
-        Ok(self.0.clone())
+    fn namespace(&self) -> Result<Namespace, Errno> {
+        Ok(Namespace::new(
+            self.0.iter().map(|(volume, _)| *volume).collect(),
+            self.0.iter().map(|(_, view)| *view).collect(),
+        ))
     }
 }
 
@@ -133,19 +137,38 @@ fn stat_of(kind: FileKind, mode: u32) -> FileStat {
     }
 }
 
-fn mount(target: &str, fstype: &str, block_size: u32) -> Mount {
-    Mount {
-        target: String::from(target),
-        fstype: String::from(fstype),
-        usage: VolumeStats {
-            block_size,
-            total_blocks: 100,
-            free_blocks: 40,
-            avail_blocks: 30,
-            files: 20,
-            files_free: 7,
-        },
+/// A volume of `fstype` and `block_size` shown from its root at `target`,
+/// identified by `target` so each fixture volume is distinct.
+fn mount(target: &str, fstype: &str, block_size: u32) -> (MountRecord, ViewBindingRecord) {
+    let mut id = [0xA5u8; 16];
+    for (slot, byte) in id.iter_mut().zip(target.bytes()) {
+        *slot ^= byte;
     }
+    let usage = VolumeStats {
+        block_size,
+        in_reserve: false,
+        total_blocks: 100,
+        free_blocks: 40,
+        avail_blocks: 30,
+        files: 20,
+        files_free: 7,
+    };
+    let volume = MountRecord::new(
+        b"vol",
+        target.as_bytes(),
+        fstype.as_bytes(),
+        MountFlags::default(),
+        MountVolumeState {
+            usage,
+            availability: MountAvailability::Available,
+            medium: None,
+        },
+        id,
+    )
+    .expect("record");
+    let view =
+        ViewBindingRecord::new(target.as_bytes(), b"/", MountFlags::default(), id).expect("view");
+    (volume, view)
 }
 
 /// Render `args` over `fs`/`mounts`/`names`, returning `(stdout, stderr,

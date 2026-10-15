@@ -78,3 +78,6 @@ tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", optional = true, features = [
     "program",
 ] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

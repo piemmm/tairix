@@ -34,12 +34,10 @@ use tairix_kernel_ipc::{CallEndpoint, EndpointId, ReplyOutcome};
 use tairix_kernel_sec::{ProcessId as SecProcessId, TaskCapabilities, UserId};
 use tairix_log::Sink;
 
-use crate::dispatch_slot::RescheduleAction;
-use crate::kthread::reschedule_current;
 use crate::sharedreg::KernelHold;
 use crate::waitq::{
-    nearest_timed_deadline, serve_wake, serve_wake_task, wait_arch, WaitQueueArch, CALL_WAITQ,
-    NO_DEADLINE,
+    nearest_timed_deadline, park_calling_task, serve_wake, serve_wake_task, wait_arch,
+    WaitQueueArch, CALL_WAITQ, NO_DEADLINE,
 };
 
 use super::blkmeter::{Attempt, DeviceIoMeter, VolumeIoSource};
@@ -294,15 +292,13 @@ impl BlkClient {
         let mut frame = [0u8; BLK_REQUEST_LEN];
         let len = request.encode(&mut frame)?;
 
-        // The current scheduler identity, for park/wake. Absent a live
-        // scheduler hook (a host test of this path, where the server runs
-        // on another thread) there is nothing to park on, so the wait
-        // degrades to a cooperative spin exactly as `SleepLock` does —
-        // never reachable as a steady state on a running kernel.
-        let sched = wait_arch().and_then(|hook| {
-            hook.current_cpu()
-                .and_then(|cpu| hook.current_task(cpu).map(|task| (cpu, task)))
-        });
+        // The task this operation runs as, for the reply's wake. Absent a
+        // live scheduler hook (a host test of this path, where the server
+        // runs on another thread) there is nothing to park on, so the wait
+        // degrades to a cooperative spin exactly as `SleepLock` does — never
+        // reachable as a steady state on a running kernel.
+        let task =
+            wait_arch().and_then(|hook| hook.current_cpu().and_then(|cpu| hook.current_task(cpu)));
 
         // Post under the client's synthetic identity; the reply wakes the
         // *scheduler* task that is running this operation. The per-request
@@ -310,7 +306,7 @@ impl BlkClient {
         // infinite park into a deterministic `TimedOut` — the mechanism, not
         // a spin. Absent a live clock hook (a host test of this path) there
         // is no deadline and the cooperative fallback below stands in.
-        let poster = sched.map_or(0, |(_, task)| task);
+        let poster = task.unwrap_or(0);
         let issued_ns = wait_arch().map_or(0, WaitQueueArch::now_ns);
         let deadline_abs = wait_arch().map_or(NO_DEADLINE, |_| {
             issued_ns.saturating_add(self.meter.budget().deadline_ns)
@@ -336,7 +332,7 @@ impl BlkClient {
         // reply, the deadline, or the endpoint's destruction releases us.
         // Arming the one-shot to the nearest pending deadline lets the timed
         // sweep wake this task at its deadline even with nothing else to run.
-        if let Some((_, task)) = sched {
+        if let Some(task) = task {
             CALL_WAITQ.register(task, deadline_abs);
             if let Some(hook) = wait_arch() {
                 hook.set_wakeup(nearest_timed_deadline());
@@ -354,17 +350,14 @@ impl BlkClient {
                 // device is gone) or the ticket is no longer ours: abandon
                 // the call fail-closed.
                 ReplyOutcome::Cancelled | ReplyOutcome::Unknown => break Err(Errno::NotFound),
-                ReplyOutcome::Pending => match sched {
-                    Some((cpu, _)) => {
-                        if !reschedule_current(cpu, RescheduleAction::Park) {
-                            core::hint::spin_loop();
-                        }
+                ReplyOutcome::Pending => {
+                    if task.is_none() || !park_calling_task() {
+                        core::hint::spin_loop();
                     }
-                    None => core::hint::spin_loop(),
-                },
+                }
             }
         };
-        if let Some((_, task)) = sched {
+        if let Some(task) = task {
             CALL_WAITQ.deregister(task);
             if let Some(hook) = wait_arch() {
                 hook.set_wakeup(nearest_timed_deadline());
@@ -898,6 +891,75 @@ mod tests {
         client.flush().expect("flush");
         server.join().unwrap();
         assert_eq!(device.lock().unwrap().flushes, 1);
+    }
+
+    /// A wake may resume the waiting task on another core than it parked on,
+    /// and the core it left now runs some other task: each park must suspend
+    /// the caller where it runs then, never through the core it parked on
+    /// before.
+    #[test]
+    fn a_waiting_transfer_parks_on_the_core_it_runs_on() {
+        let id = fresh_endpoint_id();
+        let endpoint = register_endpoint(id);
+        let window = leak_window();
+        let device = StdArc::new(Mutex::new(MemDevice::new(8)));
+        let geometry = serve(
+            Arc::clone(&endpoint),
+            Window(window),
+            device,
+            1,
+            StdArc::new(AtomicBool::new(false)),
+        );
+        let hold = KernelHold::for_test(window, BLK_DATA_LEN);
+        let mut client = BlkClient::connect(id, hold, &SINK).expect("connect");
+        geometry.join().unwrap();
+
+        let _ = crate::test_boot::claim_scheduler();
+        let (first, second) = (crate::test_boot::claim_cpu(), crate::test_boot::claim_cpu());
+        crate::test_boot::run_claim_on(first);
+        let move_to_second = |_| crate::test_boot::run_claim_on(second);
+        crate::test_boot::with_park_probe(first, move_to_second, |on_first| {
+            crate::test_boot::with_park_probe(
+                second,
+                |_| {},
+                |on_second| {
+                    thread::scope(|scope| {
+                        // Answer only once the client has parked twice, so its
+                        // second park comes after the move whatever the threads'
+                        // timing.
+                        scope.spawn(|| {
+                            let call = loop {
+                                match endpoint.recv_call(BLK_REQUEST_LEN) {
+                                    RecvCall::Received(call) => break call,
+                                    RecvCall::Empty => thread::yield_now(),
+                                    RecvCall::TooLarge { .. } => panic!("oversize request"),
+                                }
+                            };
+                            let give_up =
+                                std::time::Instant::now() + std::time::Duration::from_secs(30);
+                            while on_first.parks() + on_second.parks() < 2
+                                && std::time::Instant::now() < give_up
+                            {
+                                thread::yield_now();
+                            }
+                            let mut reply = [0u8; BLK_COMPLETION_LEN];
+                            let len = BlkCompletion::default().encode(&mut reply).unwrap();
+                            endpoint.reply(call.ticket, &reply[..len], &SINK).unwrap();
+                        });
+                        client.flush().expect("flush");
+                    });
+                    assert_eq!(
+                        on_first.parks(),
+                        1,
+                        "only the park before the move is on the first core"
+                    );
+                    assert!(
+                        on_second.parks() >= 1,
+                        "every later park is where the task runs"
+                    );
+                },
+            );
+        });
     }
 
     #[test]

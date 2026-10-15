@@ -8,9 +8,12 @@
 //! memory model permits, so a missed edge is a reported counterexample rather
 //! than a flake somebody sees once a year.
 //!
-//! It is a separate stage because it cannot ride the ordinary test pass: the
-//! substitution is a `--cfg loom` whole-crate rebuild, and building the
-//! production crate that way would make every other consumer of it wrong.
+//! It is a separate stage because it cannot ride the ordinary test pass: a
+//! crate that swaps its own atomics for loom's needs a `--cfg loom`
+//! whole-crate rebuild, and building the production crate that way would make
+//! every other consumer of it wrong. A crate whose protocol is generic over
+//! the word it runs on is modelled through a feature instead: its harness
+//! supplies loom-backed words and the graph builds as usual.
 //!
 //! The stage exists at all because the harness it drives had stopped
 //! compiling and nothing noticed — the models are only worth writing if
@@ -27,25 +30,51 @@ use crate::Context;
 pub struct Target {
     /// Workspace package (`cargo test -p`).
     pub package: &'static str,
+    /// The package's directory, relative to the workspace root.
+    pub dir: &'static str,
     /// The `tests/` harness holding its models.
     pub harness: &'static str,
+    /// How the harness reaches loom's types.
+    pub build: Build,
     /// Why this crate's correctness needs an interleaving oracle.
     pub description: &'static str,
+}
+
+/// How a harness is built against loom.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Build {
+    /// The crate swaps its own atomics for loom's under `--cfg loom`.
+    SwappedAtomics,
+    /// The models drive generic code over loom's types themselves, so only
+    /// this feature, which links loom, is needed.
+    Feature(&'static str),
 }
 
 /// The crates carrying loom models.
 pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-sync",
+        dir: "lib/sync",
         harness: "loom",
+        build: Build::SwappedAtomics,
         description: "the spin/MCS/RW locks, the seqlock, and the set-once cell",
     },
     Target {
         package: "tairix-abi",
+        dir: "lib/abi",
         harness: "loom",
+        build: Build::SwappedAtomics,
         description: "the shared PCM ring's release/acquire publication, which \
                       a total-store-ordered host would pass with both orderings \
                       downgraded to Relaxed",
+    },
+    Target {
+        package: "tairix-kernel-sched-api",
+        dir: "kernel/sched/api",
+        harness: "loom",
+        build: Build::Feature("loom"),
+        description: "the park/unpark handshake: a park and the wake racing it, \
+                      a wake owed to a later park, and a stop around both",
     },
 ];
 
@@ -139,13 +168,20 @@ fn job_for(ctx: &Context, target: &Target) -> Job {
         "--release",
         "--locked",
     ]);
-    cmd.env("RUSTFLAGS", LOOM_CFG);
+    match target.build {
+        Build::SwappedAtomics => {
+            cmd.env("RUSTFLAGS", LOOM_CFG);
+        }
+        Build::Feature(feature) => {
+            cmd.args(["--features", feature]);
+        }
+    }
     Job::new(format!("loom {}", target.package), cmd)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, selected, TARGETS};
+    use super::{parse, selected, Build, TARGETS};
     use std::ffi::OsString;
 
     fn args(items: &[&str]) -> Vec<OsString> {
@@ -187,16 +223,37 @@ mod tests {
             .and_then(std::path::Path::parent)
             .expect("workspace root");
         for target in TARGETS {
-            let crate_dir = target
-                .package
-                .strip_prefix("tairix-")
-                .unwrap_or(target.package);
             let path = root
-                .join("lib")
-                .join(crate_dir)
+                .join(target.dir)
                 .join("tests")
                 .join(format!("{}.rs", target.harness));
             assert!(path.exists(), "missing loom harness: {}", path.display());
+        }
+    }
+
+    /// A harness gated on anything but the switch its build mode sets compiles
+    /// to an empty binary, and the stage passes having run nothing.
+    #[test]
+    fn every_harness_is_gated_on_the_switch_its_build_sets() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        for target in TARGETS {
+            let path = root
+                .join(target.dir)
+                .join("tests")
+                .join(format!("{}.rs", target.harness));
+            let text = std::fs::read_to_string(&path).expect("harness readable");
+            let gate = match target.build {
+                Build::SwappedAtomics => String::from("#![cfg(loom)]"),
+                Build::Feature(feature) => format!("#![cfg(feature = \"{feature}\")]"),
+            };
+            assert!(
+                text.contains(&gate),
+                "{} is not gated by {gate}",
+                path.display()
+            );
         }
     }
 }

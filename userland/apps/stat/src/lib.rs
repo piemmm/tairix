@@ -46,8 +46,7 @@
 //!
 //! * [`Filesystem`] — the node's report, a link's stored target, and the
 //!   canonical path `%m` needs.
-//! * [`Mounts`] — the mount snapshot behind `%m`, `%o`, and every `-f`
-//!   field.
+//! * [`Mounts`] — the namespace behind `%m`, `%o`, and every `-f` field.
 //! * [`Names`] — the uid → account-name lookup behind `%U`.
 //! * [`Output`] — the report (fd 1) and the diagnostics (fd 2).
 //! * [`tairix_help::HelpSource`] — the tool's own `Help/` tree, read by the
@@ -76,4 +75,4 @@ mod io;
 pub use client::{run, Reporter, USAGE};
 pub use command::{parse, Command, Options, Pad, Piece, Subject, Trailer};
 pub use error::StatError;
-pub use io::{Filesystem, Mount, Mounts, Names, Output};
+pub use io::{Filesystem, Mounts, Names, Output};

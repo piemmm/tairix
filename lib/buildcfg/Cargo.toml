@@ -1,0 +1,17 @@
+[package]
+name = "tairix-buildcfg"
+description = "TAIRiX build-script target classification: the one definition of the `freestanding` cfg a program crate compiles under on a bare-metal target, keyed off the target's operating system so no source names an instruction set."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Read the target cargo is building and print the directives for it: what a
+# build script calls. The classification itself needs nothing.
+std = []

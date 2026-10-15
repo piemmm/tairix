@@ -567,6 +567,7 @@ mod grid {
             capability_count: 0,
             mime_count: 0,
             browse_count: 0,
+            kind: tairix_abi::ProgramKind::Application.to_wire(),
             reserved: 0,
             id_len,
             name_len,

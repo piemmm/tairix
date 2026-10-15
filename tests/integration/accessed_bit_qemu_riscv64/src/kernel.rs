@@ -60,12 +60,10 @@ const FAIL_UNEXPECTED_FAULT: NonZeroU16 = fail_point!(13);
 /// setup bug; after it, a fault the software A/D path did not resolve.
 static SETUP_DONE: AtomicBool = AtomicBool::new(false);
 
-/// Static boot heap, in the linker's NOLOAD `.heap` section so the boot
-/// trampoline neither zeroes nor counts it in the usable memory map. The
-/// riscv64 port names `alloc`, so a `#[global_allocator]` must be present
-/// even though this test allocates nothing itself.
+/// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+/// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static mut HEAP: Heap = Heap::ZERO;
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -73,7 +71,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Page-table pool backing the Sv39 hierarchy (lives in `.bss`).
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();

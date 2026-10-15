@@ -359,7 +359,7 @@ mod tests {
                 },
             }],
         }];
-        let env = vec![("PATH", "/Apps")];
+        let env = vec![("PATH", "/Users/ada/bin")];
         let spec = LaunchSpec {
             commands: &commands,
             env: &env,
@@ -367,7 +367,7 @@ mod tests {
         };
         assert_eq!(spec.commands.len(), 1);
         assert_eq!(spec.commands[0].argv, ["echo", "hi"]);
-        assert_eq!(spec.env, [("PATH", "/Apps")]);
+        assert_eq!(spec.env, [("PATH", "/Users/ada/bin")]);
         assert!(spec.background);
     }
 

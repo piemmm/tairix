@@ -100,3 +100,6 @@ tairix-crc32 = { path = "../crc32", version = "=0.0.0" }
 # The chained Ogg files the link tests read, written through the FLAC
 # encoder the sound library keeps behind a feature for exactly this.
 tairix-sound = { path = "../sound", version = "=0.0.0", features = ["encode"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

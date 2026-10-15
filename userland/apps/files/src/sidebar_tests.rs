@@ -197,12 +197,13 @@ fn hovered(places: &mut Places, event: &WindowEvent) -> (bool, Region) {
 fn a_press_on_a_row_focuses_the_rail_and_navigates_to_that_place() {
     let mut browser = browser();
     let mut places = places();
-    let apps = places
-        .index_of(&["Apps".to_string()])
-        .expect("the application root is a fixed row");
+    let system = places
+        .index_of(&["System".to_string()])
+        .expect("the system root is a fixed row");
 
-    let on_apps = press(row_centre(&places, apps));
-    let outcome = route(&mut browser, &mut places, &on_apps).expect("the rail owns its own press");
+    let on_system = press(row_centre(&places, system));
+    let outcome =
+        route(&mut browser, &mut places, &on_system).expect("the rail owns its own press");
 
     assert_eq!(
         outcome.repaint,
@@ -210,11 +211,11 @@ fn a_press_on_a_row_focuses_the_rail_and_navigates_to_that_place() {
         "the listing, the toolbar's enable states, and the rail's own mark all moved"
     );
     assert_eq!(outcome.refused, None);
-    assert_eq!(browser.components(), ["Apps".to_string()]);
+    assert_eq!(browser.components(), ["System".to_string()]);
     assert!(places.is_focused());
-    assert_eq!(places.cursor(), apps);
+    assert_eq!(places.cursor(), system);
     // The rail shows where the browser now is.
-    assert_eq!(places.index_of(browser.components()), Some(apps));
+    assert_eq!(places.index_of(browser.components()), Some(system));
 }
 
 #[test]
@@ -390,39 +391,39 @@ fn a_place_that_cannot_be_listed_reports_and_leaves_the_browser_where_it_was() {
 fn pressing_the_row_already_marked_changes_and_reports_nothing() {
     let mut browser = browser();
     let mut places = places();
-    let apps = places
-        .index_of(&["Apps".to_string()])
-        .expect("the application root is a fixed row");
-    let on_apps = press(row_centre(&places, apps));
-    route(&mut browser, &mut places, &on_apps);
+    let system = places
+        .index_of(&["System".to_string()])
+        .expect("the system root is a fixed row");
+    let on_system = press(row_centre(&places, system));
+    route(&mut browser, &mut places, &on_system);
 
     // The focus, the cursor, and the browser are all already there, so the
     // second press moves no pixel and owes no present.
-    let (outcome, damage) = routed(&mut browser, &mut places, &on_apps);
+    let (outcome, damage) = routed(&mut browser, &mut places, &on_system);
     assert_eq!(outcome, Some(super::SidebarOutcome::QUIET));
     assert!(damage.is_empty());
-    assert_eq!(browser.components(), ["Apps".to_string()]);
+    assert_eq!(browser.components(), ["System".to_string()]);
 }
 
 #[test]
 fn a_press_that_only_moves_the_mark_reports_the_rows_it_moved_between() {
     let mut browser = browser();
     let mut places = places();
-    let apps = places
-        .index_of(&["Apps".to_string()])
-        .expect("the application root is a fixed row");
-    let on_apps = press(row_centre(&places, apps));
-    route(&mut browser, &mut places, &on_apps);
+    let system = places
+        .index_of(&["System".to_string()])
+        .expect("the system root is a fixed row");
+    let on_system = press(row_centre(&places, system));
+    route(&mut browser, &mut places, &on_system);
     // Put the cursor elsewhere without navigating, so the next press on the
     // shown row moves the mark and nothing else.
     places.set_cursor(0);
     let view = rail(&places);
     let (first, marked) = (
         view.row_rect(0).expect("row 0"),
-        view.row_rect(apps).expect("the Apps row"),
+        view.row_rect(system).expect("the System row"),
     );
 
-    let (outcome, damage) = routed(&mut browser, &mut places, &on_apps);
+    let (outcome, damage) = routed(&mut browser, &mut places, &on_system);
 
     assert_eq!(outcome.map(|o| o.repaint), Some(Repaint::Reported));
     let mut want = damage::sink();
@@ -646,14 +647,14 @@ fn a_refresh_re_reads_the_volumes_and_keeps_the_users_place_in_the_rail() {
 
     assert!(places.is_focused());
     assert_eq!(places.cursor(), 2);
-    assert_eq!(places.len(), 7);
-    assert_eq!(places.rows()[6].label(), "Stick");
+    assert_eq!(places.len(), 6);
+    assert_eq!(places.rows()[5].label(), "Stick");
 
     // A cursor the shorter rail no longer has is left at the first row rather
     // than pointing past the end.
-    places.set_cursor(6);
+    places.set_cursor(5);
     refresh_places(&mut places, &home(), &[]);
-    assert_eq!(places.len(), 5);
+    assert_eq!(places.len(), 4);
     assert_eq!(places.cursor(), 0);
 }
 
@@ -919,11 +920,11 @@ fn a_focused_rail_lets_the_windows_accelerators_through() {
 fn alt_enter_on_the_focused_rail_navigates_nowhere() {
     let mut browser = browser();
     let mut places = places();
-    let apps = places
-        .index_of(&["Apps".to_string()])
-        .expect("the application root is a fixed row");
+    let system = places
+        .index_of(&["System".to_string()])
+        .expect("the system root is a fixed row");
     places.set_focused(true);
-    places.set_cursor(apps);
+    places.set_cursor(system);
 
     let outcome = route(
         &mut browser,

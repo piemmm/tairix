@@ -957,7 +957,9 @@ mod tests {
 
     #[test]
     fn a_config_without_a_service_directive_has_no_services() {
-        let config = StartupConfig::parse("console\nsession /Apps/Shell.app/Run login\n").unwrap();
+        let config =
+            StartupConfig::parse("console\nsession /System/Applications/Shell.app/Run login\n")
+                .unwrap();
         assert!(config.services().is_empty());
     }
 
@@ -1348,18 +1350,19 @@ mod tests {
 # a leading comment
 \t
 console   # open it
-session /Apps/Shell.app/Run login   # the login service
+session /System/Applications/Shell.app/Run login   # the login service
 ";
         let config = StartupConfig::parse(text).expect("config parses");
-        assert_eq!(config.session().path, "/Apps/Shell.app/Run");
+        assert_eq!(config.session().path, "/System/Applications/Shell.app/Run");
     }
 
     #[test]
     fn surrounding_whitespace_is_tolerated() {
-        let config =
-            StartupConfig::parse("   console  \n   session    /Apps/Shell.app/Run  login \n")
-                .unwrap();
-        assert_eq!(config.session().path, "/Apps/Shell.app/Run");
+        let config = StartupConfig::parse(
+            "   console  \n   session    /System/Applications/Shell.app/Run  login \n",
+        )
+        .unwrap();
+        assert_eq!(config.session().path, "/System/Applications/Shell.app/Run");
     }
 
     #[test]
@@ -1405,7 +1408,7 @@ session /Apps/Shell.app/Run login   # the login service
     #[test]
     fn a_required_directive_must_be_present() {
         assert_eq!(
-            StartupConfig::parse("session /Apps/Shell.app/Run login\n"),
+            StartupConfig::parse("session /System/Applications/Shell.app/Run login\n"),
             Err(ConfigError::ConsoleRequired),
         );
         assert_eq!(
@@ -1417,7 +1420,7 @@ session /Apps/Shell.app/Run login   # the login service
 
     #[test]
     fn an_oversized_config_is_refused_before_scanning() {
-        let mut text = String::from("console\nsession /Apps/Shell.app/Run login\n");
+        let mut text = String::from("console\nsession /System/Applications/Shell.app/Run login\n");
         while text.len() <= MAX_CONFIG_LEN {
             text.push_str("# padding comment line\n");
         }

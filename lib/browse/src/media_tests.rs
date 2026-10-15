@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::fs::FileId;
 use tairix_abi::time::Time64;
-use tairix_abi::SYSTEM_SERVICE_STORE;
+use tairix_abi::{SYSTEM_COMPONENT_STORE, SYSTEM_SERVICE_STORE};
 use tairix_icon::{IconKind, IconRequest, Reading};
 
 use super::{
@@ -305,9 +305,13 @@ fn a_bundle_in_the_service_store_is_a_service_and_elsewhere_an_application() {
     assert_eq!(service, MediaType::TairixService);
     assert_eq!(service.as_str(), "application/x-tairix-service");
     assert_eq!(service.icon(), IconKind::ServiceBundle);
+    // A component is started by the system too, never by a user's open.
+    assert_eq!(
+        media_for_entry(&bundle("desktop.app"), &components(SYSTEM_COMPONENT_STORE)),
+        MediaType::TairixService
+    );
 
     for store in [
-        "/Apps",
         "/System/Commands",
         "/System/Applications",
         "/Users/ada/Commands",

@@ -169,6 +169,7 @@ extern "C" {
 #define TAIRIX_SYS_WAITSET_CLOSE 142u
 #define TAIRIX_SYS_PORT_UNBIND 143u
 #define TAIRIX_SYS_CALL_PEER_PORT 144u
+#define TAIRIX_SYS_HW_NODE_KEY_SOURCE 145u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -206,6 +207,10 @@ typedef struct tairix_wait_status {
 * not do without failed: 128 + SIGABRT, so a parent can tell memory running
 * out from a fault or a bug, and may ask again once memory is freed. */
 #define TAIRIX_OOM_EXIT_STATUS ((int32_t)134)
+/* The exit status of a program that ended because an allocation it could
+* not do without would have passed its own memory bound: asking again
+* under the same bound fails the same way. */
+#define TAIRIX_MEMORY_BOUND_EXIT_STATUS ((int32_t)135)
 
 /* spawn() attach block: the child's credential, base console, and one wire per
 * standard descriptor (fd 0..3). Pass NULL/0 for full inherit. Every wire kind
@@ -676,6 +681,7 @@ uint64_t tairix_sys_console_relocate(void * a0, uintptr_t a1);
 int32_t tairix_sys_waitset_close(uint64_t a0);
 int32_t tairix_sys_port_unbind(uint64_t a0);
 int32_t tairix_sys_call_peer_port(uint64_t a0, uint64_t a1, uint64_t a2);
+int32_t tairix_sys_hw_node_key_source(void);
 
 #ifdef __cplusplus
 } /* extern "C" */

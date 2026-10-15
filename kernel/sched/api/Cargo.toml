@@ -21,6 +21,11 @@ test-arch = []
 # pulls in `std` for the multi-core stress
 # driver, so it is opt-in and consumed only from test targets.
 conformance = ["test-arch"]
+# `loom` builds `tests/loom.rs`, the models of the park/unpark handshake. The
+# handshake is generic over `ParkableTask`, so the models drive it over loom's
+# own atomics and the crate graph builds as usual; `cargo xtask loom` alone
+# turns it on.
+loom = ["dep:loom"]
 
 # The `kernel/sched/api/tests/conformance.rs` acceptance test runs the
 # shared suite against the in-tree concrete policy. The self dev-dep with
@@ -57,3 +62,4 @@ tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 # its insert must fail as a value rather than abort the kernel.
 tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+loom = { version = "0.7", optional = true }

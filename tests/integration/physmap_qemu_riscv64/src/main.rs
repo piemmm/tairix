@@ -64,11 +64,10 @@ mod kernel {
     use tairix_kernel::KERNEL_BOOT_DIRECT_MAP;
     use tairix_log::{Event, EventId, FieldValue, Sink};
 
-    /// Static boot heap, in the linker's dedicated `.heap` (NOLOAD)
-    /// section so the boot pipeline excludes it from the usable map,
-    /// exactly as the production riscv64 binary's heap is.
+    /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+    /// trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static mut HEAP: Heap = Heap::ZERO;
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -76,7 +75,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// The window the spawn path used to reach frames through, in bytes.
     /// The guest's RAM tops it, so a map no wider is the defect.

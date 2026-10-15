@@ -61,14 +61,10 @@ use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
 
-/// Static boot heap for the bump allocator.
-///
-/// Placed in the linker's dedicated `.heap` (NOLOAD) section — same as
-/// the riscv64 boot test bin — so the boot trampoline does not zero its
-/// 64 MiB and the boot pipeline excludes it from the usable
-/// physical-memory map.
+/// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+/// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static mut HEAP: Heap = Heap::ZERO;
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by the module-private `HEAP` static, shared by
 /// every riscv64 virtio QEMU test that links this crate.
@@ -80,7 +76,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 pub static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 // --- Stable identifiers ----------------------------------------------
 

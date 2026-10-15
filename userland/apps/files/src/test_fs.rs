@@ -29,7 +29,6 @@ impl FakeFs {
             "/Users",
             "/Users/ann",
             "/Users/ann/UserFiles",
-            "/Apps",
             "/System",
             "/Storage/Backup",
         ] {

@@ -157,8 +157,9 @@ pub fn thread_reserve_pages(stack_bytes: u64) -> u64 {
 /// * [`Errno::NotImplemented`] — the build retained no live address space, so
 ///   no stack can be reserved, or the process's siblings cannot be driven to a
 ///   stopping point (fail closed).
-/// * [`Errno::OutOfRange`] — the process is at its `threads` bound, or the
-///   requested stack exceeds its `stack-bytes` bound.
+/// * [`Errno::OutOfRange`] — the process is at its `threads` bound, the
+///   requested stack exceeds its `stack-bytes` bound, or the stack's first
+///   page would pass its `address-space-bytes` bound.
 /// * [`Errno::BadAddress`] — `entry`, `tls_base`, or `clear_on_exit` does not
 ///   name readable memory of the caller's own address space.
 /// * [`Errno::OutOfMemory`] — the anonymous window, the frame allocator, or the
@@ -191,6 +192,10 @@ where
     }
 
     let stack_bytes = request.stack_bytes;
+
+    // Charged before anything else changes, so the `AddressSpaceBytes`
+    // ceiling bounds a threaded process as it does one that maps memory.
+    let charge = StackCharge::take(handlers.aspaces, process)?;
 
     // The thread's kernel stack: a run of the shared kernel remap window whose
     // guard slot is unmapped in every root at once, so an overrun of it faults
@@ -306,6 +311,7 @@ where
             clear_on_exit: request.clear_on_exit,
         },
     );
+    charge.held_by_record();
 
     // Every piece of the thread's state now exists, so it is safe to run. A
     // thread that can no longer run fails closed, retired through the one
@@ -318,6 +324,46 @@ where
         return Err(Errno::NoSpace);
     }
     Ok(task_id)
+}
+
+/// A new thread's committed stack, charged to its process's mapped footprint
+/// before the thread exists. Every failure before the thread's stack record
+/// exists drops it, which credits the charge back; once the record exists it
+/// holds the charge, and the thread's withdrawal credits it.
+struct StackCharge<'a> {
+    aspaces: &'a RwLock<AddressSpaceRegistry>,
+    process: ProcessId,
+    held: bool,
+}
+
+impl<'a> StackCharge<'a> {
+    /// Bytes a new thread's stack is backed with as it is created.
+    const BYTES: u64 = THREAD_STACK_COMMIT_PAGES * PAGE_SIZE as u64;
+
+    fn take(aspaces: &'a RwLock<AddressSpaceRegistry>, process: ProcessId) -> Result<Self, Errno> {
+        aspaces
+            .write()
+            .try_charge_aspace_bytes(process, Self::BYTES)?;
+        Ok(Self {
+            aspaces,
+            process,
+            held: false,
+        })
+    }
+
+    fn held_by_record(mut self) {
+        self.held = true;
+    }
+}
+
+impl Drop for StackCharge<'_> {
+    fn drop(&mut self) {
+        if !self.held {
+            self.aspaces
+                .write()
+                .credit_aspace_bytes(self.process, Self::BYTES);
+        }
+    }
 }
 
 /// Make the parked `task` runnable, reporting whether it can run.
@@ -553,6 +599,32 @@ fn release_reservation<A>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stack_charge_is_credited_back_unless_the_record_holds_it() {
+        use tairix_abi::{LimitKind, ResourceLimit};
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let process = ProcessId(0x05ee_dd99);
+        let one = StackCharge::BYTES;
+        let bound = ResourceLimit::new(one, one).expect("well-formed");
+        aspaces
+            .write()
+            .set_limit(process, LimitKind::AddressSpaceBytes, bound);
+        drop(StackCharge::take(&aspaces, process).expect("fits"));
+        assert_eq!(
+            aspaces.read().mapped_aspace_bytes(process),
+            0,
+            "a creation that failed gives the stack back"
+        );
+        StackCharge::take(&aspaces, process)
+            .expect("fits")
+            .held_by_record();
+        assert_eq!(aspaces.read().mapped_aspace_bytes(process), one);
+        assert!(
+            matches!(StackCharge::take(&aspaces, process), Err(Errno::OutOfRange)),
+            "a second thread's stack passes the ceiling"
+        );
+    }
 
     /// Process ids no other test names, so the process-wide held-id set stays
     /// independent of the suite's randomised order.

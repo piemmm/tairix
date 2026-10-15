@@ -290,7 +290,7 @@ already reported and the driver ignored:
 
 Ageing a transaction needs a **monotonic clock** and something that will come
 back for it, and the host supplies both together
-(`ARXFS::with_writeback_host`, §10). A handle given neither has no window to
+(`ARXFS::with_volume_host`, §10). A handle given neither has no window to
 measure and publishes at every operation: a host that cannot say how much time
 has passed, or cannot be told when to return, does not get to defer
 durability.
@@ -579,9 +579,10 @@ check its window from inside an operation, so a volume that fell quiet held its
 transaction until the next one. The expiry now lives above the driver, as a
 kernel task.
 
-`FilesystemWrite::set_writeback_host` hands a mount the host's timer
-(`tairix_abi::driver::filesystem::WritebackHost`: a monotonic clock and a
-"this volume is due at *T*" report). `CommitScheduler` names its deadline as a
+`FilesystemWrite::set_volume_host` hands a mount its host
+(`tairix_abi::driver::filesystem::VolumeHost`: a monotonic clock, a
+"this volume is due at *T*" report, and the news that the volume crossed into
+or out of its reserve). `CommitScheduler` names its deadline as a
 transaction opens and names its absence as one closes — the two places the
 transaction state changes, so nothing above can forget — and reads its clock
 through the same seam, so a handle can never measure a window without something
@@ -591,7 +592,7 @@ Kernel side (`kernel/core/src/fs/writeback.rs`): the mount registry *is* the
 bookkeeping. Each `DriverEntry` carries one `u64` deadline slot the driver
 stores into lock-free and the flusher reads without touching the mount, so a
 volume mid-operation never delays the scan; `LateFilesystem` implements
-`WritebackHost` itself and is installed on every driver by `register` — one
+`VolumeHost` itself and is installed on every driver by `register` — one
 choke point, every port, every mount kind. `publish_due` takes the due set
 under the registry lock (consuming each deadline, so a fired one cannot re-arm
 in the past), then publishes in deadline order with the lock released. One task

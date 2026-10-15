@@ -38,6 +38,8 @@ tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # build-provenance fingerprint with the workspace's shared non-cryptographic
 # hash.
 tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
+# The same `build_support.rs` refines the shared target classification.
+tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
 # `font-atlas` rasterises the committed TrueType faces into the generated
 # `lib/font` atlas through the shared `lib/fontface` glyph engine — the same
 # parser + rasteriser the runtime font uses to resize UI glyphs, so the atlas
@@ -309,6 +311,9 @@ tairix-colour = { path = "../../lib/colour", version = "=0.0.0", features = ["te
 # surface against the one shared definition of each — never a hand-copied
 # literal (plans/APPWIN.md AW3/AW5, plans/NEW-TASKBAR.md T5).
 tairix-desktop-session = { path = "../../userland/gui/session", version = "=0.0.0" }
+# The login screen's readiness message, which a vertical logging in through it
+# waits on before typing.
+tairix-greeter-service = { path = "../../userland/session/greeter", version = "=0.0.0", default-features = false }
 # The one spelling of a bundle's entry point, so a guest's expected launch path
 # is built the way the desktop builds it.
 tairix-appstore = { path = "../../lib/appstore", version = "=0.0.0" }

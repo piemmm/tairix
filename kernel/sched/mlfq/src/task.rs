@@ -15,6 +15,7 @@
 
 use crate::loom_compat::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use crate::{CpuId, Priority, SchedClass, TaskAction, TaskContext, TaskId, TaskState};
+use tairix_kernel_sched_api::park::{AtomicLifecycle, Lifecycle};
 use tairix_kernel_sched_api::ParkableTask;
 
 use alloc::boxed::Box;
@@ -46,8 +47,8 @@ pub(crate) struct TaskInner {
     /// MLFQ band/demotion bookkeeping is meaningful only for the
     /// time-shared class.
     pub sched_class: AtomicU8,
-    /// Lifecycle state, stored as `TaskState as u8`.
-    pub state: AtomicU8,
+    /// Lifecycle state and wake token, held as one word.
+    pub lifecycle: AtomicLifecycle,
     /// Total times the body has been invoked. Useful for fairness tests.
     pub total_runs: AtomicU64,
     /// Cumulative ticks the body has spent running, in
@@ -65,13 +66,6 @@ pub(crate) struct TaskInner {
     /// allocation is reclaimed immediately rather than living as long as
     /// the registry entry.
     pub body: SpinLock<Option<Box<TaskBody>>>,
-    /// Wake-pending token closing the park/unpark lost-wakeup race
-    /// (no lost wake-ups). An [`crate::Scheduler::unpark`]
-    /// that arrives while the task has not yet committed to park cannot move
-    /// a non-parked task, so it sets this flag; the dispatch loop's `Park`
-    /// commit consumes it and re-readies the task rather than sleeping it.
-    /// Mirrors Rust's `Thread` park/unpark token semantics.
-    pub wake_pending: AtomicBool,
     /// Termination request against a task that was still executing when
     /// [`crate::Scheduler::exit`] was called. Set once (first request wins);
     /// the owning dispatch observes it when its body returns and performs
@@ -94,13 +88,12 @@ impl TaskInner {
             home_cpu: AtomicU32::new(home_cpu),
             priority: AtomicU8::new(priority as u8),
             sched_class: AtomicU8::new(SchedClass::TimeShared.as_u8()),
-            state: AtomicU8::new(TaskState::Ready.as_u8()),
+            lifecycle: AtomicLifecycle::new(TaskState::Ready),
             total_runs: AtomicU64::new(0),
             run_ticks: AtomicU64::new(0),
             yields_at_band: AtomicU64::new(0),
             last_started: AtomicU64::new(0),
             body: SpinLock::new(Some(body)),
-            wake_pending: AtomicBool::new(false),
             doomed: AtomicBool::new(false),
         }
     }
@@ -143,41 +136,21 @@ impl TaskInner {
 
     /// Unconditionally store the state.
     pub(crate) fn store_state(&self, new: TaskState) {
-        self.state.store(new.as_u8(), Ordering::Release);
+        self.lifecycle.store(Lifecycle::of(new));
     }
 }
 
 impl ParkableTask for TaskInner {
-    fn load_state(&self) -> TaskState {
-        // Only `TaskState`-produced bytes are ever stored; a corrupt one
-        // reads as terminal rather than panicking or reviving a task.
-        let raw = self.state.load(Ordering::Acquire);
-        TaskState::from_u8(raw).unwrap_or(TaskState::Exited)
+    fn load_lifecycle(&self) -> Lifecycle {
+        self.lifecycle.load()
     }
 
-    fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState> {
-        match self.state.compare_exchange(
-            expected.as_u8(),
-            new.as_u8(),
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => Ok(()),
-            Err(cur) => Err(TaskState::from_u8(cur).unwrap_or(TaskState::Exited)),
-        }
+    fn cas_lifecycle(&self, expected: Lifecycle, new: Lifecycle) -> Result<(), Lifecycle> {
+        self.lifecycle.compare_exchange(expected, new)
     }
 
-    fn swap_state(&self, new: TaskState) -> TaskState {
-        let raw = self.state.swap(new.as_u8(), Ordering::AcqRel);
-        TaskState::from_u8(raw).unwrap_or(TaskState::Exited)
-    }
-
-    fn set_wake_pending(&self) {
-        self.wake_pending.store(true, Ordering::Release);
-    }
-
-    fn take_wake_pending(&self) -> bool {
-        self.wake_pending.swap(false, Ordering::AcqRel)
+    fn swap_lifecycle(&self, new: Lifecycle) -> Lifecycle {
+        self.lifecycle.swap(new)
     }
 }
 

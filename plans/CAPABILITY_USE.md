@@ -483,7 +483,7 @@ authorises it; anything not listed is denied.
   the audited `rlimit_set` rejection followed by the scripted `exit`.
   The scripted `ls /` / file write-read steps of the original sketch are
   deliberately absent: no `ls`/file tool is in the embedded program
-  registry yet (they arrive with the `/Apps` tool enrolment), and `cd`'s
+  registry yet (they arrive with the store tool enrolment), and `cd`'s
   kernel-authorised `fs_chdir` + `pwd` already witness the filesystem
   grant end to end.
 

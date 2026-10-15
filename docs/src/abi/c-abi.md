@@ -222,9 +222,9 @@ trampoline is exercised under QEMU (`plans/CCOMPAT.md` stage CC3).
 ## Bundles and the dynamic-loader policy
 
 A C program ships exactly like any other TAIRiX application: a signed
-`/Apps/<Name>.app/` bundle whose `Run` binary is a PIE `rxe` image
-(`AGENTS.md` §16.5). The application-bundle loader (`userland/system/appmgr`)
-treats a C bundle no differently from a Rust one — the whole pipeline is
+`<Name>.app/` bundle in a program store whose `Run` binary is a PIE `rxe` image
+(`AGENTS.md` §16.5). The bundle load gate (`lib/appload`, driven by the
+kernel's `spawn`) treats a C bundle no differently from a Rust one — the whole pipeline is
 language-agnostic:
 
 1. The `AppInfo` manifest is decoded, its ABI version and syscall-table hash

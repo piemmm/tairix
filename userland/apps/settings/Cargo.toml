@@ -143,3 +143,6 @@ tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
 [lints]
 workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

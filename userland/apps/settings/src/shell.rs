@@ -18,7 +18,7 @@ use tairix_abi::elevate::ElevateArgv;
 use tairix_abi::font_ipc::FamilyEntry;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::window_ipc::PreviewSubject;
-use tairix_abi::BundleId;
+use tairix_abi::{BundleId, DATETIME_RUN_PATH};
 use tairix_controls::{
     ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, CredentialAction,
     CredentialSheet, Crumb, DisclosureSet, FieldGroup, Keystroke, Menu, MenuAction, MenuItem,
@@ -3378,9 +3378,6 @@ const SET_ADDRESSING_PURPOSE: &str =
 /// The tool that owns the machine's boot-time configuration store, which is
 /// the only thing that writes it.
 const CONFIGURE_RUN_PATH: &str = "/System/Commands/configure.app/Run";
-
-/// The application that owns the wall clock.
-const DATETIME_RUN_PATH: &str = "/System/Applications/datetime.app/Run";
 
 /// The tool that answers the account and group listing.
 const USERS_RUN_PATH: &str = "/System/Commands/users.app/Run";

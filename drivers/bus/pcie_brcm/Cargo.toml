@@ -55,3 +55,6 @@ tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 # canary, the panic handler, the syscall wrappers, the `ClockDelay`, and
 # `yield_now`.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

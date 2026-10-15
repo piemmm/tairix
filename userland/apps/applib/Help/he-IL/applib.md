@@ -46,8 +46,8 @@ applib — ניהול ספריית התוכניות של שולחן העבודה
 לעולם לא של סמכות: הפעלת חבילה עדיין נשלטת על ידי בדיקות החתימה
 וההרשאות (capability) של המטעין, ללא קשר לקטלוג.
 
-`applib rescan` סורק את מאגרי היישומים (`/System/Commands`,
-`/System/Applications` ו-`/Apps`, או את ה-`<home>/Commands` וה-`<home>/Applications`
+`applib rescan` סורק את מאגרי היישומים (`/System/Commands`
+ו-`/System/Applications`, או את ה-`<home>/Commands` וה-`<home>/Applications`
 של המשתמש תחת `--user`), קורא את המניפסט של כל
 חבילה ורושם כל יישום שמבקש להופיע ברשימה וטרם קוטלג. רשומות קיימות
 — כולל שינויי שמות והסתרות של אוצר הספרייה — לעולם לא נפגעות,
@@ -80,8 +80,8 @@ applib — ניהול ספריית התוכניות של שולחן העבודה
 
 - `applib` — הצג את הספרייה המורכבת, תיקייה אחר תיקייה.
 - `applib list --category Games` — הצג תיקייה אחת.
-- `applib add /Apps/chess.app` — רשום חבילה כפי שהמניפסט שלה מבקש.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/chess.app` — רשום חבילה כפי שהמניפסט שלה מבקש.
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   רשום חבילה שאינה מצהירה על רישום, תחת תיקייה מפורשת.
 - `applib remove os.tairix.chess` — הסר ערך לפי מזהה.
 - `applib hide os.tairix.chess --user` — הסתר אותו מהספרייה שלך בלבד.

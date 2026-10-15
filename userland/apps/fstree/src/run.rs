@@ -18,8 +18,9 @@
 //! inherited standard input/output (fd 0/1), and `RtFs`, which lists
 //! directories through the kernel-authorised `fs_*` syscalls (every
 //! per-inode and mount check stays kernel-side) and asks the System
-//! Information API's `MOUNT_LIST` query for the status line's volume free
-//! space (best-effort; an unreachable service simply omits the figure).
+//! Information API for the status line's volume free space — the volume the
+//! binding covering the directory shows (best-effort; an unreachable service
+//! simply omits the figure).
 //! The tool binds only to its inherited descriptors, never a console
 //! device, and holds no ambient authority. Invoked in the worker role
 //! (`--parser-sandbox-worker`), it instead serves the sandboxed decode
@@ -48,7 +49,7 @@ mod program {
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
     use tairix_fstree::{run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo};
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_procinfo::{for_each_mount, IpcTransport, VolumeBytes, WalkStep};
+    use tairix_procinfo::{for_each_mount, IpcTransport, Namespace, VolumeBytes, WalkStep};
     use tairix_rt::io::{write_stderr_line, StdInfo, Write};
     use tairix_rt::File;
     use tairix_sandbox::decode::DecodeService;
@@ -419,29 +420,15 @@ mod program {
         }
 
         fn volume_space(&mut self, path: &str) -> Option<VolumeBytes> {
-            // The mount whose target is the longest prefix of `path` backs
-            // it, and wins outright: one that reports no capacity omits the
-            // figure rather than letting the volume above it answer for
-            // bytes that would not land there. Best-effort by contract — an
-            // unreachable service or a failed walk omits it too, never an
-            // error and never a fabricated count.
-            let mut best: Option<(usize, Option<VolumeBytes>)> = None;
-            let walked = for_each_mount(&IpcTransport, |record| {
-                let Ok(target) = core::str::from_utf8(record.target_bytes()) else {
-                    return Ok(WalkStep::Continue);
-                };
-                if !path_has_prefix(path, target) {
-                    return Ok(WalkStep::Continue);
-                }
-                if best.as_ref().is_none_or(|(len, _)| target.len() > *len) {
-                    best = Some((target.len(), VolumeBytes::of(&record.usage())));
-                }
-                Ok(WalkStep::Continue)
-            });
-            match walked {
-                Ok(()) => best.and_then(|(_, held)| held),
-                Err(_) => None,
-            }
+            // The volume the binding covering `path` shows backs it, and wins
+            // outright: one that reports no capacity omits the figure rather
+            // than letting the volume above it answer for bytes that would
+            // not land there. Best-effort by contract — an unreachable
+            // service or a failed walk omits it too, never an error and
+            // never a fabricated count.
+            let namespace = Namespace::read(&IpcTransport).ok()?;
+            let (_, volume) = namespace.volume_at(path.as_bytes())?;
+            VolumeBytes::of(&volume.usage())
         }
 
         fn list_volumes(&mut self) -> Vec<VolumeInfo> {
@@ -478,18 +465,6 @@ mod program {
     impl Info for RtInfo {
         fn info(&mut self, record: &[u8]) {
             let _ = StdInfo.write_all(record);
-        }
-    }
-
-    /// Whether `path` lives under the mount target `target` (`/` covers
-    /// everything; otherwise the prefix must end on a component boundary).
-    fn path_has_prefix(path: &str, target: &str) -> bool {
-        if target == "/" {
-            return true;
-        }
-        match path.strip_prefix(target) {
-            Some(rest) => rest.is_empty() || rest.starts_with('/'),
-            None => false,
         }
     }
 

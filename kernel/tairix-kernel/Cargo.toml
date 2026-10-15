@@ -160,6 +160,12 @@ tairix-drv-fs-arxfs = { path = "../../drivers/filesystem/arxfs", version = "=0.0
 # a second parser. First-party, architecture-neutral; host-tested on the CI
 # host.
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
+# The caps of the settings documents the system rewrites on its own, which
+# size the root's system reserve. The app-data cap is read from `tairix-abi`:
+# its engine turns on `zeroize/alloc` for every guest built beside this crate.
+tairix-enrolment = { path = "../../lib/enrolment", version = "=0.0.0" }
+tairix-netconfig = { path = "../../lib/netconfig", version = "=0.0.0" }
+tairix-sysconfig = { path = "../../lib/sysconfig", version = "=0.0.0" }
 # The FAT boot partition holds the plaintext `root.unlock` key-derivation
 # descriptor the boot path reads *before* the encrypted root is mounted
 # (`plans/PI.md` P11 Chunk B). `root_mount` reads it back
@@ -390,8 +396,12 @@ tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # and as a kernel module, so its shared non-cryptographic hash is named in
 # both dependency sets.
 tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
+# The target classification `src/build_support.rs` refines, named in the
+# dev-dependencies too because the module's host tests compile it there.
+tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
 
 [dev-dependencies]
+tairix-buildcfg = { path = "../../lib/buildcfg", version = "=0.0.0" }
 # The shared device-tree builder, for the generic ECAM host bring-up's tests.
 tairix-fdt = { path = "../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
 # The fatal bridge's host test returns the shared fatal latch to its boot

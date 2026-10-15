@@ -43,12 +43,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::driver::filesystem::{
     DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeInfo, NodeKind as DriverNodeKind, VolumeStats, WritebackHost,
+    FilesystemWrite, NodeInfo, NodeKind as DriverNodeKind, NodeTimes, VolumeHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::{
-    MountAvailability, MountRecord, MountVolumeState, VolumeIoHealthRecord, VolumeIoQueueRecord,
-    VolumeIoStatsRecord,
+    MountAvailability, MountRecord, MountVolumeState, ViewBindingRecord, VolumeIoHealthRecord,
+    VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{
@@ -60,6 +60,9 @@ use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
 use tairix_sync::{OnceCell, RwLock, SpinLock};
 use tairix_util::fallible::collected;
 
+use tairix_log::{Field, FieldValue, Level, Sink};
+
+use crate::audit::{self, AuditEvent};
 use crate::fswatch::ClaimRef;
 use crate::sleeplock::SleepLock;
 
@@ -67,8 +70,9 @@ use super::blkmeter::VolumeIoSource;
 
 use super::delegate::{DelegatedEntry, DelegatedRef, FinalLink};
 use super::listing::{ListEnd, Listing, ListingRegistry};
-use super::path::Path;
-use super::perm::Credentials;
+use super::mount::{CoveredPair, CoveredPath, MountPoint, MountTable};
+use super::path::{spell, Path};
+use super::perm::{Access, Credentials, Metadata};
 use super::service::{FilesystemService, LookedUp, ReaddirEntry};
 use super::writeback::WritebackDue;
 use super::{Vfs, VfsError};
@@ -135,10 +139,11 @@ struct DriverEntry<F: 'static> {
     watch: Option<ClaimRef>,
 }
 
-/// One registered volume's snapshot facts, as [`LateFilesystem::entry`]
+/// One registered volume's snapshot facts, as [`LateFilesystem::entries`]
 /// reports them to the mount snapshot: the registration names, the shared
 /// driver lock, the volume's published identity, and its availability.
 struct SnapshotEntry<F: 'static> {
+    handle: u64,
     source: String,
     fstype: String,
     driver: Arc<SleepLock<F>>,
@@ -201,11 +206,14 @@ pub struct LateFilesystem<F: 'static> {
     /// filesystem operation (the `&'static SleepLock` reference is copied
     /// out first), so it never spins on a parked holder.
     drivers: SpinLock<Vec<DriverEntry<F>>>,
-    /// The write-back timer every registered driver is handed, once the boot
-    /// path has one to give ([`Self::install_writeback_host`]). Until then a
-    /// driver is registered with no host and publishes at every operation, so
-    /// no transaction is ever deferred without a timer to fire it.
-    writeback_host: OnceCell<&'static dyn WritebackHost>,
+    /// The host every registered driver is handed, once the boot path has one
+    /// to give ([`Self::install_volume_host`]). Until then a driver is
+    /// registered with no host and publishes at every operation, so no
+    /// transaction is ever deferred without a timer to fire it.
+    volume_host: OnceCell<&'static dyn VolumeHost>,
+    /// Where a volume running down to its reserve is recorded, installed with
+    /// the host.
+    audit: OnceCell<&'static (dyn Sink + Sync)>,
     /// Whether the flusher is live and will publish what a driver defers
     /// ([`Self::arm_writeback`]). Until it is, the host declines to read its
     /// clock, so every driver publishes at each operation: the batching window
@@ -233,7 +241,8 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         Self {
             vfs: OnceCell::new(),
             drivers: SpinLock::new(Vec::new()),
-            writeback_host: OnceCell::new(),
+            volume_host: OnceCell::new(),
+            audit: OnceCell::new(),
             writeback_armed: AtomicBool::new(false),
             listings: ListingRegistry::new(),
         }
@@ -312,8 +321,8 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         // fast path takes it — which matters because the surprise-removal path
         // re-registers a stand-in from a context that must not park, and
         // because the registry's own spin lock is released first either way.
-        if let Ok(Some(host)) = self.writeback_host.get() {
-            shared.lock().set_writeback_host(handle, *host);
+        if let Ok(Some(host)) = self.volume_host.get() {
+            shared.lock().set_volume_host(handle, *host);
         }
         // What the mount listing reports of the volume moved — its name,
         // type, space and availability — though the table's own mounts did
@@ -322,9 +331,10 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         Ok(shared)
     }
 
-    /// Publish the write-back timer every driver registered from now on is
-    /// handed, so a filesystem that batches commits has something above it to
-    /// publish a volume that falls quiet ([`super::writeback`]).
+    /// Publish the host every driver registered from now on is handed, so a
+    /// filesystem that batches commits has something above it to publish a
+    /// volume that falls quiet ([`super::writeback`]), and `audit`, where a
+    /// volume running down to its reserve is recorded.
     ///
     /// Set-once per boot, and installed before any writable volume is
     /// registered: a driver registered without a host publishes at every
@@ -335,13 +345,16 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     ///
     /// [`FilesystemAlreadyInstalled`] if a host is already installed — the
     /// live timer is never re-pointed.
-    pub fn install_writeback_host(
+    pub fn install_volume_host(
         &self,
-        host: &'static dyn WritebackHost,
+        host: &'static dyn VolumeHost,
+        audit: &'static (dyn Sink + Sync),
     ) -> Result<(), FilesystemAlreadyInstalled> {
-        self.writeback_host
+        self.volume_host
             .set(host)
-            .map_err(|_| FilesystemAlreadyInstalled)
+            .map_err(|_| FilesystemAlreadyInstalled)?;
+        let _ = self.audit.set(audit);
+        Ok(())
     }
 
     /// Record that the write-back flusher is live and will publish what a
@@ -660,24 +673,24 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             .collect()
     }
 
-    /// The registered driver for `handle` together with its registration
-    /// facts (names, volume identity, availability), for the mount
-    /// snapshot. `None` when the backing volume is not yet online — the
-    /// caller reports the mount without names or usage rather than
-    /// guessing.
-    fn entry(&self, handle: DriverHandle) -> Option<SnapshotEntry<F>> {
-        let handle = handle.as_u64();
-        let drivers = self.drivers.lock();
-        drivers
+    /// Every registered volume's snapshot facts, sorted by handle, read under
+    /// one hold of the registry lock.
+    fn entries(&self) -> Vec<SnapshotEntry<F>> {
+        let mut entries: Vec<SnapshotEntry<F>> = self
+            .drivers
+            .lock()
             .iter()
-            .find(|e| e.handle == handle)
             .map(|e| SnapshotEntry {
+                handle: e.handle,
                 source: e.source.clone(),
                 fstype: e.fstype.clone(),
                 driver: Arc::clone(&e.driver),
                 volume_id: e.volume_id,
                 availability: overlaid_availability(e.availability, e.io.as_ref()),
             })
+            .collect();
+        entries.sort_unstable_by_key(|entry| entry.handle);
+        entries
     }
 }
 
@@ -691,7 +704,7 @@ impl<F: FilesystemWrite + Send + 'static> Default for LateFilesystem<F> {
 /// every mounted volume by the handle a driver reports against, so the
 /// deadline lives beside the driver it belongs to rather than in a second
 /// table that could drift out of step with the mounts.
-impl<F: FilesystemWrite + Send + 'static> WritebackHost for LateFilesystem<F> {
+impl<F: FilesystemWrite + Send + 'static> VolumeHost for LateFilesystem<F> {
     fn now_ns(&self) -> Option<u64> {
         // One atomic load on the driver's per-operation path. A driver may
         // only measure a window while the flusher that will fire it is live.
@@ -703,6 +716,41 @@ impl<F: FilesystemWrite + Send + 'static> WritebackHost for LateFilesystem<F> {
 
     fn writeback_due(&self, volume: DriverHandle, deadline_ns: Option<u64>) {
         self.note_writeback_due(volume, deadline_ns);
+    }
+
+    /// The mount listing reports the volume's space, so its subscribers hear
+    /// of the crossing through the `Mounts` notice; the record is the
+    /// operator's warning while the system still has runway.
+    fn reserve_crossed(&self, volume: DriverHandle, in_reserve: bool) {
+        let source = self
+            .drivers
+            .lock()
+            .iter()
+            .find(|e| e.handle == volume.as_u64())
+            .map(|e| e.source.clone());
+        if let (Ok(Some(audit)), Some(source)) = (self.audit.get(), source) {
+            let (level, event) = if in_reserve {
+                (Level::Warn, AuditEvent::VolumeReserveEntered)
+            } else {
+                (Level::Info, AuditEvent::VolumeReserveLeft)
+            };
+            audit::emit(
+                *audit,
+                level,
+                event,
+                &[
+                    Field {
+                        key: "volume",
+                        value: FieldValue::UnsignedInt(volume.as_u64()),
+                    },
+                    Field {
+                        key: "source",
+                        value: FieldValue::Str(&source),
+                    },
+                ],
+            );
+        }
+        crate::notice::mounts_changed();
     }
 }
 
@@ -920,9 +968,10 @@ where
         uid: u32,
         caps: &dyn CapabilityQuery,
         path: &str,
-        op: impl FnOnce(&Vfs, &mut F, &Credentials<'_>, &Path) -> Result<R, VfsError>,
+        intent: Intent,
+        op: impl FnOnce(&Vfs, &mut F, &Credentials<'_>, &CoveredPath) -> Result<R, VfsError>,
     ) -> Result<R, Errno> {
-        self.with_secured_at(uid, caps, path, |vfs, fs, cred, path, _| {
+        self.with_secured_at(uid, caps, path, intent, |vfs, fs, cred, path, _| {
             op(vfs, fs, cred, path)
         })
     }
@@ -935,23 +984,69 @@ where
         uid: u32,
         caps: &dyn CapabilityQuery,
         path: &str,
-        op: impl FnOnce(&Vfs, &mut F, &Credentials<'_>, &Path, DriverHandle) -> Result<R, VfsError>,
+        intent: Intent,
+        op: impl FnOnce(
+            &Vfs,
+            &mut F,
+            &Credentials<'_>,
+            &CoveredPath,
+            DriverHandle,
+        ) -> Result<R, VfsError>,
     ) -> Result<R, Errno> {
-        let vfs = self.mount.vfs()?;
-        // An owned snapshot, so no identity-table borrow is held across the
-        // operation (which may park on device completion) while the table
-        // stays replaceable underneath.
-        let (gid, supplementary_gids) = self.identity.resolve_groups(uid)?;
+        let view = self.view(uid, caps, path)?;
+        let cred = view.cred();
+        match &view.served {
+            Served::Volume(handle, driver) => {
+                let mut fs = driver.lock();
+                op(view.vfs, &mut fs, &cred, &view.covered, *handle).map_err(VfsError::to_errno)
+            }
+            Served::Catalog => Err(intent.refusal(&view.covered).to_errno()),
+        }
+    }
+
+    /// The caller's credentials and what serves `path`, resolved once.
+    fn view<'a>(
+        &'a self,
+        uid: u32,
+        caps: &'a dyn CapabilityQuery,
+        path: &str,
+    ) -> Result<View<'a, F>, Errno> {
         let path = Path::parse(path).map_err(VfsError::to_errno)?;
-        let (handle, driver) = self.resolve_driver(vfs, &path)?;
-        let cred = Credentials {
-            uid: UserId(uid),
-            gid,
-            supplementary_gids: &supplementary_gids,
-            caps,
+        self.view_of(uid, caps, |mounts| mounts.cover(path), CoveredPath::mount)
+    }
+
+    /// The caller's credentials, and what `cover` reads of the mount table
+    /// with the driver behind its `serving` mount, both under one guard: the
+    /// guard every attach and detach writes under, so the driver is the one
+    /// behind the very mount the operation is judged against.
+    ///
+    /// The credentials are built from the kernel-attested `uid`/`caps` and an
+    /// owned snapshot of the identity table, so no table borrow is held across
+    /// an operation that may park on device completion.
+    fn view_of<'a, C>(
+        &'a self,
+        uid: u32,
+        caps: &'a dyn CapabilityQuery,
+        cover: impl FnOnce(&MountTable) -> C,
+        serving: fn(&C) -> &MountPoint,
+    ) -> Result<View<'a, F, C>, Errno> {
+        let vfs = self.mount.vfs()?;
+        let (gid, groups) = self.identity.resolve_groups(uid)?;
+        let (covered, served) = {
+            let mounts = vfs.mounts();
+            let covered = cover(&mounts);
+            let served = self.served_by(serving(&covered))?;
+            (covered, served)
         };
-        let mut fs = driver.lock();
-        op(vfs, &mut fs, &cred, &path, handle).map_err(VfsError::to_errno)
+        Ok(View {
+            vfs,
+            uid,
+            gid,
+            groups,
+            caps,
+            covered,
+            served,
+        })
     }
 
     /// As [`Self::with_secured_at`], for an operation naming **two** paths.
@@ -970,45 +1065,372 @@ where
             &Vfs,
             &mut F,
             &Credentials<'_>,
-            &Path,
-            &Path,
+            &CoveredPair,
             DriverHandle,
         ) -> Result<R, VfsError>,
     ) -> Result<R, Errno> {
-        let vfs = self.mount.vfs()?;
-        let (gid, supplementary_gids) = self.identity.resolve_groups(uid)?;
         let first = Path::parse(first).map_err(VfsError::to_errno)?;
         let second = Path::parse(second).map_err(VfsError::to_errno)?;
-        let (handle, driver) = self.resolve_driver(vfs, &first)?;
-        let cred = Credentials {
-            uid: UserId(uid),
-            gid,
-            supplementary_gids: &supplementary_gids,
+        let view = self.view_of(
+            uid,
             caps,
-        };
-        let mut fs = driver.lock();
-        op(vfs, &mut fs, &cred, &first, &second, handle).map_err(VfsError::to_errno)
+            |mounts| mounts.cover_pair(first, second),
+            |pair| pair.first().mount(),
+        )?;
+        let cred = view.cred();
+        match &view.served {
+            Served::Volume(handle, driver) => {
+                let mut fs = driver.lock();
+                op(view.vfs, &mut fs, &cred, &view.covered, *handle).map_err(VfsError::to_errno)
+            }
+            Served::Catalog => Err(Intent::Write.refusal(view.covered.first()).to_errno()),
+        }
     }
 
-    /// The driver backing the mount covering `path`, with its handle, locked
-    /// by the caller.
+    /// What serves a path `mount` covers: the driver backing it, with its
+    /// handle, locked by the caller, or — for a mount with no backing — the
+    /// `Storage:` catalog at its point.
     ///
-    /// A backing-less covering mount (the in-RAM default-layout dirs) yields
-    /// [`VfsError::NotFound`], and a backed mount whose driver is not yet
-    /// registered [`Errno::NotImplemented`]: both fail closed, never against
-    /// a guessed volume.
-    fn resolve_driver(
-        &self,
-        vfs: &Vfs,
-        path: &Path,
-    ) -> Result<(DriverHandle, Arc<SleepLock<F>>), Errno> {
-        let handle = vfs
-            .mounts()
-            .resolve(path)
-            .backing()
-            .ok_or_else(|| VfsError::NotFound.to_errno())?;
-        Ok((handle, self.mount.driver(handle)?))
+    /// Called with the mount table still read-locked, so the driver is the one
+    /// registered behind `mount` at that reading: a volume is attached before
+    /// its driver registers and unregisters only after it detaches. A backed
+    /// mount whose driver is not yet registered is [`Errno::NotImplemented`]:
+    /// it fails closed, never against a guessed volume.
+    fn served_by(&self, mount: &MountPoint) -> Result<Served<F>, Errno> {
+        match mount.backing() {
+            Some(handle) => Ok(Served::Volume(handle, self.mount.driver(handle)?)),
+            None => Ok(Served::Catalog),
+        }
     }
+}
+
+/// What a path resolves to: a volume's driver, or the catalog of attached
+/// volumes that a mount with no backing presents.
+enum Served<F: ?Sized> {
+    Volume(DriverHandle, Arc<SleepLock<F>>),
+    Catalog,
+}
+
+/// A caller and what it named — one path or a pair — resolved for one
+/// operation.
+struct View<'a, F: ?Sized, C = CoveredPath> {
+    vfs: &'a Vfs,
+    uid: u32,
+    gid: GroupId,
+    groups: Vec<GroupId>,
+    caps: &'a dyn CapabilityQuery,
+    covered: C,
+    served: Served<F>,
+}
+
+impl<F: ?Sized, C> View<'_, F, C> {
+    fn cred(&self) -> Credentials<'_> {
+        Credentials {
+            uid: UserId(self.uid),
+            gid: self.gid,
+            supplementary_gids: &self.groups,
+            caps: self.caps,
+        }
+    }
+}
+
+/// Whether an operation reads or mutates, so the catalog of attached volumes
+/// answers each in kind: a read finds nothing stored in it, and a mutation
+/// of it or of a name in it is refused as of any read-only directory.
+#[derive(Copy, Clone)]
+enum Intent {
+    /// A read, answering `on_catalog` when the path names the catalog itself.
+    Read(VfsError),
+    /// A mutation.
+    Write,
+}
+
+impl Intent {
+    /// The refusal of this operation on `covered`, which the catalog covers
+    /// and no attached volume serves.
+    fn refusal(self, covered: &CoveredPath) -> VfsError {
+        let (path, point) = (covered.path(), covered.mount().path());
+        let names_the_catalog = path == point;
+        match self {
+            Self::Read(on_catalog) if names_the_catalog => on_catalog,
+            Self::Write if names_the_catalog || path.parent().as_ref() == Some(point) => {
+                VfsError::ReadOnly
+            }
+            Self::Read(_) | Self::Write => VfsError::NotFound,
+        }
+    }
+}
+
+/// Open `path` on the volume `fs` serves: refuse a handle of the wrong kind,
+/// and create or truncate as `flags` asks.
+fn open_on_volume<F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized>(
+    vfs: &Vfs,
+    fs: &mut F,
+    cred: &Credentials<'_>,
+    covered: &CoveredPath,
+    flags: OpenFlags,
+) -> Result<(), VfsError> {
+    // `NO_FOLLOW` makes the open name the final component itself, so the
+    // resolution that decides the handle's kind keeps a link rather than
+    // reporting what it points at. The same posture rides on the handle
+    // and is re-derived by every later operation it serves, so an open
+    // and a later stat can never disagree.
+    let final_link = FinalLink::for_open(flags);
+    match vfs.stat_via_secured(cred, covered, fs, final_link) {
+        Ok(info) => {
+            // An exclusive create demands the path not already exist.
+            if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUSIVE) {
+                return Err(VfsError::AlreadyExists);
+            }
+            // A link stores a path, not bytes, so asking for byte
+            // access to one is refused; the resolve-only handle is
+            // what `lstat` and `readlink` hold. Only reachable under
+            // `NO_FOLLOW` — otherwise the link was already resolved
+            // through.
+            if info.kind == DriverNodeKind::Symlink && (flags.is_read() || flags.is_write()) {
+                return Err(VfsError::LinkLoop);
+            }
+            // A directory open must name a directory; a byte-access
+            // open must not name one.
+            if flags.contains(OpenFlags::DIRECTORY) {
+                if info.kind != DriverNodeKind::Directory {
+                    return Err(VfsError::NotADirectory);
+                }
+            } else if info.kind == DriverNodeKind::Directory
+                && (flags.is_read() || flags.is_write())
+            {
+                return Err(VfsError::IsADirectory);
+            }
+            // Truncate-on-open zeroes the file; it requires write
+            // access (enforced at `OpenFlags::from_bits`) and is
+            // authorised by the secured truncate.
+            if flags.contains(OpenFlags::TRUNCATE) {
+                vfs.truncate_via_secured(cred, covered, fs, 0)?;
+            }
+            Ok(())
+        }
+        // A missing path is created only when asked, and `open` only
+        // ever creates a regular file (directories are made by
+        // `mkdir`); a directory-typed create is a contradiction and
+        // fails closed.
+        Err(VfsError::NotFound) if flags.contains(OpenFlags::CREATE) => {
+            if flags.contains(OpenFlags::DIRECTORY) {
+                return Err(VfsError::NotADirectory);
+            }
+            vfs.create_via_secured(cred, covered, fs)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Open the catalog of attached volumes at `point`, or a name in it no
+/// attached volume serves: the catalog opens as the directory it is, and
+/// nothing in it can be created.
+fn open_catalog(
+    vfs: &Vfs,
+    cred: &Credentials<'_>,
+    covered: &CoveredPath,
+    flags: OpenFlags,
+) -> Result<(), VfsError> {
+    if covered.path() != covered.mount().path() {
+        let intent = if flags.contains(OpenFlags::CREATE) {
+            Intent::Write
+        } else {
+            Intent::Read(VfsError::NotFound)
+        };
+        return Err(intent.refusal(covered));
+    }
+    vfs.metadata(cred, covered.path())?;
+    if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUSIVE) {
+        return Err(VfsError::AlreadyExists);
+    }
+    if !flags.contains(OpenFlags::DIRECTORY) && (flags.is_read() || flags.is_write()) {
+        return Err(VfsError::IsADirectory);
+    }
+    Ok(())
+}
+
+/// Where one directory listing reads on a volume, and what its entries are
+/// reported against.
+struct VolumeListing {
+    volume: [u8; 16],
+    driver: DriverHandle,
+    listings: &'static ListingRegistry,
+    final_link: FinalLink,
+}
+
+/// The listing of the directory at `path` on the volume `fs` serves: its own
+/// entries, then the covered mount points beneath it.
+fn list_volume<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+    vfs: &Vfs,
+    fs: &mut F,
+    cred: &Credentials<'_>,
+    covered: &CoveredPath,
+    on: &VolumeListing,
+    at: &mut Listing,
+    each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
+) -> Result<(), VfsError> {
+    // Each entry's kind and sizes come from the listing driver
+    // itself, never from a per-child path re-resolution: a child
+    // path can be covered by a *different* mount (the read-only
+    // `/System` volume's own `Logs`/`Settings` beneath the writable
+    // exceptions), and re-resolving it here would judge it against
+    // the wrong volume.
+    let volume = on.volume;
+    at.on_volume(volume)?;
+    at.hold(on.listings, on.driver.as_u64())?;
+    if let Some(entries) = at.entries() {
+        let end =
+            vfs.list_via_secured(cred, covered, fs, on.final_link, entries, &mut |entry| {
+                each(&wire_entry(volume, entry))
+            })?;
+        at.hold(on.listings, on.driver.as_u64())?;
+        if end == ListEnd::Stopped {
+            return Ok(());
+        }
+        at.finish_entries();
+    }
+    // A covered mount point is part of its parent's listing even when the
+    // parent volume holds no node of that name. They follow the entries in
+    // name order, so a batch resumes after the last one handed over, and one
+    // the volume holds a node of was listed with the entries.
+    let Some(after) = at.mounts().map(|after| after.clone()) else {
+        return Ok(());
+    };
+    let mount_points = covered_after(vfs, covered.path(), after.get())?;
+    let mut names: Vec<&[u8]> = Vec::new();
+    names
+        .try_reserve_exact(mount_points.len())
+        .map_err(|_| VfsError::OutOfMemory)?;
+    names.extend(mount_points.iter().map(String::as_bytes));
+    let (dir, held) = vfs.lookup_entries_via_secured(cred, covered, fs, on.final_link, &names)?;
+    if at.bound_dir() != Some(dir.raw()) {
+        return Err(VfsError::Stale);
+    }
+    for (name, held) in mount_points.iter().zip(held) {
+        if held.is_some() {
+            continue;
+        }
+        if each(&mount_point_wire(name)) == DirVisit::Stop {
+            return Ok(());
+        }
+        if let Some(after) = at.mounts() {
+            after.set(name.as_bytes())?;
+        }
+    }
+    at.finish();
+    Ok(())
+}
+
+/// The catalog covering `covered` as the directory it is, given the reach the
+/// caller needs into it, refusing a name in it no attached volume serves.
+fn catalog_node<'v>(
+    vfs: &'v Vfs,
+    cred: &Credentials<'_>,
+    covered: &CoveredPath,
+    access: Option<Access>,
+) -> Result<&'v Metadata, VfsError> {
+    if covered.path() != covered.mount().path() {
+        return Err(VfsError::NotFound);
+    }
+    let meta = vfs.metadata(cred, covered.path())?;
+    if let Some(access) = access {
+        meta.authorize(cred, access)?;
+    }
+    Ok(meta)
+}
+
+/// The listing of the catalog covering `covered`: the volumes attached beneath
+/// it, in name order, resumed after the last one a batch handed over.
+fn list_catalog(
+    vfs: &Vfs,
+    cred: &Credentials<'_>,
+    covered: &CoveredPath,
+    at: &mut Listing,
+    each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
+) -> Result<(), VfsError> {
+    catalog_node(vfs, cred, covered, Some(Access::Read))?;
+    at.on_volume(FileId::NONE.volume)?;
+    if at.entries().is_some() {
+        at.finish_entries();
+    }
+    let Some(after) = at.mounts().map(|after| after.clone()) else {
+        return Ok(());
+    };
+    for name in covered_after(vfs, covered.path(), after.get())? {
+        if each(&mount_point_wire(&name)) == DirVisit::Stop {
+            return Ok(());
+        }
+        if let Some(after) = at.mounts() {
+            after.set(name.as_bytes())?;
+        }
+    }
+    at.finish();
+    Ok(())
+}
+
+/// `found`, the entries a directory holds of `names`, with each name it
+/// holds none of answered by a mount point of that name beneath `path`: the
+/// same merge a listing makes.
+fn with_mount_points(
+    vfs: &Vfs,
+    path: &Path,
+    names: &[&[u8]],
+    dir: FileId,
+    found: impl Iterator<Item = Option<ReaddirEntry>>,
+) -> Result<LookedUp, VfsError> {
+    let mounts = vfs.mounts();
+    let children = mounts.children_of(path);
+    let mut covered: Vec<&String> = Vec::new();
+    for name in mounts
+        .direct_children(path)
+        .filter_map(|mount| mount.path().components().last())
+    {
+        covered.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
+        covered.push(name);
+    }
+    let entries = collected(
+        names.len(),
+        found.zip(names).map(|(entry, &name)| {
+            entry.or_else(|| {
+                covered
+                    .iter()
+                    .find(|mounted| mounted.as_bytes() == name)
+                    .map(|mounted| mount_point_entry(String::clone(mounted)))
+            })
+        }),
+    )
+    .ok_or(VfsError::OutOfMemory)?;
+    Ok(LookedUp {
+        dir,
+        entries,
+        children,
+    })
+}
+
+/// The canonical spelling of `covered` in the catalog covering it: the
+/// catalog itself, or — where `mode` lets a component be missing — a name in
+/// it no attached volume serves, which holds no link to resolve.
+fn realpath_in_catalog(
+    vfs: &Vfs,
+    cred: &Credentials<'_>,
+    covered: &CoveredPath,
+    mode: RealpathMode,
+) -> Result<String, VfsError> {
+    let (path, point) = (covered.path(), covered.mount().path());
+    let catalog = vfs.metadata(cred, point)?;
+    if path != point {
+        let reached = match mode {
+            RealpathMode::Existing => false,
+            RealpathMode::Final => path.parent().as_ref() == Some(point),
+            RealpathMode::Missing => true,
+        };
+        if !reached {
+            return Err(VfsError::NotFound);
+        }
+        catalog.authorize(cred, Access::Execute)?;
+    }
+    Ok(spell(path.components()))
 }
 
 /// A node's system-wide identity: the driver's node number paired with the
@@ -1120,60 +1542,15 @@ where
         path: &str,
         flags: OpenFlags,
     ) -> Result<(), Errno> {
-        // `NO_FOLLOW` makes the open name the final component itself, so the
-        // resolution that decides the handle's kind keeps a link rather than
-        // reporting what it points at. The same posture rides on the handle
-        // and is re-derived by every later operation it serves, so an open
-        // and a later stat can never disagree.
-        let final_link = FinalLink::for_open(flags);
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
-            match vfs.stat_via_secured(cred, path, fs, final_link) {
-                Ok(info) => {
-                    // An exclusive create demands the path not already exist.
-                    if flags.contains(OpenFlags::CREATE) && flags.contains(OpenFlags::EXCLUSIVE) {
-                        return Err(VfsError::AlreadyExists);
-                    }
-                    // A link stores a path, not bytes, so asking for byte
-                    // access to one is refused; the resolve-only handle is
-                    // what `lstat` and `readlink` hold. Only reachable under
-                    // `NO_FOLLOW` — otherwise the link was already resolved
-                    // through.
-                    if info.kind == DriverNodeKind::Symlink && (flags.is_read() || flags.is_write())
-                    {
-                        return Err(VfsError::LinkLoop);
-                    }
-                    // A directory open must name a directory; a byte-access
-                    // open must not name one.
-                    if flags.contains(OpenFlags::DIRECTORY) {
-                        if info.kind != DriverNodeKind::Directory {
-                            return Err(VfsError::NotADirectory);
-                        }
-                    } else if info.kind == DriverNodeKind::Directory
-                        && (flags.is_read() || flags.is_write())
-                    {
-                        return Err(VfsError::IsADirectory);
-                    }
-                    // Truncate-on-open zeroes the file; it requires write
-                    // access (enforced at `OpenFlags::from_bits`) and is
-                    // authorised by the secured truncate.
-                    if flags.contains(OpenFlags::TRUNCATE) {
-                        vfs.truncate_via_secured(cred, path, fs, 0)?;
-                    }
-                    Ok(())
-                }
-                // A missing path is created only when asked, and `open` only
-                // ever creates a regular file (directories are made by
-                // `mkdir`); a directory-typed create is a contradiction and
-                // fails closed.
-                Err(VfsError::NotFound) if flags.contains(OpenFlags::CREATE) => {
-                    if flags.contains(OpenFlags::DIRECTORY) {
-                        return Err(VfsError::NotADirectory);
-                    }
-                    vfs.create_via_secured(cred, path, fs)
-                }
-                Err(err) => Err(err),
+        let view = self.view(uid, caps, path)?;
+        let cred = view.cred();
+        let opened = match &view.served {
+            Served::Volume(_, driver) => {
+                open_on_volume(view.vfs, &mut *driver.lock(), &cred, &view.covered, flags)
             }
-        })
+            Served::Catalog => open_catalog(view.vfs, &cred, &view.covered, flags),
+        };
+        opened.map_err(VfsError::to_errno)
     }
 
     fn read(
@@ -1184,8 +1561,23 @@ where
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        let intent = Intent::Read(VfsError::IsADirectory);
+        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
             vfs.read_via_secured(cred, path, fs, offset, buf)
+        })
+    }
+
+    fn read_program(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, Errno> {
+        let intent = Intent::Read(VfsError::IsADirectory);
+        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
+            vfs.read_program_via_secured(cred, path, fs, offset, buf)
         })
     }
 
@@ -1198,7 +1590,7 @@ where
         append: bool,
         data: &[u8],
     ) -> Result<usize, Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             // An append write ignores the supplied offset and writes at the
             // current end of file (the journal-append posture), resolved under
             // the same lock so the size cannot change before the write.
@@ -1221,61 +1613,22 @@ where
         at: &mut Listing,
         each: &mut dyn FnMut(&DirEntry<'_>) -> DirVisit,
     ) -> Result<(), Errno> {
-        self.with_secured_at(uid, caps, path, |vfs, fs, cred, path, driver| {
-            // Each entry's kind and sizes come from the listing driver
-            // itself, never from a per-child path re-resolution: a child
-            // path can be covered by a *different* mount (the read-only
-            // `/System` volume's own `Logs`/`Settings` beneath the writable
-            // exceptions), and re-resolving it here would judge it against
-            // the wrong volume.
-            let volume = self.mount.volume_id(driver);
-            at.on_volume(volume)?;
-            let registry = &self.mount.listings;
-            at.hold(registry, driver.as_u64())?;
-            if let Some(entries) = at.entries() {
-                let end =
-                    vfs.list_via_secured(cred, path, fs, final_link, entries, &mut |entry| {
-                        each(&wire_entry(volume, entry))
-                    })?;
-                at.hold(registry, driver.as_u64())?;
-                if end == ListEnd::Stopped {
-                    return Ok(());
-                }
-                at.finish_entries();
+        let view = self.view(uid, caps, path)?;
+        let cred = view.cred();
+        let (vfs, covered, cred) = (view.vfs, &view.covered, &cred);
+        let listed = match &view.served {
+            Served::Catalog => list_catalog(vfs, cred, covered, at, each),
+            Served::Volume(driver, fs) => {
+                let on = VolumeListing {
+                    volume: self.mount.volume_id(*driver),
+                    driver: *driver,
+                    listings: &self.mount.listings,
+                    final_link,
+                };
+                list_volume(vfs, &mut *fs.lock(), cred, covered, &on, at, each)
             }
-            // A covered mount point is part of its parent's listing even
-            // when the parent volume holds no node of that name — the
-            // runtime `/Storage/<name>` mounts, i.e. the `Storage:` catalog
-            // enumeration (drives.md §15). They follow the entries in name
-            // order, so a batch resumes after the last one handed over, and
-            // one the volume holds a node of was listed with the entries.
-            let Some(after) = at.mounts().map(|after| after.clone()) else {
-                return Ok(());
-            };
-            let covered = covered_after(vfs, path, after.get())?;
-            let mut names: Vec<&[u8]> = Vec::new();
-            names
-                .try_reserve_exact(covered.len())
-                .map_err(|_| VfsError::OutOfMemory)?;
-            names.extend(covered.iter().map(String::as_bytes));
-            let (dir, held) = vfs.lookup_entries_via_secured(cred, path, fs, final_link, &names)?;
-            if at.bound_dir() != Some(dir.raw()) {
-                return Err(VfsError::Stale);
-            }
-            for (name, held) in covered.iter().zip(held) {
-                if held.is_some() {
-                    continue;
-                }
-                if each(&mount_point_wire(name)) == DirVisit::Stop {
-                    return Ok(());
-                }
-                if let Some(after) = at.mounts() {
-                    after.set(name.as_bytes())?;
-                }
-            }
-            at.finish();
-            Ok(())
-        })
+        };
+        listed.map_err(VfsError::to_errno)
     }
 
     fn lookup_entries(
@@ -1286,41 +1639,29 @@ where
         final_link: FinalLink,
         names: &[&[u8]],
     ) -> Result<LookedUp, Errno> {
-        self.with_secured_at(uid, caps, path, |vfs, fs, cred, path, driver| {
-            let (dir, found) = vfs.lookup_entries_via_secured(cred, path, fs, final_link, names)?;
-            let volume = self.mount.volume_id(driver);
-            let mounts = vfs.mounts();
-            let children = mounts.children_of(path);
-            let mut covered: Vec<&String> = Vec::new();
-            for name in mounts
-                .direct_children(path)
-                .filter_map(|mount| mount.path().components().last())
-            {
-                covered.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
-                covered.push(name);
+        let view = self.view(uid, caps, path)?;
+        let cred = view.cred();
+        let (vfs, covered, cred) = (view.vfs, &view.covered, &cred);
+        let path = covered.path();
+        let looked = match &view.served {
+            Served::Volume(driver, fs) => {
+                let volume = self.mount.volume_id(*driver);
+                let mut fs = fs.lock();
+                vfs.lookup_entries_via_secured(cred, covered, &mut *fs, final_link, names)
+                    .and_then(|(dir, found)| {
+                        let found = found
+                            .into_iter()
+                            .map(|entry| entry.map(|entry| readdir_entry(volume, entry)));
+                        with_mount_points(vfs, path, names, node_identity(volume, dir.raw()), found)
+                    })
             }
-            let entries = collected(
-                found.len(),
-                found
-                    .into_iter()
-                    .zip(names)
-                    .map(|(entry, &name)| match entry {
-                        Some(entry) => Some(readdir_entry(volume, entry)),
-                        // The same merge `readdir` makes: a mount point the
-                        // directory holds no node for still lists.
-                        None => covered
-                            .iter()
-                            .find(|mounted| mounted.as_bytes() == name)
-                            .map(|mounted| mount_point_entry(String::clone(mounted))),
-                    }),
-            )
-            .ok_or(VfsError::OutOfMemory)?;
-            Ok(LookedUp {
-                dir: node_identity(volume, dir.raw()),
-                entries,
-                children,
-            })
-        })
+            Served::Catalog => {
+                catalog_node(vfs, cred, covered, Some(Access::Read)).and_then(|_| {
+                    with_mount_points(vfs, path, names, FileId::NONE, names.iter().map(|_| None))
+                })
+            }
+        };
+        looked.map_err(VfsError::to_errno)
     }
 
     fn mount_epoch(&self) -> u64 {
@@ -1334,22 +1675,38 @@ where
         path: &str,
         final_link: FinalLink,
     ) -> Result<FileStat, Errno> {
-        self.with_secured_at(uid, caps, path, |vfs, fs, cred, path, driver| {
-            let info = vfs.stat_via_secured(cred, path, fs, final_link)?;
-            let volume = self.mount.volume_id(driver);
-            Ok(FileStat {
-                kind: file_kind(info.kind),
-                nlink: info.nlink,
-                size: info.size,
-                allocated: info.allocated,
-                mode: u32::from(info.meta.mode.bits()),
-                uid: info.meta.owner.0,
-                gid: info.meta.group.0,
-                id: node_identity(volume, info.node),
-                times: info.times,
-                content_gen: info.content_gen,
-            })
-        })
+        let view = self.view(uid, caps, path)?;
+        let cred = view.cred();
+        let (vfs, covered, cred) = (view.vfs, &view.covered, &cred);
+        let stat = match &view.served {
+            Served::Volume(driver, fs) => vfs
+                .stat_via_secured(cred, covered, &mut *fs.lock(), final_link)
+                .map(|info| FileStat {
+                    kind: file_kind(info.kind),
+                    nlink: info.nlink,
+                    size: info.size,
+                    allocated: info.allocated,
+                    mode: u32::from(info.meta.mode.bits()),
+                    uid: info.meta.owner.0,
+                    gid: info.meta.group.0,
+                    id: node_identity(self.mount.volume_id(*driver), info.node),
+                    times: info.times,
+                    content_gen: info.content_gen,
+                }),
+            Served::Catalog => catalog_node(vfs, cred, covered, None).map(|meta| FileStat {
+                kind: FileKind::Directory,
+                nlink: NodeInfo::SINGLE_NAME,
+                size: 0,
+                allocated: 0,
+                mode: u32::from(meta.mode.bits()),
+                uid: meta.owner.0,
+                gid: meta.group.0,
+                id: FileId::NONE,
+                times: NodeTimes::default(),
+                content_gen: NodeInfo::NO_CONTENT_GEN,
+            }),
+        };
+        stat.map_err(VfsError::to_errno)
     }
 
     fn truncate(
@@ -1359,7 +1716,7 @@ where
         path: &str,
         size: u64,
     ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             vfs.truncate_via_secured(cred, path, fs, size)
         })
     }
@@ -1380,7 +1737,7 @@ where
     }
 
     fn mkdir(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             vfs.mkdir_via_secured(cred, path, fs)
         })
     }
@@ -1392,13 +1749,19 @@ where
         path: &str,
         flags: UnlinkFlags,
     ) -> Result<(), Errno> {
-        self.with_secured_at(uid, caps, path, |vfs, fs, cred, path, driver| {
-            let removed = vfs.remove_via_secured(cred, path, fs, flags.is_directory_only())?;
-            if let Some(dir) = removed {
-                self.mount.listings.removed(driver.as_u64(), dir.raw());
-            }
-            Ok(())
-        })
+        self.with_secured_at(
+            uid,
+            caps,
+            path,
+            Intent::Write,
+            |vfs, fs, cred, path, driver| {
+                let removed = vfs.remove_via_secured(cred, path, fs, flags.is_directory_only())?;
+                if let Some(dir) = removed {
+                    self.mount.listings.removed(driver.as_u64(), dir.raw());
+                }
+                Ok(())
+            },
+        )
     }
 
     fn symlink(
@@ -1408,13 +1771,14 @@ where
         target: &str,
         path: &str,
     ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             vfs.symlink_via_secured(cred, path, fs, target)
         })
     }
 
     fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<String, Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        let intent = Intent::Read(VfsError::InvalidPath);
+        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
             vfs.readlink_via_secured(cred, path, fs)
         })
     }
@@ -1426,9 +1790,14 @@ where
         path: &str,
         mode: RealpathMode,
     ) -> Result<String, Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
-            vfs.realpath_via_secured(cred, path, fs, mode)
-        })
+        let view = self.view(uid, caps, path)?;
+        let cred = view.cred();
+        let (vfs, covered, cred) = (view.vfs, &view.covered, &cred);
+        let real = match &view.served {
+            Served::Volume(_, fs) => vfs.realpath_via_secured(cred, covered, &mut *fs.lock(), mode),
+            Served::Catalog => realpath_in_catalog(vfs, cred, covered, mode),
+        };
+        real.map_err(VfsError::to_errno)
     }
 
     fn rename(
@@ -1439,8 +1808,8 @@ where
         dst: &str,
         flags: RenameFlags,
     ) -> Result<(), Errno> {
-        self.with_secured_pair(uid, caps, src, dst, |vfs, fs, cred, src, dst, driver| {
-            let replaced = vfs.rename_via_secured(cred, src, dst, fs, flags)?;
+        self.with_secured_pair(uid, caps, src, dst, |vfs, fs, cred, pair, driver| {
+            let replaced = vfs.rename_via_secured(cred, pair, fs, flags)?;
             if let Some(dir) = replaced {
                 self.mount.listings.removed(driver.as_u64(), dir.raw());
             }
@@ -1456,15 +1825,9 @@ where
         link: &str,
         existing_link: FinalLink,
     ) -> Result<(), Errno> {
-        self.with_secured_pair(
-            uid,
-            caps,
-            existing,
-            link,
-            |vfs, fs, cred, existing, link, _| {
-                vfs.link_via_secured(cred, existing, link, fs, existing_link)
-            },
-        )
+        self.with_secured_pair(uid, caps, existing, link, |vfs, fs, cred, pair, _| {
+            vfs.link_via_secured(cred, pair, fs, existing_link)
+        })
     }
 
     fn set_mode(
@@ -1481,7 +1844,7 @@ where
         if mode & !FS_MODE_MASK != 0 {
             return Err(Errno::OutOfRange);
         }
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             vfs.set_mode_via_secured(cred, path, fs, mode)
         })
     }
@@ -1498,7 +1861,7 @@ where
         // unprivileged owner-only group change, the set-*id* strip) lives in
         // the secured VFS under the caller's kernel-attested credential; this
         // seam only resolves the covering mount and delegates.
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             vfs.set_owner_via_secured(cred, path, fs, owner, group)
         })
     }
@@ -1514,7 +1877,8 @@ where
         // A mount whose format stores no attributes answers with the typed
         // refusal, decided per driver through the attribute facet; every
         // permission decision stays in the secured VFS.
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        let intent = Intent::Read(VfsError::NotSupported);
+        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
             let Some(fs) = fs.attrs_fs() else {
                 return Err(VfsError::NotSupported);
             };
@@ -1530,7 +1894,7 @@ where
         key: &[u8],
         value: &[u8],
     ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             let Some(fs) = fs.attrs_fs() else {
                 return Err(VfsError::NotSupported);
             };
@@ -1546,7 +1910,8 @@ where
         index: u64,
         key_out: &mut [u8],
     ) -> Result<Option<usize>, Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        let intent = Intent::Read(VfsError::NotSupported);
+        self.with_secured(uid, caps, path, intent, |vfs, fs, cred, path| {
             let Some(fs) = fs.attrs_fs() else {
                 return Err(VfsError::NotSupported);
             };
@@ -1561,7 +1926,7 @@ where
         path: &str,
         key: &[u8],
     ) -> Result<(), Errno> {
-        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, Intent::Write, |vfs, fs, cred, path| {
             let Some(fs) = fs.attrs_fs() else {
                 return Err(VfsError::NotSupported);
             };
@@ -1575,58 +1940,65 @@ where
         let Ok(vfs) = self.mount.vfs() else {
             return Vec::new();
         };
-        // Snapshot the mount list under the short read lock and drop the
-        // guard before touching any driver: `driver.lock()` below may park
-        // on a busy volume, and a spinning mount-table guard must never be
-        // held across a park.
-        let mounts: Vec<super::MountPoint> = vfs.mounts().iter().cloned().collect();
+        // Copied out under the short read guard: `driver.lock()` below may
+        // park on a busy volume, and a spinning guard is never held across a
+        // park.
+        let volumes = vfs.mounts().volumes();
+        let online = self.mount.entries();
+        volumes
+            .into_iter()
+            .filter_map(|(attachment, shown_at)| {
+                // A volume attached in the namespace whose driver is not yet
+                // registered serves nothing, so it is not reported.
+                let entry = online_entry(&online, attachment.driver())?;
+                // A driver fault reading its accounting reports the volume
+                // with zero usage: it exists, only its figures are unknown.
+                let usage = entry.driver.lock().stats().unwrap_or_default();
+                let target = shown_at.map_or_else(String::new, |at| spell(at.components()));
+                // `MountRecord::new` fails only on an over-long field or an
+                // inconsistent usage report; such a volume is left out rather
+                // than misreported.
+                MountRecord::new(
+                    entry.source.as_bytes(),
+                    target.as_bytes(),
+                    entry.fstype.as_bytes(),
+                    attachment.flags(),
+                    MountVolumeState {
+                        usage,
+                        availability: entry.availability,
+                        medium: attachment.medium(),
+                    },
+                    entry.volume_id,
+                )
+                .ok()
+            })
+            .collect()
+    }
+
+    fn view_snapshot(&self) -> Vec<ViewBindingRecord> {
+        let Ok(vfs) = self.mount.vfs() else {
+            return Vec::new();
+        };
+        let online = self.mount.entries();
+        let mounts = vfs.mounts();
         mounts
             .iter()
             .filter_map(|mount| {
-                // The mount table records the mount *point* (target) and its
-                // permission flags authoritatively; the backing volume's
-                // name, filesystem type, and space accounting come from the
-                // driver registry. A backing-less mount (the in-RAM layout
-                // dirs) or one whose volume is not yet online reports empty
-                // names and the all-zero usage — the truthful "nothing
-                // known", never a guess. A driver fault while reading its
-                // accounting likewise degrades to the all-zero usage: the
-                // mount itself is still reported (it exists — only its
-                // numbers are unavailable).
-                let (source, fstype, usage, volume_id, availability) =
-                    match mount.backing().and_then(|handle| self.mount.entry(handle)) {
-                        Some(entry) => {
-                            let usage = entry.driver.lock().stats().unwrap_or_default();
-                            (
-                                entry.source,
-                                entry.fstype,
-                                usage,
-                                entry.volume_id,
-                                entry.availability,
-                            )
-                        }
-                        None => (
-                            String::new(),
-                            String::new(),
-                            VolumeStats::default(),
-                            [0u8; 16],
-                            MountAvailability::Available,
-                        ),
-                    };
-                // `MountRecord::new` only fails on an over-long field or an
-                // inconsistent usage report, which a validated VFS `Path`
-                // and a sane driver cannot produce; a defensive `ok()`
-                // drops any such entry rather than panicking.
-                MountRecord::new(
-                    source.as_bytes(),
-                    path_str(mount.path()).as_bytes(),
-                    fstype.as_bytes(),
+                // A policy-only projection — the `/Storage` catalog — shows no
+                // volume and is listed as such, so a path beneath it is never
+                // credited to the volume above. A backed one is listed once its
+                // volume is.
+                let (subtree, volume_id) = match mount.backing() {
+                    None => (String::new(), [0u8; 16]),
+                    Some(driver) => (
+                        spell(mount.backing_subtree()),
+                        online_entry(&online, driver)?.volume_id,
+                    ),
+                };
+                ViewBindingRecord::new(
+                    spell(mount.path().components()).as_bytes(),
+                    subtree.as_bytes(),
                     mount.flags(),
-                    MountVolumeState {
-                        usage,
-                        availability,
-                        medium: mount.medium(),
-                    },
                     volume_id,
                 )
                 .ok()
@@ -1661,22 +2033,13 @@ where
     }
 }
 
-/// Reconstruct the absolute path string of `path` for building a child path.
-///
-/// The VFS [`Path`] stores validated components; joining a child for the
-/// per-entry stat in `readdir` needs the textual parent. The root is the bare
-/// `"/"`; a deeper path is `"/" + components.join("/")`.
-fn path_str(path: &Path) -> String {
-    let mut out = String::from("/");
-    let mut first = true;
-    for component in path.components() {
-        if !first {
-            out.push('/');
-        }
-        out.push_str(component);
-        first = false;
-    }
-    out
+/// The registered volume `driver` names, in `online` as
+/// [`LateFilesystem::entries`] sorted it.
+fn online_entry<F>(online: &[SnapshotEntry<F>], driver: DriverHandle) -> Option<&SnapshotEntry<F>> {
+    online
+        .binary_search_by_key(&driver.as_u64(), |entry| entry.handle)
+        .ok()
+        .map(|at| &online[at])
 }
 
 #[cfg(test)]

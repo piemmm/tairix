@@ -326,7 +326,7 @@ mod tests {
             "/System/Drivers/storage/",
             "/System/Drivers//emmc2",
             "/System/Drivers/",
-            "/Apps/storage/emmc2",
+            "/System/Applications/storage/emmc2",
         ] {
             assert!(!is_class_and_leaf(refused), "{refused}");
         }

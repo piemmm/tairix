@@ -42,7 +42,7 @@ mod program {
     /// Absolute path the parent role spawns. It is the registry key the
     /// consuming vertical's runtime `spawn` producer resolves to the child
     /// (session) `rxe`; both halves agree on this byte string (bundle layout single definition).
-    const SESSION_PATH: &[u8] = b"/Apps/Session.app/Run";
+    const SESSION_PATH: &[u8] = b"/System/Applications/Session.app/Run";
 
     /// Yield count when the consuming build did not pin one via
     /// `TAIRIX_SPAWN_YIELDS`. Large enough that a single accidental run cannot

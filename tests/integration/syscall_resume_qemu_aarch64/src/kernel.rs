@@ -20,7 +20,7 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::FreeListAllocator;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     note_preempt_tick, reschedule_current, spawn_image, spawn_user_kthread, take_preempt_pending,
@@ -41,6 +41,7 @@ const USER_BLOCK_BASE: u64 = USER_BIAS + 0x30_0000;
 const CANARY: u64 = 0x51a7_c011_71a0_ca5e;
 const EXPECTED_READING: u64 = 0x51a7_c011_71a0_0001;
 const FRAME_COUNT: usize = 256;
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 const MAX_STEPS: u64 = 1_000_000;
 
@@ -66,16 +67,14 @@ static EXIT_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHILD_PARK_ENTERED: AtomicBool = AtomicBool::new(false);
 static CHILD_RESUMED: AtomicBool = AtomicBool::new(false);
 
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// SAFETY: the page-aligned static outlives the kernel and this allocator is
 /// its sole owner.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 static PARENT_PAGE_TABLES: PageTablePool = PageTablePool::new();
 static CHILD_PAGE_TABLES: PageTablePool = PageTablePool::new();

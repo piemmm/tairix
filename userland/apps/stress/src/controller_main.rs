@@ -21,7 +21,7 @@ use tairix_abi::{
     CONSOLE_INHERIT, SPAWN_SELF, SPAWN_UID_INHERIT, SYSTEM_COMMAND_STORE, WAITSET_CHILD_ANY,
     WAIT_PID_ANY,
 };
-use tairix_procinfo::{for_each_mount, IpcTransport, VolumeBytes, WalkStep};
+use tairix_procinfo::{IpcTransport, Namespace, VolumeBytes};
 use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
 use tairix_stress::{
     completion_line, default_scratch, dispatch_line, refusal_line, run_scratch_paths, size_targets,
@@ -369,42 +369,17 @@ fn cleanup_scratch(spec: &RunSpec, scratch: &str) {
     }
 }
 
-/// Free space on the volume backing `scratch`, discovered through the
-/// unprivileged `MOUNT_LIST` query — the longest mount target that is a
-/// path prefix of the scratch directory wins (the covering volume). An
-/// empty scratch, a refused walk, or an uncovered path answers `None`
-/// and the sizing falls back to its documented conservative figures.
+/// Free space on the volume backing `scratch`: the volume the binding
+/// covering it shows, read through the unprivileged namespace queries. An
+/// empty scratch, a refused walk, or an uncovered path answers `None` and the
+/// sizing falls back to its documented conservative figures.
 fn scratch_free_bytes(scratch: &str) -> Option<u64> {
     if scratch.is_empty() {
         return None;
     }
-    let transport = IpcTransport;
-    let mut best: Option<(usize, u64)> = None;
-    let walk = for_each_mount(&transport, |record| {
-        if let Ok(target) = core::str::from_utf8(record.target_bytes()) {
-            let better = best.is_none_or(|(len, _)| target.len() >= len);
-            if better && path_covers(target, scratch) {
-                let free = VolumeBytes::of(&record.usage()).map_or(0, |held| held.available);
-                best = Some((target.len(), free));
-            }
-        }
-        Ok(WalkStep::Continue)
-    });
-    if walk.is_err() {
-        return None;
-    }
-    best.map(|(_, free)| free)
-}
-
-/// Whether the mount target `mount` covers `path` as a directory prefix
-/// (component-aligned: `/Users` covers `/Users/x` but never `/Usersx`).
-fn path_covers(mount: &str, path: &str) -> bool {
-    let mount = mount.trim_end_matches('/');
-    if mount.is_empty() {
-        return true;
-    }
-    path.strip_prefix(mount)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    let namespace = Namespace::read(&IpcTransport).ok()?;
+    let (_, volume) = namespace.volume_at(scratch.as_bytes())?;
+    Some(VolumeBytes::of(&volume.usage()).map_or(0, |held| held.available))
 }
 
 /// `--background`: re-spawn this same binary detached (same options,

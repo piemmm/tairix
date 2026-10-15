@@ -123,12 +123,10 @@ static PREEMPTIONS_AT_SOLE: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Set once the round-trip has been driven so a re-entry cannot re-run it.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
-/// Static boot heap, in the linker's NOLOAD `.heap` section so the boot
-/// trampoline neither zeroes nor counts it in the usable memory map. The user
-/// kthread's kernel stack + control block and the spawn caller's
-/// startup-vector block allocate from it.
+/// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+/// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static mut HEAP: Heap = Heap::ZERO;
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -136,7 +134,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Page-table pool backing the U-mode address space's Sv39 hierarchy.
 static PAGE_TABLES: paging::PageTablePool = paging::PageTablePool::new();

@@ -17,9 +17,9 @@ use tairix_log::{Event, Sink};
 use tairix_reclaim::{CacheBudget, ReclaimOwner};
 
 use super::memfs::RwMockFs;
-use super::perm::Credentials;
 use super::{
-    CachedFs, LateFilesystem, LateIdentity, Mode, MountBacking, MountedFilesystemService, Path, Vfs,
+    Attachment, CachedFs, LateFilesystem, LateIdentity, Metadata, Mode, MountedFilesystemService,
+    Path, Vfs,
 };
 use crate::fswatch::{VolumeWatch, WatchRegistry};
 use crate::test_pressure::unpressured;
@@ -64,30 +64,22 @@ pub(crate) fn identity_table() -> IdentityTable {
 /// A default-layout VFS with the in-memory driver mounted at [`MOUNT`],
 /// read-only when `read_only`.
 pub(crate) fn vfs(read_only: bool) -> Vfs {
-    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
-    let caps = caps();
-    let cred = Credentials {
-        uid: UserId(TEST_UID),
-        gid: GroupId(TEST_GID),
-        supplementary_gids: &[],
-        caps: &caps,
-    };
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
     let mount = Path::parse(MOUNT).expect("valid mount path");
-    vfs.mkdir(&cred, &mount, Mode::from_bits(0o755))
-        .expect("create mount point");
     let handle = DriverHandle::from_raw(9).expect("non-zero handle");
     let flags = if read_only {
         MountFlags::READ_ONLY
     } else {
         MountFlags::from_bits(0).expect("empty flags")
     };
+    let template = Metadata::new(UserId(TEST_UID), GroupId(TEST_GID), Mode::from_bits(0o755));
     // The fixture stands in for a volume attached from a classified block
     // device, so the medium it reports is the one the device declared.
     vfs.mounts_write()
-        .mount(
+        .attach_at(
+            Attachment::new(handle, Some(MOUNT_MEDIUM), flags),
             mount,
-            flags,
-            Some(MountBacking::new(handle, Some(MOUNT_MEDIUM))),
+            template,
         )
         .expect("mount backed");
     vfs

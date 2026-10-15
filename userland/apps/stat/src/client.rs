@@ -4,15 +4,17 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::fs::mode_string;
 use tairix_abi::time::CivilTime;
 use tairix_abi::time::Time64;
 use tairix_abi::{Errno, FileKind, FileStat, FS_MODE_MASK, FS_NAME_MAX};
 use tairix_help::{own_short_help, HelpSource};
+use tairix_procinfo::{field_lossy, Namespace};
 
 use crate::command::{Command, Options, Piece, Subject, Trailer};
 use crate::error::StatError;
-use crate::io::{Filesystem, Mount, Mounts, Names, Output};
+use crate::io::{Filesystem, Mounts, Names, Output};
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `stat`'s own Help tree is unavailable.
@@ -180,7 +182,7 @@ struct Facts {
     target: Option<String>,
     /// The account name owning the node, if the directory holds one.
     user: Option<String>,
-    /// The covering mount, if the mount table names one.
+    /// The volume holding the path, if the namespace names one.
     mount: Option<Mount>,
 }
 
@@ -196,16 +198,16 @@ impl Reporter<'_> {
         } else {
             None
         };
-        // The mount holding a path is the longest mount prefix of its
-        // *canonical* spelling: a link into another volume must report the
-        // volume it lands on. A mount table the caller cannot read leaves
-        // the mount-derived fields unknown rather than failing the report.
+        // The binding covering a path's *canonical* spelling decides the
+        // volume: a link into another volume must report the volume it lands
+        // on. A namespace the caller cannot read leaves the mount-derived
+        // fields unknown rather than failing the report.
         let mount = self
             .fs
             .canonicalize(path)
             .ok()
-            .zip(self.mounts.list().ok())
-            .and_then(|(canonical, table)| covering_mount(&canonical, table));
+            .zip(self.mounts.namespace().ok())
+            .and_then(|(canonical, namespace)| Mount::covering(&namespace, &canonical));
         Ok(Facts {
             name: String::from(path),
             user: self.names.user(stat.uid),
@@ -217,27 +219,29 @@ impl Reporter<'_> {
     }
 }
 
-/// The mount whose point is the longest prefix of `canonical`.
-///
-/// Longest-prefix, not first-match, because mounts nest: `/System/Logs`
-/// covers a path under it even though `/System` also prefixes it.
-fn covering_mount(canonical: &str, table: Vec<Mount>) -> Option<Mount> {
-    table
-        .into_iter()
-        .filter(|mount| covers(&mount.target, canonical))
-        .max_by_key(|mount| mount.target.len())
+/// The volume holding a path, as the report names it: the view path of the
+/// binding covering it, and the volume that binding shows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Mount {
+    /// The covering binding's path in the caller's own namespace.
+    target: String,
+    /// The filesystem type the volume was attached with.
+    fstype: String,
+    /// The volume's live usage and geometry, as its driver reports it.
+    usage: VolumeStats,
 }
 
-/// Whether the mount point `target` covers the canonical path `path`.
-///
-/// A mount point covers a path when the path is the point itself or lies
-/// under it — matched by whole components, so `/Storage/vol` does not cover
-/// `/Storage/volume`.
-fn covers(target: &str, path: &str) -> bool {
-    if target == "/" {
-        return path.starts_with('/');
+impl Mount {
+    /// The volume holding the canonical path `path` in `namespace`, or `None`
+    /// when the binding covering it shows no listed volume.
+    fn covering(namespace: &Namespace, path: &str) -> Option<Self> {
+        let (view, volume) = namespace.volume_at(path.as_bytes())?;
+        Some(Self {
+            target: field_lossy(view.target_bytes()),
+            fstype: field_lossy(volume.fstype_bytes()),
+            usage: volume.usage(),
+        })
     }
-    path == target || (path.starts_with(target) && path.as_bytes().get(target.len()) == Some(&b'/'))
 }
 
 /// Render `pieces` for one operand's `facts`.
@@ -260,7 +264,7 @@ fn render(pieces: &[Piece], facts: &Facts) -> String {
 fn field(letter: char, facts: &Facts) -> String {
     match facts.subject {
         Subject::File => file_field(letter, &facts.stat, facts, facts.mount.as_ref()),
-        // A volume the mount table does not name has no usage to report, so
+        // A volume the namespace does not name has no usage to report, so
         // every field but the operand's own name says so.
         Subject::Filesystem => match &facts.mount {
             Some(mount) => fs_field(letter, mount, facts),

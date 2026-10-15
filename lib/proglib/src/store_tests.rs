@@ -24,7 +24,7 @@ fn entry(leaf: &str, category: LibraryCategory) -> LibraryEntry {
     LibraryEntry::new(
         id(leaf),
         DisplayName::new(leaf).expect("name"),
-        crate::entry::BundlePath::new(&format!("/Apps/{leaf}.app")).expect("bundle"),
+        crate::entry::BundlePath::new(&format!("/System/Applications/{leaf}.app")).expect("bundle"),
         category,
         None,
     )
@@ -48,7 +48,7 @@ fn a_full_document_reads_to_its_records() {
 # The machine store, with a comment and a blank line.
 
 com.example.editor.name = Text Editor # trailing note
-com.example.editor.bundle = /Apps/Editor.app
+com.example.editor.bundle = /System/Applications/Editor.app
 com.example.editor.category = Office
 com.example.editor.icon = editor.svg
 
@@ -60,7 +60,7 @@ chess.name = My Chess
 
     let editor = catalog.entry(&id("com.example.editor")).expect("entry");
     assert_eq!(editor.name().as_str(), "Text Editor");
-    assert_eq!(editor.bundle().as_str(), "/Apps/Editor.app");
+    assert_eq!(editor.bundle().as_str(), "/System/Applications/Editor.app");
     assert_eq!(editor.category(), LibraryCategory::Office);
     assert_eq!(editor.icon().map(IconAsset::as_str), Some("editor.svg"));
     assert!(!editor.hidden());
@@ -86,7 +86,7 @@ fn the_render_is_canonical_and_round_trips() {
         "chess.category = Games\n\
          chess.hidden = false\n\
          editor.name = editor\n\
-         editor.bundle = /Apps/editor.app\n\
+         editor.bundle = /System/Applications/editor.app\n\
          editor.category = Office\n"
     );
     assert_eq!(read(&rendered(&catalog)).expect("re-reads"), catalog);
@@ -96,10 +96,10 @@ fn the_render_is_canonical_and_round_trips() {
 fn a_hidden_declaration_round_trips_and_an_explicit_show_normalises_away() {
     let text = "\
 editor.name = Editor
-editor.bundle = /Apps/Editor.app
+editor.bundle = /System/Applications/Editor.app
 editor.hidden = true
 chess.name = Chess
-chess.bundle = /Apps/Chess.app
+chess.bundle = /System/Applications/Chess.app
 chess.hidden = false
 ";
     let catalog = read(text).expect("hidden declarations are legal");
@@ -110,10 +110,10 @@ chess.hidden = false
     assert_eq!(
         rendered(&catalog),
         "chess.name = Chess\n\
-         chess.bundle = /Apps/Chess.app\n\
+         chess.bundle = /System/Applications/Chess.app\n\
          chess.category = Other\n\
          editor.name = Editor\n\
-         editor.bundle = /Apps/Editor.app\n\
+         editor.bundle = /System/Applications/Editor.app\n\
          editor.category = Other\n\
          editor.hidden = true\n"
     );
@@ -139,7 +139,7 @@ fn every_field_a_record_can_hold_is_a_legal_setting() {
     let mut declared = LibraryEntry::new(
         id("com.example.editor"),
         DisplayName::new("Text Editor").expect("name"),
-        crate::entry::BundlePath::new("/Apps/Editor.app").expect("bundle"),
+        crate::entry::BundlePath::new("/System/Applications/Editor.app").expect("bundle"),
         LibraryCategory::Office,
         Some(IconAsset::new("editor.svg").expect("icon")),
     );
@@ -238,7 +238,8 @@ fn a_field_the_entry_model_refuses_is_a_field_refusal() {
 
 #[test]
 fn a_bundle_without_a_display_name_is_refused() {
-    let error = read("editor.bundle = /Apps/Editor.app\n").expect_err("incomplete entry");
+    let error =
+        read("editor.bundle = /System/Applications/Editor.app\n").expect_err("incomplete entry");
     assert_eq!(error.kind, ParseError::IncompleteEntry);
 }
 
@@ -253,7 +254,8 @@ fn a_catalog_at_the_record_bound_renders_whole() {
         let mut declared = LibraryEntry::new(
             id(&format!("os.tairix.app{index}")),
             DisplayName::new(&format!("App {index}")).expect("name"),
-            crate::entry::BundlePath::new(&format!("/Apps/app{index}.app")).expect("bundle"),
+            crate::entry::BundlePath::new(&format!("/System/Applications/app{index}.app"))
+                .expect("bundle"),
             LibraryCategory::Office,
             Some(IconAsset::new("icon.svg").expect("icon")),
         );

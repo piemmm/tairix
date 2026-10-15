@@ -84,10 +84,8 @@ static EXITS: AtomicU64 = AtomicU64::new(0);
 /// cannot re-enter the test logic.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
-/// Static heap for the bump allocator (per the production bin); the boot
-/// pipeline, the spawn callers' startup-vector blocks, and the two user
-/// kthreads' kernel stacks + control blocks allocate from it.
-static mut HEAP: Heap = Heap::ZERO;
+/// The global allocator's arena.
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -95,7 +93,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Per-space page-table pools (one per EL0 address space). Each backs a PML4
 /// hierarchy whose root [`activate_user_root`] reloads (via CR3) before every

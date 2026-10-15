@@ -186,3 +186,6 @@ proptest = { version = "=1.5.0", default-features = false, features = ["std"] }
 tairix-fuzzseed = { path = "../../../../tests/fuzzseed", version = "=0.0.0", features = [
     "proptest",
 ] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

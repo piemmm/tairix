@@ -210,7 +210,7 @@ drawn in their own colour, so structure reads without hunting.
   Each cache path's hit ratio is a percentage, or `-` when the
   denominator is idle — never a ratio invented from zero.
 - **`disks`** — the **mounted-volume storage table**, one `df`-style row
-  per mounted filesystem: mount point, filesystem type, total size, used,
+  per attached volume: mount point, filesystem type, total size, used,
   available, use percentage, and an ASCII usage bar. A mount point too long
   for its column loses its middle through the same `elide_middle` the cache
   label uses (`/Storage/backup-2024-vol1` → `/Storage/b~2024-vol1`), so two

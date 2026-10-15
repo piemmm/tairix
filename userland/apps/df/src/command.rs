@@ -264,14 +264,14 @@ mod tests {
 
     #[test]
     fn flags_cluster_and_operands_interleave() {
-        let options = report(&["-aTP", "/Users", "-i", "/Apps"]);
+        let options = report(&["-aTP", "/Users", "-i", "/Storage"]);
         assert!(options.all);
         assert!(options.print_type);
         assert!(options.portability);
         assert!(options.inodes);
         assert_eq!(
             options.paths,
-            vec!["/Users".to_string(), "/Apps".to_string()]
+            vec!["/Users".to_string(), "/Storage".to_string()]
         );
     }
 

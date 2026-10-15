@@ -49,15 +49,15 @@ use tairix_collections::{RangeKey, RangeSet};
 use tairix_reclaim::MAP_ENTRY_OVERHEAD;
 
 use crate::allocmap::{
-    bit_get, clear_bit_range, find_free_bit, find_free_bit_rev, find_used_bit, set_bit_range,
-    summary_get, summary_set, MapGeometry, MapHeader, ALLOC_MAP_OWNER,
+    bit_get, clear_bit_range, find_free_bit, find_free_bit_rev, find_used_bit, find_used_bit_rev,
+    set_bit_range, summary_get, summary_set, MapGeometry, MapHeader, ALLOC_MAP_OWNER,
 };
 use crate::dedupe::DedupeIndex;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 use crate::pagecache::{page_payload_len, BlockCache, MAX_CACHED_PAGES};
 use crate::superblock::RING_BLOCKS;
 use crate::wcache::WritePhase;
-use crate::{as_u32, ARXFS, MAX_BLOCK_SIZE, METADATA_RESERVE};
+use crate::{as_u32, ARXFS, MAX_BLOCK_SIZE};
 
 /// Upper bound on the transient pending-discard queue, in **runs**. The queue
 /// batches freed-but-not-yet-trimmed runs; it is rebuildable,
@@ -145,6 +145,22 @@ pub(crate) struct Allocator {
     pub(crate) embargo: RangeSet<u64>,
     /// Freed runs awaiting a device discard.
     pub(crate) pending_discard: RangeSet<u64>,
+    /// Free runs held back for the system and for operations that free space,
+    /// which ordinary allocation never hands out (`reserve` module). Free in
+    /// the map like any free block, so persisting the map needs nothing done
+    /// for them.
+    pub(crate) reserve: RangeSet<u64>,
+    /// Blocks [`Self::reserve`] is held at.
+    pub(crate) reserve_target: u64,
+    /// Runs the open transaction took from the reserve, returned to it if the
+    /// transaction is abandoned.
+    pub(crate) txn_reserve: RangeSet<u64>,
+    /// The part of [`Self::txn_reserve`] the running operation took.
+    pub(crate) op_reserve_taken: RangeSet<u64>,
+    /// Runs the running operation gave back to the reserve that an earlier
+    /// operation of the same transaction had taken; undoing it takes them
+    /// again.
+    pub(crate) op_reserve_returned: RangeSet<u64>,
     /// The bounded, rebuildable `(domain, length, logical hash) -> chunk`
     /// dedupe cache.
     pub(crate) dedupe_index: DedupeIndex,
@@ -251,6 +267,9 @@ impl Allocator {
             &self.op_deferred,
             &self.pending_used,
             &self.pending_free,
+            &self.txn_reserve,
+            &self.op_reserve_taken,
+            &self.op_reserve_returned,
         ]
         .into_iter()
         .fold((0, 0), |(bytes, runs), set| {
@@ -279,6 +298,11 @@ impl Allocator {
             txn_freed: RangeSet::new(),
             embargo: RangeSet::new(),
             pending_discard: RangeSet::new(),
+            reserve: RangeSet::new(),
+            reserve_target: 0,
+            txn_reserve: RangeSet::new(),
+            op_reserve_taken: RangeSet::new(),
+            op_reserve_returned: RangeSet::new(),
             dedupe_index: DedupeIndex::new(),
         }
     }
@@ -833,6 +857,70 @@ impl<B: Block> ARXFS<B> {
         }
     }
 
+    /// The highest used block in `floor..=from`, or `None`. A page the summary
+    /// reports wholly free is skipped without being read, and one it reports
+    /// full answers at once.
+    pub(crate) fn map_scan_used_down(
+        &mut self,
+        from: u64,
+        floor: u64,
+    ) -> Result<Option<u64>, DriverError> {
+        let geom = self.map_geometry()?;
+        if floor > from || geom.covered() == 0 {
+            return Ok(None);
+        }
+        let mut block = from.min(geom.covered() - 1);
+        loop {
+            if block < floor {
+                return Ok(None);
+            }
+            let page = geom.page_of(block);
+            let first = geom.page_first_block(page);
+            let free = self.map_page_free(page)?;
+            if free == 0 {
+                return Ok(Some(block));
+            }
+            if free < geom.page_capacity(page) {
+                self.map_page_load(page)?;
+                let page_block = geom.page_block(page);
+                let low_bit = floor.saturating_sub(first);
+                let found = {
+                    let alloc = self.allocator_mut()?;
+                    let payload = alloc
+                        .cache
+                        .read(page_block)
+                        .ok_or(DriverError::DeviceFault)?;
+                    find_used_bit_rev(payload, block - first, low_bit)
+                };
+                if let Some(bit) = found {
+                    return Ok(Some(first + bit));
+                }
+            }
+            if first <= floor {
+                return Ok(None);
+            }
+            block = first - 1;
+        }
+    }
+
+    /// The highest free block in `floor..=from` outside the reserve, stepping
+    /// over a reserve run whole.
+    pub(crate) fn scan_down_outside_reserve(
+        &mut self,
+        from: u64,
+        floor: u64,
+    ) -> Result<Option<u64>, DriverError> {
+        let mut high = from;
+        while let Some(block) = self.map_scan_down(high, floor)? {
+            match self.allocator()?.reserve.covering(block) {
+                Some(held) if held.start > floor => high = held.start - 1,
+                Some(_) => return Ok(None),
+                None => return Ok(Some(block)),
+            }
+        }
+        Ok(None)
+    }
+
     /// The first free run at or after `from`, within `..hi`, as
     /// `(start, len)`.
     ///
@@ -932,10 +1020,9 @@ impl<B: Block> ARXFS<B> {
     /// the two streams apart lets a large sequential write land in physically
     /// contiguous blocks even though it interleaves extent-tree growth, so it
     /// collapses to one extent run rather than fragmenting
-    /// (`docs/src/filesystem/arxfs-spec.md` §6). Metadata also draws on the
-    /// last [`METADATA_RESERVE`] free blocks so a delete or other shrinking
-    /// transaction can still copy-on-write itself on an otherwise-full volume;
-    /// data allocation stops at the reserve and fails closed with
+    /// (`docs/src/filesystem/arxfs-spec.md` §6). Neither hands out a block of
+    /// the reserve; only an operation entitled to it draws there, once nothing
+    /// else is left (`reserve` module), and anything else fails closed with
     /// [`DriverError::NoSpace`].
     pub(crate) fn alloc_block(&mut self, metadata: bool) -> Result<u64, DriverError> {
         if metadata {
@@ -962,20 +1049,70 @@ impl<B: Block> ARXFS<B> {
     /// Allocate one data block, scanning **upward** from the low end.
     fn alloc_data_block(&mut self) -> Result<u64, DriverError> {
         self.map_fold_pending()?;
-        if self.free_count <= METADATA_RESERVE {
-            return Err(DriverError::NoSpace);
+        let Some(block) = self.find_ordinary_block()? else {
+            return self.take_reserved(1);
+        };
+        self.claim_run(block, 1);
+        self.allocator_mut()?.alloc_cursor = block + 1;
+        Ok(block)
+    }
+
+    /// The next free block outside the reserve from the data cursor, wrapping
+    /// once to the low end.
+    fn find_ordinary_block(&mut self) -> Result<Option<u64>, DriverError> {
+        if !self.has_ordinary_space()? {
+            return Ok(None);
         }
         let start = RING_BLOCKS;
         let total = self.total_blocks;
         let cursor = self.allocator()?.alloc_cursor.max(start);
-        let found = match self.map_scan_up(cursor, total)? {
-            Some(block) => Some(block),
-            None => self.map_scan_up(start, cursor)?,
-        };
-        let block = found.ok_or(DriverError::NoSpace)?;
-        self.claim_run(block, 1);
-        self.allocator_mut()?.alloc_cursor = block + 1;
-        Ok(block)
+        match self.scan_up_outside_reserve(cursor, total)? {
+            Some(block) => Ok(Some(block)),
+            None => self.scan_up_outside_reserve(start, cursor),
+        }
+    }
+
+    /// Whether any free block lies outside the reserve. The reserve's blocks
+    /// are all free, so this is a count comparison over an exact map.
+    pub(crate) fn has_ordinary_space(&self) -> Result<bool, DriverError> {
+        Ok(self.free_count > self.allocator()?.reserve.covered())
+    }
+
+    /// The lowest free block in `lo..hi` outside the reserve, stepping over a
+    /// reserve run whole.
+    fn scan_up_outside_reserve(&mut self, lo: u64, hi: u64) -> Result<Option<u64>, DriverError> {
+        let mut from = lo;
+        while let Some(block) = self.map_scan_up(from, hi)? {
+            match self.allocator()?.reserve.covering(block) {
+                Some(held) => from = held.end,
+                None => return Ok(Some(block)),
+            }
+        }
+        Ok(None)
+    }
+
+    /// The lowest start of `run` consecutive free blocks in `lo..hi`, none of
+    /// them in the reserve.
+    pub(crate) fn find_ordinary_run(
+        &mut self,
+        run: u64,
+        lo: u64,
+        hi: u64,
+    ) -> Result<Option<u64>, DriverError> {
+        let mut from = lo;
+        while let Some(start) = self.map_find_free_run(run, from, hi)? {
+            let Some(span) = start.span(run) else {
+                return Ok(None);
+            };
+            match self.allocator()?.reserve.first_overlap(span) {
+                Some(held) => {
+                    let whole = self.allocator()?.reserve.covering(held.start);
+                    from = whole.map_or(held.end, |whole| whole.end);
+                }
+                None => return Ok(Some(start)),
+            }
+        }
+        Ok(None)
     }
 
     /// Allocate a mirrored metadata pair, scanning **downward** from the high
@@ -990,33 +1127,54 @@ impl<B: Block> ARXFS<B> {
         if total <= floor {
             return Err(DriverError::NoSpace);
         }
-        let cursor = self.allocator()?.meta_cursor.clamp(floor, total - 1);
-        let primary = match self.find_meta_pair(cursor, floor)? {
-            Some(primary) => primary,
-            None => self
-                .find_meta_pair(total - 1, cursor)?
-                .ok_or(DriverError::NoSpace)?,
+        let Some(primary) = self.find_ordinary_pair(floor, total)? else {
+            return self.take_reserved(2);
         };
         self.claim_run(primary, 2);
         self.allocator_mut()?.meta_cursor = primary.saturating_sub(1).max(floor);
         Ok(primary)
     }
 
+    /// The next free pair outside the reserve below the metadata cursor,
+    /// wrapping once to the high end.
+    fn find_ordinary_pair(&mut self, floor: u64, total: u64) -> Result<Option<u64>, DriverError> {
+        if !self.has_ordinary_space()? {
+            return Ok(None);
+        }
+        let cursor = self.allocator()?.meta_cursor.clamp(floor, total - 1);
+        match self.find_meta_pair(cursor, floor)? {
+            Some(primary) => Ok(Some(primary)),
+            None => self.find_meta_pair(total - 1, cursor),
+        }
+    }
+
     /// The highest `primary` in `floor..=from` whose pair `(primary,
-    /// primary + 1)` is entirely free.
-    fn find_meta_pair(&mut self, from: u64, floor: u64) -> Result<Option<u64>, DriverError> {
+    /// primary + 1)` is entirely free and outside the reserve.
+    pub(crate) fn find_meta_pair(
+        &mut self,
+        from: u64,
+        floor: u64,
+    ) -> Result<Option<u64>, DriverError> {
         let mut high = from;
         loop {
             let Some(candidate) = self.map_scan_down(high, floor)? else {
                 return Ok(None);
             };
-            if candidate > floor && !self.bit_used(candidate - 1)? {
-                return Ok(Some(candidate - 1));
+            if let Some(held) = self.allocator()?.reserve.covering(candidate) {
+                if held.start <= floor {
+                    return Ok(None);
+                }
+                high = held.start - 1;
+                continue;
             }
             if candidate <= floor {
                 return Ok(None);
             }
-            high = candidate - 1;
+            let below = candidate - 1;
+            if !self.allocator()?.reserve.contains(below) && !self.bit_used(below)? {
+                return Ok(Some(below));
+            }
+            high = below;
         }
     }
 

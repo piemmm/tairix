@@ -19,9 +19,9 @@ documento strutturato per comando o argomento, per lingua. `man` risolve
 mostrata descrive sempre il programma che la shell eseguirebbe per la
 stessa parola; `PATH` non può riordinare né sovrascrivere quel prefisso.
 Un suffisso `.app` nomina direttamente il pacchetto. Quando nessuno di
-essi contiene la parola, `man` percorre gli store di applicazioni in modo
-ricorsivo — prima `/Apps`, poi le cartelle `Commands` e `Applications`
-della propria home — così un pacchetto riposto in cartelle annidate viene
+essi contiene la parola, `man` percorre in modo
+ricorsivo le cartelle `Commands` e `Applications` della propria home,
+così un pacchetto riposto in cartelle annidate viene
 comunque trovato; la ricerca non guarda mai dentro un altro pacchetto, e
 vince la corrispondenza meno profonda.
 

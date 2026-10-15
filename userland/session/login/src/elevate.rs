@@ -1253,14 +1253,14 @@ mod tests {
 
     #[test]
     fn correct_password_launches_the_program_without_waiting_and_audits() {
-        let (buf, len) = encoded_launch("root", "correct", "/System/Applications/datetime.app/Run");
+        let (buf, len) = encoded_launch("root", "correct", tairix_abi::DATETIME_RUN_PATH);
         let launcher = MockLauncher::new(Ok(4210));
         let sink = CountSink::default();
         let reply = decide(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
         assert_eq!(reply, ElevateReply::Launched { pid: 4210 });
         assert_eq!(
             launcher.launches.borrow().as_slice(),
-            &[("/System/Applications/datetime.app/Run".to_string(), 0)]
+            &[(tairix_abi::DATETIME_RUN_PATH.to_string(), 0)]
         );
         assert!(
             launcher.runs.borrow().is_empty(),
@@ -1272,7 +1272,7 @@ mod tests {
 
     #[test]
     fn a_launch_with_the_wrong_password_is_refused_and_starts_nothing() {
-        let (buf, len) = encoded_launch("root", "wrong", "/System/Applications/datetime.app/Run");
+        let (buf, len) = encoded_launch("root", "wrong", tairix_abi::DATETIME_RUN_PATH);
         let launcher = MockLauncher::new(Ok(4210));
         let sink = CountSink::default();
         let reply = decide(&buf[..len], 1, Some(0), 1, &FixedAuth, &launcher, &sink);
@@ -1295,7 +1295,7 @@ mod tests {
 
     #[test]
     fn a_launch_caller_on_another_console_is_refused_before_parsing() {
-        let (buf, len) = encoded_launch("root", "correct", "/System/Applications/datetime.app/Run");
+        let (buf, len) = encoded_launch("root", "correct", tairix_abi::DATETIME_RUN_PATH);
         let launcher = MockLauncher::new(Ok(4210));
         let sink = CountSink::default();
         let reply = decide(&buf[..len], 2, Some(0), 1, &FixedAuth, &launcher, &sink);

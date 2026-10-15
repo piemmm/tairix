@@ -791,7 +791,7 @@ mod tests {
     /// a launch passes is read as the program's own name and dropped.
     #[test]
     fn a_launch_names_the_program_before_its_arguments() {
-        let files = &b"/System/Applications/files.app/Run"[..];
+        let files = tairix_abi::FILES_RUN_PATH.as_bytes();
         assert_eq!(
             launch_argv(files, &[&b"--desktop"[..]]),
             alloc::vec![files, &b"--desktop"[..]],
@@ -824,22 +824,19 @@ mod tests {
     fn the_table_resolves_a_running_child_by_its_run_path() {
         let mut launched = LaunchTable::new();
         assert!(launched.is_empty());
-        launched.record(10, "Files", "/System/Applications/files.app/Run");
-        launched.record(11, "Chess", "/Apps/chess.app/Run");
+        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH);
+        launched.record(11, "Chess", "/System/Applications/chess.app/Run");
         assert_eq!(launched.len(), 2);
 
+        assert_eq!(launched.running_from(tairix_abi::FILES_RUN_PATH), Some(10));
         assert_eq!(
-            launched.running_from("/System/Applications/files.app/Run"),
-            Some(10)
+            launched.running_from("/System/Applications/editor.app/Run"),
+            None
         );
-        assert_eq!(launched.running_from("/Apps/editor.app/Run"), None);
 
         let reaped = launched.remove(10).expect("recorded");
         assert_eq!(reaped.label, "Files");
-        assert_eq!(
-            launched.running_from("/System/Applications/files.app/Run"),
-            None
-        );
+        assert_eq!(launched.running_from(tairix_abi::FILES_RUN_PATH), None);
         assert_eq!(launched.remove(10), None, "a reaped pid is forgotten");
     }
 
@@ -849,11 +846,11 @@ mod tests {
     #[test]
     fn get_resolves_a_running_child_by_its_pid() {
         let mut launched = LaunchTable::new();
-        launched.record(11, "Chess", "/Apps/chess.app/Run");
+        launched.record(11, "Chess", "/System/Applications/chess.app/Run");
 
         let app = launched.get(11).expect("recorded");
         assert_eq!(app.label, "Chess");
-        assert_eq!(app.run_path, "/Apps/chess.app/Run");
+        assert_eq!(app.run_path, "/System/Applications/chess.app/Run");
         assert_eq!(
             launched.get(99),
             None,
@@ -872,7 +869,7 @@ mod tests {
     #[test]
     fn reap_drains_and_reports_only_the_refused_launch() {
         let mut launched = LaunchTable::new();
-        launched.record(10, "Files", "/System/Applications/files.app/Run");
+        launched.record(10, "Files", tairix_abi::FILES_RUN_PATH);
         launched.record(11, "Terminal", "/System/Applications/terminal.app/Run");
 
         let mut script = alloc::vec![
@@ -928,7 +925,7 @@ mod tests {
     #[test]
     fn a_stopped_child_keeps_its_record_and_its_windows() {
         let mut launched = LaunchTable::new();
-        launched.record(10, "Viewer", "/Apps/viewer.app/Run");
+        launched.record(10, "Viewer", "/System/Applications/viewer.app/Run");
 
         let mut script = alloc::vec![(10u64, WaitStatus::Stopped(Signal::Stop))].into_iter();
         let mut reported: Vec<String> = Vec::new();
@@ -954,7 +951,7 @@ mod tests {
     #[test]
     fn a_stop_does_not_stop_the_drain() {
         let mut launched = LaunchTable::new();
-        launched.record(10, "Viewer", "/Apps/viewer.app/Run");
+        launched.record(10, "Viewer", "/System/Applications/viewer.app/Run");
         launched.record(11, "Terminal", "/System/Applications/terminal.app/Run");
 
         let mut script = alloc::vec![
@@ -1004,7 +1001,7 @@ mod tests {
     #[test]
     fn reap_with_no_zombies_does_nothing() {
         let mut launched = LaunchTable::new();
-        let path = "/System/Applications/files.app/Run";
+        let path = tairix_abi::FILES_RUN_PATH;
         launched.record(3, "Files", path);
         let mut reported: Vec<String> = Vec::new();
         let mut torn_down: Vec<u64> = Vec::new();

@@ -19,7 +19,7 @@
 //!
 //! Nothing polls the mounts. Each driver *reports* its deadline as its
 //! transaction opens and reports its absence as the transaction closes
-//! ([`tairix_abi::driver::filesystem::WritebackHost`]), so the timer is armed
+//! ([`tairix_abi::driver::filesystem::VolumeHost`]), so the timer is armed
 //! exactly once per batch and a machine with no dirty volume arms nothing and
 //! takes no wakeup. A deadline
 //! is **consumed** when it fires, exactly as a wait-queue deadline is: a

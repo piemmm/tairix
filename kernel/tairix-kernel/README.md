@@ -1,31 +1,27 @@
 # tairix-kernel
 
-Stage 3a (c7-bin) of [`PLAN.md`](../../PLAN.md). The freestanding
-`x86_64-tairix-none` kernel binary that wires the existing
-architecture port (`kernel/arch/x86_64`) to the architecture-neutral
-[`kernel_core::kernel_main`](../core/src/init.rs) entry point.
+The freestanding kernel binary for the three bare-metal Tier-1 ports
+(`x86_64-tairix-none`, `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`).
+It wires each architecture port (`kernel/arch/<target>`) to the
+architecture-neutral [`kernel_core::kernel_main`](../core/src/init.rs), and
+carries the boot-floor work that runs before the driver store is reachable:
+the root volume's unlock and mount, the `/System` view, the driver store
+server, and the hardware-tree store.
 
 ## Layout
 
-The crate ships a hybrid `[lib]` + `[[bin]]`:
+The crate ships a `[lib]` shared by the production `[[bin]]` and the QEMU
+verticals that boot it.
 
-| Path                  | Role                                                              |
-|-----------------------|-------------------------------------------------------------------|
-| `src/lib.rs`          | Library half — boot pipeline reused by both bins.                 |
-| `src/main.rs`         | Production `tairix-kernel` binary.                                |
-| `src/kalloc.rs`       | Freeing (coalescing free-list) `GlobalAlloc` impl.                |
-| `src/arch_wrapper.rs` | `BinArch` — local `KernelArch` impl around `X86_64Arch`.          |
-| `src/dispatch.rs`     | Production syscall-dispatch callback + `DISPATCH_SLOT` (Stage 2.7 (f5)). |
-| `src/serial_sink.rs`  | COM1-backed `tairix_log::Sink`.                                   |
-| `src/panic_ctx.rs`    | Bridge between `#[panic_handler]` and `kernel_core::handle_panic`. |
-| `src/boot.rs`         | `boot(multiboot_info, log_sink, audit_sink) -> !`.                |
-| `build.rs`            | Hands the kernel linker script to `rustc` on bare metal.          |
+| Path                   | Role |
+|------------------------|------|
+| `src/main.rs`          | The production binary: each port's `#[global_allocator]`, `#[panic_handler]` and entry symbol. |
+| `src/<arch>/`          | One port's own wiring (`x86_64`, `aarch64`, `riscv64`): `boot.rs` (the boot pipeline), `dispatch.rs` (the syscall-dispatch callback), `panic_ctx.rs` (the panic bridge), `root_unlock.rs`, `init_spawn.rs` and `spawn_producer.rs`, plus the port's interrupt controller and console. |
+| `src/dispatch_core.rs` | What every port's dispatch callback shares: the argument frame, the result encoding, and the forward through the dispatch slot. |
+| `src/kalloc.rs`        | Re-exports `lib/kalloc`'s freeing allocator and arena type. |
+| `build.rs`             | Hands each port's boot linker script to `rustc` and emits the `freestanding` and `kernel_isa` names the crate gates on. |
 
-The QEMU integration test
-[`tests/integration/kernel_arch_boot`](../../tests/integration/kernel_arch_boot)
-re-uses the library half with its own audit sink (the one that flips
-QEMU's `isa-debug-exit` device to success on observing
-`AuditEvent::BootCompleted`).
+The other modules in `src/` are arch-neutral and serve every port.
 
 ## Allocator
 
@@ -37,110 +33,59 @@ Each bin registers the shared `tairix_kalloc::FreeListAllocator`
 
 ## Production dispatch callback
 
-`src/dispatch.rs::production_dispatch` is installed via
-`syscall_entry::set_dispatch_callback` before `init_local_syscalls`
-enables `syscall` on any CPU — the arch-level fail-closed ordering
-contract (see `tairix_arch_x86_64::syscall_entry` rustdoc and
-`AGENTS.md` §5.4.5).
+Each port's `src/<arch>/dispatch.rs::production_dispatch` is the callback its
+syscall trampoline calls; its signature is pinned at compile time against the
+port's `SyscallDispatchFn` (`_DISPATCH_SIGNATURE_PINNED`). It forwards through
+`dispatch_core::dispatch_via_slot`, which reads the hook `kernel_main`
+publishes into the port's `DISPATCH_SLOT` during its `Syscall` phase:
 
-The callback's job is split into two stages (Stage 2.7 follow-up
-(f4)+(f5)):
+* **An empty slot** means a syscall fired before that phase ran — a
+  boot-ordering failure — and the callback halts the CPU.
+* **An unattributable caller** (`DispatchOutcome::NoCallerContext`) never
+  halts: the EL0 context on that CPU is one the kernel no longer owns, so it
+  is killed the way a wild user fault is.
 
-1. **Stage A — arch publication.** `boot.rs::try_boot` installs
-   `production_dispatch` so the trampoline has a callback before any
-   syscall can fire. `production_dispatch` is `extern "C" fn(u64,
-   *const [u64; SYSCALL_MAX_ARGS]) -> u64` and its ABI is pinned at
-   compile time by `_DISPATCH_SIGNATURE_PINNED`.
-2. **Stage B — kernel publication.** `kernel_main` runs a new
-   `Phase::Syscall` step between Sched and Ipc, building a
-   `KernelDispatchHook` around `KernelState` (scheduler + capability
-   table + arch + audit) and calling
-   `DISPATCH_SLOT.install_dispatcher(&hook)`. `production_dispatch`
-   reads the slot via `DISPATCH_SLOT.get()` on every syscall and
-   forwards.
-
-`production_dispatch` halts the CPU forever via
-`kernel_arch::halt` in exactly two situations — the same fail-closed
-posture the pre-(f5) `fail_closed_dispatch` shipped:
-
-* **Empty slot**: a syscall fired before `kernel_main` ran the
-  `Syscall` phase. Impossible if BSP boot ordering is correct, but
-  the callback must not assume so.
-* **`DispatchOutcome::NoCallerContext`**: `Scheduler::current_task`
-  returned `None` for the issuing CPU, or no `TaskCapabilities`
-  record exists for the running task. The hook has already emitted
-  `AuditEvent::SyscallNoCallerContext` (id 4021) by the time we
-  halt.
-
-Normal `Errno` returns are encoded back into `%rax` via
-`encode_result`: `Ok(v) → v`; `Err(e) → (-(e.as_i32() as i64)) as
-u64`, the conventional Linux-style negation that userland recovers
-with `(rax as i64) < 0` → `(-(rax as i64)) as i32`. The encoding is
-covered by `encode_result_err_encodes_as_negative_i64`.
+Results are encoded by `dispatch_core::encode_result`: `Ok(v)` returns `v`,
+and `Err(e)` returns `-(e.as_i32() as i64)` as a `u64`, which userland reads
+back with `(rax as i64) < 0`.
 
 ## `KernelArch::halt` proof
 
-`src/arch_wrapper.rs::BinArch` implements
-`tairix_kernel_core::KernelArch::halt` by forwarding to the free
-function `tairix_arch_x86_64::kernel_arch::halt()`. The `-> !`
-signature is pinned at compile time by
-`const _BIN_ARCH_HALT_RETURNS_NEVER: fn(&BinArch) -> ! =
-<BinArch as KernelArch>::halt;` — the same pattern (c7-arch) uses on
-the arch crate's free `halt` function.
+Each port's `KernelArch` implementation forwards `halt` to its arch crate's
+free function, and pins the `-> !` signature at compile time
+(`_BIN_ARCH_HALT_RETURNS_NEVER` on x86_64, `_AARCH64_BIN_ARCH_HALT_RETURNS_NEVER`
+and `_RISCV_BIN_ARCH_HALT_RETURNS_NEVER` on the others).
 
 ## Panic handler
 
-Each binary's `#[panic_handler]` is a one-liner that calls
-`tairix_kernel::handle_panic_via_kernel_core` (defined in
-`src/panic_ctx.rs`). The bridge loads a `Arc<BinArch>` pointer
-published by `boot()` (via `panic_ctx::PANIC_ARCH_PTR`) and forwards
-to `tairix_kernel_core::handle_panic` with a `PanicContext { arch,
-audit_sink: &SERIAL_SINK }`. A pre-init panic (before `boot()`
-finishes building the arch handle) emits a single "panic before init"
-record on COM1 and halts.
+Each binary's `#[panic_handler]` calls its port's
+`panic_ctx::handle_panic_via_kernel_core`, which runs the kernel's shared
+post-mortem with the arch handle `boot()` published. A panic before that
+handle exists goes to the port's own serial report, then halts.
 
 ## Published boot-state accessors
 
-`src/arch_wrapper.rs` exposes a small set of read-only accessors over
-`kernel/sync::OnceCell` set-once slots, so a driver-bring-up observer
-(e.g. a future `tests/integration/virtio_blk_pci_x86_64` integration
-test) can reach live boot state without re-borrowing the `pub(crate)`
-`KernelState`:
+`src/x86_64/arch_wrapper.rs` exposes read-only accessors over
+`tairix_sync::OnceCell` set-once slots, so an in-kernel bring-up observer (the
+`tests/integration/irq_qemu_x86_64` vertical, say) can reach live boot state
+without re-borrowing the `pub(crate)` `KernelState`:
 
 * `published_irq_table()` / `published_irq_controller()` — the live
-  `IrqTable` and `IoApicController` (Stage 4.D Item 2-tail.2).
-* `published_memory_map()` — a `'static` clone of the firmware
-  `BootMemoryMap`. `boot::try_boot` calls `publish_memory_map(&map)`
-  once, before the original is moved into the `kernel_core` hand-off.
-  A bring-up observer builds its per-device DMA
-  `tairix_kernel_mem::FrameAllocator` from this map; it draws frames
-  from the same firmware description as the live kernel allocator, so
-  the observer must reserve / partition the region it uses rather than
-  re-hand the live allocator's frames.
+  `IrqTable` and the published `IrqController`.
 
-Each slot enforces one-shot publication (`AGENTS.md` §2.1); a second
-`set` is a rejected no-op and the accessors never expose a writable
-surface (`AGENTS.md` §2.4).
+An observer that needs DMA memory draws it from the kernel's own frame
+allocator, `installed_spawn_services().frames()`: that allocator owns every
+RAM frame it did not reserve, so a second allocator over the firmware memory
+map would hand out frames the kernel is also using.
+
+Each slot enforces one-shot publication: a second `set` is a rejected no-op,
+and the accessors expose no writable surface.
 
 ## Tests
 
-* **Host unit tests** (`cargo test -p tairix-kernel --lib`):
-  bump-allocator semantics, `BinArch` delegation to `X86_64Arch`'s
-  host counters, `RawArgs` reinterpretation through the `extern "C"`
-  shim, `production_dispatch` signature pin, `encode_result` Ok/Errno
-  round-trips, and `dispatch_via_slot` happy-path / no-task /
-  empty-slot branches.
-* **QEMU integration test** (`cargo xtask test --qemu` →
-  `tairix-test-kernel-arch-boot`): boot the kernel image under
-  QEMU on `-smp 1`; the audit-observer sink flips
-  `qemu_exit::exit_success` on observing
-  `AuditEvent::BootCompleted` (`EventId(4004)`).
-
-## Stage 2.7 follow-up
-
-Stage 2.7 follow-up (f4)+(f5) are now landed. `src/dispatch.rs`
-ships `production_dispatch`, `DISPATCH_SLOT`, and `encode_result`;
-`boot.rs` installs `production_dispatch` (not `fail_closed_dispatch`)
-and hands `&DISPATCH_SLOT` to `BootInfo::new`. The slot itself
-remains a `static` (not `static mut`); its set-once publication is
-protected by `kernel/sync::OnceCell` (`AGENTS.md` §2.1).
+* **Host unit tests** (`cargo test -p tairix-kernel --lib`) cover the
+  arch-neutral modules, including the dispatch frame and its result encoding
+  and the forward through an empty, a resident and an unattributing slot.
+* **QEMU verticals** (`cargo xtask test --qemu`) boot the kernel on each
+  port; `tairix-test-kernel-arch-boot` and its `aarch64` and `riscv64`
+  siblings pass on observing `AuditEvent::BootCompleted` (`EventId(4004)`).

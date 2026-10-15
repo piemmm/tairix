@@ -536,12 +536,12 @@ fn session() -> DesktopSession {
 
 // ---- fixtures --------------------------------------------------------
 
-/// A validated catalog entry for `/Apps/<stem>.app`.
+/// A validated catalog entry for `/System/Applications/<stem>.app`.
 fn entry(stem: &str, name: &str, category: LibraryCategory) -> LibraryEntry {
     LibraryEntry::new(
         EntryId::new(&alloc::format!("os.tairix.{stem}")).expect("id"),
         DisplayName::new(name).expect("name"),
-        BundlePath::new(&alloc::format!("/Apps/{stem}.app")).expect("bundle"),
+        BundlePath::new(&alloc::format!("/System/Applications/{stem}.app")).expect("bundle"),
         category,
         None,
     )
@@ -5569,11 +5569,11 @@ fn library_host(overlay: Option<&str>) -> tairix_appdata::fake::FakeService {
 /// guess.
 #[test]
 fn load_programs_walks_the_installed_stores_rather_than_the_catalogue() {
-    let machine_conf = "os.tairix.editor.name = Editor\nos.tairix.editor.bundle = /Apps/editor.app\nos.tairix.editor.category = Office\nos.tairix.ghost.name = Ghost\nos.tairix.ghost.bundle = /Apps/ghost.app\nos.tairix.ghost.category = Office\n";
+    let machine_conf = "os.tairix.editor.name = Editor\nos.tairix.editor.bundle = /System/Applications/editor.app\nos.tairix.editor.category = Office\nos.tairix.ghost.name = Ghost\nos.tairix.ghost.bundle = /System/Applications/ghost.app\nos.tairix.ghost.category = Office\n";
     let mut reader = MemoryAssets::default()
         .with(LIBRARY_PATH, machine_conf.as_bytes())
         .with(
-            "/Apps/editor.app/AppInfo",
+            "/System/Applications/editor.app/AppInfo",
             &manifest_fixture(EDITOR_ID, "Editor", None),
         )
         // Installed but uncatalogued: it used to contribute nothing at all.
@@ -5595,13 +5595,16 @@ fn load_programs_walks_the_installed_stores_rather_than_the_catalogue() {
     claimed.sort_unstable();
     assert_eq!(
         claimed,
-        ["/Apps/editor.app", "/System/Applications/view.app"],
+        [
+            "/System/Applications/editor.app",
+            "/System/Applications/view.app"
+        ],
         "every installed bundle claims its types; the catalogued ghost claims none"
     );
 
     assert_eq!(
         programs.bundles.path_of(&attested(EDITOR_ID)),
-        Some("/Apps/editor.app")
+        Some("/System/Applications/editor.app")
     );
     assert_eq!(
         programs.bundles.path_of(&attested("os.tairix.view")),
@@ -5614,7 +5617,7 @@ fn load_programs_walks_the_installed_stores_rather_than_the_catalogue() {
         "a catalogue row with no installed bundle attributes nothing"
     );
     assert_eq!(
-        reader.reads("/Apps/editor.app/AppInfo"),
+        reader.reads("/System/Applications/editor.app/AppInfo"),
         1,
         "one read per installed bundle, not one per gesture"
     );
@@ -5634,7 +5637,7 @@ fn the_service_store_names_its_bundles_identities_and_no_file_types() {
             &iconless_manifest_fixture("os.tairix.switchboard", "Switchboard"),
         )
         .with(
-            "/Apps/planted.app/AppInfo",
+            "/Users/ada/Applications/planted.app/AppInfo",
             &manifest_fixture("os.tairix.switchboard", "Planted", None),
         )
         .with(
@@ -5643,7 +5646,7 @@ fn the_service_store_names_its_bundles_identities_and_no_file_types() {
         );
     let mut host = library_host(None);
 
-    let programs = load_programs(&mut reader, &mut host, None);
+    let programs = load_programs(&mut reader, &mut host, Some("/Users/ada"));
     assert!(programs.warnings.is_empty(), "{:?}", programs.warnings);
     assert_eq!(
         programs.bundles.path_of(&attested("os.tairix.switchboard")),
@@ -5661,8 +5664,8 @@ fn the_service_store_names_its_bundles_identities_and_no_file_types() {
 
 #[test]
 fn load_library_merges_the_machine_store_and_the_published_overlay() {
-    let machine_conf = "os.tairix.editor.name = Editor\nos.tairix.editor.bundle = /Apps/editor.app\nos.tairix.editor.category = Office\n";
-    let user_conf = "os.tairix.editor.name = My Editor\nos.tairix.files.name = Files\nos.tairix.files.bundle = /Apps/files.app\nos.tairix.files.category = Office\n";
+    let machine_conf = "os.tairix.editor.name = Editor\nos.tairix.editor.bundle = /System/Applications/editor.app\nos.tairix.editor.category = Office\n";
+    let user_conf = "os.tairix.editor.name = My Editor\nos.tairix.files.name = Files\nos.tairix.files.bundle = /System/Applications/files.app\nos.tairix.files.category = Office\n";
 
     // (a) neither layer present -> empty catalog, no warnings. An
     // application that publishes nothing is the ordinary fresh-account state
@@ -5896,12 +5899,15 @@ fn the_strip_groups_windows_under_the_process_that_owns_them() {
     let windows = vec![(one, TaskId(0)), (two, TaskId(1)), (one, TaskId(2))];
     let strip = service.strip(
         &windows,
-        |owner| (owner == one).then(|| String::from("/Apps/terminal.app")),
+        |owner| (owner == one).then(|| String::from("/System/Applications/terminal.app")),
         &BundleIndex::new(),
     );
     assert_eq!(strip.len(), 2, "one slot per process, not per window");
     assert_eq!(strip[0].owner, one);
-    assert_eq!(strip[0].bundle.as_deref(), Some("/Apps/terminal.app"));
+    assert_eq!(
+        strip[0].bundle.as_deref(),
+        Some("/System/Applications/terminal.app")
+    );
     assert_eq!(strip[0].windows, vec![TaskId(0), TaskId(2)]);
     assert_eq!(strip[1].owner, two);
     assert_eq!(
@@ -5957,7 +5963,7 @@ fn store_precedence_settles_a_duplicate_and_a_tie_inside_one_store_attributes_no
     index.record(
         &view,
         2,
-        "/Apps/planted.app",
+        "/System/Applications/planted.app",
         &fixture_header("os.tairix.view"),
     );
     index.record(
@@ -6426,16 +6432,16 @@ fn a_slots_identity_is_the_signed_manifests_and_a_missing_one_states_only_a_name
     let mut service = AppBarService::new();
     let (named, bare, none) = (window_owner(1), window_owner(2), window_owner(3));
     let reader = MemoryAssets::default().with(
-        "/Apps/terminal.app/AppInfo",
+        "/System/Applications/terminal.app/AppInfo",
         &described_manifest_fixture("os.tairix.terminal", "Terminal", "Runs a shell", "TAIRiX"),
     );
     let strip = service.strip(
         &[(named, TaskId(0)), (bare, TaskId(1)), (none, TaskId(2))],
         |owner| {
             if owner == named {
-                Some(String::from("/Apps/terminal.app"))
+                Some(String::from("/System/Applications/terminal.app"))
             } else if owner == bare {
-                Some(String::from("/Apps/ghost.app"))
+                Some(String::from("/System/Applications/ghost.app"))
             } else {
                 None
             }
@@ -6471,12 +6477,12 @@ fn the_strip_reads_no_manifest_and_forgets_a_bundle_nothing_runs_from() {
     let mut service = AppBarService::new();
     let (one, two) = (window_owner(1), window_owner(2));
     let reader = MemoryAssets::default().with(
-        "/Apps/terminal.app/AppInfo",
+        "/System/Applications/terminal.app/AppInfo",
         &manifest_fixture("os.tairix.terminal", "Terminal", None),
     );
     let index = installed_index(&reader);
-    let walked = reader.reads("/Apps/terminal.app/AppInfo");
-    let bundle = |_| Some(String::from("/Apps/terminal.app"));
+    let walked = reader.reads("/System/Applications/terminal.app/AppInfo");
+    let bundle = |_| Some(String::from("/System/Applications/terminal.app"));
 
     let strip = service.strip(&[(one, TaskId(0)), (two, TaskId(1))], bundle, &index);
     let slots = with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)));
@@ -6492,7 +6498,7 @@ fn the_strip_reads_no_manifest_and_forgets_a_bundle_nothing_runs_from() {
     let slots = with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)));
     assert_eq!(slots[0].label(), "Terminal", "taken from the index again");
     assert_eq!(
-        reader.reads("/Apps/terminal.app/AppInfo"),
+        reader.reads("/System/Applications/terminal.app/AppInfo"),
         walked,
         "no manifest is read after the walk"
     );
@@ -6529,7 +6535,7 @@ fn a_slot_carries_the_declaration_its_own_process_made() {
 #[test]
 fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
     const ICONLESS: &str = "/System/Services/switchboard.app";
-    const ORDINARY: &str = "/Apps/terminal.app";
+    const ORDINARY: &str = "/System/Applications/terminal.app";
     let reader = MemoryAssets::default()
         .with(
             &format!("{ICONLESS}/AppInfo"),
@@ -6608,7 +6614,7 @@ fn the_switchboards_window_takes_no_slot_through_the_desktops_own_identity_walk(
 /// header bit, so a bundle opts out of the bar and a running program cannot.
 #[test]
 fn only_the_manifest_takes_a_bundle_off_the_bar_not_an_unreadable_one() {
-    let bundle = |_| Some(String::from("/Apps/ghost.app"));
+    let bundle = |_| Some(String::from("/System/Applications/ghost.app"));
     let mut service = AppBarService::new();
     let strip = service.strip(&[(window_owner(1), TaskId(0))], bundle, &BundleIndex::new());
     assert_eq!(
@@ -8282,7 +8288,7 @@ fn a_caller_launched_from_another_bundle_is_refused() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    launched.record(41, "Editor", "/Apps/Editor.app/Run");
+    launched.record(41, "Editor", "/System/Applications/Editor.app/Run");
     let mut relaunches = Relaunches::default();
     let mut saver = Screensaver::new();
 
@@ -8346,7 +8352,7 @@ fn relaunching_the_monitor_reaches_the_recorded_instance() {
 #[test]
 fn relaunching_the_monitor_with_none_live_spawns() {
     let mut launched = LaunchTable::new();
-    launched.record(3, "Files", "/System/Applications/files.app/Run");
+    launched.record(3, "Files", tairix_abi::FILES_RUN_PATH);
     let mut host = CountingReach::default();
     assert_eq!(
         resolve_launch(
@@ -8576,7 +8582,7 @@ fn an_unattested_caller_is_refused_for_every_operation() {
         let mut shell = shell();
         let mut comp = compositor();
         let mut launched = monitor_launched();
-        launched.record(41, "Editor", "/Apps/Editor.app/Run");
+        launched.record(41, "Editor", "/System/Applications/Editor.app/Run");
         let mut relaunches = Relaunches::default();
         let mut saver = Screensaver::new();
 
@@ -8730,7 +8736,7 @@ fn restart_owner_relaunches_the_recorded_bundle() {
     let mut shell = shell();
     let mut comp = compositor();
     let mut launched = monitor_launched();
-    launched.record(41, "Editor", "/Apps/Editor.app/Run");
+    launched.record(41, "Editor", "/System/Applications/Editor.app/Run");
     let mut relaunches = Relaunches::default();
 
     let outcome = serve_as_monitor(
@@ -8745,7 +8751,10 @@ fn restart_owner_relaunches_the_recorded_bundle() {
     assert_eq!(outcome, Ok(SwitchboardOutcome::Plain));
     assert_eq!(
         relaunches.launched,
-        vec![(String::from("/Apps/Editor.app/Run"), String::from("Editor"))]
+        vec![(
+            String::from("/System/Applications/Editor.app/Run"),
+            String::from("Editor")
+        )]
     );
 }
 
@@ -8925,7 +8934,7 @@ fn each_owners_bundle_is_told_once_and_only_while_it_is_on_the_strip() {
 fn a_fresh_monitor_instance_is_told_the_whole_strip_again() {
     let mut gate = OwnerBundleGate::new();
     let mut mailbox = RecordingMailbox::default();
-    let strip = alloc::vec![group(1, Some("/Apps/A.app"))];
+    let strip = alloc::vec![group(1, Some("/System/Applications/A.app"))];
     gate.attest(MONITOR_PID);
     gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
     assert_eq!(owner_bundles(&mailbox).len(), 1);
@@ -8951,7 +8960,7 @@ fn a_fresh_monitor_instance_is_told_the_whole_strip_again() {
 fn an_owner_that_leaves_the_strip_is_told_again_when_it_returns() {
     let mut gate = OwnerBundleGate::new();
     let mut mailbox = RecordingMailbox::default();
-    let strip = alloc::vec![group(3, Some("/Apps/C.app"))];
+    let strip = alloc::vec![group(3, Some("/System/Applications/C.app"))];
     gate.attest(MONITOR_PID);
     gate.publish(Some(MONITOR_PID), &strip, &mut mailbox);
     assert_eq!(owner_bundles(&mailbox).len(), 1);
@@ -8996,7 +9005,7 @@ fn a_refused_send_leaves_the_owner_to_be_told_on_the_next_strip_change() {
 
     let mut gate = OwnerBundleGate::new();
     let mut refusing = RefusingMailbox::default();
-    let strip = alloc::vec![group(5, Some("/Apps/E.app"))];
+    let strip = alloc::vec![group(5, Some("/System/Applications/E.app"))];
     gate.attest(MONITOR_PID);
     gate.publish(Some(MONITOR_PID), &strip, &mut refusing);
     assert_eq!(refusing.offered, 1);
@@ -11252,9 +11261,9 @@ fn test_artwork_cache(gauge: &'static ReportedPressure, output_bytes: usize) -> 
 fn pin_artwork_is_decoded_once_per_path_and_side() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
-    let mut reader = artwork_assets(&["/Apps/One.app"]);
+    let mut reader = artwork_assets(&["/System/Applications/One.app"]);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
-    let path = artwork_source("/Apps/One.app");
+    let path = artwork_source("/System/Applications/One.app");
 
     assert!(cache
         .path_artwork(
@@ -11288,9 +11297,9 @@ fn pin_artwork_is_decoded_once_per_path_and_side() {
 fn a_refused_pin_icon_is_refused_once_not_on_every_refresh() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
-    let mut reader = artwork_assets(&["/Apps/Bad.app"]);
+    let mut reader = artwork_assets(&["/System/Applications/Bad.app"]);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::refusing());
-    let path = artwork_source("/Apps/Bad.app");
+    let path = artwork_source("/System/Applications/Bad.app");
 
     assert!(cache
         .path_artwork(
@@ -11322,7 +11331,9 @@ fn pin_artwork_never_outgrows_the_budget_its_output_allows() {
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, tiny_output_bytes);
     // Enough distinct bundles for the store to overrun that bound several
     // times over, so it is reached by evicting rather than by never filling.
-    let bundles: Vec<String> = (0..192).map(|i| format!("/Apps/App{i}.app")).collect();
+    let bundles: Vec<String> = (0..192)
+        .map(|i| format!("/System/Applications/App{i}.app"))
+        .collect();
     let refs: Vec<&str> = bundles.iter().map(String::as_str).collect();
     let mut reader = artwork_assets(&refs);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
@@ -11360,9 +11371,9 @@ fn pin_artwork_survives_tightening_pressure_and_is_wiped_on_teardown() {
     static PRESSURED: ReportedPressure = ReportedPressure::unknown();
     PRESSURED.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&PRESSURED, TEST_FRAME_BYTES);
-    let mut reader = artwork_assets(&["/Apps/One.app"]);
+    let mut reader = artwork_assets(&["/System/Applications/One.app"]);
     let mut rasteriser = ArtworkSandbox(CountingRasteriser::working());
-    let path = artwork_source("/Apps/One.app");
+    let path = artwork_source("/System/Applications/One.app");
     let mut drawn = |cache: &mut ArtworkCache| {
         cache
             .path_artwork(
@@ -11463,13 +11474,13 @@ impl SessionFileReader for CountingAssets {
     }
 }
 
-/// A catalog entry for `/Apps/<stem>.app` declaring its own icon asset, so
+/// A catalog entry for `/System/Applications/<stem>.app` declaring its own icon asset, so
 /// the library popup has an application icon to resolve.
 fn entry_with_icon(stem: &str, name: &str, asset: Option<&str>) -> LibraryEntry {
     LibraryEntry::new(
         EntryId::new(&format!("os.tairix.{stem}")).expect("id"),
         DisplayName::new(name).expect("name"),
-        BundlePath::new(&format!("/Apps/{stem}.app")).expect("bundle"),
+        BundlePath::new(&format!("/System/Applications/{stem}.app")).expect("bundle"),
         LibraryCategory::Utilities,
         asset.map(|asset| IconAsset::new(asset).expect("asset")),
     )
@@ -11529,7 +11540,7 @@ fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
     // file.
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
-    let bundle = "/Apps/One.app";
+    let bundle = "/System/Applications/One.app";
     let mut reader = ArtworkFileReader(CountingAssets::new(
         MemoryAssets::default()
             .with(
@@ -11582,9 +11593,10 @@ fn a_library_row_draws_its_own_applications_icon() {
     cat.insert(entry_with_icon("one", "One", Some("icon.svg")))
         .expect("fits");
     let (mut session, _comp) = open_library_over(cat);
-    let mut reader = ArtworkFileReader(shipped_app_bundle_master(
-        MemoryAssets::default().with("/Apps/one.app/Resources/icon.svg", &[BUNDLE_TINT]),
-    ));
+    let mut reader = ArtworkFileReader(shipped_app_bundle_master(MemoryAssets::default().with(
+        "/System/Applications/one.app/Resources/icon.svg",
+        &[BUNDLE_TINT],
+    )));
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
 
     resolve_library_icons(
@@ -11617,9 +11629,10 @@ fn a_library_row_draws_its_own_applications_icon() {
 #[test]
 fn the_launcher_has_its_icons_before_it_is_first_drawn() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    let assets = shipped_app_bundle_master(
-        MemoryAssets::default().with("/Apps/one.app/Resources/icon.svg", &[BUNDLE_TINT]),
-    );
+    let assets = shipped_app_bundle_master(MemoryAssets::default().with(
+        "/System/Applications/one.app/Resources/icon.svg",
+        &[BUNDLE_TINT],
+    ));
     let mut cat = Catalog::new();
     cat.insert(entry_with_icon("one", "One", Some("icon.svg")))
         .expect("fits");
@@ -11698,9 +11711,10 @@ fn resolving_the_popups_rows_owes_the_rows_whose_picture_changed() {
     cat.insert(entry_with_icon("one", "One", Some("icon.svg")))
         .expect("fits");
     let (mut session, _comp) = open_library_over(cat);
-    let mut reader = ArtworkFileReader(shipped_app_bundle_master(
-        MemoryAssets::default().with("/Apps/one.app/Resources/icon.svg", &[BUNDLE_TINT]),
-    ));
+    let mut reader = ArtworkFileReader(shipped_app_bundle_master(MemoryAssets::default().with(
+        "/System/Applications/one.app/Resources/icon.svg",
+        &[BUNDLE_TINT],
+    )));
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
     let layout = session.taskbar().library_layout(Scale::ONE);
     let rows = shown_entry_rows(&session);
@@ -11759,8 +11773,11 @@ fn a_library_row_whose_asset_will_not_serve_falls_back_and_never_blanks() {
     let oversize = vec![BUNDLE_TINT; MAX_ARTWORK_BYTES + 1];
     let mut reader = ArtworkFileReader(shipped_app_bundle_master(
         MemoryAssets::default()
-            .with("/Apps/huge.app/Resources/icon.svg", &oversize)
-            .with("/Apps/junk.app/Resources/icon.svg", &[]),
+            .with(
+                "/System/Applications/huge.app/Resources/icon.svg",
+                &oversize,
+            )
+            .with("/System/Applications/junk.app/Resources/icon.svg", &[]),
     ));
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
 
@@ -11826,7 +11843,7 @@ fn the_library_resolves_artwork_only_for_the_rows_it_shows() {
         ))
         .expect("fits");
         assets = assets.with(
-            &format!("/Apps/{stem}.app/Resources/icon.svg"),
+            &format!("/System/Applications/{stem}.app/Resources/icon.svg"),
             &[BUNDLE_TINT],
         );
     }
@@ -11887,7 +11904,7 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     let manifests = MemoryAssets::default();
     let strip = service.strip(
         &[(window_owner(1), TaskId(0))],
-        |_| Some(String::from("/Apps/one.app")),
+        |_| Some(String::from("/System/Applications/one.app")),
         &installed_index(&manifests),
     );
     let slots = {
@@ -15315,8 +15332,8 @@ impl<T: IconRasteriser> IconRasteriser for Shared<T> {
 }
 
 /// The bundle each identity test's window owner was launched from.
-const EDITOR_BUNDLE: &str = "/Apps/editor.app";
-const CHESS_BUNDLE: &str = "/Apps/chess.app";
+const EDITOR_BUNDLE: &str = "/System/Applications/editor.app";
+const CHESS_BUNDLE: &str = "/System/Applications/chess.app";
 
 /// The bundle identifiers those bundles' own manifests declare — what the
 /// kernel attests for a process running from each.
@@ -15961,9 +15978,9 @@ fn a_popup_over_a_frosted_window_never_reblurs_it() {
 
 // --- The credential prompt for a command the session may not perform ----
 
-use crate::config::DATETIME_RUN_PATH;
 use crate::elevate::{ElevatePrompt, Elevator, PromptOutcome, NOT_STARTED_REASON, REFUSED_REASON};
 use alloc::string::ToString;
+use tairix_abi::DATETIME_RUN_PATH;
 
 /// One sentence explaining the command, as the session words it.
 const ELEVATE_PURPOSE: &str = "Setting the clock needs an account that may.";

@@ -6,7 +6,7 @@
 //! model, and it *writes* the user's keystrokes to the shell's standard input.
 //! Keeping it a trait means the screen model and the renderer are exhaustively
 //! testable against an in-memory queue without a kernel, exactly as the file
-//! browser's `DirectorySource`, `appmgr`'s `BundleStore`, and `ps`'s transport
+//! browser's `DirectorySource`, the load gate's `BundleStore`, and `ps`'s transport
 //! are injected seams.
 //!
 //! On a running system the source is backed by a capability-checked

@@ -1,10 +1,11 @@
 //! TAIRiX `df` — report filesystem space usage (Stage 6
 //! `userland/apps/`, a `plans/APPS.md` command app).
 //!
-//! `df` reports, one row per mounted filesystem, the volume's size, the space
-//! used, the space available, and the mount point. With `file` operands it
-//! reports the filesystem containing each operand. The option surface follows
-//! GNU coreutils: `-a` shows the pseudo/duplicate mounts the default hides,
+//! `df` reports, one row per attached volume, the volume's size, the space
+//! used, the space available, and the view path showing it. With `file`
+//! operands it reports the binding covering each operand, from the volume that
+//! binding shows. The option surface follows GNU coreutils: `-a` lists every
+//! binding, so a volume's bind mounts and the `/Storage` catalog appear,
 //! `-T`/`-t`/`-x` add and filter by filesystem type, `-i` reports inodes, `-P`
 //! selects the POSIX portable wording, `--total` appends a summary row, and
 //! `-k`/`-h`/`-H`/`--si`/`-B <size>` select the scale. `-?`/`--help` render the
@@ -14,22 +15,23 @@
 //! # Where the numbers come from
 //!
 //! Live system state is read exclusively through the System Information API:
-//! the typed, versioned `sysinfo-v1` `MOUNT_LIST` query served by
-//! `/System/Services/sysinfod.app/Run`, whose rows now carry each backing
-//! volume's space accounting (`VolumeStats`) as the mounted filesystem driver
-//! reports it. There is no `/proc`, no mount-table file, and no second query
-//! client: the paging walk is the shared `tairix_procinfo::for_each_mount` the
-//! `mount` tool uses.
+//! the typed, versioned `sysinfo-v1` `MOUNT_LIST` and `VIEW_LIST` queries
+//! served by `/System/Services/sysinfod.app/Run`, whose volume records carry
+//! each volume's space accounting (`VolumeStats`) as the mounted filesystem
+//! driver reports it. There is no `/proc`, no mount-table file, and no second
+//! query client: the walks and their join are the shared
+//! `tairix_procinfo::Namespace` the `mount` tool uses.
 //!
 //! # What this crate is
 //!
 //! A **selection and rendering engine**, not a data source. For one
-//! parsed [`Command`] it fetches the mount table, chooses the rows (all
-//! mounts, or each operand's covering mount), applies the type filters,
-//! and renders the GNU-shaped table. The operations that touch the
+//! parsed [`Command`] it reads the namespace, chooses the rows (each volume,
+//! every binding under `-a`, or each operand's covering binding), applies the
+//! type filters, and renders the GNU-shaped table. The operations that touch the
 //! outside world are the injected seams:
 //!
-//! * [`tairix_procinfo::Transport`] — the `MOUNT_LIST` query.
+//! * [`tairix_procinfo::Transport`] — the `MOUNT_LIST` and `VIEW_LIST`
+//!   queries.
 //! * [`PathProbe`] — confirm a `file` operand exists.
 //! * [`Output`] — the table on standard output, diagnostics on standard
 //!   error, and the omission advisory on fd 3.
@@ -38,10 +40,11 @@
 //!
 //! # Advisory output
 //!
-//! When the default view hides capacity-less bindings or further mounts of an
-//! already-listed volume, `df` notes the omission on the standard information
-//! stream (fd 3) with the `fs.mounts_omitted` record — advisory only, never
-//! affecting the table, the ordering, or the exit status.
+//! When the default view leaves out rows `-a` shows — a volume reporting no
+//! capacity, a volume's further bindings, the `/Storage` catalog — `df` notes
+//! the omission on the standard information stream (fd 3) with the
+//! `fs.mounts_omitted` record — advisory only, never affecting the table, the
+//! ordering, or the exit status.
 //!
 //! # Fail loud, degrade gracefully
 //!

@@ -69,9 +69,9 @@ mod program {
         GroupDirectoryRecord, IntrospectDomain, IrqRecord, KernelMemoryStats, LoadAverage,
         MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord,
         RamzipStats, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SystemIdentity, Uptime,
-        UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
-        RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST,
-        SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
+        UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
+        VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT, SYSINFO_MAX_REPLY,
+        SYSINFO_MAX_REQUEST, SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, PROC_ID_LEN};
@@ -214,6 +214,14 @@ mod program {
                 IntrospectDomain::Mounts,
                 MountRecord::WIRE_LEN,
                 MountRecord::from_bytes,
+            )
+        }
+
+        fn view_records(&self, _caller: &Caller) -> Result<Vec<ViewBindingRecord>, Errno> {
+            decode_list(
+                IntrospectDomain::Views,
+                ViewBindingRecord::WIRE_LEN,
+                ViewBindingRecord::from_bytes,
             )
         }
 

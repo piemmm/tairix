@@ -329,7 +329,8 @@ and the long format paints a link's target in the role of what it names.
 manager needs both: `EntryKind::Link(LinkTarget)` shows the link while
 naming what it resolves to, and `Entry::target()` carries the stored spelling
 for display and launch. Bundle-ness is decided from the **target's** leaf
-name, so a desktop shortcut named `Editor` pointing at `/Apps/Editor.app`
+name, so a desktop shortcut named `Editor` pointing at
+`/System/Applications/Editor.app`
 reads as an application — the shape S5 builds on. `is_directory_backed()` is
 `false` for every link however it resolves (a link is a leaf: removing one
 unlinks it, and recursing into one would walk a tree the name only points
@@ -397,7 +398,7 @@ never launch one bundle and link another — and answers a `DesktopAction`:
 
 - The link takes the entry's **display name**, the target is its
   `BundlePath` verbatim. That is what exercises S4's classifier: bundle-ness
-  reads off the *target's* leaf, so `Chess` → `/Apps/chess.app` is an
+  reads off the *target's* leaf, so `Chess` → `/System/Applications/chess.app` is an
   application while the link's own name is just a name.
 - A display name is not automatically a file name (the library permits `/`
   and `:` in one), so it is validated through the one shared

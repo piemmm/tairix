@@ -29,8 +29,8 @@ cyffredin ddarllen y gosodiadau ond nid eu newid.
   gwasanaeth mewngofnodi yn ei chychwyn i ddefnyddiwr wedi'i ddilysu.
   Mae `graphical` (y rhagosodiad) yn cychwyn y sesiwn bwrdd gwaith yn
   uniongyrchol ar ôl dilysu, gan ddisgyn yn ôl i'r mewngofnodi testun ar
-  beiriant na all redeg un; mae `text` yn cychwyn cragen y cyfrif —
-  gellir dal i gychwyn y bwrdd gwaith ar alw gyda'r gorchymyn `desktop`.
+  beiriant na all redeg un; mae `text` yn cychwyn cragen y cyfrif — dim
+  ond o fewngofnodi graffigol y mae'r bwrdd gwaith yn rhedeg.
 - `cache.all` — `on` neu `off`: y prif switsh storio dros dro. Mae
   `on` (y rhagosodiad) yn gadael i bob dosbarth storfa isod ddilyn ei
   osodiad ei hun; mae `off` yn nenfwd sy'n analluogi pob storfa gof

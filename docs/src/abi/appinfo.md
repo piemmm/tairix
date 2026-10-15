@@ -8,7 +8,7 @@ ships in `abi-v2`.
 
 ## Bundle layout
 
-An installed application is a `/Apps/<Name>.app/` directory whose top-level
+An application is a `<Name>.app/` directory in a program store whose top-level
 entries are drawn from a **closed** set, modelled by `BundleEntry`:
 
 | Entry             | Kind      | Required |
@@ -89,9 +89,16 @@ field. It carries:
     own scope by construction rather than by a check a caller might forget.
     `BundleId` is the validated inline form the kernel attests on an
     `Origin`.
-- `capability_count`, `mime_count`, and `browse_count` describing the body,
-  then a reserved `u16` that must be zero — the explicit padding, so no byte
-  of the signed prefix is unnamed.
+- `capability_count`, `mime_count`, and `browse_count` describing the body.
+- `kind` — the program's `ProgramKind` byte (`command` 1, `application` 2,
+  `service` 3, `component` 4; `TAIRIX_PROGRAM_KIND_*` in C), signed with the
+  rest, then a reserved byte that must be zero — the explicit padding, so no
+  byte of the signed prefix is unnamed. A kind byte naming no kind is
+  refused. The load gate refuses a bundle launched from a store its kind
+  does not run from (`ProgramKind::launchable_from`): each system store holds
+  only its own kind, and a service or component runs only from its own
+  store, so a system-signed service copied into a user's store is not a
+  command.
 - `syscall_table_hash` — the syscall interface the bundle was linked against
   (§9 / §19.2).
 - `content_hash` — the digest binding the signature to the bundle's contents
@@ -186,15 +193,18 @@ first, so a bundle's private copy shadows the system one.
 ## The system command, application, and service stores
 
 `SYSTEM_COMMAND_STORE` (`/System/Commands`), `SYSTEM_APPLICATION_STORE`
-(`/System/Applications`), `SYSTEM_SERVICE_STORE` (`/System/Services`), and
-`BUNDLE_SUFFIX` (`.app`) are the one definition of where the OS-provided
-programs live and how a bundle directory is named (`AGENTS.md` §16.2,
-`plans/APPS.md` §8). Which store a bundle lands in is decided solely by
-its `AppInfo.toml` `kind` declaration (`ProgramKind::Command`,
-`ProgramKind::Application`, or `ProgramKind::Service`) — there is no
-separate list anywhere of which programs are which. A service is an app:
+(`/System/Applications`), `SYSTEM_SERVICE_STORE` (`/System/Services`),
+`SYSTEM_COMPONENT_STORE` (`/System/Components`), and `BUNDLE_SUFFIX` (`.app`)
+are the one definition of where the OS-provided programs live and how a
+bundle directory is named (`AGENTS.md` §16.2, `plans/APPS.md` §8); each
+component's entry point (`DESKTOP_RUN_PATH`, `FILES_RUN_PATH`,
+`SETTINGS_RUN_PATH`, `DATETIME_RUN_PATH`) is defined beside them. Which store
+a bundle lands in is decided solely by its `AppInfo.toml` `kind` declaration
+(`ProgramKind::Command`, `Application`, `Service`, or `Component`) — there is
+no separate list anywhere of which programs are which. A service is an app:
 it ships as the same self-contained `<name>.app` bundle as a command app,
-just in the service store. The kernel's embedded-program registry
+just in the service store; a component — a part of the desktop the OS starts
+by its path — likewise, in the component store, and no typed word runs it. The kernel's embedded-program registry
 registers every command app as a command-named store bundle
 (`/System/Commands/<command>.app/Run`) and every service as
 `/System/Services/<name>.app/Run` (the paths PID 1 `init`'s startup config
@@ -204,5 +214,5 @@ prefix, followed by `/System/Applications`, then the user's own
 `Commands`/`Applications` stores, then the user's `PATH`, so `PATH` can
 never shadow a system command.
 
-The user-space service that applies all of this to a real bundle is
-[`appmgr`](../userland/appmgr.md).
+The kernel's `spawn` applies all of this to a real bundle through the shared
+load gate, [`lib/appload`](../lib/appload.md).

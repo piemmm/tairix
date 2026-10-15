@@ -133,6 +133,9 @@ mod wire {
     /// `BTN_GEAR_UP` — one wheel detent away from the user (see
     /// [`BTN_GEAR_DOWN`]).
     pub const BTN_GEAR_UP: u16 = 0x151;
+    /// `BTN_MISC` — the first button code; every key code below it is a
+    /// keyboard's.
+    pub const BTN_MISC: u16 = 0x100;
 
     /// `select` byte of the device-configuration query (virtio 1.1 §5.8.4).
     pub const CFG_SELECT: usize = 0;
@@ -333,6 +336,15 @@ fn event_bits<T: Transport>(
     answered
 }
 
+/// Whether the device reports a keyboard's key — a code below the buttons —
+/// as Linux's keyboard handler tells a keyboard from a pointer that has
+/// buttons (`drivers/tty/vt/keyboard.c`, `kbd_match`).
+fn reports_keyboard_keys<T: Transport>(transport: &mut T) -> bool {
+    let mut bitmap = [0u8; wire::CFG_ANSWER_LEN];
+    let answered = event_bits(transport, wire::EV_KEY, &mut bitmap);
+    (1..wire::BTN_MISC).any(|code| reports(&bitmap[..answered], code))
+}
+
 /// A relative pointer displacement on `axis`.
 const fn pointer(axis: u16, value: i32) -> InputEvent {
     InputEvent {
@@ -382,6 +394,8 @@ pub struct VirtioInput<'h, T: Transport> {
     wheels: Wheels,
     /// The contact decoder, for a device that is a touch surface.
     touch: Option<touch::MultiTouch>,
+    /// Whether the device reports a keyboard's keys.
+    keyboard: bool,
 }
 
 impl<'h, T: Transport> VirtioInput<'h, T> {
@@ -389,8 +403,8 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
     ///
     /// Implements the virtio-1.1 §3.1 initialisation sequence: reset,
     /// ACKNOWLEDGE, DRIVER, feature negotiation (the transport features
-    /// only, no device-specific ones), `FEATURES_OK`, the wheel-code query,
-    /// set up the event queue, `DRIVER_OK`,
+    /// only, no device-specific ones), `FEATURES_OK`, the wheel-code, touch
+    /// and keyboard queries, set up the event queue, `DRIVER_OK`,
     /// then fill the eventq with one device-write slot per negotiated
     /// descriptor (all carved from one shared DMA region) and notify
     /// the device. Once the reset confirms, the device is declared
@@ -416,6 +430,7 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         let mut status = negotiated.status;
         let wheels = Wheels::reported_by(&mut transport);
         let touch = touch::MultiTouch::reported_by(&mut transport);
+        let keyboard = reports_keyboard_keys(&mut transport);
         // Program the deepest event queue the device supports, up to the
         // pool ceiling: depth is the input-loss bound (the device drops
         // events with no posted buffer), so take everything offered. A
@@ -446,9 +461,17 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
             event_slots: core::array::from_fn(|_| None),
             wheels,
             touch,
+            keyboard,
         };
         input.post_pool(queue_size)?;
         Ok(input)
+    }
+
+    /// Whether the device is a keyboard: it reports a key below the buttons,
+    /// where a pointer reports only buttons.
+    #[must_use]
+    pub const fn is_keyboard(&self) -> bool {
+        self.keyboard
     }
 
     /// Post every event slot and notify the device.

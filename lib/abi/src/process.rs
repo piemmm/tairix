@@ -676,8 +676,8 @@ const SPAWN_ATTACH_LIMITS_AT: usize = SPAWN_ATTACH_SESSION_AT + 4 + 4 + PROC_ID_
 pub const SPAWN_ATTACH_LEN: usize =
     SPAWN_ATTACH_LIMITS_AT + 4 + 4 + LimitKind::COUNT * ResourceLimit::WIRE_LEN;
 
-/// The threads a sandbox worker may hold: its leader alone, so no stack
-/// beyond its own escapes the memory ceiling its block names.
+/// The threads a sandbox worker may hold: its leader alone. A parser needs no
+/// other, and every thread costs kernel memory its ceiling does not bound.
 const SANDBOX_THREADS: ResourceLimit = ResourceLimit { soft: 1, hard: 1 };
 
 /// Wire discriminant for [`SpawnSession::Inherit`]. `0` is reserved so a
@@ -1261,6 +1261,13 @@ pub const FAULT_EXIT_STATUS: i32 = 139;
 /// failure reports, so a parent can tell memory running out from a fault or a
 /// panic, and may ask again once memory is freed.
 pub const OOM_EXIT_STATUS: i32 = 134;
+
+/// The exit status of a program that ended because an allocation it could not
+/// do without would have carried it past its own memory bound — its
+/// `address-space-bytes` limit, or its pinned budget while pinned. Distinct
+/// from [`OOM_EXIT_STATUS`]: a shortage may pass once memory is freed, while
+/// asking again under the same bound fails the same way.
+pub const MEMORY_BOUND_EXIT_STATUS: i32 = 135;
 
 /// A process's time-shared scheduling service level, set by
 /// [`crate::SyscallNumber::SCHED_SET_PRIORITY`] and reported in the System
@@ -2528,7 +2535,7 @@ mod tests {
 
     #[test]
     fn parses_args_and_env() {
-        let block = build(&[b"prog", b"--flag", b"value"], &[b"PATH=/Apps", b"LANG=C"]);
+        let block = build(&[b"prog", b"--flag", b"value"], &[b"TERM=vt100", b"LANG=C"]);
         let view = ProcessStart::parse(&block).expect("valid block");
         assert_eq!(view.arg_count(), 3);
         assert_eq!(view.env_count(), 2);
@@ -2536,7 +2543,7 @@ mod tests {
         assert_eq!(view.arg(1), Some(&b"--flag"[..]));
         assert_eq!(view.arg(2), Some(&b"value"[..]));
         assert_eq!(view.arg(3), None);
-        assert_eq!(view.env(0), Some(&b"PATH=/Apps"[..]));
+        assert_eq!(view.env(0), Some(&b"TERM=vt100"[..]));
         assert_eq!(view.env(1), Some(&b"LANG=C"[..]));
         assert_eq!(view.env(2), None);
         assert_eq!(view.canary(), 0xDEAD_BEEF_F00D_CAFE);
@@ -2680,11 +2687,11 @@ mod tests {
     #[test]
     fn encoded_len_matches_the_written_block() {
         let args: &[&[u8]] = &[b"prog", b"--flag"];
-        let env: &[&[u8]] = &[b"PATH=/Apps"];
+        let env: &[&[u8]] = &[b"TERM=vt100"];
         let len = super::encoded_len(args, env).expect("within limits");
         let block = build(args, env);
         assert_eq!(block.len(), len);
-        // Header(40) + 3 slots(24) + strings("prog"+"--flag"+"PATH=/Apps").
+        // Header(40) + 3 slots(24) + strings("prog"+"--flag"+"TERM=vt100").
         assert_eq!(len, 40 + 3 * 8 + 4 + 6 + 10);
     }
 

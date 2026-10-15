@@ -275,13 +275,17 @@ syscall — so the FS-backed store and the IPC ingress endpoint are the userland
 journal service's concern, layered on top. It is `no_std` and allocation-free,
 and every path fails closed.
 
-* `SegmentStore` — the sink trait. The journal calls `store_segment` once per
+* `SegmentStore` — the sink trait. The journal calls `store_segment` for each
   closed segment, in append order within a stream, passing the whole immutable
-  segment image. The concrete store is a directory under
-  `/System/Logs/<stream>/` reached over the filesystem syscalls.
+  segment image. A store refuses a segment whose place is taken rather than
+  overwrite it. The concrete store is journald's: one file per segment under
+  `/System/Logs/<stream>/`, named `<segment id>-<boot id>.seg` in hex and
+  created exclusively.
 * `Journal` — constructed with one working buffer per stream, the
-  installation/boot binding, the log-attestation key (required to close
-  `audit`/`security` segments), and the journal's own attested origin.
+  installation/boot binding, the log-attestation key (required to write
+  `audit`/`security` at all), and the journal's own attested origin.
+  `continuing_segments` numbers each stream's segments on from the ids the
+  store already holds, so a restart neither reuses nor overwrites one.
   * `admit` — a pass-through to the owned `Ingress`, so admit and commit are
     1:1 (each reserves exactly one append sequence).
   * `admit_limited` — the caller-facing admission path: it applies the
@@ -302,7 +306,15 @@ and every path fails closed.
     so the segment's own record chain and the `Ingress` counter stay in
     lockstep. An invalid or over-cap record is rejected whole (`JournalError`),
     never partially written, and the segment's dictionary is discarded so it
-    stays consistent with the records the segment actually holds.
+    stays consistent with the records the segment actually holds. A rejected
+    record hands its sequence back, so the stream's sequence stays gap-free.
+    An `audit` or `security` record is refused while no key could seal its
+    segment, rather than accepted into one that cannot close.
+  * A segment the store refuses (a full volume) is kept in its buffer, and the
+    stream accepts nothing more until the store takes it: the journal offers
+    it again before each later record on that stream, answering every record
+    it cannot hold with the store's error, so a refusal loses nothing the
+    journal accepted.
   * `import_boot` — drains a CPU's early-boot `BootRing` into the `boot` stream,
     appending each retained body verbatim (a boot body is a self-contained,
     dictionary-free record body, so it needs no re-encoding). If the ring
@@ -319,7 +331,8 @@ and every path fails closed.
     independently of the record it concerned.
   * `flush` — closes every open segment (persisting each), keeping each
     stream's running chain hash so the next record reopens a chained segment.
-    Called on shutdown and before anchoring.
+    Every stream is offered to the store even when one refuses. Called on
+    shutdown and before anchoring.
 
 The cross-segment chain uses each closed segment's `segment_hash` as the next
 segment's `prev_segment_hash`; the append sequence is continuous across the

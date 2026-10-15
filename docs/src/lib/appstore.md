@@ -26,7 +26,7 @@ skipped }`:
   in store order owns an identifier" a rule rather than a race.
 - **A `.app` is a sealed unit.** The walk never descends into one, so a bundle
   can never contain another; nested *plain* subdirectories are descended, so a
-  store may be organised (`/Apps/games/chess.app`).
+  store may be organised (`Applications/games/chess.app`).
 - **Contained.** `MAX_WALK_DEPTH` bounds the descent and `MAX_WALK_ENTRIES`
   the directory entries one scan examines across all roots. Both are fixed
   containment bounds on an untrusted tree (§24.4), not capacities: exhausting
@@ -39,8 +39,8 @@ skipped }`:
   `Verdict::Refused` counts the same way.
 
 `store_roots(home)` spells the roots in the precedence a program name resolves
-against them (§16.8): `/System/Commands`, `/System/Applications`, `/Apps`, then
-the account's own `Commands` and `Applications`. `MACHINE_ROOTS` is the
+against them (§16.8): `/System/Commands`, `/System/Applications`, then the
+account's own `Commands` and `Applications`. `MACHINE_ROOTS` is the
 machine-wide prefix on its own, for a consumer with no account in hand, and
 `user_roots(home)` the account's pair — empty for a session with no usable
 `HOME`, so every machine-wide store is still walked. A `HOME` that is relative
@@ -48,13 +48,15 @@ or has an empty, `.` or `..` component is not usable: it could name somewhere
 other than the account's home, so it contributes no store rather than a guess.
 
 `identity_roots(home)` is the wider set the session's identity index walks:
-the same roots with `/System/Services` ranked among the read-only system
-stores, ahead of `/Apps` (`IDENTITY_MACHINE_ROOTS` is its machine-wide
-prefix). No program word resolves against a service, but a running service is
-a process like any other — the Switchboard owns a desktop window — so the
-bundle it was admitted from has to be found for its slot and title band to read
-its signed manifest; ranking the store with the system stores keeps a bundle
-planted in a writable store from claiming a shipped service's identity.
+the same roots with `/System/Services` and `/System/Components` ranked among
+the read-only system stores, ahead of every writable one
+(`IDENTITY_MACHINE_ROOTS` is its machine-wide prefix, derived from every
+kind's store). No program word resolves against a service or a component, but
+each runs as a process like any other — the Switchboard and the file manager
+own desktop windows — so the bundle it was admitted from has to be found for
+its slot and title band to read its signed manifest; ranking those stores with
+the system stores keeps a bundle planted in a writable store from claiming a
+shipped program's identity.
 
 `manifest_path(bundle)` and `decode_manifest(bytes)` are the same
 bundle-relative path and the same `APPINFO_WIRE_MAX`-bounded decode the walk

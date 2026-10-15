@@ -56,9 +56,8 @@ Allowed implementation flexibility:
   incompressible record raw;
 - future on-disk format versions that change constants globally.
 
-Normal TAIRiX mount security flags such as `ro`, `noexec`, `nosuid`, and
-`nodev` remain valid because they are permission policy, not ARXFS feature
-configuration.
+The TAIRiX mount flags `ro` and `noexec` remain valid because they are
+permission policy, not ARXFS feature configuration.
 
 ---
 
@@ -451,6 +450,55 @@ verification before sharing, and rebuildable dedupe metadata.
 > compressed — into strictly fewer contiguous physical blocks, recorded as one
 > compressed extent (§10). Zero detection still runs first: an all-zero
 > cluster becomes holes, not a compressed extent.
+
+### The reserve
+
+Every writable mount holds free space back from ordinary allocation, so a
+volume its users have filled still takes the system's own writes and still
+lets a delete free space. The reserve is a set of named free runs taken from
+the top of the volume, where metadata lives, which the ordinary data and
+metadata scans step over. It is named runs and not a count because metadata
+allocates in adjacent mirrored pairs: a count can be stranded as single blocks
+by any pattern of frees, and a set of runs cannot.
+
+- **Who draws on it.** Ordinary allocation never does. Once nothing else is
+  free, three things may: a write the kernel classes `AllocationClass::System`
+  (the driver ABI carries the class; the kernel sets it from the projection a
+  write lands through — the `/System/Logs` and `/System/Settings` grafts — and
+  the account engine sets it for `/System/Security`), an operation that frees
+  space (a node's last unlink, a truncate that drops data, the pending-delete
+  drain), and a commit's own root, since what joined the transaction is acknowledged work. The class
+  follows the destination, never the writer: app data a service writes under a
+  home is ordinary.
+- **A release must free what it holds.** An operation that drew on the reserve
+  as a release is refused, and undone, if it frees less than it still holds —
+  so a delete whose blocks a reflink still holds cannot erode the reserve.
+- **What is drawn comes back.** A block taken from the reserve and freed in
+  the same transaction returns to it, an abandoned transaction returns all it
+  took, and a commit's frees top the reserve up before ordinary allocation sees
+  them. The reserve is chosen again from free space at every mount; it is never
+  stored.
+- **Size.** Every writable volume holds a *release share*: one release
+  transaction (512 KiB), the operation that crosses it, and the commit that
+  publishes it, within an eighth of the volume. A volume backing the system's
+  writable grafts holds the *system reserve*, of which the share is part:
+  `min(volume / 8, max(floor, min(128 MiB, volume / 32)))`, the floor four
+  times what the system's bounded write set costs plus the share. The write set
+  is the largest size of each file the system rewrites on its own — both
+  account databases, the largest settings documents, and a journal segment per
+  stream twice over — at its worst-case extent-tree and tree-path cost, so
+  moving one of those caps moves the reserve. At 512-byte blocks that is 128 KiB
+  on 1 MiB, 8 MiB on 64 MiB, 16 MiB on 512 MiB, and 128 MiB from 4 GiB past
+  100 TB.
+- **Below the reserve, commits tighten.** A transaction on a volume below its
+  reserve is published once it has allocated a release transaction's worth, so
+  a batched delete reuses its own frees rather than needing metadata for the
+  whole batch first.
+- **Reporting.** `avail_blocks` is free space less the reserve, and
+  `in_reserve` says the volume is down to it — less than one operation's worth
+  left outside it, so an ordinary write may be refused. The host is told when a
+  volume crosses into its reserve and back (`VolumeHost::reserve_crossed`); the
+  kernel records each crossing in the audit log and as a `Mounts` notice.
 
 ---
 
@@ -961,6 +1009,15 @@ on the next mount (§14). A device that has *shrunk* below the committed size is
 rejected: online shrink would require relocating live tail blocks first and is
 not offered.
 
+The kernel's writable root mount uses it for an image written to a larger
+medium. When the root is the medium's last partition and the medium reaches
+past it, the partition's MBR entry is extended to the medium's end (every other
+byte of the table left as it was, the barrier taken before the volume is
+opened), and the volume then grows into it; each step is audited, and a refused
+step leaves the root mounting at the size it had. Both steps are idempotent, so
+a power cut between them is finished by the next boot. A GPT disk is not grown
+this way: moving its backup header is a different operation.
+
 ---
 
 ## 14. Crash consistency
@@ -1019,8 +1076,10 @@ that root still names them, so an overwrite or a discard of one would
 corrupt it. The next commit's pre-slot barrier, an explicit sync's, or a
 flush the volume issues itself releases the embargo. A mutation that runs out
 of space while blocks are embargoed flushes, releases them and runs once more,
-so a delete always makes room for the very next write; a map rebuilt from the
-trees re-reserves the embargo, since no tree names it.
+and a commit's root that finds no room does the same, so on a full volume a
+delete still makes room for the next write (§6, the reserve) and acknowledged
+work is never abandoned for want of a root; a map rebuilt from the trees
+re-reserves the embargo, since no tree names it.
 
 **Durability vs. consistency.** Crash *consistency* depends on the mandatory
 pre-slot barrier: it makes every block the new root transitively names durable
@@ -1056,6 +1115,13 @@ resumable is on-disk state:
   transaction's memory and there is not a second policy for freeing. An
   ordinary delete still fits one transaction, because the operation that
   detaches the name takes the first step itself.
+- Once the name has gone the unlink has happened, so a step that fails after
+  it is not reported as the unlink's failure: the node stays in the set and the
+  next unlink or mount finishes it. Only a failure that leaves the transaction
+  carrying the unlink unpublished — abandoned, or its slot write refused, before
+  any commit published it — takes the name change with it, and only that is
+  reported. The steps are releases, so they may draw on the reserve (§6) and a
+  delete completes on a full volume.
 - A **writable mount finishes the set before it serves a request**. Every state
   that reaches the medium is therefore lawful: the inode is unreachable by name
   and named by the set, so an interrupted delete is something the next mount

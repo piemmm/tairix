@@ -83,8 +83,8 @@ static REAP_OK: AtomicBool = AtomicBool::new(false);
 /// Scheduler task id of the parent (the program that calls `wait`).
 static PARENT_TID: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Static heap for the bump allocator (per the production bin).
-static mut HEAP: Heap = Heap::ZERO;
+/// The global allocator's arena.
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -92,7 +92,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Per-space page-table pools (one per ring-3 address space).
 static PAGE_TABLE_POOL_CHILD: paging::PageTablePool = paging::PageTablePool::new();

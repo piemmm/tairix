@@ -52,3 +52,6 @@ rt = [
 
 [lints]
 workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

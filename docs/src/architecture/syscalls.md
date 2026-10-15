@@ -197,6 +197,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 142 | `waitset_close` | `Handle` (set)                         | `errno`       | —                       | no      |
 | 143 | `port_unbind`  | `IpcEndpoint` (own port)                | `errno`       | —                       | yes     |
 | 144 | `call_peer_port` | `IpcEndpoint`, `Handle` (ticket), `IpcEndpoint` (port) | `errno` | —             | no      |
+| 145 | `hw_node_key_source` | —                                 | `errno`       | `CAP_INPUT_INJECT` | no    |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -225,7 +226,7 @@ and needs no capability (reading one's own directory grants no authority).
 The per-process directory lives beside the task's streams and limits in
 `kernel/core::aspace::AddressSpaceRegistry` and is dropped when the task
 exits. An alias spelling (`Alias:/…` or the expanded `alias::Name/…`) names a
-first-class storage root: a *machine alias* (`System:`, `Users:`, `Apps:`,
+first-class storage root: a *machine alias* (`System:`, `Users:`,
 `Storage:`) is the canonical root the `/` view projects as `/<Name>`, so
 `System:/Logs/a` resolves to the same object as `/System/Logs/a` and is then
 subject to the identical inode/mount-flag authorisation. `lib/path` already
@@ -2489,8 +2490,8 @@ LRU-evicted under a byte budget of a fixed fraction of discovered RAM,
 bundle serves the cached, already-verified image after re-authorising
 the **caller's** read of the bundle's `Run` through the secured VFS —
 verification is hoisted off the launch hot path (`AGENTS.md` §2.16),
-authorisation never is. Bundles on writable volumes (`/Apps`) are never
-cached and re-verify through the full gate on every launch.
+authorisation never is. Bundles on writable volumes (a user's own stores)
+are never cached and re-verify through the full gate on every launch.
 
 `KernelArch::monotonic_ns` is a new trait method with **no default
 impl**: every architecture port must opt in so an arch that cannot

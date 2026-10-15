@@ -86,7 +86,10 @@ modules; the reference documentation is `docs/src/architecture/threads.md`.
    time exactly as the first thread's growth room is, and the release credits
    back nothing it never charged. Charging the whole extent up front (the
    `mem_map` rule) would bill a thread the RAM of its worst case — with the
-   default `stack_len` below, the process's entire `stack-bytes` bound. A
+   default `stack_len` below, the process's entire `stack-bytes` bound. Each
+   committed page — the first at creation, every growth step after — is
+   charged to the process's `address-space-bytes` total before it is mapped,
+   so that ceiling bounds a threaded process like any other. A
    caller-supplied base cannot
    carry a real guard page under the demand-paged anonymous model (every page of
    a `mem_map` reservation is backed on touch, and the page below one is free for

@@ -143,17 +143,17 @@ rounds and the scan cannot revisit one.
 
 ## S4 — one park/unpark handshake, with an honest error contract
 
-All three policies carry a byte-identical `unpark`: `lookup` → state match →
-wake-pending token → `SeqCst` fence → re-check `Parked`. That is the park state
-machine, not scheduling policy, so it is hoisted rather than fixed three times.
-Only the *placement* differs, and placement is policy.
+The park state machine is lifecycle, not scheduling policy, so it is one
+definition rather than three. Only the *placement* differs, and placement is
+policy.
 
-- `kernel/sched/api` gains the handshake over the shared `TaskState` vocabulary
-  — `unpark_task` and the `step` Park-commit's `commit_park` — parameterised on
-  the policy's own "admit this woken task" step, plus the small trait over the
-  per-policy `TaskInner` it needs (`load_state` / `cas_state` /
-  `set_wake_pending` / `take_wake_pending`). Three live implementors and one
-  live consumer, in this change.
+- `kernel/sched/api::park` holds the handshake — `unpark_task` and the
+  dispatch's `settle` — parameterised on the policy's own "admit this woken
+  task" step, over the trait each per-policy `TaskInner` implements
+  (`load_lifecycle` / `cas_lifecycle` / `swap_lifecycle`). The wake token is a
+  bit of the lifecycle word, so the settle that would park consumes it in the
+  same exchange; a token kept in a word of its own could be taken by a CPU
+  still finishing an earlier park of the task (`OPEN-DEFECTS` D994).
 - Each policy keeps `placement_for` / `admit_fresh_on` (cfq, eevdf) and
   `preferred_home` / `push_class` (mlfq), and nothing else of the handshake.
 - The compare-exchange-loss arm re-reads the state: `Exited` is

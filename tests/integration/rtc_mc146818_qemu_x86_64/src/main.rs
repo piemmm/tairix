@@ -68,12 +68,8 @@ mod kernel {
     };
     use tairix_log::{Event, FieldValue, Sink};
 
-    /// Static heap for the bump allocator (identical to the production bin's
-    /// declaration; `#[global_allocator]` is per-binary).
-    ///
-    /// `static mut` because the bump allocator hands out disjoint slices via
-    /// an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -81,7 +77,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports PASS
     /// once `timed` applied a reading of the fixture's clock chip.

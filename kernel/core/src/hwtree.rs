@@ -32,7 +32,8 @@ pub trait HwNodeLiveness: Sync {
 }
 
 /// The tree a driver is admitted against: whether its node still lives, and
-/// the record of whether a driver drives it and has settled.
+/// the record of whether a driver drives it, has settled, and delivers its
+/// keys.
 pub trait HwDriverTree: HwNodeLiveness {
     /// Record that the driver admitted as `generation` drives `node_id`,
     /// before it can run.
@@ -42,12 +43,13 @@ pub trait HwDriverTree: HwNodeLiveness {
     /// says otherwise, so a child an earlier instance's settling would have
     /// marked as arriving on a running machine is not misread as one. What
     /// an earlier instance left — how it ended, the health it reported of
-    /// its fault domain — is its own view, and goes.
+    /// its fault domain, whether its keys reached the seat — is its own
+    /// view, and goes.
     fn driver_admitted(&self, node_id: u32, generation: u64, publishes: bool);
 
     /// Record that the driver admitted as `generation` no longer drives
-    /// `node_id`, and how it ended: neither driven nor settled, unless a
-    /// later driver already holds it.
+    /// `node_id`, and how it ended: neither driven, settled nor a key source,
+    /// unless a later driver already holds it.
     fn driver_released(&self, node_id: u32, generation: u64, ending: DriverEnding);
 }
 
@@ -280,6 +282,20 @@ pub trait HwTreeSource: HwNodeLiveness {
     /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`];
     /// [`Errno::NotFound`] if no live non-root node has id `node_id`.
     fn settle(&self, node_id: u32) -> Result<(), Errno>;
+
+    /// Mark the live node `node_id` a key source — its driver now delivers
+    /// the device's key presses to the seat — and wake every parked
+    /// `hw_tree_wait` caller when that changes.
+    ///
+    /// This is the store side of the `hw_node_key_source` syscall, whose
+    /// handler has already resolved `node_id` to the caller's own matched
+    /// node. The mark lasts until the node's driver is released or replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullHwTreeSource`];
+    /// [`Errno::NotFound`] if no live non-root node has id `node_id`.
+    fn mark_key_source(&self, node_id: u32) -> Result<(), Errno>;
 }
 
 /// The CPU-side range each DMA window in `tree` reaches, once each: the
@@ -357,6 +373,10 @@ impl HwTreeSource for NullHwTreeSource {
     fn settle(&self, _node_id: u32) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn mark_key_source(&self, _node_id: u32) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// The shared [`NullHwTreeSource`] instance the syscall handler defaults to
@@ -406,6 +426,9 @@ mod tests {
             Ok(())
         }
         fn settle(&self, _: u32) -> Result<(), Errno> {
+            Err(Errno::NotImplemented)
+        }
+        fn mark_key_source(&self, _: u32) -> Result<(), Errno> {
             Err(Errno::NotImplemented)
         }
     }

@@ -524,7 +524,7 @@ volume-policy service.
   the `BootInfo::with_volume_service` seam → `NULL_VOLUME_SERVICE`
   fail-closed default): windows the extent (`PartitionBlock`), opens the
   matched filesystem (ARXFS / ext4 / FAT32), mounts under
-  `/Storage/<name>` with `nosuid,nodev,noexec` (+`ro` per the device),
+  `/Storage/<name>` with `noexec` (+`ro` per the device),
   and publishes the identity **last** with full unwind on any refusal.
   Detach orders fs-flush → device-flush → unmount → unregister →
   unpublish and fails closed (volume stays attached) on a flush error; a
@@ -641,7 +641,7 @@ volume-policy service.
   installed gid (or a registry without the group) leaves the volume
   restrictively system-owned (fail closed, never an invented gid); volumes
   with a real owner model (ext4, ARXFS) are never wrapped. Removable
-  mounts keep `nosuid,nodev,noexec` (landed in D3b); `CAP_FS_MOUNT_RELAX`
+  mounts keep `noexec` (landed in D3b); `CAP_FS_MOUNT_RELAX`
   relaxation stays future work with its own enforcement point.
 - **Catalog enumeration:** listing a driver-backed directory merges the
   backed mounts sitting directly beneath it (`MountTable::direct_children`

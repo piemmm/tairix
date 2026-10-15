@@ -113,6 +113,10 @@ impl HwTreeSource for Tree {
     fn settle(&self, _node_id: u32) -> Result<(), Errno> {
         Err(Errno::NotImplemented)
     }
+
+    fn mark_key_source(&self, _node_id: u32) -> Result<(), Errno> {
+        Err(Errno::NotImplemented)
+    }
 }
 
 /// A reference unit, its frames and a tree, in statics of this expansion's

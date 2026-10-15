@@ -25,7 +25,8 @@ use tairix_abi::sysinfo::{
     DmaNodeRecord, DmaUnitRecord, GroupDirectoryRecord, IrqRecord, KernelMemoryStats, LoadAverage,
     MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountRecord, ProcessRecord, RamzipStats,
     ResourceLimitRecord, SeatRecord, SelfAccountRecord, SystemIdentity, Uptime,
-    UserDirectoryRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    UserDirectoryRecord, ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord,
+    VolumeIoStatsRecord,
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityQuery, Errno, LimitKind, Origin, ProcId};
@@ -166,6 +167,11 @@ pub trait SysinfoSource {
     /// the owned list is returned whole and [`crate::serve`] applies the
     /// `offset`/`limit` paging; ordering must be stable across paged calls.
     fn mount_records(&self, caller: &Caller) -> Result<Vec<MountRecord>, Errno>;
+
+    /// Return the view bindings onto the volumes
+    /// [`mount_records`](Self::mount_records) reports, ungated and paged on
+    /// the same terms.
+    fn view_records(&self, caller: &Caller) -> Result<Vec<ViewBindingRecord>, Errno>;
 
     /// Return `caller`'s effective resource limits and current live usage,
     /// one record per [`LimitKind`] in discriminant order. The query is self-scoped — the answer describes the caller's

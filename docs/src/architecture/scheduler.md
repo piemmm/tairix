@@ -918,16 +918,23 @@ condition but before it commits to park — is closed in the scheduler
 itself by a **wake-pending token** (mirroring Rust's `Thread`
 park/unpark). `Scheduler::unpark` of a task that has *not* yet committed to
 park (it is `Ready`/`Running`) cannot move a non-parked task, so instead of
-no-oping the wake away it sets the token; the dispatch loop's `Park` commit
-consumes the token and re-readies the task rather than sleeping it. Parking is
-lifecycle rather than policy, so both halves of that handshake are one
-definition in `kernel/sched/api::park` (`unpark_task` and `commit_park`),
-parameterised on the policy's own "admit this woken task" placement. A
-waiter therefore only ever sleeps through a wake it has not yet observed,
-and always re-checks its condition after each wake, so a finished or
-timed-out wait returns rather than parking forever. The shared
-`SchedulerPolicy` conformance suite's `unpark_before_park_is_not_lost`
-case asserts this for every policy.
+no-oping the wake away it sets the token. The token is a bit of the task's
+lifecycle word (`park::Lifecycle`), not a word of its own, so the settle
+that would park the task consumes it in the same compare-exchange and
+re-readies the task instead (`Settled::Woken`). That is what keeps a token
+for the park it was left for: with the token apart, a CPU still finishing an
+earlier park of the same task — interrupted between publishing `Parked` and
+taking the token, while the task was woken, ran elsewhere and was woken again
+before its next park — took the later park's token and dropped it, and that
+park slept for good (D994). Parking is lifecycle rather than policy, so both
+halves of the handshake are one definition in `kernel/sched/api::park`
+(`unpark_task` and `settle`), parameterised on the policy's own "admit this
+woken task" placement. A waiter therefore only ever sleeps through a wake it
+has not yet observed, and always re-checks its condition after each wake, so
+a finished or timed-out wait returns rather than parking forever. The shared
+`SchedulerPolicy` conformance suite's `unpark_before_park_is_not_lost` case
+asserts this for every policy, and `kernel/sched/api/tests/loom.rs` checks
+the handshake over every interleaving (`cargo xtask loom`).
 
 `unpark` reports an error **only** for a task that can never run again — it is
 terminal, or the id names none. Callers rely on exactly that reading: the
@@ -949,7 +956,8 @@ leaves it parked for the wake it waits on, and a wake reaching it first makes
 it `Stopped`, owed its run once resumed. Resumed as runnable, a thread born
 parked would run before its creator had made it whole, and a waiter would run
 with nothing woken. A body that parks as a stop lands ends `StoppedParked`
-too, and its park commit keeps a wake that raced it (`park::commit_park`).
+too, and a wake that raced it is kept: the settle ends it `Stopped`, owed its
+run once resumed.
 A queued task keeps its entry (`StoppedOnQueue`) and a running one its CPU
 (`StoppedOnCpu`) until the scheduler next reaches it: whoever takes the entry,
 or the dispatch whose body returns, completes the stop, and a `resume` before
@@ -1253,13 +1261,16 @@ These hold at every API boundary:
    | `Exited`       | *anything*                 | retire                           |
    | *any other*    | `Exit`, or `doomed` (§5) and not `Park` | → `Exited`, retire  |
    | `StoppedOnCpu` | `Yield`                    | → `Stopped`, nothing more owed   |
-   | `StoppedOnCpu` | `Park`                     | → `StoppedParked`, commit the park |
-   | `Running`      | `Park`                     | → `Parked`, commit the park      |
+   | `StoppedOnCpu` | `Park`, a wake owed        | → `Stopped`, nothing more owed   |
+   | `StoppedOnCpu` | `Park`                     | → `StoppedParked`                |
+   | `Running`      | `Park`, a wake owed        | → `Ready`, admit as woken        |
+   | `Running`      | `Park`                     | → `Parked`                       |
    | `Running`      | `Yield`                    | → `Ready`, re-enqueue            |
 
    No other state is reachable from a running task: it holds no queue
    entry, so no wake or resume can queue it, and an `unpark` of a running
-   task only leaves the token its coming park consumes. A stop wins over
+   task only leaves the token its coming park consumes. Every row but a
+   park keeps an owed wake for the park that follows. A stop wins over
    the body's own `Park` or `Yield`, either of which would leave the task
    where a wake or its own entry could run it; a park is kept beneath it.
 

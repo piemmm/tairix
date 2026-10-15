@@ -3,14 +3,12 @@
 The TAIRiX desktop **session glue** (`AGENTS.md` §10, `PLAN.md` Stage 7): the
 component that owns the shared theme registry and the taskbar model and ties
 the desktop's parts together. The crate also ships the `Run` binary of the
-`desktop` **application** (`desktop.app` in the system application store,
-`AGENTS.md` §16.8): a shell user starts the desktop by typing `desktop` — the
-application store is on the fixed lookup prefix, so the bare word resolves
-without any `PATH` entry — and the default graphical login
-(`os.loginType graphical`) spawns the same bundle directly after
-authentication — one bundle, one spelling. The command's grammar is closed
-(`src/cli.rs`): bare `desktop` starts the session, the reserved `-h`/`-?`
-switches serve its own `Help/` documents, anything else is a usage error.
+desktop session **component** (`desktop.app` in `/System/Components`,
+`AGENTS.md` §16.2): a graphical login (`os.loginType graphical`, the
+default) spawns it by its one path after authentication, and no typed word
+runs it. Its grammar is closed (`src/cli.rs`): no operands starts the
+session, the reserved `-h`/`-?` switches serve its own `Help/` documents,
+anything else is a usage error.
 
 The taskbar deliberately owns no theme registry, no filesystem reach, and no
 spawn capability: its buttons and its program-library popup only *report*

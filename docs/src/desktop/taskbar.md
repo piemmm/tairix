@@ -604,7 +604,7 @@ A **secondary** press opens the network menu, one table
 
 | Row | What it is |
 |---|---|
-| Network Settings… | opens Settings at the pane that configures the interfaces (`tairix_netconfig::SETTINGS_PANE`); disabled *Not installed* without a settings bundle |
+| Network Settings… | opens Settings at the pane that configures the interfaces (`tairix_netconfig::SETTINGS_PANE`); disabled *Not installed* until the session attests the Settings component |
 | Network Activity… | opens the Switchboard on its Resources section |
 
 A primary press is claimed and inert, as on every status signal but volume.
@@ -1090,16 +1090,17 @@ two can never disagree (`AGENTS.md` §2.2):
 | About This System | opens the Switchboard's overview |
 | System Monitor | opens the Switchboard's task list |
 | Task Shell | launches the terminal bundle |
-| Settings… | opens the settings bundle |
+| Settings… | opens the Settings component |
 | Lock Screen | secures the screen behind this user's password |
 | Log Out | ends the session; the login supervisor re-prompts |
 | Restart / Shut Down | confirmed, then relayed to the one holder of the power capability |
 
 *Settings…* stands in a group of its own, between inspecting the machine and
 leaving it. The desktop's appearance is configured there and nowhere else
-([Settings](settings.md)), so the menu offers no second way to change it. Like
-*Task Shell* it maps onto the bar's one launch response, so the session gains
-no second path to a program on the user's account.
+([Settings](settings.md)), so the menu offers no second way to change it.
+Settings is a component, never a library entry, so the row reports its own
+response and the session starts the component by its one path; the row is
+actionable only once the session attests the component is installed.
 
 The bar holds none of this authority. Each row reports a typed response and
 the session resolves it, and every row whose backing is missing renders

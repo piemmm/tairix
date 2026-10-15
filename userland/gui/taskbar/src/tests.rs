@@ -214,12 +214,12 @@ const NOW_NS: u64 = 1_000_000_000;
 
 // ---- fixtures --------------------------------------------------------
 
-/// A validated catalog entry for `/Apps/<stem>.app`.
+/// A validated catalog entry for `/System/Applications/<stem>.app`.
 fn entry(stem: &str, name: &str, category: LibraryCategory) -> LibraryEntry {
     LibraryEntry::new(
         EntryId::new(&format!("os.tairix.{stem}")).expect("id"),
         DisplayName::new(name).expect("name"),
-        BundlePath::new(&format!("/Apps/{stem}.app")).expect("bundle"),
+        BundlePath::new(&format!("/System/Applications/{stem}.app")).expect("bundle"),
         category,
         None,
     )
@@ -8351,16 +8351,18 @@ fn offered_tip(request: &MenuRequest, index: usize) -> Option<&str> {
         .tip()
 }
 
-/// The network signal's Settings row opens the settings bundle, so it fails
-/// closed exactly as the system menu's own Settings row does when the catalog
-/// holds no such bundle.
+/// The network signal's Settings row opens the Settings component, so it
+/// fails closed exactly as the system menu's own Settings row does when the
+/// session attested no such component.
 #[test]
-fn the_network_menus_settings_row_follows_the_catalog() {
+fn the_network_menus_settings_row_follows_the_component() {
     let settings = crate::network_menu::ROWS
         .iter()
         .position(|row| *row == crate::network_menu::NetworkRow::Settings)
         .expect("a listed row");
-    for (mut bar, installed) in [(bottom_bar(), false), (bar_with_task_shell(), true)] {
+    for installed in [false, true] {
+        let mut bar = bottom_bar();
+        bar.set_settings_installed(installed);
         assert!(bar.set_network(Some(crate::network::tests::connected())));
         let mut input = TaskbarInput::new();
         let signal = centre_of(bar.layout(Scale::ONE).notifications[0]);
@@ -8471,9 +8473,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
         Some(TaskbarResponse::LibraryLaunch {
             entry: EntryId::new("os.tairix.terminal").expect("id"),
         }),
-        Some(TaskbarResponse::LibraryLaunch {
-            entry: EntryId::new("os.tairix.settings").expect("id"),
-        }),
+        Some(TaskbarResponse::OpenSettings),
         Some(TaskbarResponse::LockSession),
         Some(TaskbarResponse::SwitchUser),
         Some(TaskbarResponse::LogOut),
@@ -8494,6 +8494,7 @@ fn every_row_maps_to_exactly_its_expected_response() {
     bar.set_tray_summary(Some(power_capable_summary()));
     bar.set_elevation_available(true);
     bar.set_switch_user_available(true);
+    bar.set_settings_installed(true);
     let mut input = TaskbarInput::new();
     let request = ask_system_menu(&mut input, &mut bar);
     for (index, want) in expected.into_iter().enumerate() {
@@ -8753,14 +8754,15 @@ fn a_launch_row_whose_bundle_is_absent_is_disabled_and_asks_for_nothing() {
 }
 
 #[test]
-fn the_settings_row_is_a_group_of_its_own_and_opens_the_settings_bundle() {
+fn the_settings_row_is_a_group_of_its_own_and_opens_the_settings_component() {
     // Configuring the machine is neither inspecting it nor leaving it, so
     // Settings stands between the two groups rather than inside either.
     let settings = system_row(SystemAction::Settings);
     assert!(crate::system::ROWS[settings].group_break);
     assert!(crate::system::ROWS[settings + 1].group_break);
 
-    let mut bar = bar_with_task_shell();
+    let mut bar = bottom_bar();
+    bar.set_settings_installed(true);
     let mut input = TaskbarInput::new();
     let request = ask_system_menu(&mut input, &mut bar);
     let item = offered_row(&request, settings);
@@ -8769,17 +8771,15 @@ fn the_settings_row_is_a_group_of_its_own_and_opens_the_settings_bundle() {
     assert_eq!(offered_tip(&request, settings), None);
     assert_eq!(
         chosen_at(&mut bar, &request, settings),
-        Some(TaskbarResponse::LibraryLaunch {
-            entry: EntryId::new("os.tairix.settings").expect("id"),
-        }),
-        "it reuses the bar's one launch response"
+        Some(TaskbarResponse::OpenSettings),
+        "a component is opened by its path, never through the library"
     );
 }
 
 #[test]
 fn the_settings_row_is_disabled_when_its_bundle_is_not_installed() {
-    // The standard fixture holds no settings bundle, so the row is offered
-    // with its reason stated rather than emitting a launch that must fail.
+    // The session attested no Settings component, so the row is offered with
+    // its reason stated rather than emitting a launch that must fail.
     let settings = system_row(SystemAction::Settings);
     let mut bar = bottom_bar();
     let mut input = TaskbarInput::new();

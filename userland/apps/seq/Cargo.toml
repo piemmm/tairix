@@ -53,3 +53,6 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 [dev-dependencies]
 # The refusal a failing-stream fixture answers with.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

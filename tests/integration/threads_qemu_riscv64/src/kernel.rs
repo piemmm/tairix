@@ -53,7 +53,7 @@ use tairix_arch_riscv64::{
 use tairix_caps::CapabilitySet;
 use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::FreeListAllocator;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args, resolve_user_fault_via_slot};
 use tairix_kernel::riscv64::boot::{self as boot_riscv64, RiscvBinArch, RISCV_UART_CONSOLES};
 use tairix_kernel::riscv64::spawn_producer::{CHILD_USER_BIAS, RISCV_PROCESS_SPAWN};
@@ -176,14 +176,11 @@ const FAIL_PAGING: NonZeroU16 = fail_point!(15);
 /// code is added so the failing role/site is identifiable in the finisher.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
 
-/// Size of the test's bump heap. Lives in `.bss` (zeroed by the trampoline).
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
-/// Page-aligned backing store for the bump heap.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -191,7 +188,7 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 /// Identity-mapped physical-frame backing store the live [`FrameAllocator`]
 /// serves the spawn producer and the stack-growth fault path from; inside

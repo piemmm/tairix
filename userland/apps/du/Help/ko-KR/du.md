@@ -60,7 +60,7 @@ du — 파일의 디스크 사용량 추정
 - `du` — 현재 디렉터리의 트리, 디렉터리마다 한 행.
 - `du -sh /Users/jo` — `/Users/jo`의 읽기 쉬운 합계 하나.
 - `du -a docs` — `docs` 아래의 모든 파일과 디렉터리.
-- `du -d1 -c /Apps /Users` — 각 저장소의 첫 단계와 총합.
+- `du -d1 -c /System/Applications /Users` — 각 저장소의 첫 단계와 총합.
 
 ## EXIT STATUS
 

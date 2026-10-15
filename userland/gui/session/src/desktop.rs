@@ -417,7 +417,7 @@ impl<S: DirectorySource> Desktop<S> {
     /// The link takes the entry's **display name** and points at the bundle
     /// *directory* it launches. That is what makes the shortcut read as an
     /// application on the desktop: bundle-ness is decided from the target's own
-    /// leaf name, never from the link's, so `Chess` → `/Apps/chess.app` is an
+    /// leaf name, never from the link's, so `Chess` → `/System/Applications/chess.app` is an
     /// application while the link itself is just a name. The target is carried
     /// verbatim and never resolved here, so a shortcut whose bundle is later
     /// removed dangles honestly rather than being prevented at creation.

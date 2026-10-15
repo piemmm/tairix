@@ -2,12 +2,11 @@
 //! what medium it is on, and every completion bucketed
 //! (`plans/switchboard/04-disk.png`).
 //!
-//! The service readings are the device's, not a mount's: every volume on one
-//! disk reads the same fold, and one volume is projected at as many mount
-//! points as the namespace needs. So the rail groups the mount table into
+//! The service readings are the device's, not a volume's: every volume on one
+//! disk reads the same fold. So the rail groups the attached volumes into
 //! devices before it draws anything — otherwise a disk's throughput is
-//! reported once per partition and once per projection, and a volume's
-//! counters are deltaed against themselves.
+//! reported once per partition, and a device's counters are deltaed against
+//! themselves.
 //!
 //! Nothing here is served pre-derived: throughput, IOPS, utilisation, await
 //! and mean queue depth are all deltas of the device's cumulative counters
@@ -39,51 +38,20 @@ use crate::view::resources::{
     ResourceControl, ResourceDevice, StorageId, TaskCostColumn, Trace,
 };
 
-/// The nil volume identity: what the mount table reports for a mount with no
-/// backing volume at all — the in-RAM layout directories.
+/// The nil volume identity: what a volume that published no identity
+/// reports, which no per-volume query can be keyed on.
 const NO_VOLUME: [u8; MOUNT_VOLUME_ID_LEN] = [0; MOUNT_VOLUME_ID_LEN];
-
-/// One volume of a storage device, and every mount projecting it.
-struct StorageVolume<'a> {
-    /// The volume's durable identity, which the per-volume queries key on.
-    id: [u8; MOUNT_VOLUME_ID_LEN],
-    /// Every mount projecting it, in the mount table's own order. A volume
-    /// reachable at six paths is one volume, not six.
-    mounts: Vec<&'a MountRecord>,
-}
 
 /// One storage device the rail lists, and what is on it.
 pub(crate) struct StorageSubject<'a> {
     /// Its own identity, which the selection remembers.
     id: StorageId,
     /// The volumes on it, in the mount table's own order. Never empty: a
-    /// subject is only ever built from a mount.
-    volumes: Vec<StorageVolume<'a>>,
+    /// subject is only ever built from a volume.
+    volumes: Vec<&'a MountRecord>,
 }
 
-impl<'a> StorageSubject<'a> {
-    /// A subject identified as `id`, carrying `mount`'s volume.
-    fn of(id: StorageId, volume: [u8; MOUNT_VOLUME_ID_LEN], mount: &'a MountRecord) -> Self {
-        Self {
-            id,
-            volumes: alloc::vec![StorageVolume {
-                id: volume,
-                mounts: alloc::vec![mount],
-            }],
-        }
-    }
-
-    /// Add `mount` to this subject, under `volume`.
-    fn add(&mut self, volume: [u8; MOUNT_VOLUME_ID_LEN], mount: &'a MountRecord) {
-        match self.volumes.iter_mut().find(|held| held.id == volume) {
-            Some(held) => held.mounts.push(mount),
-            None => self.volumes.push(StorageVolume {
-                id: volume,
-                mounts: alloc::vec![mount],
-            }),
-        }
-    }
-
+impl StorageSubject<'_> {
     /// The volume id the device's own readings are looked up by.
     ///
     /// The three per-volume queries key on a volume but report the
@@ -92,7 +60,9 @@ impl<'a> StorageSubject<'a> {
     /// record, so a subject that somehow held none would read unmeasured
     /// rather than borrow another device's figures.
     pub(crate) fn key(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
-        self.volumes.first().map_or(NO_VOLUME, |volume| volume.id)
+        self.volumes
+            .first()
+            .map_or(NO_VOLUME, |volume| volume.volume_id())
     }
 
     /// This device's rail entry identity.
@@ -102,31 +72,17 @@ impl<'a> StorageSubject<'a> {
 
     /// What the device's volumes hold between them, or [`None`] where none
     /// of them tracks a fixed capacity.
-    ///
-    /// Summed over the *volumes*, so a volume projected at several mount
-    /// points is counted once rather than once per projection.
     pub(crate) fn held(&self) -> Option<VolumeBytes> {
-        self.heads()
-            .filter_map(|(_, mount)| VolumeBytes::of(&mount.usage()))
+        self.volumes
+            .iter()
+            .filter_map(|volume| VolumeBytes::of(&volume.usage()))
             .reduce(VolumeBytes::plus)
     }
 
-    /// The medium the device declares, taking the first mount that names one
-    /// so an unclassified projection cannot hide a classified sibling.
+    /// The medium the device declares, taking the first volume that names
+    /// one so an unclassified volume cannot hide a classified sibling.
     fn medium(&self) -> Option<BlkDeviceClass> {
-        self.volumes
-            .iter()
-            .flat_map(|volume| volume.mounts.iter())
-            .find_map(|mount| mount.medium())
-    }
-
-    /// Each volume's identity, in rail order: its own record and the first
-    /// mount projecting it, which carries the volume's driver-reported
-    /// accounting (every projection reports the same).
-    fn heads(&self) -> impl Iterator<Item = (&[u8; MOUNT_VOLUME_ID_LEN], &MountRecord)> {
-        self.volumes
-            .iter()
-            .filter_map(|volume| volume.mounts.first().map(|mount| (&volume.id, *mount)))
+        self.volumes.iter().find_map(|volume| volume.medium())
     }
 
     /// The device's own name, as its driver declares it, or [`None`] where
@@ -143,12 +99,12 @@ impl<'a> StorageSubject<'a> {
     }
 
     /// The volumes on the device, in rail order. A volume the mount table
-    /// gives no source for falls back to its first mount point, so no volume
-    /// is ever nameless.
+    /// gives no source for falls back to its mount point, so no volume is
+    /// ever nameless.
     fn volume_names(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        for (_, mount) in self.heads() {
-            let name = String::from_utf8_lossy(mount_name_bytes(mount)).into_owned();
+        for volume in &self.volumes {
+            let name = String::from_utf8_lossy(mount_name_bytes(volume)).into_owned();
             if !name.is_empty() && !names.contains(&name) {
                 names.push(name);
             }
@@ -165,10 +121,11 @@ impl<'a> StorageSubject<'a> {
     /// stands for it.
     pub(crate) fn availability(&self, sample: &Sample) -> MountAvailability {
         let health = sample.volume_health.as_deref();
-        self.heads()
-            .map(|(volume, mount)| {
-                super::find_volume_stats(health, volume)
-                    .map_or_else(|| mount.availability(), VolumeIoHealthRecord::availability)
+        self.volumes
+            .iter()
+            .map(|volume| {
+                super::find_volume_stats(health, &volume.volume_id())
+                    .map_or_else(|| volume.availability(), VolumeIoHealthRecord::availability)
             })
             .max_by_key(|availability| availability.health())
             .unwrap_or(MountAvailability::Available)
@@ -192,30 +149,30 @@ impl<'a> StorageSubject<'a> {
     }
 }
 
-/// Group the mount table into the storage devices the rail lists.
+/// Group the attached volumes into the storage devices the rail lists.
 ///
-/// A volume projected at several mount points is one volume of one device,
-/// and every volume served over one block endpoint is one device — so a
-/// disk's throughput is folded and drawn once rather than once per
-/// projection or once per partition. Where the kernel publishes no serving
-/// device for a volume there are no shared counters to collapse, so the
-/// volume stands as its own subject with its capacity alone. A mount with no
-/// backing volume at all (the in-RAM layout directories) names no storage
-/// device and is not one.
+/// Every volume served over one block endpoint is one device — so a disk's
+/// throughput is folded and drawn once rather than once per partition. Where
+/// the kernel publishes no serving device for a volume there are no shared
+/// counters to collapse, so the volume stands as its own subject with its
+/// capacity alone. A volume that published no identity can be keyed by no
+/// per-volume query and is not listed.
 ///
 /// The order is the mount table's, which is the registry's own stable
 /// registration order, so the rail does not reorder itself between samples.
 pub(crate) fn subjects(sample: &Sample) -> Vec<StorageSubject<'_>> {
     let mut subjects: Vec<StorageSubject<'_>> = Vec::new();
-    for mount in sample.mounts.iter().flatten() {
-        let volume = mount.volume_id();
-        if volume == NO_VOLUME {
+    for volume in sample.mounts.iter().flatten() {
+        if volume.volume_id() == NO_VOLUME {
             continue;
         }
-        let id = subject_of(sample, &volume);
+        let id = subject_of(sample, &volume.volume_id());
         match subjects.iter_mut().find(|subject| subject.id == id) {
-            Some(subject) => subject.add(volume, mount),
-            None => subjects.push(StorageSubject::of(id, volume, mount)),
+            Some(subject) => subject.volumes.push(volume),
+            None => subjects.push(StorageSubject {
+                id,
+                volumes: alloc::vec![volume],
+            }),
         }
     }
     subjects
@@ -458,12 +415,22 @@ fn capacity_facts(
         }
         None => facts.push(ReadingFact::absent("Capacity", Unmeasured::Unavailable)),
     }
+    if subject
+        .volumes
+        .iter()
+        .any(|volume| volume.usage().in_reserve)
+    {
+        facts.push(ReadingFact::text(
+            "Space",
+            "down to its reserve: ordinary writes may be refused",
+        ));
+    }
     // Each distinct block size the device's volumes are formatted with, so a
     // disk carrying two differently-formatted volumes names both rather than
     // reporting whichever came first as the device's.
     let mut blocks: Vec<String> = Vec::new();
-    for (_, mount) in subject.heads() {
-        let size = format_bytes(u64::from(mount.usage().block_size));
+    for volume in &subject.volumes {
+        let size = format_bytes(u64::from(volume.usage().block_size));
         if !blocks.contains(&size) {
             blocks.push(size);
         }
@@ -478,20 +445,17 @@ fn capacity_facts(
     facts
 }
 
-/// Each volume on the device, then the paths it is reachable at.
+/// Each volume on the device, then the view path showing its root.
 ///
 /// This is where the mount table's own detail lives now that the rail is per
 /// device: a volume's filesystem, its own capacity and its availability, then
-/// one row per projection carrying that mount's permission policy.
+/// where it is mounted and the policy it was attached with.
 fn volume_facts(subject: &StorageSubject<'_>) -> Vec<ReadingFact> {
     let mut facts = Vec::new();
     for volume in &subject.volumes {
-        let Some(head) = volume.mounts.first() else {
-            continue;
-        };
-        let source = String::from_utf8_lossy(head.source_bytes()).into_owned();
-        let fstype = String::from_utf8_lossy(head.fstype_bytes()).into_owned();
-        let capacity = VolumeBytes::of(&head.usage()).map_or_else(
+        let source = String::from_utf8_lossy(volume.source_bytes()).into_owned();
+        let fstype = String::from_utf8_lossy(volume.fstype_bytes()).into_owned();
+        let capacity = VolumeBytes::of(&volume.usage()).map_or_else(
             || String::from("capacity unavailable"),
             |bytes| {
                 format!(
@@ -501,17 +465,22 @@ fn volume_facts(subject: &StorageSubject<'_>) -> Vec<ReadingFact> {
                 )
             },
         );
+        let reserve = if volume.usage().in_reserve {
+            " · down to its reserve"
+        } else {
+            ""
+        };
         facts.push(ReadingFact::text(
             if source.is_empty() { "Volume" } else { &source },
             format!(
-                "{fstype} · {capacity} · {}",
-                availability_name(head.availability())
+                "{fstype} · {capacity} · {}{reserve}",
+                availability_name(volume.availability())
             ),
         ));
-        for mount in &volume.mounts {
+        if !volume.target_bytes().is_empty() {
             facts.push(ReadingFact::text(
-                String::from_utf8_lossy(mount.target_bytes()).into_owned(),
-                tairix_procinfo::render_options(mount.flags()),
+                String::from_utf8_lossy(volume.target_bytes()).into_owned(),
+                tairix_procinfo::render_options(volume.flags()),
             ));
         }
     }

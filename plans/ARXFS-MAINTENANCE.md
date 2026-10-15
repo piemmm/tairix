@@ -413,7 +413,11 @@ already checks. It does not get it ambiently and it does not get a new one.
 them. `check` and `rescue` are offline: `check` rebuilds derived state and needs
 the volume not serving, `rescue` reads a volume too damaged to mount. `grow`
 changes the volume's geometry on an operator's instruction. Automating any of
-them would be automating a decision that is not the filesystem's to make.
+them would be automating a decision that is not the filesystem's to make. The
+one grow that is not an operator's is the boot path's, and it is provisioning,
+not maintenance: an image written to a larger medium has its root — the last
+partition — extended to the medium's end at its writable mount, and the volume
+grown into it (`docs/src/filesystem/arxfs-spec.md` §13).
 
 They are reachable, and the health the runner accumulates is readable, through
 one new command app — a self-contained bundle under the system command store,

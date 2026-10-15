@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats, WritebackHost,
+    FilesystemStats, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverError;
 
@@ -142,7 +142,7 @@ impl FilesystemWrite for FlushSpy {
         self.inner.flush()
     }
 
-    fn set_writeback_host(&mut self, volume: DriverHandle, _host: &'static dyn WritebackHost) {
+    fn set_volume_host(&mut self, volume: DriverHandle, _host: &'static dyn VolumeHost) {
         self.host_volume = Some(volume);
     }
 }
@@ -165,11 +165,12 @@ impl FilesystemStats for FlushSpy {
 
 impl FilesystemAttrsProvider for FlushSpy {}
 
-/// A leaked registry, so it can be its own `&'static` write-back host — the
+/// A leaked registry, so it can be its own `&'static` volume host — the
 /// production shape (`LATE_FILESYSTEM` installs itself).
 fn registry() -> &'static LateFilesystem<FlushSpy> {
     let cell: &'static LateFilesystem<FlushSpy> = Box::leak(Box::new(LateFilesystem::new()));
-    cell.install_writeback_host(cell).expect("host installs");
+    cell.install_volume_host(cell, sink())
+        .expect("host installs");
     cell
 }
 
@@ -250,13 +251,13 @@ fn the_host_reads_no_clock_until_the_flusher_arms_it() {
     let _ = crate::test_boot::claim_scheduler();
     crate::test_boot::advance_clock(4_242);
     assert_eq!(
-        WritebackHost::now_ns(mounts),
+        VolumeHost::now_ns(mounts),
         None,
         "deferral is refused while nothing would publish it"
     );
     mounts.arm_writeback();
     assert_eq!(
-        WritebackHost::now_ns(mounts),
+        VolumeHost::now_ns(mounts),
         Some(4_242),
         "an armed host defers against the wait clock"
     );

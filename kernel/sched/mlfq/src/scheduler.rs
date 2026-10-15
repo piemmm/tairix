@@ -941,7 +941,7 @@ impl<A: SchedulerArch> Scheduler<A> {
                 }
                 self.drop_record(task);
             }
-            Settled::Park => park::commit_park(task, |woken| self.admit_woken(woken)),
+            Settled::Woken => self.admit_woken(task),
             Settled::Requeue => self.reenqueue_after_yield(task, prio, cpu),
             Settled::Released => {}
         }

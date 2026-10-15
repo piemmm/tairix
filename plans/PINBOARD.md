@@ -418,7 +418,9 @@ known, to start once that cost fits; a render with nothing else running always
 goes on, whatever it costs, with nothing started beside it. A render that runs
 out of memory beside others runs again alone; one that runs out alone
 concludes `PreviewOutcome::Unavailable`, which Settings asks for again once
-memory may have been freed. A window may have no more pending than there are
+memory may have been freed. A decode that outgrows its worker's memory bound
+concludes `PreviewOutcome::Refused` at once: a worker under the same bound
+would fail it the same way. A window may have no more pending than there are
 preparers, so a chooser of pictures uses the machine's cores without being
 able to flood them. The desktop always prepares its own backdrop first, so the
 picture the user is looking at never waits behind a thumbnail, and the

@@ -83,10 +83,11 @@ impl SysinfoQueryId {
     pub const SYSTEM_IDENTITY: Self = Self(4);
     /// Read system uptime and boot wall-clock time. Requires none.
     pub const UPTIME: Self = Self(5);
-    /// List the currently-mounted filesystems. Requires no capability:
-    /// the mount table is system-wide rather than scoped to a principal,
-    /// and exposes no per-process secret, so — like [`Self::UPTIME`] and
-    /// [`Self::SYSTEM_IDENTITY`] — any task may read it. The privileged *act* of mounting is gated separately by
+    /// List the attached volumes, one [`MountRecord`] each. Requires no
+    /// capability: the mount table is system-wide rather than scoped to a
+    /// principal, and exposes no per-process secret, so — like
+    /// [`Self::UPTIME`] and [`Self::SYSTEM_IDENTITY`] — any task may read it.
+    /// The privileged *act* of mounting is gated separately by
     /// `CAP_FS_MOUNT`; this query only reports.
     pub const MOUNT_LIST: Self = Self(6);
     /// Read the calling principal's own effective resource limits together
@@ -703,6 +704,12 @@ impl SysinfoQueryId {
     /// Requires `CAP_SYSINFO_GLOBAL` and is audited: it is system-wide
     /// topology, the same class as [`Self::NET_INTERFACE_STATE`].
     pub const NET_ROUTES: Self = Self(51);
+    /// List the view bindings: each view path and the subtree of the attached
+    /// volume it shows, one [`ViewBindingRecord`] each, paged by a
+    /// [`PageRequest`]. Ungated, exactly as [`Self::MOUNT_LIST`], whose
+    /// attached volumes these bind: the namespace is system-wide and carries
+    /// no per-process secret.
+    pub const VIEW_LIST: Self = Self(52);
 
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
@@ -871,6 +878,9 @@ pub enum IntrospectDomain {
     /// The nodes units translate for an owner: one packed
     /// [`DmaNodeRecord`] each, paged by the syscall's `arg`.
     DmaNodes = 27,
+    /// The view bindings: one packed [`ViewBindingRecord`] each, paged by the
+    /// syscall's `arg`.
+    Views = 28,
 }
 
 impl IntrospectDomain {
@@ -913,6 +923,7 @@ impl IntrospectDomain {
             25 => Ok(Self::DmaUnits),
             26 => Ok(Self::DmaGroups),
             27 => Ok(Self::DmaNodes),
+            28 => Ok(Self::Views),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -1289,6 +1300,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
         name: "net_routes",
         required_capability: Some(CapabilityId::SYSINFO_GLOBAL),
         audit: true,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::VIEW_LIST,
+        name: "view_list",
+        required_capability: None,
+        audit: false,
     },
 ];
 
@@ -3362,12 +3379,14 @@ impl NetInterfaceRatesRequest {
     }
 }
 
-/// One entry in the system mount table, returned by
-/// [`SysinfoQueryId::MOUNT_LIST`].
+/// One attached volume, returned by [`SysinfoQueryId::MOUNT_LIST`]: a volume
+/// is listed once however many view paths show it, those being its
+/// [`ViewBindingRecord`]s.
 ///
-/// Each record names a mounted filesystem by its backing `source`, the
-/// `target` path it is mounted at, the driver `fstype`, the
-/// [`MountFlags`] policy in force (`ro`/`nosuid`/`nodev`/`noexec`), and the
+/// Each record names the volume by its backing `source`, the `target` view
+/// path that shows the volume's own root (empty when none does), the driver
+/// `fstype`, the [`MountFlags`] it is attached under (`ro`/`noexec`) — which
+/// every binding of it preserves or narrows — and the
 /// volume's space accounting as a [`VolumeStats`] — the same type the
 /// filesystem driver ABI defines, so the numbers cross the wire in the one
 /// shape the driver reported them in.
@@ -3377,9 +3396,9 @@ impl NetInterfaceRatesRequest {
 /// [`MountFlags`] type the filesystem driver ABI defines rather than
 /// re-declaring the flag algebra.
 ///
-/// A mount with no live backing volume (or one whose driver reports no
-/// accounting) carries an all-zero [`VolumeStats`]: zero total blocks is the
-/// honest "no capacity known" answer a consumer skips, never a guess.
+/// A volume whose driver reports no accounting carries an all-zero
+/// [`VolumeStats`]: zero total blocks is the honest "no capacity known"
+/// answer a consumer skips, never a guess.
 ///
 /// Each record also reports the volume's [`MountAvailability`] — so a
 /// surprise-removed volume never masquerades as healthy — and its stable
@@ -3391,7 +3410,7 @@ impl NetInterfaceRatesRequest {
 /// The record also carries the backing block device's storage
 /// [`medium`](MountRecord::medium) ([`BlkDeviceClass`]), so a consumer such
 /// as the file manager can show a medium-appropriate drive icon instead of
-/// guessing. A mount with no block backing — a synthetic or view mount — and
+/// guessing. A volume attached with no classified block device behind it and
 /// any medium byte the decoder does not understand both report `None`
 /// (unknown): the record never fabricates a class it does not know.
 #[repr(C)]
@@ -3607,6 +3626,7 @@ impl MountRecord {
         out[7] = self.availability.as_u8();
         out[Self::MEDIUM_OFFSET] = self.medium;
         put_u32(&mut out, Self::USAGE_OFFSET, self.usage.block_size);
+        out[Self::USAGE_OFFSET + 4] = u8::from(self.usage.in_reserve);
         put_u64(&mut out, Self::USAGE_OFFSET + 8, self.usage.total_blocks);
         put_u64(&mut out, Self::USAGE_OFFSET + 16, self.usage.free_blocks);
         put_u64(&mut out, Self::USAGE_OFFSET + 24, self.usage.avail_blocks);
@@ -3645,11 +3665,16 @@ impl MountRecord {
         }
         if bytes[Self::RESERVED_OFFSET..Self::USAGE_OFFSET]
             .iter()
+            .chain(&bytes[Self::USAGE_OFFSET + 5..Self::USAGE_OFFSET + 8])
             .any(|byte| *byte != 0)
-            || read_u32(bytes, Self::USAGE_OFFSET + 4) != 0
         {
             return Err(Errno::OutOfRange);
         }
+        let in_reserve = match bytes[Self::USAGE_OFFSET + 4] {
+            0 => false,
+            1 => true,
+            _ => return Err(Errno::OutOfRange),
+        };
         // Normalised on the way in, so a byte the ABI does not define is
         // held — and re-emitted — as unknown rather than relayed onward.
         let medium = Self::medium_to_wire(Self::medium_from_wire(bytes[Self::MEDIUM_OFFSET]));
@@ -3666,6 +3691,7 @@ impl MountRecord {
         }
         let usage = VolumeStats {
             block_size: read_u32(bytes, Self::USAGE_OFFSET),
+            in_reserve,
             total_blocks: read_u64(bytes, Self::USAGE_OFFSET + 8),
             free_blocks: read_u64(bytes, Self::USAGE_OFFSET + 16),
             avail_blocks: read_u64(bytes, Self::USAGE_OFFSET + 24),
@@ -3698,6 +3724,163 @@ impl MountRecord {
             target,
             fstype,
         })
+    }
+}
+
+/// One view binding, returned by [`SysinfoQueryId::VIEW_LIST`]: a view path
+/// (`target`), the path within an attached volume it shows (`subtree`, `/`
+/// for the volume's own root), and the [`MountFlags`] it narrows that volume
+/// to.
+///
+/// `volume_id` is the attached volume's, the key of its [`MountRecord`], so a
+/// consumer resolving a path takes the covering binding and reads the volume's
+/// figures in one join. A binding showing no volume — the `/Storage` catalog —
+/// carries an empty `subtree` and the all-zero identity, which joins to
+/// nothing, so a path beneath it is never credited to the volume above. A flat
+/// `repr(C)` block of [`Self::WIRE_LEN`] bytes encoded little-endian.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ViewBindingRecord {
+    flags: MountFlags,
+    target_len: u8,
+    subtree_len: u8,
+    reserved: [u8; 2],
+    volume_id: [u8; MOUNT_VOLUME_ID_LEN],
+    target: [u8; MOUNT_TARGET_MAX],
+    subtree: [u8; MOUNT_TARGET_MAX],
+}
+
+impl ViewBindingRecord {
+    /// Encoded size of a [`ViewBindingRecord`] on the wire: the flags word,
+    /// the two length bytes and two reserved bytes, the volume identity, then
+    /// the two fixed-capacity path buffers.
+    pub const WIRE_LEN: usize = Self::SUBTREE_OFFSET + MOUNT_TARGET_MAX;
+
+    const RESERVED_OFFSET: usize = 6;
+    const VOLUME_ID_OFFSET: usize = 8;
+    const TARGET_OFFSET: usize = Self::VOLUME_ID_OFFSET + MOUNT_VOLUME_ID_LEN;
+    const SUBTREE_OFFSET: usize = Self::TARGET_OFFSET + MOUNT_TARGET_MAX;
+
+    /// Build a record from its parts.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] if `target` or `subtree` exceeds
+    /// [`MOUNT_TARGET_MAX`].
+    pub fn new(
+        target: &[u8],
+        subtree: &[u8],
+        flags: MountFlags,
+        volume_id: [u8; MOUNT_VOLUME_ID_LEN],
+    ) -> Result<Self, Errno> {
+        if target.len() > MOUNT_TARGET_MAX || subtree.len() > MOUNT_TARGET_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let target_len = u8::try_from(target.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        let subtree_len = u8::try_from(subtree.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        let mut record = Self {
+            flags,
+            target_len,
+            subtree_len,
+            reserved: [0u8; 2],
+            volume_id,
+            target: [0u8; MOUNT_TARGET_MAX],
+            subtree: [0u8; MOUNT_TARGET_MAX],
+        };
+        record.target[..target.len()].copy_from_slice(target);
+        record.subtree[..subtree.len()].copy_from_slice(subtree);
+        Ok(record)
+    }
+
+    /// The flags the binding narrows its volume to.
+    #[must_use]
+    pub fn flags(&self) -> MountFlags {
+        self.flags
+    }
+
+    /// The attached volume's stable identity, the key of its [`MountRecord`];
+    /// all-zero for a binding showing no volume.
+    #[must_use]
+    pub fn volume_id(&self) -> [u8; MOUNT_VOLUME_ID_LEN] {
+        self.volume_id
+    }
+
+    /// Whether the binding shows a volume: `false` for one showing none, such
+    /// as the `/Storage` catalog.
+    #[must_use]
+    pub fn shows_volume(&self) -> bool {
+        self.volume_id != [0; MOUNT_VOLUME_ID_LEN]
+    }
+
+    /// The view path bytes.
+    #[must_use]
+    pub fn target_bytes(&self) -> &[u8] {
+        &self.target[..usize::from(self.target_len)]
+    }
+
+    /// The path within the volume the binding shows: `/` for its root, empty
+    /// for a binding showing no volume.
+    #[must_use]
+    pub fn subtree_bytes(&self) -> &[u8] {
+        &self.subtree[..usize::from(self.subtree_len)]
+    }
+
+    /// Encode `self` into its little-endian wire representation.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
+        let mut out = [0u8; Self::WIRE_LEN];
+        put_u32(&mut out, 0, self.flags.bits());
+        out[4] = self.target_len;
+        out[5] = self.subtree_len;
+        out[Self::VOLUME_ID_OFFSET..Self::TARGET_OFFSET].copy_from_slice(&self.volume_id);
+        out[Self::TARGET_OFFSET..Self::SUBTREE_OFFSET].copy_from_slice(&self.target);
+        out[Self::SUBTREE_OFFSET..Self::WIRE_LEN].copy_from_slice(&self.subtree);
+        out
+    }
+
+    /// Decode `bytes` into a [`ViewBindingRecord`].
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::BufferTooSmall`] if `bytes.len() < WIRE_LEN`.
+    /// * [`Errno::OutOfRange`] if the flags word sets a bit outside the known
+    ///   [`MountFlags`] mask, or a reserved byte is non-zero.
+    /// * [`Errno::LengthOutOfRange`] if a length byte exceeds its buffer.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() < Self::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        if bytes[Self::RESERVED_OFFSET..Self::VOLUME_ID_OFFSET]
+            .iter()
+            .any(|byte| *byte != 0)
+        {
+            return Err(Errno::OutOfRange);
+        }
+        let flags = MountFlags::from_bits(read_u32(bytes, 0)).map_err(|_| Errno::OutOfRange)?;
+        let (target_len, subtree_len) = (bytes[4], bytes[5]);
+        if usize::from(target_len) > MOUNT_TARGET_MAX || usize::from(subtree_len) > MOUNT_TARGET_MAX
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut record = Self {
+            flags,
+            target_len,
+            subtree_len,
+            reserved: [0u8; 2],
+            volume_id: [0u8; MOUNT_VOLUME_ID_LEN],
+            target: [0u8; MOUNT_TARGET_MAX],
+            subtree: [0u8; MOUNT_TARGET_MAX],
+        };
+        record
+            .volume_id
+            .copy_from_slice(&bytes[Self::VOLUME_ID_OFFSET..Self::TARGET_OFFSET]);
+        record
+            .target
+            .copy_from_slice(&bytes[Self::TARGET_OFFSET..Self::SUBTREE_OFFSET]);
+        record
+            .subtree
+            .copy_from_slice(&bytes[Self::SUBTREE_OFFSET..Self::WIRE_LEN]);
+        Ok(record)
     }
 }
 
@@ -6898,6 +7081,7 @@ mod tests {
         MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
     };
     use super::{IrqRecord, IRQ_FLAG_QUARANTINED};
+    use super::{ViewBindingRecord, MOUNT_VOLUME_ID_LEN};
     use super::{VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord};
     use crate::blkio::{
         BlkDeviceClass, BlkDeviceName, BlkHealthCounters, BlkIoCounters, BlkQueueCounters,
@@ -7133,12 +7317,13 @@ mod tests {
             (25, IntrospectDomain::DmaUnits),
             (26, IntrospectDomain::DmaGroups),
             (27, IntrospectDomain::DmaNodes),
+            (28, IntrospectDomain::Views),
         ] {
             assert_eq!(domain.as_u32(), raw);
             assert_eq!(IntrospectDomain::from_u32(raw), Ok(domain));
         }
         // Any value outside the closed set is rejected, not guessed.
-        assert_eq!(IntrospectDomain::from_u32(28), Err(Errno::OutOfRange));
+        assert_eq!(IntrospectDomain::from_u32(29), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -8162,13 +8347,82 @@ mod tests {
     }
 
     #[test]
+    fn view_binding_record_round_trips_and_refuses_what_it_cannot_carry() {
+        let volume_id = [0x5Au8; MOUNT_VOLUME_ID_LEN];
+        let binding = ViewBindingRecord::new(
+            b"/System/Logs",
+            b"/System/Logs",
+            MountFlags::NOEXEC,
+            volume_id,
+        )
+        .expect("fits");
+        let bytes = binding.to_le_bytes();
+        assert_eq!(bytes.len(), ViewBindingRecord::WIRE_LEN);
+        // The in-memory image is the wire image, so the generated C view
+        // mirrors one layout.
+        assert_eq!(
+            core::mem::size_of::<ViewBindingRecord>(),
+            ViewBindingRecord::WIRE_LEN
+        );
+        assert_eq!(
+            core::mem::offset_of!(ViewBindingRecord, volume_id),
+            ViewBindingRecord::VOLUME_ID_OFFSET
+        );
+        assert_eq!(
+            core::mem::offset_of!(ViewBindingRecord, subtree),
+            ViewBindingRecord::SUBTREE_OFFSET
+        );
+        let decoded = ViewBindingRecord::from_bytes(&bytes).expect("decodes");
+        assert_eq!(decoded, binding);
+        assert_eq!(decoded.target_bytes(), b"/System/Logs");
+        assert_eq!(decoded.subtree_bytes(), b"/System/Logs");
+        assert_eq!(decoded.flags(), MountFlags::NOEXEC);
+        assert_eq!(decoded.volume_id(), volume_id);
+        assert!(decoded.shows_volume());
+        let catalog = ViewBindingRecord::new(
+            b"/Storage",
+            b"",
+            MountFlags::READ_ONLY,
+            [0; MOUNT_VOLUME_ID_LEN],
+        )
+        .expect("fits");
+        assert!(!catalog.shows_volume());
+
+        let long = [b'a'; MOUNT_TARGET_MAX + 1];
+        assert_eq!(
+            ViewBindingRecord::new(&long, b"", MountFlags::default(), volume_id),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            ViewBindingRecord::from_bytes(&bytes[..ViewBindingRecord::WIRE_LEN - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut reserved = bytes;
+        reserved[6] = 1;
+        assert_eq!(
+            ViewBindingRecord::from_bytes(&reserved),
+            Err(Errno::OutOfRange)
+        );
+        let mut flagged = bytes;
+        flagged[3] = 0x80;
+        assert_eq!(
+            ViewBindingRecord::from_bytes(&flagged),
+            Err(Errno::OutOfRange)
+        );
+        let mut overlong = bytes;
+        overlong[5] = u8::try_from(MOUNT_TARGET_MAX + 1).expect("small");
+        assert_eq!(
+            ViewBindingRecord::from_bytes(&overlong),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
+    #[test]
     fn mount_record_round_trips() {
-        let flags = MountFlags::READ_ONLY
-            .union(MountFlags::NOSUID)
-            .union(MountFlags::NODEV)
-            .union(MountFlags::NOEXEC);
+        let flags = MountFlags::READ_ONLY.union(MountFlags::NOEXEC);
         let usage = VolumeStats {
             block_size: 4096,
+            in_reserve: false,
             total_blocks: 1 << 40,
             free_blocks: 1 << 39,
             avail_blocks: (1 << 39) - 32,
@@ -8622,6 +8876,7 @@ mod tests {
         // Free exceeding total is refused at construction…
         let free_over_total = VolumeStats {
             block_size: 512,
+            in_reserve: false,
             total_blocks: 10,
             free_blocks: 11,
             avail_blocks: 0,
@@ -8642,6 +8897,7 @@ mod tests {
         // …as is available exceeding free…
         let avail_over_free = VolumeStats {
             block_size: 512,
+            in_reserve: false,
             total_blocks: 10,
             free_blocks: 5,
             avail_blocks: 6,
@@ -8683,11 +8939,49 @@ mod tests {
                 "reserved byte {offset}"
             );
         }
-        // So must the usage block's own reserved pad, which belongs to the
-        // shared volume-statistics type rather than to this record.
+        // So must the usage block's own reserved pad after its reserve
+        // byte, which belongs to the shared volume-statistics type rather than
+        // to this record.
+        for offset in 21..24 {
+            let mut bytes = ok.to_le_bytes();
+            bytes[offset] = 1;
+            assert_eq!(
+                MountRecord::from_bytes(&bytes),
+                Err(Errno::OutOfRange),
+                "usage pad byte {offset}"
+            );
+        }
+        // The reserve byte is a flag, and nothing else.
         let mut bytes = ok.to_le_bytes();
-        bytes[20] = 1;
+        bytes[20] = 2;
         assert_eq!(MountRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_volume_down_to_its_reserve_says_so_on_the_wire() {
+        let usage = VolumeStats {
+            block_size: 512,
+            in_reserve: true,
+            total_blocks: 100,
+            free_blocks: 10,
+            avail_blocks: 0,
+            files: 0,
+            files_free: 0,
+        };
+        let record = MountRecord::new(
+            b"root",
+            b"/",
+            b"arxfs",
+            MountFlags::default(),
+            healthy(usage),
+            [0u8; 16],
+        )
+        .unwrap();
+        let bytes = record.to_le_bytes();
+        assert_eq!(bytes[20], 1);
+        let decoded = MountRecord::from_bytes(&bytes).expect("decodes");
+        assert!(decoded.usage().in_reserve);
+        assert_eq!(decoded, record);
     }
 
     #[test]

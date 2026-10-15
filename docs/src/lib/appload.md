@@ -2,9 +2,8 @@
 
 `lib/appload` (`tairix-appload`) is the one place a `<Name>.app/` bundle is
 *judged* before it may be launched (`AGENTS.md` §16.4, §16.5). It is a shared
-`lib/*` crate so the same gate is used by both the kernel boot-floor spawn
-path and the user-space [application-manager service](../userland/appmgr.md),
-never re-implemented (§2.2, §17.4). The gate runs in this shared layer because
+`lib/*` crate so the one gate the kernel's `spawn` loads every bundle through
+is never re-implemented beside it (§2.2, §17.4). The gate runs in this shared layer because
 the layout, signature, and capability policy is not architecture- or
 kernel-specific; the kernel only enforces the resulting capability ceiling at
 exec time.

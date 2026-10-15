@@ -1,16 +1,17 @@
-//! The shared mount-list paging walk and row rendering.
+//! The shared mount-list and view-list walks, the namespace they join into,
+//! and the `mount` row rendering.
 //!
-//! The `mount` tool pages through the system mount table and renders each
-//! [`MountRecord`] into a single line in the familiar
-//! `source on target type fstype (options)` shape. The paging is the generic
-//! [`walk_pages`](crate::list) used by the process list, so only the
-//! per-record decode and the row rendering live here.
+//! The service lists attached volumes ([`MountRecord`]) apart from the view
+//! paths that show them ([`ViewBindingRecord`]). [`Namespace`] joins the two,
+//! so every consumer resolves a path to the binding covering it and that
+//! binding to its volume through one definition.
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::MountFlags;
-use tairix_abi::sysinfo::{MountRecord, SysinfoQueryId};
+use tairix_abi::sysinfo::{MountRecord, SysinfoQueryId, ViewBindingRecord, MOUNT_VOLUME_ID_LEN};
 use tairix_abi::Errno;
 
 use crate::list::{field_lossy, walk_records, ListError, WalkStep};
@@ -19,27 +20,29 @@ use crate::volume::availability_marker;
 
 /// Number of [`MountRecord`]s requested per mount-list page: the most one
 /// reply holds, since a page that does not fit is refused whole.
-///
-/// A page bounds the reply size so the transport never has to carry the
-/// whole mount table at once; [`for_each_mount`] walks pages until a short
-/// page ends the list.
 pub const MOUNT_PAGE: u16 = tairix_abi::reply_page(MountRecord::WIRE_LEN);
 
-/// Page through the mount table and hand each decoded [`MountRecord`] to
-/// `sink`.
+/// Number of [`ViewBindingRecord`]s requested per view-list page, sized as
+/// [`MOUNT_PAGE`] is.
+pub const VIEW_PAGE: u16 = tairix_abi::reply_page(ViewBindingRecord::WIRE_LEN);
+
+/// The identity of a volume that published none, which joins to nothing.
+const UNPUBLISHED: [u8; MOUNT_VOLUME_ID_LEN] = [0; MOUNT_VOLUME_ID_LEN];
+
+/// Page through the attached volumes and hand each decoded [`MountRecord`]
+/// to `sink`, in the order the service lists them.
 ///
 /// The query is [`SysinfoQueryId::MOUNT_LIST`], which the service serves
-/// ungated: the mount table is system-wide and secret-free. Records are delivered in the order the service returns them.
+/// ungated: the mount table is system-wide and secret-free.
 ///
 /// `sink` answers [`WalkStep::Continue`] to be given the next record or
 /// [`WalkStep::Stop`] to end the walk there, which is how a caller bounds
 /// how much of a long or hostile list it will accept. Stopping is an
 /// ordinary success, so it stays distinguishable from a failure.
 ///
-/// The walk **fails closed**: a reply whose length
-/// is not a whole number of [`MountRecord::WIRE_LEN`] records, or one that
-/// would overflow the page offset, is rejected rather than partially
-/// rendered.
+/// The walk **fails closed**: a reply whose length is not a whole number of
+/// [`MountRecord::WIRE_LEN`] records, or one that would overflow the page
+/// offset, is rejected rather than partially rendered.
 ///
 /// # Errors
 ///
@@ -61,8 +64,138 @@ pub fn for_each_mount(
     )
 }
 
-/// Render one [`MountRecord`] as a `source on target type fstype (options)`
-/// line, the long-standing Unix `mount` listing shape.
+/// Page through the view bindings ([`SysinfoQueryId::VIEW_LIST`]) and hand
+/// each to `sink`, on the terms of [`for_each_mount`].
+///
+/// # Errors
+///
+/// As [`for_each_mount`].
+pub fn for_each_view(
+    transport: &dyn Transport,
+    sink: impl FnMut(&ViewBindingRecord) -> Result<WalkStep, Errno>,
+) -> Result<(), ListError> {
+    walk_records(
+        transport,
+        SysinfoQueryId::VIEW_LIST,
+        ViewBindingRecord::WIRE_LEN,
+        VIEW_PAGE,
+        ViewBindingRecord::from_bytes,
+        sink,
+    )
+}
+
+/// The attached volumes and the view bindings onto them, read together so a
+/// path resolves to the binding covering it and that binding to its volume.
+#[derive(Clone, Debug, Default)]
+pub struct Namespace {
+    volumes: Vec<MountRecord>,
+    views: Vec<ViewBindingRecord>,
+    /// Indices of the volumes that published an identity, sorted by it.
+    by_id: Vec<usize>,
+}
+
+impl Namespace {
+    /// Read the volume list, then the view list.
+    ///
+    /// They are two queries, so a volume attached or detached between them can
+    /// leave a binding naming no listed volume; that binding then resolves to
+    /// no volume rather than to a guess.
+    ///
+    /// # Errors
+    ///
+    /// As [`for_each_mount`].
+    pub fn read(transport: &dyn Transport) -> Result<Self, ListError> {
+        let mut volumes = Vec::new();
+        for_each_mount(transport, |volume| {
+            volumes.push(*volume);
+            Ok(WalkStep::Continue)
+        })?;
+        let mut views = Vec::new();
+        for_each_view(transport, |view| {
+            views.push(*view);
+            Ok(WalkStep::Continue)
+        })?;
+        Ok(Self::new(volumes, views))
+    }
+
+    /// The namespace `volumes` and `views` describe, each in service order.
+    #[must_use]
+    pub fn new(volumes: Vec<MountRecord>, views: Vec<ViewBindingRecord>) -> Self {
+        let mut by_id: Vec<usize> = (0..volumes.len())
+            .filter(|&at| volumes[at].volume_id() != UNPUBLISHED)
+            .collect();
+        by_id.sort_unstable_by_key(|&at| volumes[at].volume_id());
+        Self {
+            volumes,
+            views,
+            by_id,
+        }
+    }
+
+    /// The attached volumes, in service order.
+    #[must_use]
+    pub fn volumes(&self) -> &[MountRecord] {
+        &self.volumes
+    }
+
+    /// The view bindings, in mount-table order.
+    #[must_use]
+    pub fn views(&self) -> &[ViewBindingRecord] {
+        &self.views
+    }
+
+    /// The volume `view` shows, or `None` when it shows none (the `/Storage`
+    /// catalog) or one this namespace does not list.
+    #[must_use]
+    pub fn volume_of(&self, view: &ViewBindingRecord) -> Option<&MountRecord> {
+        if !view.shows_volume() {
+            return None;
+        }
+        let at = self
+            .by_id
+            .binary_search_by_key(&view.volume_id(), |&at| self.volumes[at].volume_id())
+            .ok()?;
+        Some(&self.volumes[self.by_id[at]])
+    }
+
+    /// The binding covering the absolute `path`: the longest view path that
+    /// is `path` or one of its ancestors, compared a whole component at a
+    /// time.
+    #[must_use]
+    pub fn covering(&self, path: &[u8]) -> Option<&ViewBindingRecord> {
+        self.views
+            .iter()
+            .filter(|view| covers(view.target_bytes(), path))
+            .max_by_key(|view| view.target_bytes().len())
+    }
+
+    /// The binding covering `path` and the volume it shows. `None` when the
+    /// covering binding shows no listed volume: the volume above it does not
+    /// answer for bytes that would not land on it.
+    #[must_use]
+    pub fn volume_at(&self, path: &[u8]) -> Option<(&ViewBindingRecord, &MountRecord)> {
+        let view = self.covering(path)?;
+        Some((view, self.volume_of(view)?))
+    }
+}
+
+/// Whether the view path `target` is the absolute `path` or one of its
+/// ancestors.
+fn covers(target: &[u8], path: &[u8]) -> bool {
+    if target == b"/" {
+        return path.first() == Some(&b'/');
+    }
+    path.strip_prefix(target)
+        .is_some_and(|rest| rest.first().is_none_or(|&byte| byte == b'/'))
+}
+
+/// Render one binding as a `source on target type fstype (options)` line,
+/// the long-standing Unix `mount` listing shape, from its `volume`.
+///
+/// A binding of a subtree names it after the source, `source[/subtree]`, as
+/// `findmnt` does, so a carved-out directory is not read as the volume's
+/// root. A binding showing no volume (the `/Storage` catalog) reads `none`
+/// for both.
 ///
 /// A surprise-removed volume carries a trailing ` [unavailable-dirty]` /
 /// ` [unavailable-lost]` marker, a re-inserted volume whose
@@ -73,16 +206,22 @@ pub fn for_each_mount(
 /// byte-identical to the classic shape while an unwell, dead, or
 /// conflicted one never looks healthy (`plans/DEVICES.md` D4b).
 #[must_use]
-pub fn render_mount(record: &MountRecord) -> String {
-    let marker = availability_marker(record.availability())
+pub fn render_binding(view: &ViewBindingRecord, volume: Option<&MountRecord>) -> String {
+    let target = field_lossy(view.target_bytes());
+    let options = render_options(view.flags());
+    let Some(volume) = volume else {
+        return format!("none on {target} type none ({options})");
+    };
+    let subtree = match view.subtree_bytes() {
+        b"" | b"/" => String::new(),
+        subtree => format!("[{}]", field_lossy(subtree)),
+    };
+    let marker = availability_marker(volume.availability())
         .map_or_else(String::new, |marker| format!(" [{marker}]"));
     format!(
-        "{} on {} type {} ({}){}",
-        field_lossy(record.source_bytes()),
-        field_lossy(record.target_bytes()),
-        field_lossy(record.fstype_bytes()),
-        render_options(record.flags()),
-        marker,
+        "{}{subtree} on {target} type {} ({options}){marker}",
+        field_lossy(volume.source_bytes()),
+        field_lossy(volume.fstype_bytes()),
     )
 }
 
@@ -97,22 +236,17 @@ pub fn render_options(flags: MountFlags) -> String {
     } else {
         "rw"
     });
-    for (flag, name) in [
-        (MountFlags::NOSUID, "nosuid"),
-        (MountFlags::NODEV, "nodev"),
-        (MountFlags::NOEXEC, "noexec"),
-    ] {
-        if flags.contains(flag) {
-            options.push(',');
-            options.push_str(name);
-        }
+    if flags.contains(MountFlags::NOEXEC) {
+        options.push_str(",noexec");
     }
     options
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{for_each_mount, render_mount, render_options, WalkStep, MOUNT_PAGE};
+    use super::{
+        for_each_mount, render_binding, render_options, Namespace, WalkStep, MOUNT_PAGE, VIEW_PAGE,
+    };
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::Transport;
@@ -122,14 +256,16 @@ mod tests {
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
         MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
-        SysinfoRequestHeader,
+        SysinfoRequestHeader, ViewBindingRecord,
     };
     use tairix_abi::Errno;
 
-    /// An in-memory `sysinfod` stand-in answering mount-list queries from a
-    /// fixed record set, decoding the request exactly as the real service.
+    /// An in-memory `sysinfod` stand-in answering the mount and view lists
+    /// from fixed record sets, decoding each request exactly as the real
+    /// service.
     struct Fixture {
         records: Vec<MountRecord>,
+        views: Vec<ViewBindingRecord>,
         malformed: bool,
         seen: RefCell<Vec<SysinfoQueryId>>,
     }
@@ -138,10 +274,32 @@ mod tests {
         fn new(records: Vec<MountRecord>) -> Self {
             Self {
                 records,
+                views: Vec::new(),
                 malformed: false,
                 seen: RefCell::new(Vec::new()),
             }
         }
+    }
+
+    fn page_of<R>(
+        records: &[R],
+        request: &PageRequest,
+        len: usize,
+        encode: impl Fn(&R) -> Vec<u8>,
+    ) -> Result<Vec<u8>, Errno> {
+        let offset = request.offset as usize;
+        if offset >= records.len() {
+            return Ok(Vec::new());
+        }
+        let take = core::cmp::min(records.len() - offset, request.limit as usize);
+        // As the service does: a page one reply cannot hold is refused.
+        if take * len > tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX {
+            return Err(Errno::BufferTooSmall);
+        }
+        Ok(records[offset..offset + take]
+            .iter()
+            .flat_map(encode)
+            .collect())
     }
 
     impl Transport for Fixture {
@@ -153,22 +311,37 @@ mod tests {
             }
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
-            let req = PageRequest::from_bytes(payload)?;
-            let offset = req.offset as usize;
-            if offset >= self.records.len() {
-                return Ok(Vec::new());
+            let page = PageRequest::from_bytes(payload)?;
+            match header.query {
+                SysinfoQueryId::MOUNT_LIST => {
+                    page_of(&self.records, &page, MountRecord::WIRE_LEN, |r| {
+                        r.to_le_bytes().to_vec()
+                    })
+                }
+                SysinfoQueryId::VIEW_LIST => {
+                    page_of(&self.views, &page, ViewBindingRecord::WIRE_LEN, |r| {
+                        r.to_le_bytes().to_vec()
+                    })
+                }
+                _ => Err(Errno::NotImplemented),
             }
-            let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
-            // As the service does: a page one reply cannot hold is refused.
-            if take * MountRecord::WIRE_LEN > tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX {
-                return Err(Errno::BufferTooSmall);
-            }
-            let mut out = Vec::with_capacity(take * MountRecord::WIRE_LEN);
-            for record in &self.records[offset..offset + take] {
-                out.extend_from_slice(&record.to_le_bytes());
-            }
-            Ok(out)
         }
+    }
+
+    fn volume(source: &[u8], target: &[u8], fstype: &[u8], id: u8) -> MountRecord {
+        MountRecord::new(
+            source,
+            target,
+            fstype,
+            MountFlags::default(),
+            MountVolumeState {
+                usage: VolumeStats::default(),
+                availability: MountAvailability::Available,
+                medium: None,
+            },
+            [id; 16],
+        )
+        .expect("record")
     }
 
     fn record(source: &[u8], target: &[u8], fstype: &[u8], flags: MountFlags) -> MountRecord {
@@ -187,6 +360,99 @@ mod tests {
         .expect("record")
     }
 
+    fn view(target: &[u8], subtree: &[u8], flags: MountFlags, id: u8) -> ViewBindingRecord {
+        ViewBindingRecord::new(target, subtree, flags, [id; 16]).expect("view")
+    }
+
+    /// The default install's namespace with a stick under `/Storage`: the
+    /// root volume (1) at `/` and carved out at `/System/Logs`, the system
+    /// volume (2) at `/System`, the catalog showing no volume, and the
+    /// stick (3).
+    fn installed() -> Namespace {
+        Namespace::new(
+            alloc::vec![
+                volume(b"ARXFSRoot", b"/", b"arxfs", 1),
+                volume(b"ARXFSSystem", b"/System", b"arxfs", 2),
+                volume(b"usb1", b"/Storage/usb1", b"fat32", 3),
+            ],
+            alloc::vec![
+                view(b"/", b"/", MountFlags::default(), 1),
+                view(b"/System", b"/", MountFlags::READ_ONLY, 2),
+                view(b"/System/Logs", b"/System/Logs", MountFlags::NOEXEC, 1),
+                view(
+                    b"/Storage",
+                    b"",
+                    MountFlags::READ_ONLY.union(MountFlags::NOEXEC),
+                    0
+                ),
+                view(b"/Storage/usb1", b"/", MountFlags::NOEXEC, 3),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_path_resolves_to_the_volume_its_covering_binding_shows() {
+        let ns = installed();
+        let source = |path: &[u8]| ns.volume_at(path).map(|(_, volume)| volume.source_bytes());
+        assert_eq!(source(b"/System/Logs/boot"), Some(&b"ARXFSRoot"[..]));
+        assert_eq!(source(b"/System/Logs"), Some(&b"ARXFSRoot"[..]));
+        assert_eq!(
+            source(b"/System/Commands/ls.app"),
+            Some(&b"ARXFSSystem"[..])
+        );
+        assert_eq!(source(b"/Users/ada"), Some(&b"ARXFSRoot"[..]));
+        assert_eq!(source(b"/Storage/usb1/x"), Some(&b"usb1"[..]));
+        // A name sharing a prefix is not a descendant.
+        assert_eq!(source(b"/Systemic"), Some(&b"ARXFSRoot"[..]));
+        // The catalog stores nothing, so no volume answers for it — and the
+        // volume above it does not answer in its place.
+        assert_eq!(
+            ns.covering(b"/Storage")
+                .map(ViewBindingRecord::target_bytes),
+            Some(&b"/Storage"[..])
+        );
+        assert_eq!(source(b"/Storage"), None);
+        assert_eq!(source(b"/Storage/absent"), None);
+        assert!(ns.covering(b"relative/path").is_none());
+    }
+
+    #[test]
+    fn a_binding_of_an_unlisted_volume_resolves_to_none() {
+        // The stick left between the two reads.
+        let ns = Namespace::new(
+            alloc::vec![volume(b"ARXFSRoot", b"/", b"arxfs", 1)],
+            alloc::vec![
+                view(b"/", b"/", MountFlags::default(), 1),
+                view(b"/Storage/usb1", b"/", MountFlags::NOEXEC, 3),
+            ],
+        );
+        assert!(ns.volume_at(b"/Storage/usb1/x").is_none());
+        // A volume with no published identity joins to no binding either.
+        let unpublished = Namespace::new(
+            alloc::vec![volume(b"anon", b"/", b"arxfs", 0)],
+            alloc::vec![view(b"/", b"/", MountFlags::default(), 0)],
+        );
+        assert!(unpublished.volume_at(b"/x").is_none());
+    }
+
+    #[test]
+    fn read_walks_the_volumes_then_the_views() {
+        let ns = installed();
+        let mut fixture = Fixture::new(ns.volumes().to_vec());
+        fixture.views = ns.views().to_vec();
+        let read = Namespace::read(&fixture).expect("both lists");
+        assert_eq!(read.volumes(), ns.volumes());
+        assert_eq!(read.views(), ns.views());
+        assert_eq!(
+            fixture.seen.borrow().as_slice(),
+            &[SysinfoQueryId::MOUNT_LIST, SysinfoQueryId::VIEW_LIST]
+        );
+        assert!(
+            usize::from(VIEW_PAGE) * ViewBindingRecord::WIRE_LEN
+                <= tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX
+        );
+    }
+
     #[test]
     fn the_storage_medium_survives_the_client_decode() {
         // The medium the service reported reaches the consumer through the
@@ -195,7 +461,7 @@ mod tests {
             b"usb1",
             b"/Storage/usb1",
             b"fat32",
-            MountFlags::NOSUID,
+            MountFlags::NOEXEC,
             MountVolumeState {
                 usage: VolumeStats::default(),
                 availability: MountAvailability::Available,
@@ -216,7 +482,7 @@ mod tests {
     #[test]
     fn a_mount_table_longer_than_one_reply_is_walked_whole() {
         let records: Vec<MountRecord> = (0..100)
-            .map(|_| record(b"vol", b"/Storage/vol", b"arxfs", MountFlags::NOSUID))
+            .map(|_| record(b"vol", b"/Storage/vol", b"arxfs", MountFlags::NOEXEC))
             .collect();
         let fixture = Fixture::new(records);
         assert_eq!(collect(&fixture).expect("every page answered").len(), 100);
@@ -300,13 +566,21 @@ mod tests {
 
     #[test]
     fn render_writes_the_classic_mount_line() {
-        let flags = MountFlags::NOSUID
-            .union(MountFlags::NODEV)
-            .union(MountFlags::NOEXEC);
-        let line = render_mount(&record(b"data", b"/Storage/data", b"arxfs", flags));
+        let ns = installed();
+        let lines: Vec<_> = ns
+            .views()
+            .iter()
+            .map(|view| render_binding(view, ns.volume_of(view)))
+            .collect();
         assert_eq!(
-            line,
-            "data on /Storage/data type arxfs (rw,nosuid,nodev,noexec)"
+            lines,
+            [
+                "ARXFSRoot on / type arxfs (rw)",
+                "ARXFSSystem on /System type arxfs (ro)",
+                "ARXFSRoot[/System/Logs] on /System/Logs type arxfs (rw,noexec)",
+                "none on /Storage type none (ro,noexec)",
+                "usb1 on /Storage/usb1 type fat32 (rw,noexec)",
+            ]
         );
     }
 
@@ -321,7 +595,7 @@ mod tests {
                 b"usb1",
                 b"/Storage/usb1",
                 b"fat32",
-                MountFlags::NOSUID,
+                MountFlags::NOEXEC,
                 MountVolumeState {
                     usage: VolumeStats::default(),
                     availability,
@@ -330,18 +604,15 @@ mod tests {
                 [7u8; 16],
             )
             .expect("record");
-            let line = render_mount(&record);
+            let line = render_binding(
+                &view(b"/Storage/usb1", b"/", MountFlags::NOEXEC, 7),
+                Some(&record),
+            );
             assert_eq!(
                 line,
-                alloc::format!("usb1 on /Storage/usb1 type fat32 (rw,nosuid) {marker}")
+                alloc::format!("usb1 on /Storage/usb1 type fat32 (rw,noexec) {marker}")
             );
         }
-    }
-
-    #[test]
-    fn read_only_renders_ro() {
-        let line = render_mount(&record(b"rootfs", b"/", b"arxfs", MountFlags::READ_ONLY));
-        assert_eq!(line, "rootfs on / type arxfs (ro)");
     }
 
     #[test]
@@ -349,19 +620,17 @@ mod tests {
         assert_eq!(render_options(MountFlags::default()), "rw");
         assert_eq!(render_options(MountFlags::READ_ONLY), "ro");
         assert_eq!(
-            render_options(MountFlags::NODEV.union(MountFlags::READ_ONLY)),
-            "ro,nodev"
+            render_options(MountFlags::NOEXEC.union(MountFlags::READ_ONLY)),
+            "ro,noexec"
         );
     }
 
     #[test]
     fn render_is_lossy_on_invalid_bytes() {
-        let line = render_mount(&record(
-            &[0xFF, 0xFE],
-            b"/",
-            b"arxfs",
-            MountFlags::default(),
-        ));
+        let line = render_binding(
+            &view(b"/", b"/", MountFlags::default(), 1),
+            Some(&volume(&[0xFF, 0xFE], b"/", b"arxfs", 1)),
+        );
         assert!(line.contains('\u{FFFD}'));
     }
 }

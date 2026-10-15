@@ -19,9 +19,8 @@ documento estruturado por comando ou tópico, por língua. O `man` resolve
 mostrada documenta sempre o programa que a shell executaria para a mesma
 palavra; o `PATH` não pode reordenar nem substituir esse prefixo. Um
 sufixo `.app` nomeia o pacote diretamente. Quando nenhum deles contém a
-palavra, o `man` percorre as lojas de aplicações de forma recursiva —
-primeiro `/Apps`, depois as pastas `Commands` e `Applications` do seu
-diretório pessoal — pelo que um pacote arrumado em pastas encaixadas é
+palavra, o `man` percorre de forma recursiva as
+pastas `Commands` e `Applications` do seu diretório pessoal, pelo que um pacote arrumado em pastas encaixadas é
 encontrado à mesma; a procura nunca olha para dentro de outro pacote, e
 vence a correspondência menos profunda.
 

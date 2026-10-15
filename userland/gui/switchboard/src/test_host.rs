@@ -136,6 +136,7 @@ pub(crate) fn mount_of(
         MountVolumeState {
             usage: VolumeStats {
                 block_size: block,
+                in_reserve: false,
                 total_blocks: total,
                 free_blocks: avail,
                 avail_blocks: avail,

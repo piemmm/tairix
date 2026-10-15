@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 372 open, 633 closed, 1005 total.
+**closed**, and a partial fix stays **open**. 372 open, 659 closed, 1031 total.
 
 ### Open (372)
 
@@ -50,8 +50,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard | partial — the registry guards and every reachable identity collision are closed, the latter as D147. Open: `console::cooked_foreground_maps_ctrl_c_to_a_queued_interrupt` failed once in 500 shuffled runs and is unexplained, its install-once-hook lead untested; and an isolated identity is still not the default — 300 of `syscalls.rs`'s 450 tests spell the literal `2` |
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
 | D123 | `kernel/core` is not under the UB oracle | `kernel/mem` is **closed** — enrolled and green (0 leaks) once `DirectPhysMap` gained a provenance root, every leaked fixture became a `Once` cell, `slab`'s proptest stopped wanting a cwd, the sample-sized sweeps were scaled, and the crate was dealt across the host's cores (`Spread::PerCore`) instead of taken serially in one process, which is what overran the runner's per-job budget; two `dma` tests are skipped by name. `kernel/core` is **not** budget-bound as previously recorded: 577 test-side `Box::leak` sites across ~40 fixture types had never been seen, because every whole-crate run aborted on provenance before the leak check ran — see the section |
-| D127 | the tree carries `static mut`, which the charter names as a hack, in ~30 source files and 139 test kernels | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table (`HEAP`, `KERNEL_STACKS`, port scratch) reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. `SyncUnsafeCell` is the modern form. `tairix_kalloc::Heap` no longer forces it: the arena is a plain `static` reached through `Heap::as_mut_ptr`, and the Settings vertical is the first binary built that way, so the heap sites convert one line each. Either the sweep lands or a charter carve-out says why storage is not state; today neither is written down |
-| D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static; `kernel/sched/api::park` would need one too. Distinct from D123, which is the UB oracle |
+| D127 | the tree carries `static mut`, which the charter names as a hack: the kernel ports' boot state (D242) and the test kernels' non-heap arenas and tables — `FRAME_POOL` in 48 of them, `USER_STACK`, `FRAMEBUFFER`, `PROBE_FRAME`, `WORKER_STACK`, `WORKER_CTX`, `MAIN_CTX`, `SECRET_FRAME`, `VICTIM_PAGE`, `DMA_FRAMES`, `ANON_POOL` | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. The heap arenas went with D975 (`tairix_kalloc::Heap`, a plain `static`); each remaining site wants the same shape, an `UnsafeCell` wrapper whose raw pointer is the only access |
+| D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static. Distinct from D123, which is the UB oracle |
 | D132 | no run states whether a *double-click* in a file-manager window reaches `activate` on a guest | coverage gap with an unexplained observation behind it, not a confirmed defect. The `handover_qemu_aarch64` vertical originally injected the pair as one four-edge burst and never passed. The burst **was** delivered: four window events reached the manager's own event mailbox (`0xE117…` tagged with the `files` task) in the 60 ms after that window's first frame, and the manager repainted twice after them — yet no `fd_grant` followed. The aim was verified independently against the run's screendump and round-trips to the intended entry through the production hit-test, and the shared pairing rule accepts two presses 32 ms apart on one subject (neither `Moved` nor `Released` resets the tracker). So either the burst yielded one press rather than two, or the two resolved to different subjects — and **no existing record can tell them apart**: `MessageDelivered` carries a port, a sender and a length, every window event is 40 bytes, and no audit event anywhere names a pointer action. Answering it needs a witness that names the delivered event kind, plus re-adding injection (`PointerAction::DoubleClick` was deleted with its last consumer). The vertical now activates through the item's context-menu *Open* row, which runs the same `activate`, so the delegation chain is covered and only the pairing path is host-tested only |
 | D139 | `lib/rt` is not under the UB oracle, and cannot be enrolled as the registry's scopes stand | noticed while adding a granted-region mapping; the allocator's pager seam hands it fabricated addresses, which strict provenance refuses as *unsupported* — a reason `Scope::LibExcept` does not currently admit |
 | D140 | the desktop never installs the notification-icon set it can load, so a shipped chrome SVG would be ignored | latent today (no chrome kind ships an SVG); wiring it naively costs 80 speculative per-kind lookups at bring-up, so the fix is to discover the present assets from one directory listing first — see below |
@@ -336,7 +336,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D815 | the file manager still writes on its event loop: New ▸'s create, the Properties window's mode, owner and attribute commits, the Trash folder's creation, the `stat`s that plan a paste or a move to Trash, and every step of a delete, paste or move to Trash each make their filesystem call on the loop that owes its windows a frame, so a slow or failing volume stalls every window the process serves for the length of that call | **medium**: responsiveness under slow or failing storage, not correctness; noticed moving the rename off the loop, the same class; not absorbed, because the operations need a worker of their own. Each call is bounded — an operation step is one directory read, unlink, `fs_mkdir`, rename or copy chunk, and a turn starts none after half a frame — so a stall is one device round trip, but on a failing disk that is the request deadline. The fix: the one-shot writes become one write-job type on the reader thread, answered by ticket to the window that asked as the rename is (`Reads::rename`, `collect_renames`), the window keeping its live state until the answer lands; an operation runs whole on a worker that posts progress for the panel and takes a cancel between steps, the loop presenting the panel once a frame from the latest progress. The reads' counterpart is D454. Tests: an answer reaches only the window that asked and a closed window's is dropped; a full queue refuses with its reason; a cancel stops a worker-run operation between steps. `userland/apps/files/src/run.rs` `begin_new_entry`, `toggle_permission`, `commit_owner`, `set_attribute`, `remove_attribute`, `ensure_dir`, `plan_trash_moves`, `start_paste`, `advance_operation` |
 | D828 | the capability table allocates infallibly on admission and mutation: `insert` boxes a record in an `Arc` and grows `BTreeMap` nodes, `register_thread` grows two maps, and a mutation of a record a snapshot shares copies it — each an abort, not a `Result`, when the kernel heap is exhausted | **medium**; partial — the record copy a mutation makes is fallible (`caps_of_process_mut` answers `OutOfMemory` and changes nothing, closed with D813); `insert`'s boxing and the maps' growth still abort. Noticed closing D825; the class predates the shared record (the map nodes always aborted). Closed by fallible growth — reserved map capacity or a fallible ordered map, `Arc::try_new`, and a fallible record copy — so an admission or a revocation the heap cannot serve fails with `OutOfMemory` and changes nothing. `kernel/sec/src/captable.rs` |
 | D834 | ARXFS's freed-block embargo does not cover the window right after a mount: the newest root's freed blocks are rebuilt free and reusable before any device flush, so after a kernel crash that left slot N only in the drive's write cache, the first transaction can overwrite blocks slot N−1 still names before a power loss | **medium**, plausible; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. Closed by a flush on a read-write open before the first allocation. `drivers/filesystem/arxfs/src/lib.rs` mount, the embargo |
-| D835 | ARXFS's claim that a delete always makes room for the very next write is false under the kernel's write-back batching: a delete's frees stay in the open transaction, `mutation()` only lifts the embargo, the commit's own root allocation and `reclaim_step` get no retry, and the embargo holds the previous root out of the fixed metadata reserve — on a full volume a commit can abort acknowledged work and freeze the handle, and `remove`/`rename` can return `NoSpace` after the name changed, so the fs cache skips its change-log event | **medium**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `docs/src/filesystem/arxfs-spec.md` (delete makes room), `drivers/filesystem/arxfs/src/lib.rs` `mutation`, `commit_prepare`, `reclaim_step` |
 | D836 | the file manager ignores every key, click and scroll while a rename is with the volume, and the rename waits behind the one reader thread's queue — a program-store rescan each right-click queues, a large listing, a picture decode — so on slow storage the window is dead for that whole time, against `rename.rs`'s own "nothing typed is thrown away" | **medium**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `userland/apps/files/src/rename.rs`, `run.rs` (the rename wait, the reader queue) |
 | D837 | a refused rename's reason is never drawn: the editor is one control tall and the text control draws a message only with room beneath it, which neither a list row nor a grid label leaves, so validation, clash and volume refusals are invisible and Enter or a click outside just does nothing; context-menu refusals reach only stderr, and every volume refusal reads "The rename was refused." with its error dropped, the app's own full queue included | **medium**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `lib/browse/src/render.rs` (editor height), `lib/controls/src/text.rs` (message room), `userland/apps/files/src/run.rs` |
 | D839 | the persistent thumbnail store is fragile and over-trusting: a failed header read (an I/O error) is taken for another layout and truncates the store; its layout is keyed by the first icon side to ask, so a scale change or a second instance at another DPI truncates the shared blob and lookups then thrash; keys trust the medium's volume id, so a cloned or crafted volume can plant a stored picture for a file; `THUMBNAIL_REVISION` is hand-maintained with nothing tying it to decoder output; and pictures of deleted files or of another volume outlive them in a blob the user cannot list or purge | **low**; noticed reviewing the merge of `fdae8e464`, not absorbed: the incoming work is the user's own, raised with them. `lib/icon/src/store.rs` `open`, keys; `lib/sandbox/src/imagerender.rs` `THUMBNAIL_REVISION` |
@@ -378,31 +377,32 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D937 | wait-set readiness is a poll: every wait snapshots and scans the whole membership, and adding, removing and reporting a member each scan it linearly, so a set's cost grows with what is registered rather than with what is ready | **medium**; noticed charging wait-set members, not absorbed. A ready list fed by each source's wake, as `epoll` keeps, makes a wait cost what is ready; the member bound is now a per-process limit, so the cost is bounded but not proportionate. `kernel/core/src/waitset.rs`, `syscalls.rs` `waitset_wait` |
 | D968 | on the Pi 4 every service bundle read stalled about 2 s at boot: nine loads began at 2.297 s and none finished before 4.49 s, then all nine completed within 0.5 s at the steady rate later loads keep, the stall ending as the 2 s eMMC completion deadline and the Supervisor's ESC window both expire. QEMU's virtio floor shows no stall with the same window open, every read returned `Ready`, and no lock, park fallback, owner-only wake, placement IPI or interrupt mask explains it from the code | **medium**; diagnosed from the 2026-10-12 boot log, not yet localised. A wait woken 250 ms or more after its line fired is now recorded (`4073` `IRQ_WAKE_LATE`, `line`, `late_ms`, and `drained_ms` when the deferred wake was performed), which names the half that failed on the next metal boot: a deferred wake left undrained while the interrupted CPU ran on (the D32 mechanism, whose fix is to wake an idle CPU to drain it), or a woken task left undispatched. The 2026-10-13 log repeats it (loads from 2.346 s, the first done at 4.598 s), but its build predates `4073`, so it says nothing either way; D969 closed one mechanism that fits it, a completion stranded behind whatever the device-interrupt CPU ran. The 2026-10-14 log (build `e31971f3d+dirty`, which carries `4073`) stalled longer: nine loads from 2.036 s, netstack done at 2.489 s, then nothing until 7.982 s, the rest by 9.239 s, with **no** `4073`, so no completion wake was 250 ms late. Code review then ruled out a lost sleeping-lock handoff wake (immediate, never deferred), a lost placement IPI (always sent, after a `dsb ishst`) and the idle check-then-WFI race (closed with device interrupts masked); and every core takes the 1 Hz watchdog tick even idle, so a task stranded on a run queue is picked up within a second, which no 5.5 s dead stall fits. Left open: a forced yield in `SharedBlockHandle::with_device` (`yield_if_owed`) taken while the caller still holds the `/System` mount lock every loader queues on, and a dependency on the unlock thread's pre-unlock wait. The instrument that localises it is a record of a mount lock (`fs/mounted.rs` `with_secured_at`) or disk lock (`shared_block.rs` `with_device`) waited on, or held, 250 ms or more, naming the lock and the operation; it needs a boot-installed sink in kernel core, which has none reachable from either site today. **Re-check trigger:** the next Pi boot log carrying that record, or a `4073` |
 | D974 | the aarch64 secondary-CPU stacks, 64 KiB each, come from the fixed bootstrap heap arena: the secondary entry runs on its stack with the MMU off, and the identity window maps only the kernel image's gigapages as normal memory, so the stacks must sit in the image. `BOOT_HEAP_BYTES` therefore caps the port at about 200 cores, where it claims no compile-time core ceiling, and a larger machine parks at boot | **low**; no Tier-1 aarch64 target comes near it. The fix is for the secondary entry to enable translation before its first stack access, as Linux's does, then draw each CPU's stack from guarded frames when it is brought up; the arena can then shrink to what boot itself uses |
-| D975 | 160 test kernels (154 QEMU, six `wasm32`) declare their heap arena `static mut`, which the charter forbids: 128 over `tairix_kalloc::Heap`, 30 over a private `HeapStore` copy of that type, and two (`scheduler_stress_qemu`, `kthread_switch_qemu_x86_64`) over a bump allocator of their own beside the shared one | **low**; test kernels only, the production bins are plain statics. The sweep is a plain `static HEAP: Heap<N> = Heap::ZERO` handed over through `HEAP.as_mut_ptr()`, the `HeapStore` copies deleted for `Heap<N>`, and the two bump allocators replaced by `FreeListAllocator`; each fixture compiles only for its own target, so its target's batch build is what verifies it |
-| D977 | the Supervisor window takes any `Input` node a driver has bound as a key source, so a mouse that binds before the keyboard, or an interface its driver is about to decline, starts the 2 s countdown while no key can yet arrive | **low**; on the 2026-10-13 Pi boot the first input node bound was the keyboard's. The fix is a fact the input driver states on its node once it serves keys, which the window waits for instead of the bind |
-| D987 | a thread's stack is not charged against its process's `AddressSpaceBytes` limit | noticed closing D596; not absorbed. `reserve_anonymous_growable` (`kernel/core/src/threads.rs`) bounds stacks only by `Threads` × `StackBytes`, while `check_map_growth` charges `mem_map` and `file_map` alone, so the limit the ABI documents as the process's mapped anonymous memory does not hold for a threaded process; sandbox workers are held to one thread for this reason. The fix charges each stack's committed pages (or its reserve) against the same running total the mapping paths do |
-| D988 | a sandbox worker stopped by its memory ceiling ends with the same out-of-memory exit a machine shortage does, which callers read as worth retrying | low; noticed closing D596; not absorbed. The worker's heap returns null for either refusal and `alloc_error_handler` exits `OOM_EXIT_STATUS`, so `WorkerEnd::OutOfMemory` cannot tell a decode that will always outgrow its ceiling from one that may fit later, and a caller that re-runs a failed request alone (the session's wallpaper preview, `wallpaper.rs`) pays the decode again to fail the same way. Telling them apart needs the heap to carry why the map was refused to the exit status, without a global mutable static |
-| D993 | the kernel driver-store server's private read-only `/System` window (`root_mount.rs` `with_system_volume`) is mounted without the transform cluster cache or `CachedFs`, so each of devmgr's 31 prefix scans decompresses a bundle's first cluster and each driver load decompresses every cluster again, including the one the scan just did; and `read_image_prefix` (and `read_bootstrap_file`) resolve each path twice, once to stat and once to read | **low, performance**; tens of milliseconds on the devmgr boot path; found tracing the Pi 4 boot delay. The cache needs a budget decision first: a fifth RAM/16 ceiling breaks the boot volumes' 1/4-of-memory statement in `docs/src/architecture/memory.md`, so either share the one `/System` transform cache (a `ClusterCache::get` lock-shared variant) or budget the window from its bundles. The double walk wants one `DelegatedFs` primitive that resolves once, then checks regular-file, size bound and read authorisation before `read_at`, used by both callers, with a lookup-counting test on `MockStore::lookup`. `kernel/tairix-kernel/src/root_mount.rs`, `kernel/core/src/driver_store.rs`, `kernel/core/src/fs/mod.rs` |
-| D994 | a stale `commit_park` can consume the wake token meant for a task's next park and so hang it for good: CPU A parks task T on lock L1 (`settle` marks it Parked) and takes an interrupt before `commit_park`; meanwhile L1's releaser readies T onto CPU B, T claims L1, registers on L2 and parks, and L2's releaser, seeing T Running, leaves a token; A then resumes, its `commit_park` swaps that token out and `deliver_wake` drops it because T is not Parked, so T commits its L2 park with no token and sleeps with L2 designated to it | **high, correctness**; found tracing the Pi 4 boot stall (it is not D968: this hang never clears). The window is a few instructions wide but the interrupt only has to outlast a handoff, which heavy lock contention makes reachable. The fix is to tie a token to the park it answers (each park's sequence carried by its wake, a `commit_park` consuming only its own), with a loom model of the two-CPU interleaving above as its regression. `kernel/sched/api/src/park.rs` `deliver_wake`, `commit_park`, `unpark_task`; `kernel/sched/eevdf/src/scheduler.rs` `settle` |
-| D996 | `noexec` is enforced nowhere: `spawn` launches a bundle from any mount, so a bundle on removable media under `/Storage`, or under `/System/Logs` or `/System/Settings`, runs whenever its signature verifies, though `AGENTS.md` §11 and §16.3 and `drives.md` §15 make those mounts `noexec`, and `FsBundleStore`'s rustdoc says the mount-flag checks stay kernel-side | **medium, security**; noticed tracing why `/Users`, `/Apps` and `/Storage` are mounts; logged rather than fixed, by the user's decision. The VFS consults only `READ_ONLY` (`MountPoint::is_read_only`); `bundle_run_path` takes any absolute `…/<Name>.app/Run`, and the load reads it through `stat` and `read`, which `noexec` never refuses. The gate trusts one key, the build's application anchor, so what this admits today is a rollback: an older, validly signed bundle carried on a stick. The fix refuses a spawn whose bundle is served by a `NOEXEC` mount, judged on the mount covering each file's resolved location rather than its spelling, so an intermediate link into `/Storage` cannot dodge it; tested by spawning from a `noexec` runtime mount and through such a link. `kernel/core/src/appspawn.rs` `FsBundleStore`, `bundle_run_path`; `kernel/core/src/syscalls.rs` `spawn` |
-| D997 | the root volume keeps no space back for the system: ARXFS withholds a fixed 16 blocks (`METADATA_RESERVE`, 8 KiB at the 512-byte blocks every image uses) from file data alone, metadata allocation takes them unchecked, and nothing else is held, so one user filling the disk stops the system's log, settings and account writes, can block a delete, and leaves a root holding a pending delete unable to complete its own writable mount | **high, availability and security**; the user asked for a reserve that keeps the OS writing when users fill a disk; logged by the user's decision, with the design in the D997 section below. Couples to D835 (deletes under batching), D1006 and D1007 (the journal), and D1009 (the 64 MiB Pi root holds an 8 MiB reserve, not the 128 MiB target). `drivers/filesystem/arxfs/src/allocator.rs`; `drivers/filesystem/arxfs/src/lib.rs` `METADATA_RESERVE`, `drain_pending_deletes`; `kernel/tairix-kernel/src/root_mount.rs` |
-| D998 | nothing bounds how much of a volume one principal may fill: ARXFS keeps no per-owner usage and `LimitKind` has no storage kind, so one user can take every free byte of the root volume from every other user | **medium, multi-user fairness**; noticed with D996; logged by the user's decision. D997 keeps the system writing and does nothing between users. A per-process limit is the wrong shape: a quota is a persistent property of an owner on a volume. The fix is per-owner usage the ARXFS allocator keeps as it allocates and frees (never a scan), with soft and hard bounds an account administrator sets, enforced at allocation and reported through the System Information API. App data confd writes under a home as uid 17 is charged to the account whose home it is; `plans/CAPABILITY_USE.md` already speaks of that account's quota, which does not exist. `drivers/filesystem/arxfs/src/allocator.rs`; `lib/abi/src/rlimit.rs` `LimitKind` |
-| D999 | `/Apps` must not exist: the default root view is to hold only `/System`, `/Users` and `/Storage`, machine-wide applications living only in `/System/Applications` and a user's only in their home's `Applications` store | **medium, design**; the user's decision; logged, with the design and the site census in the D999 section below. About 160 tracked files name `/Apps`, `Apps:` or the four-entry template, and `tools/mkimage/src/rootfs.rs` `TOP_LEVEL_DIRS` is a second copy of `ROOT_TEMPLATE`, a duplicated constant the charter forbids. `kernel/core/src/fs/path.rs` `ROOT_TEMPLATE`; `lib/abi/src/appinfo.rs` `INSTALLED_APP_STORE` |
-| D1000 | the OS's own desktop programs — `desktop.app`, `files.app`, `settings.app` and `datetime.app` — ship in `/System/Applications`, the global store of user-facing applications, because `ProgramKind` has no kind for a component of the OS | **medium, design**; the user's decision; logged, with the design (a `component` kind stored in `/System/Components`) in the D1000 section below. `DATETIME_RUN_PATH` is defined twice, a duplicated constant (`userland/gui/session/src/config.rs`, `userland/apps/settings/src/shell.rs`). `lib/abi/src/appinfo.rs` `ProgramKind` |
-| D1001 | `/Users` and `/Storage` are the root volume mounted again over its own subdirectories only to carry flags, so a rename or link between `/`, `/Users` and `/Storage` is refused `CrossVolume` on one volume, and `/Storage` is a real root-volume directory rather than the synthetic catalog `drives.md` §10 specifies | **medium, correctness and performance**; noticed with D996; logged by the user's decision. `delegate_pair_context` refuses any pair whose paths resolve to different mounts, so moving a tree between them is a full copy then delete: twice its size at the peak, and not atomic. The mounts enforce nothing `/` does not; their flags are D1002's inert pair and D996's unenforced `noexec`. The fix makes `/Users` a plain directory of the root volume and `/Storage` a catalog node with no backing, listing only attached volumes (`MountTable::direct_children` already merges them), so nothing can be stored in `/Storage` itself; a mount exists only where a different volume is attached. `plans/NEW-NAMESPACE.md` §5's policy and §9's "two attachments and seven projections" change with it, to two attachments and four projections: `/`, `/System`, and the `/System/Logs` and `/System/Settings` grafts the read-only `/System` needs. `kernel/core/src/fs/vfs.rs` `delegate_pair_context`, `with_default_layout`; `kernel/tairix-kernel/src/system_mount.rs` `system_vfs` |
-| D1002 | `MountFlags::NOSUID` and `NODEV` mean nothing in TAIRiX and are enforced nowhere, yet the boot layout, every runtime mount and the charter apply them as defences, and their rustdoc promises rejections that never happen | **low, design**; noticed with D996; logged by the user's decision. There are no device-special files to reject (`FileKind` is `Regular`, `Directory` or `Symlink`), and nothing honours a setuid bit at spawn (`FS_SETUID_BIT` is only cleared on an ownership change); authority comes from the signed manifest. The fix deletes both flags from `MountFlags` and `KNOWN_MASK` (regenerating `include/`), from `Vfs::with_default_layout` and `volume_service::mount_flags`, from the sysinfo, `procinfo`, `mount` and `sysinfod` renderings and their tests, and from `AGENTS.md` §5.3, §11 and §16.3, `drives.md` §9 and §15, and `plans/DEVICES.md`. `lib/abi/src/driver/filesystem.rs` `MountFlags` |
-| D1003 | the mount list reports the root volume once per mount carved out of it, six rows of identical size, use and free beside `/System`'s one, which is why those subtrees read as partitions; and `mount_snapshot` locks that one driver and reads its `stats()` once per row | **low, reporting and performance**; known as `plans/NEW-NAMESPACE.md` NS-1, which carries the fix (attachment records apart from view bindings, and deleting `df`'s duplicate-source heuristic); logged so the ledger shows it, by the user's decision. `sysmon` lists all seven. D999 and D1001 bring the root volume to three rows before NS-1 lands. `kernel/core/src/fs/mounted.rs` `mount_snapshot`; `userland/apps/df/src/client.rs` `select_all` |
-| D1004 | a program's kind is not in its signed `AppInfo`: `AppInfoHeader` has no kind field and no flag carries it, so a built bundle's kind is only the directory it sits in, though `AGENTS.md` §16.5 says the manifest declares it and is the only place the decision is recorded | **medium, integrity**; noticed scoping D1000; not absorbed. Nothing can tell a service or component bundle copied into a user store from a command. The fix adds the kind to the header (abi-v1 is unfrozen; regenerate `include/`), signed with the rest; the build places a bundle by it; the load gate refuses a bundle launched from a store its signed kind does not name; `lib/appstore` and `lib/browse` read the signed kind instead of inferring it from the path. `lib/abi/src/appinfo.rs` `AppInfoHeader`; `kernel/core/src/appspawn.rs` |
-| D1005 | `userland/system/appmgr` is a dead crate: nothing depends on it, it has no binary and no `AppInfo.toml`, and it only re-exports `lib/appload`, yet its README, rustdoc and `docs/src/userland/appmgr.md` describe a service installed at `/System/Services/appmgr` that loads `/Apps` bundles, and `AGENTS.md` §16.5 says applications launch through it | **low, dead code and stale docs**; noticed scoping D1000; not absorbed. The kernel's `spawn` loads and verifies every bundle itself, through the shared gate (`FsBundleStore`). The charter's default is deletion: the crate, its docs page and its `AGENTS.md` §3 entry, with §16.5 naming the load gate instead. Building the user-space loader its docs describe instead is a design decision for the user. `userland/system/appmgr` |
-| D1006 | journald numbers each stream's segments from 0 at every start and names them by that number alone (`/System/Logs/<stream>/<id>.seg`, opened with `create`, which truncates), so a restart overwrites the previous run's segments and destroys the audit trail they held, and the listing `segment_path` documents as chronological is not across restarts | **high, security**; latent, since journald is not yet launched (it has no `AppInfo.toml` and nothing sends to its endpoint); found scoping D997; not absorbed. The fix resumes each stream's numbering after the highest segment on disk, refuses to open an existing segment (a written segment is immutable), and names the boot in the path; tested by starting the journal twice over one store and keeping both runs. `lib/log/src/journal.rs` `next_segment_id`; `userland/system/journald/src/store.rs` `segment_path`; `userland/system/journald/src/run.rs` |
-| D1007 | a failed segment store leaves a journal stream without its only buffer: `Journal::close` returns on `finish`'s or `store_segment`'s error before giving the buffer back, so that segment's records are lost and every later record on the stream fails `BufferTooSmall` until journald restarts; one `NoSpace` on the audit stream silences audit for the rest of the run, even once space is freed | **high, security**; latent like D1006; found scoping D997; not absorbed. Audit and security records may not be dropped silently, so the fix returns the buffer on every path, keeps the unpersisted segment and retries its store before accepting more, and answers each record it cannot hold with `NoSpace`; tested with a store that fails once and then succeeds. `lib/log/src/journal.rs` `close`, `ensure_open` |
-| D1008 | machine settings are replaced in place: `configure` (`system.conf`, `network.conf`), `applib` (`ProgramLibrary/library.conf`) and `timed` (`Time/state`) truncate the live file and rewrite it with no sync and no rename, so a crash or power loss mid-write leaves it empty or torn, while init, confd and the account engine replace theirs through a temporary and a rename (init and the account engine sync it first), each with its own copy of that sequence | **medium, durability**; found scoping D997; not absorbed. The fix is one shared replace-a-document primitive in `lib/rt` (write a sibling temporary, sync it, rename it over the original, sync again), used by every writer, with a test that interrupts a replace between truncate and write. `userland/apps/configure/src/run.rs` `replace_document`; `userland/apps/applib/src/run.rs`; `userland/system/timed/src/run.rs`; `userland/system/init/src/run.rs`; `userland/system/confd/src/store.rs`; `kernel/tairix-kernel/src/user_admin_backing.rs` |
-| D1009 | the Pi images' root volume is a fixed 64 MiB whatever the card holds: `ROOT_PART_SECTORS`'s rustdoc says the installer grows the layout on first boot, but the installer is a six-line placeholder and nothing enlarges the partition or calls `ARXFS::grow`, so every account's files, the applications and D997's reserve share 64 MiB | **medium, capacity**; found scoping D997; not absorbed. The fix grows the root partition to the medium on first boot, then the volume through `ARXFS::grow`, with a QEMU vertical booting a disk larger than its image; the rustdoc is corrected with it. `tools/mkimage/src/lib.rs` `ROOT_PART_SECTORS`; `drivers/filesystem/arxfs/src/lib.rs` `grow`; `userland/system/installer` |
-| D1010 | `kernel/core/src/fs/path.rs` carries a raw NUL byte in a test literal (`parse_link_target`'s NUL-bearing case) where the `\0` escape was meant, so a search that sniffs for binary content skips the whole file, hiding `ROOT_TEMPLATE` and `resolve_machine_alias` from a tree grep; the D999 census needed `grep -a` to find them | **low, maintainability**; found scoping D999; not absorbed; the only raw NUL in tracked `.rs`, `.md` and `.toml` files. The fix writes the escape, and a check refusing control bytes in tracked source is its regression test. `kernel/core/src/fs/path.rs` |
-| D1011 | `kernel/tairix-kernel/README.md` still documents `published_memory_map()` and `publish_memory_map`, which `1d6d23511` deleted, and tells a bring-up observer to build its own per-device DMA `FrameAllocator` from the firmware memory map: the second owner of the kernel allocator's frames that D995 removed. The same passage names `src/arch_wrapper.rs`, which is `src/x86_64/arch_wrapper.rs` | **low, stale docs**; noticed reviewing the merge of `1d6d23511`; logged rather than absorbed, by the user's decision for this merge. The fix deletes the bullet, leaving `published_irq_table()` and `published_irq_controller()` as the accessors, states that an observer's DMA pool draws on the kernel's own frame allocator (`installed_spawn_services().frames()`), and corrects the path. `kernel/tairix-kernel/README.md` "Published boot-state accessors" |
+| D997 | the root volume keeps no space back for the system: ARXFS withheld a fixed 16 blocks from file data alone, metadata took them unchecked, and nothing else was held, so one user filling the disk stopped the system's log, settings and account writes, could block a delete, and left a root holding a pending delete unable to complete its own writable mount | **high, availability and security**; D997.1–.6 are done with D835 — the reserve, its classes, release admission, sizing, tightened commits, the `in_reserve` report and its audit and `Mounts` notice (`docs/src/filesystem/arxfs-spec.md` §6). Open for D997.7 alone: the journal's rotation under the reserve lands with journald's launch (`plans/SYSLOG.md` §10) |
+| D998 | nothing bounds how much of a volume one principal may fill: ARXFS keeps no per-owner usage and `LimitKind` has no storage kind, so one user can take every free byte of the root volume from every other user | **medium, multi-user fairness**; noticed with D996; logged by the user's decision. D997 keeps the system writing and does nothing between users. A per-process limit is the wrong shape: a quota is a persistent property of an owner on a volume. The fix is per-owner usage the ARXFS allocator keeps as it allocates and frees (never a scan), with soft and hard bounds an account administrator sets, enforced at allocation and reported through the System Information API. App data confd writes under a home as uid 17 is charged to the account whose home it is; `plans/CAPABILITY_USE.md` already speaks of that account's quota, which does not exist. `drivers/filesystem/arxfs/src/allocator.rs`; `lib/abi/src/rlimit.rs` `LimitKind`; **escalated**: the design needs the user's decisions, set out in the D998 section |
+| D1014 | `userland/apps/mount` builds no bundle — no `AppInfo`, `Run` or `Help` — and nothing implements its `Mounter`, though its docs said it ships | **low**; the docs were corrected with D1003. Blocked on a design decision, raised with the user: `volume_attach` attaches a block-service partition under `/Storage/<name>`, but nothing lets a user name an unattached storage object to attach (`plans/DRIVES.md` §5.8), so a real `Mounter` needs that discovery surface first; the bundle registers with it (`plans/APPS.md` §12.1 Stage B). `userland/apps/mount` |
+| D1015 | the cloud photon solve lights every level with the eye's bent sun, so no sun photons reach a dusk sky: `powers[SUN]` scales by `bank.sun.y.max(0)` and the beam takes `-self.bank.sun` while only single scattering uses the local cosine | **medium, rendering**; found reviewing the merge of `f2c95bdee`, logged for the user. Contradicts `docs/src/lib/raytrace.md` and `plans/RAYTRACE.md` RT44; no test sets the sun at or below the horizon with multiple scattering. `lib/raytrace/src/cloud/light.rs` |
+| D1016 | under broken cloud the shadow and open sky read too dark: `Cloudbank::shadow` takes `exp(-depth)` of a trilinearly interpolated optical depth swept from an eight-sample average, where interpolating transmittance is what Jensen's inequality allows | **medium, rendering**; found reviewing `f2c95bdee`, logged for the user. Feeds the direct sun and the shafts. `lib/raytrace/src/cloud.rs` `shadow`; `cloud/light.rs` `depth` |
+| D1017 | ground-reflected sun reads the bank's shadow at the floor crossing `(x, 0, z)` and `ceiling_under` looks `floor·tan θ` too far, about 1.9 km off for a 1.1 km floor at 30° | **low, rendering**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/light.rs` |
+| D1018 | light levels meet at a seam: `Lights::breadth` takes no rim blend and the tap margin doubles at a level's edge, and the seam test covers only the weather levels | **low, rendering**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/light.rs`; `cloud_tests.rs` `the_levels_meet_without_a_seam` |
+| D1019 | `impl Clone for Tally` answers empty tallies, and `stand()` keeps `lighting`, so `Sky::build`'s `if !bank.lit()` never refreshes the sun cosines after a second `stand()` | **low, latent**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/light.rs`; `cloud.rs` `stand`; `sky.rs` |
+| D1020 | the docs promise every parallel unit about 10 ms of fixed work, but a photon unit traces 256 photons a core, each up to 16 384 density steps, against an unmeasured claim | **medium, docs**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/README.md`; `docs/src/lib/raytrace.md`; `cloud/light.rs` |
+| D1021 | the raytrace memory and timing figures predate the cloud rework: the 475/840 MB "clouds' light grids" no longer exist and `AIR_POINTS` went from 1 to 4 | **medium, docs**; found reviewing `f2c95bdee`, logged for the user; a congestus bank costs about 61 MB kept and 45 MB solving at Simple. `docs/src/lib/raytrace.md`; `plans/RAYTRACE.md` |
+| D1022 | the `tracks` stopping rule is documented per cloudy voxel, but the code counts clear voxels too and tests a level-wide total | **low, docs**; found reviewing `f2c95bdee`, logged for the user. `plans/RAYTRACE.md`; `cloud/light.rs` |
+| D1023 | RT43's ledger row says a far heap reads as bright as a near one, which the plan's own 0.79–0.84 figure and the docs contradict | **low, docs**; found reviewing `f2c95bdee`, logged for the user. `plans/RAYTRACE.md` |
+| D1024 | `form.rs` speaks of three bubble scales where `BUBBLES` holds four, and the docs say clouds tap their own billows where `optical_depth` does so only for water seen directly | **low, docs**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/form.rs`; `docs/src/lib/raytrace.md` |
+| D1025 | `Reading.depth` is computed and interpolated but never read, `optical_depth` reads the depth field again, and the finest-level search, rim and corners are repeated across `reading`, `breadth`, `above` and `depth` | **low, performance**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/light.rs` |
+| D1026 | the light fields are six separate `Vec<u16>`, so one reading touches about 24 cache lines where interleaving per voxel would touch a few | **medium, performance**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/light.rs` |
+| D1027 | the sky asks `beneath` and `sunlit` at four points per stretch per bank, `Lights::beneath` makes three column lookups at one `(x, z)`, and `Cloudbank::beneath`/`shadow` recompute the altitude and level search | **low, performance**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/sky.rs`; `cloud/light.rs`; `cloud.rs` |
+| D1028 | `form::weather` recomputes the deck's heading cosine and sine and its cover quantile at every vertex, about 2.4 M per bank, which `Cloudbank` already caches, and the texture reaches are recomputed per `form::cloud` call | **low, performance**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/form.rs`; `cloud.rs` |
+| D1029 | `Sweep::slice` allocates a fresh buffer per call and copies back serially, and the outermost light level spans up to twice the weather's reach, so about 61% of its area is voxelled, swept and lit where cloud never forms | **low, performance**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/light.rs` |
+| D1030 | three raytrace tests assert what cannot fail: `!field.signed` (negatives are clamped), `kept <= 1` (guaranteed by packing), and a sum checked with no `met > 0` guard | **low, tests**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/light_tests.rs`; `cloud_tests.rs` |
+| D1031 | the 1/4-1/2-1/4 blur is written three times and bilinear sampling twice in `cloud/light.rs`, though `heightfield::bilinear` exists and `form.rs` uses it | **low, duplication**; found reviewing `f2c95bdee`, logged for the user. `lib/raytrace/src/cloud/light.rs` |
+| D1032 | `plans/RAYTRACE.md` quotes the numbers of a rejected design beside the chosen one — history the plan file is not to keep | **low, docs**; found reviewing `f2c95bdee`, logged for the user. `plans/RAYTRACE.md` |
+| D1034 | the template-only delegation family — the fourteen `Vfs::*_via` methods, `DelegatedFs::new` and the `Uniform` policy that judges every node against the mount point's template — has no production caller: every mounted driver, FAT32 included, implements `FilesystemSecurity` and is served through `*_via_secured`, so only `delegate_tests` keeps it alive | **low, dead code**; noticed with D1012, raised with the user; the overview's offer of it for FAT was corrected with D1012: the fix deletes the family and the `MetaPolicy` generic with it, and moves the delegation suite onto per-inode mocks, so each template-semantics test is restated against stored records. `kernel/core/src/fs/vfs.rs`; `kernel/core/src/fs/delegate.rs`; `kernel/core/src/fs/delegate_tests.rs` |
+| D1037 | `MountTable::resolve` finds the mount covering a path by testing every mount point (`filter(is_prefix_of).max_by_key(depth)`), so each path-based operation pays a pass over the whole table — the boot layout's handful of mounts plus one per attached volume — where a lookup keyed by path component would pay only the path's depth | **low, scalability**; noticed reviewing D1012, which takes one table read per operation where two were taken but keeps the scan. The fix is a mount tree keyed by path component, walked with the path and stopped at the first component no mount lies beneath, so resolution does not grow with the mount count; listings keep insertion order through a per-mount sequence number. `cover` keeps cloning the winning mount: the root mount clones without allocating, and an `Arc` shared instead would add a reference count every CPU writes on every operation. Raised with the user beside D1034, which reshapes the same surface. `kernel/core/src/fs/mount.rs` |
 
 
-### Closed (633)
+### Closed (659)
 
 | ID | Subject |
 |---|---|
@@ -913,6 +913,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D831 | an ARXFS mount could overwrite live data repairing a superseded transaction root: the ring scan repaired every slot's root before choosing, and a superseded root's primary may hold data the live volume wrote after freeing it; the scan now writes nothing, only the chosen slot and root are repaired after the choice, and every bad copy a read path meets — a refused repair included, which no longer fails or passes silently — is tallied for the next health pass and persisted (`metadata_damaged`); `a_mount_never_rewrites_a_superseded_root_from_its_companion`, `a_mount_repairs_the_root_it_chose_and_records_the_repair`, `a_mount_repairs_the_slot_it_chose_and_no_other`, `a_read_only_mount_records_a_bad_root_copy_and_writes_nothing` |
 | D832 | a rename differing from a sibling only in letter case destroyed that sibling on FAT32 and ADFS, and a case-only rename of an entry reported success while changing nothing; the VFS now decides a no-replace rename under the volume's own matching rule (`NameMatching::matches`), FAT32, ADFS (both directory formats) and the in-RAM test volume re-spell an entry's own name, an ADFS replacing rename takes the spelling asked for, and the file manager maps the kernel's refusal to the clash it shows; FAT32's rename also stopped zeroing the entry's stored stamps; `a_no_replace_rename_refuses_a_sibling_differing_only_in_case`, `a_rename_respells_its_own_entry_on_a_folding_volume`, `a_case_only_rename_respells_the_entry_and_keeps_its_data`, `a_rename_keeps_the_entry_s_stamps`, `a_replacing_rename_takes_the_spelling_asked_for`, `a_name_the_volume_finds_taken_is_a_clash` |
 | D833 | the ABI offered no rename that refuses to replace, so an interactive rename checked against a stale listing could overwrite a name created meanwhile; `fs_rename` takes `RenameFlags::NO_REPLACE`, checked under the volume's lock, and the file manager's rename and paste/Trash moves, `fstree`'s moves and `mv -n`/`-i` use it; `a_no_replace_rename_refuses_an_occupied_destination_and_keeps_both`, `no_clobber_never_replaces_a_destination_created_after_its_look`, `interactive_asks_about_a_destination_created_after_its_look`, `a_rename_asks_about_a_name_created_after_it_was_typed` |
+| D835 | ARXFS's claim that a delete always makes room for the very next write is false under the kernel's write-back batching: a delete's frees stay in the open transaction, `mutation()` only lifts the embargo, the commit's own root allocation and `reclaim_step` get no retry, and the embargo holds the previous root out of the fixed metadata reserve — on a full volume a commit can abort acknowledged work and freeze the handle, and `remove`/`rename` can return `NoSpace` after the name changed, so the fs cache skips its change-log event |
 | D843 | the file grid's selection band laid out the name of every edge tile on every pointer sample, a whole column over the band's auto-scrolled height when an edge sat in a tile's margin; the band now keeps each edge tile's body with the cell and a digest of the name that gave it, and lays a name out only for a tile new to the edge or changed (`marquee::Edge`). A tile handed no picture still rasterises its glyph and casts its shadow inline: that is reached only by an owner holding no cache or one that could not retain even the glyph, the designed degradation, and must draw what the glyph tier draws (pinned by the browse fallback tests). `a_band_lays_out_an_edge_tiles_name_once_while_it_stays_on_the_edge` |
 | D846 | a latest-wins worker dropped the write still waiting when its program ended: `JobDesk::stop` drops the job not yet taken and nothing waited a settings writer out, so a setting changed just before a quit — the terminal's profile, sapper's best time, cinder's mood on Quit, WinterSun's graphics choice — could be lost; `Worker::wait` now serves every desk and each program sees its writes out before its worker is stopped; `a_latest_wins_worker_is_waited_out`, `a_job_is_outstanding_until_its_answer_lands` |
 | D848 | a settings registry's save compared what it wrote with a reload that had already defaulted every refused value, so a stored value the registry refused was never replaced and was refused again at every start (the terminal, fstree, sapper, which also never removed a malformed time), and cinder's writer reported every refusal as `NoSpace`; the shared registry save replaces a refused value and the shared publish reports the service's own refusal; `a_save_mends_a_stored_value_the_registry_refused_and_spares_another_apps_keys`, `a_save_removes_a_stored_time_the_registry_refused` |
@@ -1007,7 +1008,9 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D972 | the kernel's bundle reader sized its buffer with an infallible `resize`, so a heap that could not hold a bundle of up to 16 MiB panicked the reading thread rather than refusing the read; the buffer is reserved fallibly and the read fails closed with `OutOfMemory` (`a_bundle_the_heap_cannot_hold_fails_closed`) |
 | D970 | on the Pi 4 the Supervisor's 2 s ESC window could not be entered: console 0 is the framebuffer console, whose keyboard queue the user-space HID driver feeds, and that driver loaded seconds after the window closed, so the boot paid 2 s before the root mount for nothing. The window now opens once a key can arrive — at once on a live line, when the live hardware tree holds an input device a driver serves on an input-device console, after at most 30 s — and draws nothing if none can; meanwhile a separate task reads the root mount's reads ahead, writing nothing (`with_no_key_source_the_window_is_not_drawn_and_the_root_mounts_on_its_line`, `the_window_waits_for_its_key_source_before_drawing`, `the_prefetch_reads_into_a_plaintext_root_and_writes_nothing`, `the_prefetch_reads_an_encrypted_root_only_as_far_as_its_lock`, `only_a_driven_input_device_is_a_key_source`) |
 | D973 | the frame allocator drew its per-frame metadata, about 4.3 MiB per GiB of usable span, from the fixed 64 MiB bootstrap heap arena with infallible allocations, so a machine whose span passed about 15 GiB aborted the boot building it, while every machine kept 64 MiB of RAM from the frame allocator for an arena boot needs at most a few MiB of. On a port with a direct map the metadata is carved from the top of the highest usable run the map reaches, the arena is 16 MiB, and the boot records its peak use of it (`4006` `KERNEL_HEAP_GROWTH`) (`carved_metadata_lives_in_frames_the_allocator_never_hands_out`, `the_metadata_comes_off_the_top_of_the_highest_run_that_holds_it`, `the_metadata_skips_a_run_the_direct_map_cannot_reach`, `metadata_that_fills_a_whole_run_removes_it`, `metadata_no_reachable_run_holds_is_refused`) |
+| D975 | 160 test kernels (154 QEMU, six `wasm32`) declare their heap arena `static mut`, which the charter forbids: 128 over `tairix_kalloc::Heap`, 30 over a private `HeapStore` copy of that type, and two (`scheduler_stress_qemu`, `kthread_switch_qemu_x86_64`) over a bump allocator of their own beside the shared one |
 | D976 | on the Pi 4 the Supervisor window drew nothing while it waited for the keyboard, then ran its 2 s announcement 0.31 s after the native display engine's takeover had re-trained the HDMI link, while the monitor re-locked, so the boot showed neither the wait nor the prompt. The line reads `[Waiting for a keyboard]` until a key can arrive and the announcement is drawn over it, and a display engine's `console_relocate` parks until the boot hands console 0 to `login`, so the takeover's mode set never lands under the window or a passphrase prompt (`the_window_shows_its_wait_and_announces_over_it_once_a_key_can_arrive`, `with_no_key_source_the_wait_is_erased_and_the_root_mounts_on_its_line`, `a_key_source_ready_at_once_shows_no_wait`, `console_relocate_takes_the_screen_only_once_the_boot_lets_go`) |
+| D977 | the Supervisor window takes any `Input` node a driver has bound as a key source, so a mouse that binds before the keyboard, or an interface its driver is about to decline, starts the 2 s countdown while no key can yet arrive |
 | D978 | MLFQ's single-producer Chase–Lev run deque was pushed by whichever CPU spawned, woke or migrated a task, with nothing serialising producers, so two concurrent pushes could write one slot and lose a task; producers now take a per-deque lock while consumers stay lock-free. `concurrent_producers_and_consumers_hand_off_every_task_once` (fails 20 of 20 runs without the lock; clean under miri with strict provenance over 24 seeds) |
 | D980 | the x86_64 scheduler-stress vertical's preemption witnesses, documented as pinned two per CPU, were queued while the APs already stepped, so an idle AP could take a CPU's witness and leave that CPU holding one: uncontended, its one-shot never armed, it never ticked, and every witness spun waiting for it (the gate's 120 s hang once dispatch stopped taking the task registry's read lock and the APs drained faster); they are now queued before any CPU steps, so each CPU keeps two and none is ever idle to steal one. `tairix-test-scheduler-stress-qemu` |
 | D979 | the desktop lock screen rendered a whole new screen-sized frame and replaced its window surface for every input event that changed it, so a key-repeat burst cost a full allocation, paint and whole-screen recomposite per key; an event now only owes the frame what it changed, `ScreenLock::advance` draws the owed rectangles once a frame into the kept frame (`Compositor::repaint_window` with `damage::paint_parts`, marking only them), and a change of look or screen redraws it whole. `a_burst_of_keys_at_the_lock_is_painted_once_at_the_frame_and_only_the_field`, `a_lock_redraws_itself_whole_in_a_changed_look` |
@@ -1034,11 +1037,34 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D524 | a seat's reads checked the lease under the seat lock and drained the ring after releasing it, so a revoke, a new owner's acquire and its first input could land between the check and the drain, handing the new owner's keystroke, pointer or touch record to the old owner; the three reads now check and drain under one hold of the seat's state (`SeatRegistry::drain_leased`), the hold every revoke, acquire and inject already takes. `a_read_checks_its_lease_and_drains_under_one_hold` |
 | D884 | `line_box_px` now works in `u64`, so no representable size and line box can overflow it (overflow checks are on in release, so the old `u32` product was a panic). Regression: `a_point_size_draws_one_em_whatever_the_family` asserts a `u16::MAX` size at a `u16::MAX` line box clamps to the ladder's maximum. |
 | D762 | The stride is now a validated `RedistributorStride` (whole 64 KiB frames, at least a redistributor's two), so `find_redistributor` cannot be handed zero. `redistributor_regions` refuses a stride that is not one such 64-bit value, and hands over no region unless every one translates, so a malformed description fails GIC bring-up with `gic_no_redistributors` instead of hanging. Regressions: `a_stride_no_redistributor_layout_has_refuses_the_whole_description` (zero, one frame, part frames, one and three cells), `a_region_that_does_not_translate_hands_over_none_of_its_siblings`, `a_stride_is_whole_frames_and_never_less_than_one_redistributor`. |
+| D987 | a thread's stack is not charged against its process's `AddressSpaceBytes` limit |
+| D988 | a sandbox worker stopped by its memory ceiling ends with the same out-of-memory exit a machine shortage does, which callers read as worth retrying |
 | D989 | `sysinfod` checked each self-reported entry against the whole process census (`live.contains`), so a cache-ledger or frame read cost entries × processes comparisons — up to two 1024-entry tables against every live process; it also took the census when no reporter was held, and a walk's first page took one when only the asking caller held walks. The census is now `LiveInstances`, sorted once and searched, shared by both tables and the walks, and it is taken only when there is something it could let go of. `a_registry_with_no_reporter_takes_no_census`, `a_census_is_taken_only_when_another_caller_holds_a_walk`, `a_walk_begun_lets_go_of_an_exited_callers_walks` |
 | D990 | the boot RAM self-test paid a full barrier per sampled page: each sampled word was written, cleaned with `dc civac` and completed by its own `dsb sy`, twice, so 7.4 GB took ~3.6 million serialised DRAM round trips (1.19 s on the Pi 4, before the other cores start). Sampled cells are now driven 64 at a time and flushed under one barrier (`WordWindow::flush_words` over `PhysMap::clean_invalidate_each`, which aarch64 completes with one `dsb sy`; the default delegates to each port's `clean_invalidate`), with the same cells, both polarities and DRAM-observing reads; the address pass flushes its markers as one batch. The stale 'zeroes / verifies every usable byte' wording is corrected. `a_window_flushes_its_samples_a_batch_per_barrier`, `a_stuck_cell_past_the_first_batch_is_named` |
 | D991 | `devmgr` re-ran matching only when node ids changed, so a consumer held for its supplier stayed unbound when the supplier began serving (a flag on the supplier's own node, no id change) until some unrelated tree change, and on a quiet tree never loaded — the settle deadline then declared readiness without it; the reaction now also compares which roles each node serves (`HwNode::served_roles`, `AutoloadState::serving`). `a_consumer_held_for_its_supplier_loads_once_the_supplier_serves` |
 | D992 | `drvhost` copied every verified driver image into its load record, where only the record's own `Drop` read it, to wipe it: a bundle-sized allocation, copy and volatile wipe per driver load for nothing (reload re-fetches). The copy and the record's `Drop` are deleted. `a_load_retains_no_copy_of_the_image` (over a new `Metering::retained`) |
+| D993 | the kernel driver-store server's private read-only `/System` window (`root_mount.rs` `with_system_volume`) is mounted without the transform cluster cache or `CachedFs`, so each of devmgr's 31 prefix scans decompresses a bundle's first cluster and each driver load decompresses every cluster again, including the one the scan just did; and `read_image_prefix` (and `read_bootstrap_file`) resolve each path twice, once to stat and once to read |
+| D994 | a stale `commit_park` can consume the wake token meant for a task's next park and so hang it for good: CPU A parks task T on lock L1 (`settle` marks it Parked) and takes an interrupt before `commit_park`; meanwhile L1's releaser readies T onto CPU B, T claims L1, registers on L2 and parks, and L2's releaser, seeing T Running, leaves a token; A then resumes, its `commit_park` swaps that token out and `deliver_wake` drops it because T is not Parked, so T commits its L2 park with no token and sleeps with L2 designated to it |
 | D995 | the riscv64 virtio-MMIO and the virtio-PCI QEMU harnesses built a second frame allocator over the top 1 MiB of the firmware memory map, frames the kernel's own allocator also owned (it keeps its per-frame metadata at the top of the highest run and hands out its highest frames first), so kernel bookkeeping wrote into the harness allocator's free lists; it passed only while those writes missed them, and `tairix-test-virtio-blk-mmio-riscv64` and `tairix-test-input-virtio-mmio-qemu-riscv64` failed `VirtioBlk::open`/`VirtioInput::open` with `AllocError::InvariantViolation` once they did not. Both harnesses now draw DMA frames from the kernel's live allocator (`installed_spawn_services().frames()`), and the double-owning `carve_dma_map` and the firmware memory-map publication it alone used (the x86_64 port's `publish_memory_map`/`published_memory_map`, the riscv64 scenario crate's twin) are deleted. Regression: those two verticals, which fail before and pass after |
+| D996 | `noexec` is enforced nowhere: `spawn` launches a bundle from any mount, so a bundle on removable media under `/Storage`, or under `/System/Logs` or `/System/Settings`, runs whenever its signature verifies, though `AGENTS.md` §11 and §16.3 and `drives.md` §15 make those mounts `noexec`, and `FsBundleStore`'s rustdoc says the mount-flag checks stay kernel-side |
+| D999 | `/Apps` must not exist: the default root view is to hold only `/System`, `/Users` and `/Storage`, machine-wide applications living only in `/System/Applications` and a user's only in their home's `Applications` store |
+| D1000 | the OS's own desktop programs — `desktop.app`, `files.app`, `settings.app` and `datetime.app` — ship in `/System/Applications`, the global store of user-facing applications, because `ProgramKind` has no kind for a component of the OS |
+| D1001 | `/Users` and `/Storage` are the root volume mounted again over its own subdirectories only to carry flags, so a rename or link between `/`, `/Users` and `/Storage` is refused `CrossVolume` on one volume, and `/Storage` is a real root-volume directory rather than the synthetic catalog `drives.md` §10 specifies |
+| D1002 | `MountFlags::NOSUID` and `NODEV` mean nothing in TAIRiX and are enforced nowhere, yet the boot layout, every runtime mount and the charter apply them as defences, and their rustdoc promises rejections that never happen |
+| D1003 | the mount list reports the root volume once per mount carved out of it, six rows of identical size, use and free beside `/System`'s one, which is why those subtrees read as partitions; and `mount_snapshot` locks that one driver and reads its `stats()` once per row |
+| D1004 | a program's kind is not in its signed `AppInfo`: `AppInfoHeader` has no kind field and no flag carries it, so a built bundle's kind is only the directory it sits in, though `AGENTS.md` §16.5 says the manifest declares it and is the only place the decision is recorded |
+| D1005 | `userland/system/appmgr` is a dead crate: nothing depends on it, it has no binary and no `AppInfo.toml`, and it only re-exports `lib/appload`, yet its README, rustdoc and `docs/src/userland/appmgr.md` describe a service installed at `/System/Services/appmgr` that loads `/Apps` bundles, and `AGENTS.md` §16.5 says applications launch through it |
+| D1006 | journald numbers each stream's segments from 0 at every start and names them by that number alone (`/System/Logs/<stream>/<id>.seg`, opened with `create`, which truncates), so a restart overwrites the previous run's segments and destroys the audit trail they held, and the listing `segment_path` documents as chronological is not across restarts |
+| D1007 | a failed segment store leaves a journal stream without its only buffer: `Journal::close` returns on `finish`'s or `store_segment`'s error before giving the buffer back, so that segment's records are lost and every later record on the stream fails `BufferTooSmall` until journald restarts; one `NoSpace` on the audit stream silences audit for the rest of the run, even once space is freed |
+| D1008 | machine settings are replaced in place: `configure` (`system.conf`, `network.conf`), `applib` (`ProgramLibrary/library.conf`) and `timed` (`Time/state`) truncate the live file and rewrite it with no sync and no rename, so a crash or power loss mid-write leaves it empty or torn, while init, confd and the account engine replace theirs through a temporary and a rename (init and the account engine sync it first), each with its own copy of that sequence |
+| D1009 | the Pi images' root volume is a fixed 64 MiB whatever the card holds: `ROOT_PART_SECTORS`'s rustdoc says the installer grows the layout on first boot, but the installer is a six-line placeholder and nothing enlarges the partition or calls `ARXFS::grow`, so every account's files, the applications and D997's reserve share 64 MiB |
+| D1010 | `kernel/core/src/fs/path.rs` carries a raw NUL byte in a test literal (`parse_link_target`'s NUL-bearing case) where the `\0` escape was meant, so a search that sniffs for binary content skips the whole file, hiding `ROOT_TEMPLATE` and `resolve_machine_alias` from a tree grep; the D999 census needed `grep -a` to find them |
+| D1011 | `kernel/tairix-kernel/README.md` still documents `published_memory_map()` and `publish_memory_map`, which `1d6d23511` deleted, and tells a bring-up observer to build its own per-device DMA `FrameAllocator` from the firmware memory map: the second owner of the kernel allocator's frames that D995 removed. The same passage names `src/arch_wrapper.rs`, which is `src/x86_64/arch_wrapper.rs` |
+| D1012 | `MountedFilesystemService::resolve_driver` picked the driver for a path under one mount-table read and `Vfs::delegate_context` resolved the covering mount again under a second, so a detach and re-attach at that path between the two paired the first volume's driver with the second projection's flags, subtree, template and allocation class |
+| D1013 | the `freestanding` rule was restated in every program crate's build script — 154 copies of "`rustc-cfg=freestanding` when the target OS is `none`" — and the bare-metal test and the native instruction-set list again in the runtime crates', the fixtures', the QEMU harness's and the kernel binary's build glue |
+| D1033 | volume recovery registered the live driver before re-attaching the volume under its recovered posture, so for that interval a conflicted FAT32 or ext4 volume — whose driver opens writable whatever the posture, leaving the mount its only guard — was served under the stale writable mount |
+| D1035 | two in-kernel wait loops parked through a CPU read before an earlier park — `BlkClient::transfer_once` and the `fs_lock` wait — so once a wake resumed the task on another core, the next park suspended the task switched in on the old one from the wrong CPU, corrupting both cores' dispatch state; with several USB disks attaching at once the corrupted core ran user code its scheduler no longer attributed ("syscall has no caller context") and the disks' block servers stopped answering |
+| D1036 | `usb_msd` built its "service could not be stood up" exit record eagerly (`ok_or(end(..))`), so every LUN it published logged that failure three times and made three needless syscalls |
 
 ## Scope
 
@@ -10970,222 +10996,90 @@ served exactly the role's rounds, and its stall guard counts posted replies.
 
 ---
 
-## D997 — System reserve on the root volume
+## D997 — System reserve on the root volume — DONE but D997.7
 
-**State:** ARXFS withholds `METADATA_RESERVE`, 16 blocks, from file
-data alone, and `avail_blocks` is free space less those 16. Metadata
-allocation checks no reserve and needs an adjacent mirrored pair, so an
-ordinary user's creates, directories, links, attributes and renames take the
-reserve, and fragmentation can strand what is left as single blocks. Every
-TAIRiX volume uses 512-byte blocks today; the Pi root is 64 MiB (D1009) and
-the QEMU fixtures' roots are 1 MiB. A full root stops the system's own
-writes, can block a delete (D835), and fails a writable mount that must
-first drain a pending delete (`ARXFS::open` → `drain_pending_deletes`), so
-the machine cannot reach login.
+Every writable ARXFS volume holds free runs back from ordinary allocation,
+chosen from the top of the volume at each mount and stepped over by the
+ordinary scans, so a full volume still takes the system's own writes and still
+frees space (`docs/src/filesystem/arxfs-spec.md` §6):
 
-- **D997.1 — allocation classes.** Every allocating operation carries a
-  class. *System* covers writes through the `/System/Logs` and
-  `/System/Settings` grafts, a property of those two projections alone (set
-  by `system_vfs` today, and by the namespace policy once
-  `plans/NEW-NAMESPACE.md` lands), and the account engine's writes of
-  `/System/Security`, which pass the class themselves because they run below
-  the VFS. *Release* covers operations that free space: the last unlink of a
-  node, `rmdir`, a truncate that drops an extent, and the mount-time
-  pending-delete drain. Everything else, home provisioning included, is
-  *ordinary*. Ordinary allocation stops while only the reserve remains;
-  system and release may draw on it.
-  Eligibility follows the destination, never the writer: confd writes app
-  data under homes as uid 17, up to 64 blobs and 32 temporary files of 64 MiB
-  per application per account, so exempting a writer would hand user data
-  the reserve.
-- **D997.2 — release is admitted only when it frees.** A release
-  transaction draws on the reserve only if its commit returns at least what
-  it allocates. A delete whose blocks a reflink, deduplication or a snapshot
-  still holds frees nothing, and is ordinary.
-- **D997.3 — enforced by the allocator, in whole pairs.** The ARXFS
-  allocator enforces the reserve, since only it knows free space and
-  adjacency, and holds it as free mirrored pairs, the unit metadata
-  allocates. It replaces `METADATA_RESERVE`. The driver ABI carries the class
-  (abi-v1 is unfrozen); the VFS adds no gate. Every ARXFS volume holds a
-  release share of one release transaction (D997.5), within volume / 8; a
-  volume backing a system graft holds the whole D997.4 reserve, of which that
-  share is part.
-- **D997.4 — size.** Derived from the volume at mount, never configured:
-  `min(volume / 8, max(floor, min(128 MiB, volume / 32)))`.
-  - The *floor* is the system's bounded write set at the volume's block
-    size, computed from the caps it covers so that changing a cap moves it:
-    both account databases rewritten (64 KiB each), the largest settings
-    documents replaced (`Services/overrides` and `library.conf` at 64 KiB,
-    `network.conf` at 16 KiB, `system.conf` at 4 KiB), one 64 KiB segment for
-    each of the six journal streams, twice over for rotation, and one
-    release transaction (D997.5). With its mirrored metadata that is about
-    2 MiB at 512-byte blocks; the floor is four times it, 8 MiB, so a very
-    large volume's deeper trees still fit.
-  - *128 MiB* is the runway. Audit and security records may not be
-    discarded under storage pressure (`plans/SYSLOG.md` §11), so once
-    ordinary space is gone those streams grow into the reserve. 128 MiB is
-    about a day and a half of audit at one 1 KiB record a second: time for an
-    operator to be told and act.
-  - *volume / 32* scales small volumes in proportion, and *volume / 8* caps
-    one too small for the floor, whose guarantee then shrinks with it.
+- **Classes.** The driver ABI carries `AllocationClass`; the kernel sets
+  `System` for writes through the `/System/Logs` and `/System/Settings`
+  projections and for the account engine's `/System/Security` rewrite, and
+  scopes each setting to one operation. A node's last unlink, a truncate that
+  drops data and the pending-delete drain are releases; a commit's root may
+  always draw.
+- **Admission.** A release that drew on the reserve and frees less than it
+  still holds is refused and undone. What a transaction takes is returned when
+  it frees it or is abandoned; a commit's frees refill the reserve first.
+- **Size.** A release share of one 512 KiB release transaction within an eighth
+  of the volume; on the root, the system reserve over `SYSTEM_WRITE_SET`
+  (`kernel/tairix-kernel/src/system_mount.rs`), pinned at 128 KiB, 8 MiB,
+  16 MiB, 128 MiB and 128 MiB for 1 MiB, 64 MiB, 512 MiB, 4 GiB and 100 TB.
+- **Below the reserve** a transaction is published at each release
+  transaction's worth. With D835, a commit's root takes the embargoed frees
+  rather than abandoning acknowledged work, and an unlink whose name has gone
+  is not reported failed by a later reclaim step.
+- **Reporting.** `VolumeStats::in_reserve`, the mount record's reserve byte,
+  `VolumeHost::reserve_crossed`, audit events 4267/4268 and a `Mounts`
+  notice; the Switchboard states it on the device.
 
-  | Volume | Reserve |
-  |---|---|
-  | 1 MiB (the QEMU fixtures) | 128 KiB |
-  | 64 MiB (the Pi root today) | 8 MiB |
-  | 512 MiB | 16 MiB |
-  | 4 GiB and larger, past 100 TB | 128 MiB |
-
-- **D997.5 — commits tighten under the reserve.** Below its reserve, a
-  volume commits a transaction as soon as it has allocated 512 KiB, so a
-  batched delete recycles its own frees rather than needing metadata for the
-  whole batch first. At 512-byte blocks each inode is its own leaf, so a
-  100 000-file `rm -r` in one batch would rewrite about 100 MiB of leaves
-  before freeing any. This is the reserve's side of D835; the two land
-  together.
-- **D997.6 — reporting and notice.** `avail_blocks` is free space less the
-  reserve, its documented meaning, so `df` shows Avail reaching 0 while Used
-  stays below Size. Crossing into the reserve publishes a system notice
-  (`plans/NOTICE.md`), so the desktop and the log warn while runway remains.
-- **D997.7 — the journal under the reserve.** Once a volume reports no
-  available space, the runtime and debug streams rotate within what they
-  hold, deleting the oldest segment before writing the next; audit and
-  security grow into the reserve, and only an exhausted reserve fails
-  audited decisions closed. journald is not yet launched, so this lands with
-  it, beside D1006 and D1007, under `plans/SYSLOG.md`'s retention budget.
-
-**Done when:** an ordinary user filling the root reaches `NoSpace` with
-Avail at 0 and the reserve still free; the journal keeps persisting, init
-rewrites `Services/overrides`, and the account engine rewrites both
-databases; app data confd writes under a home is refused like any other user
-data; the user deletes files and allocates again; a delete that frees
-nothing is not admitted; a root left full with a pending delete still
-mounts; the size policy is pinned at 1 MiB, 64 MiB, 512 MiB, 4 GiB and
-100 TB; and `docs/src/filesystem/arxfs.md`, `arxfs-spec.md` and
-`plans/SYSLOG.md` state the reserve.
+**Open — D997.7:** once a volume is `in_reserve`, the runtime and debug journal
+streams rotate within what they hold, audit and security grow into the reserve,
+and only an exhausted reserve fails an audited decision closed. It lands with
+journald's launch, under `plans/SYSLOG.md` §10.
 
 ---
 
-## D999 — Remove `/Apps`
+## D998 — Per-owner storage quotas — escalated
 
-**State:** the user's decision. `/Apps` is the machine-wide installed
-store (`INSTALLED_APP_STORE`): the fourth entry of the default root view, a
-machine alias, the default `PATH`, a root of the program-store walks, and a
-row of the files places rail. It goes. The root view holds `/System`,
-`/Users` and `/Storage`; machine-wide applications live only in
-`/System/Applications`, and a user's only in their home's `Applications`
-store. The per-app data roots `Settings/Apps/` and `Library/Apps/` under a
-home are a different thing and stay.
+**State:** open. Nothing bounds how much of a volume one principal fills; the
+reserve (D997) keeps the system writing and does nothing between users. A
+complete design needs the user's decisions before code, because each choice
+below changes the on-disk format or a security boundary:
 
-- **D999.1 — the template and the alias.** `ROOT_TEMPLATE` drops `Apps`,
-  so `Apps:` and `alias::Apps` fail closed with `NotFound` (with a negative
-  test). `Vfs::with_default_layout` and `system_vfs` drop the `/Apps` mount
-  together; if only one does, `system_vfs` fails, and every `fs_*` call with
-  it. `tools/mkimage/src/rootfs.rs` `TOP_LEVEL_DIRS` is a second copy of the
-  template: the two become one `lib/abi` definition that both import.
-- **D999.2 — the store and its walks.** `INSTALLED_APP_STORE` is deleted
-  with its re-export, and these drop it: `lib/appstore`'s `MACHINE_ROOTS`
-  and `IDENTITY_MACHINE_ROOTS`, `lib/cmdres`'s `search_roots`,
-  `lib/proglib`'s `store_body`, and `lib/browse`'s places rail (its `Apps`
-  row and `APPS_ROOT`).
-- **D999.3 — the default `PATH`.** login's `DEFAULT_PATH` and elsh's
-  fallback are `/Apps` today, and neither is replaced. The fixed lookup
-  prefix already names all four program stores, so login exports no `PATH`,
-  and an empty one stays empty.
-- **D999.4 — machine-wide installs.** The only machine-wide store is
-  `/System/Applications`, written by the installer and the updater under
-  `CAP_SYSTEM_UPDATE`. `plans/RISCOS-EMULATOR.md`, which ships the emulator
-  under `/Apps`, moves it there. There is no migration: images are rebuilt.
-- **D999.5 — the census.** About 160 tracked files. Beyond those above:
-  - the tests asserting the four entries, the store order, the default
-    `PATH` or the rail (`kernel/core/src/fs/vfs_tests.rs`,
-    `tests/integration/posix_fs_suite/tests/layout.rs`,
-    `kernel/tairix-kernel/src/system_mount_tests.rs`, `lib/appstore`,
-    `lib/cmdres`, `lib/proglib` and its fuzz generator, `lib/icon`'s
-    `artwork_tests.rs`, `lib/browse`, `userland/apps/files`, `man`, `applib`,
-    the taskbar and session test helpers, and the Switchboard's mount
-    fixture);
-  - `docs/src/filesystem/layout.md` and `drives.md` §2, §9, §17 and §21;
-  - the `man`, `applib` and `du` help in all thirteen locales;
-  - `AGENTS.md` §5.3, §11, §16.1, §16.3, §16.5 and §16.8, and `PLAN.md`;
-  - `plans/NEW-NAMESPACE.md`, `DRIVES.md`, `APPS.md`, `DEVICES.md`,
-    `SHELL.md`, `SYMLINKS.md`, `PI.md`, `NEW-FILEMANAGER.md`,
-    `NEW-TASKBAR.md` and `CAPABILITY_USE.md`.
+1. **Who is charged.** Charging by the inode's owner charges uid 17 for the
+   app data `confd` writes under every home, so a user could fill a volume
+   through app data. The proposal is a *charge id* each inode inherits from its
+   parent directory at creation (XFS's project quotas), set to the account's uid
+   on its home at provisioning: a write is charged to the tree it lands in, as
+   the reserve's class follows the destination. A rename across charge ids moves
+   the node's usage, which needs a per-inode allocated-block count.
+2. **What is counted.** Data blocks only, or data and the metadata pairs a
+   file's trees take; and whether a block a reflink or deduplication shares is
+   charged to every owner mapping it (XFS's answer) or once.
+3. **Soft limits.** A grace period (its length, and what starts and clears
+   it), or hard limits only.
+4. **Who sets them.** An extension of the `users_admin` engine under
+   `CAP_USER_ADMIN`, per account on the root volume, or a capability and a
+   surface of their own; and whether other volumes take quotas at all.
+5. **The refusal.** A new `Errno::QuotaExceeded` (`EDQUOT`), so a full quota is
+   told apart from a full volume.
 
-  Already stale, and corrected with it: `userland/apps/terminal/README.md`
-  and `userland/apps/man/README.md`, which say `/Apps` and `<HOME>/Apps`;
-  `tools/mkimage/src/lib.rs` and `tools/xtask/src/commands/image_apps.rs`,
-  which say `Apps/` where the code plants `Commands/`; and the rustdoc of
-  `lib/partition`'s `PartitionType::ARXFSRoot`. A census search must read
-  `kernel/core/src/fs/path.rs` as text despite its raw NUL byte (D1010).
-
-**Done when:** no live code, doc or test names `/Apps`, `Apps:` or a
-four-entry root view; `Apps:` fails closed; the root view lists three
-entries; and the gate is green.
+The usage itself is kept by the allocator as it allocates and frees, never by a
+scan, in a tree the transaction root names, and reported through the System
+Information API: a caller's own usage ungated, another's under
+`CAP_SYSINFO_GLOBAL`.
 
 ---
 
-## D1000 — A component store for the OS's own programs
+## D999 — Remove `/Apps` — DONE
 
-**State:** the user's decision. A bundle's store follows its
-`ProgramKind`, and there are three kinds, so the OS's desktop programs share
-`/System/Applications` with the applications users browse:
+The default root view is `/System`, `/Users` and `/Storage`, one `lib/abi`
+definition (`ROOT_VIEW`) the VFS and the image builder share; `Apps:` fails
+closed. `INSTALLED_APP_STORE` is gone with its uses in `lib/appstore`,
+`lib/cmdres`, `lib/proglib` and `lib/browse`; login exports no `PATH`, since
+the fixed lookup prefix names every program store. Machine-wide applications
+live in `/System/Applications`; the per-app data roots under a home stay.
 
-- `desktop.app`, the session itself: compositor, icon bar, program library
-  and file picker;
-- `files.app`, the file manager the session starts as a desktop component;
-- `settings.app`;
-- `datetime.app`, the elevated Date & Time setter.
+---
 
-The tree already calls them components: `files.app` is "a component of the
-desktop", and Settings "part of the desktop rather than an application the
-user manages".
+## D1000 — A component store for the OS's own programs — DONE
 
-- **D1000.1 — the kind and the store.** `ProgramKind::Component`, stored in
-  `/System/Components` (`SYSTEM_COMPONENT_STORE`) and not searched: a
-  component is neither a command nor a program-library entry, and the OS
-  starts it by path. The four bundles declare it. `terminal.app` stays an
-  application: a user-facing program that the system menu also opens.
-- **D1000.2 — one definition of each path.** Each component's run path is
-  defined once, beside the store constant, with a test pinning it under the
-  store. login's `DESKTOP_SESSION_PATH` and the session's `FILES_RUN_PATH`,
-  `SETTINGS_RUN_PATH` and `DATETIME_RUN_PATH` import it, and Settings' second
-  copy of `DATETIME_RUN_PATH` is deleted.
-- **D1000.3 — the consumers that do not follow the kind.**
-  - `lib/appstore`'s `IDENTITY_MACHINE_ROOTS` gains the store. Without it,
-    the session loses the Files slot's name and icon, and gives Settings a
-    slot its `icon-bar = false` forbids.
-  - `lib/browse`'s store classification and `tools/mkimage`'s list of
-    `/System` subdirectories gain it.
-  - `lib/help`'s own-help lookup and `man`'s bundle search find component
-    bundles, without the store joining the command prefix.
-  - `help-lint` covers components.
-  - syshelp, the bundle composer, the kernel launch cache and
-    `library_catalog` already follow `ProgramKind`.
-  - The `STORE_INVENTORY` pin in `program_manifests.rs` changes its four
-    kinds.
-- **D1000.4 — Settings leaves the program library.** `settings/AppInfo.toml`
-  declares `library = "SystemTools"`, against `plans/NEW-TASKBAR.md`, which
-  keeps Settings out of the library. The system menu's *Settings…* row
-  launches the component path instead of catalog id `os.tairix.settings`,
-  and is enabled by the component being present.
-- **D1000.5 — starting the desktop.** `desktop` stops being a command. The
-  thirteen QEMU verticals that type it after a text login start the desktop
-  through login's graphical round instead. Keeping components on the command
-  prefix is the alternative, if a typeable `desktop` is wanted.
-- **D1000.6 — docs.**
-  - `AGENTS.md` §16.2 (with its `PLAN.md` amendment for a new `/System`
-    entry), §16.5 and §16.8;
-  - `docs/src/abi/appinfo.md`, `lib/appstore.md`, `lib/proglib.md`,
-    `desktop/session.md`, `desktop/settings.md`, `desktop/taskbar.md` and
-    `userland/login.md`;
-  - `plans/APPS.md`, `NEW-TASKBAR.md`, `NEW-DESKTOP-SETTINGS.md`, `ICONS.md`,
-    `DISPLAY.md` and `APPDATA.md`;
-  - the taskbar's Cargo description and README, which still describe a
-    permanent Files launcher the code no longer has.
-- **D1000.7 — signed.** With D1004 the kind is part of the signature, so the
-  load gate can refuse a component launched from any other store.
-
-**Done when:** the four bundles ship in `/System/Components` and nothing
-names their old paths; Files and Settings keep their slots and menus; the
-verticals reach the desktop through login; and the gate is green.
+`ProgramKind::Component` puts `desktop.app`, `files.app`, `settings.app` and
+`datetime.app` in `/System/Components`, which no command lookup searches; each
+run path is defined once in `lib/abi` and the kind is part of the signed
+`AppInfo` (D1004), so the load gate refuses a component launched from any other
+store. Settings leaves the program library and the system menu opens it by
+path; the desktop is started by login's graphical round, which the desktop
+verticals now drive through the greeter.

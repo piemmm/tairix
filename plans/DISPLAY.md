@@ -783,16 +783,15 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   bookkeeping; and fixture build scripts register the inner build's
   dep-info (`tests/integration/harness` `dep_info`).
   **D7d-2 (the desktop launch) guarantees:**
-  - The desktop is the `desktop` **application** in the system application store
-    (`userland/gui/session`, bundle `desktop.app`): the shell resolves
-    the bare command word `desktop` to it, and a graphical login spawns
-    the same bundle — one bundle, one spelling.
+  - The desktop is the desktop session **component**
+    (`userland/gui/session`, bundle `desktop.app` in `/System/Components`):
+    a graphical login spawns it by its one path, and no typed word runs it.
   - Session selection is system policy, never a per-login prompt: login
     starts the desktop when `os.loginType` is `graphical` (`lib/sysconfig`,
     the default) *and* the per-round probe holds — a
-    read-only `fs_open` of `DESKTOP_SESSION_PATH`
-    (`tairix_login::session`, the one spelling of
-    `/System/Applications/desktop.app/Run`) plus one `Query` `ipc_call` to the
+    read-only `fs_open` of `DESKTOP_RUN_PATH`
+    (`tairix_abi`, the one spelling of
+    `/System/Components/desktop.app/Run`) plus one `Query` `ipc_call` to the
     reserved `DISPLAY_ENDPOINT` (any well-formed reply proves a
     privileged-bound service; `NotFound` proves none); a configured
     graphical default that cannot start degrades to text, never an
@@ -811,10 +810,10 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     range `15000..16000` in the driver crate's lib target, message
     shared with every consumer; manifest += `CAP_LOG_EMIT` at both plant
     sites) after the first successful client present — off the hot path.
-  - The vertical types `root`/`root` + the `desktop` command at the
-    shell the text login drops to (a second marker-gated typed-keys step
-    keyed on the `UsersDbLoaded` serial witness; the dialogue is
-    compile-time-pinned to the fixture credentials), and the
+  - The vertical chooses the fixture account at the graphical login screen
+    and types its password (a second marker-gated typed-keys step keyed on
+    the screen's own readiness record; the dialogue is compile-time-pinned
+    to the fixture credentials), and the
     runner keys **both** a QEMU-monitor screendump and the mouse
     injection on the `FIRST_PRESENT` marker, ordered present → fully
     parsed dump → pointer → `kind=pointer` witness → PASS, then proves

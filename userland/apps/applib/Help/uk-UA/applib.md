@@ -50,8 +50,8 @@ applib — адміністрування бібліотеки програм р
 повноважень: запуск пакета все одно регулюється перевіркою підпису та
 можливостей (capabilities) завантажувача незалежно від каталогу.
 
-`applib rescan` обходить сховища програм (`/System/Commands`,
-`/System/Applications` та `/Apps`, або власні шляхи користувача
+`applib rescan` обходить сховища програм (`/System/Commands` та
+`/System/Applications`, або власні шляхи користувача
 `<home>/Commands` та `<home>/Applications` з параметром `--user`),
 читає маніфест кожного пакета та реєструє кожну програму, яка потребує
 включення до списку і ще не внесена до каталогу. Існуючі записи —
@@ -90,9 +90,9 @@ applib — адміністрування бібліотеки програм р
 
 - `applib` — показати розгорнуту бібліотеку папка за папкою.
 - `applib list --category Games` — показати одну папку.
-- `applib add /Apps/chess.app` — зареєструвати пакет згідно з його
+- `applib add /System/Applications/chess.app` — зареєструвати пакет згідно з його
   маніфестом.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   зареєструвати пакет, який не оголошує включення до списку, у явній
   папці.
 - `applib remove os.tairix.chess` — видалити запис за ідентифікатором.

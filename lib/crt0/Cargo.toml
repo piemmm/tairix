@@ -21,3 +21,6 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # instruction and is out of scope for this runtime (`plans/CCOMPAT.md` §1).
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-abi-sys = { path = "../abi-sys", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

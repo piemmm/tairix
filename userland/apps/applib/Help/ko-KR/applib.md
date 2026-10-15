@@ -46,8 +46,8 @@ applib — 데스크톱 프로그램 라이브러리 관리
 숨기기는 표시 방식의 문제일 뿐 권한과는 무관합니다. 번들 실행은 카탈로그와
 관계없이 항상 로더의 서명 및 기능(capability) 체크에 의해 제어됩니다.
 
-`applib rescan`은 애플리케이션 저장소(`/System/Commands`,
-`/System/Applications` 및 `/Apps`, 또는 `--user` 지정 시 호출자 자신의
+`applib rescan`은 애플리케이션 저장소(`/System/Commands` 및
+`/System/Applications`, 또는 `--user` 지정 시 호출자 자신의
 `<home>/Commands` 및 `<home>/Applications`)를 검색하고, 각 번들의
 매니페스트를 읽어 목록 게시를 요청하고 아직 카탈로그에 등록되지 않은 모든
 애플리케이션을 등록합니다. 큐레이터의 이름 변경 및 억제 사항을 포함한 기존
@@ -83,8 +83,8 @@ applib — 데스크톱 프로그램 라이브러리 관리
 
 - `applib` — 해석된 라이브러리를 폴더별로 표시합니다.
 - `applib list --category Games` — 하나의 폴더만 표시합니다.
-- `applib add /Apps/chess.app` — 매니페스트의 요청에 따라 번들을 등록합니다.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/chess.app` — 매니페스트의 요청에 따라 번들을 등록합니다.
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   목록 게시 선언이 없는 번들을 명시적인 폴더 아래에 등록합니다.
 - `applib remove os.tairix.chess` — 식별자로 항목을 삭제합니다.
 - `applib hide os.tairix.chess --user` — 자신의 라이브러리에서만 숨깁니다.

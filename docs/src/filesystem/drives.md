@@ -14,7 +14,7 @@ The one-line decision this page turns into a contract:
 
 TAIRiX storage is a **forest of independently addressable named roots**, not a
 single global Unix tree. A path names its root explicitly (by human alias or by
-stable ID); the familiar `/System`, `/Users`, `/Apps`, `/Storage` layout is a
+stable ID); the familiar `/System`, `/Users`, `/Storage` layout is a
 convenience *view* projected over that forest, never the identity of storage.
 This removes the single-root fault-tolerance weakness of the Unix model: a
 healthy volume stays reachable by its stable ID even when the `/` view — or the
@@ -34,15 +34,15 @@ token, `uid = 0` as an authority shortcut, and any re-creation of `/proc`,
 
 ## 2. Charter relationship and `AGENTS.md` amendments
 
-- **`AGENTS.md` §16.1 is amended** from "exactly four top-level directories" to
-  "exactly four entries in the default session root **view**", backed by the
-  first-class aliases `System:`, `Users:`, `Apps:`, and `Storage:`. The
+- **`AGENTS.md` §16.1** names exactly three entries in the default session
+  root **view**, backed by the first-class aliases `System:`, `Users:`, and
+  `Storage:`. The
   canonical identity of a storage root becomes its root ID (`id::`) or alias
   path, not the `/` view path. The amendment preserves the existing rules the
   brief lists under "preserve": Rust-only, microkernel-leaning drivers,
   mandatory capabilities, mode-bits+ACL+capability permissions, no `/proc` /
   `/sys`, the secure default mount policy, and the signed driver-store model.
-- **`AGENTS.md` §16.2 / §16.3** (`/System`, `/Users`, `/Apps`, `/Storage`
+- **`AGENTS.md` §16.2 / §16.3** (`/System`, `/Users`, `/Storage`
   contents and mount flags) are **preserved** and reinterpreted as the policy
   of the aliases and view bindings those names project (§14, §15).
 - No other charter section changes. In particular §4 (no ambient authority),
@@ -96,7 +96,7 @@ The user-facing native spelling is `Alias:/path/inside/root`:
 System:/Kernel/tairix.rxe
 Users:/ian/Documents/design.md
 Home:/Documents/spec.md
-Apps:/Editor.app/Run
+System:/Applications/Editor.app/Run
 Backup:/snapshots/latest
 CameraCard:/DCIM/100MEDIA/IMG_0001.RAW
 ```
@@ -170,7 +170,7 @@ System Information API's job (§16, `AGENTS.md` §16.6), never a namespace tree.
 
 ## 7. Alias model
 
-**Classes.** *Machine aliases* (`System:`, `Users:`, `Apps:`, `Storage:`) are
+**Classes.** *Machine aliases* (`System:`, `Users:`, `Storage:`) are
 published by the namespace manager from signed policy; *user/session aliases*
 (`Home:`, `Desktop:`) are added by the session manager after login and are
 scoped to that session; *volume aliases* name a discovered removable/extra
@@ -205,18 +205,20 @@ metadata uses `Time64` (`AGENTS.md` §21), never a 32-bit second count.
 ## 9. Synthetic root view `/`
 
 `/` is a view assembled from the alias namespace. Its default entries are
-exactly four, and each is a projection of a machine alias:
+exactly three, and each is a projection of a machine alias:
 
 ```text
 /System   -> System:/
 /Users    -> Users:/
-/Apps     -> Apps:/
 /Storage  -> Storage:/     # a catalog/view of published non-core aliases
 ```
 
+There is no `/Apps` and no `Apps:`: a name outside the three fails closed
+(`NotFound`).
+
 A view binding may only **preserve or restrict** the source root's authority
-and mount flags; it may never relax `ro` / `nosuid` / `nodev` / `noexec`
-without the explicit relax capability and an audit record (§15). Creating any
+and mount flags; it may never relax `ro` / `noexec` without the explicit
+relax capability and an audit record (§15). Creating any
 additional default-view entry requires amending `AGENTS.md` §16.1.
 
 ## 10. Storage catalog `Storage:`
@@ -226,17 +228,19 @@ media, extra disks, network shares), projected into the `/` view as
 `/Storage/<name>`. It is a *view projection only*: `/Storage/Backup` is nothing
 more than a rendering of `Backup:/`, and `Backup:/file` must open even when the
 `Storage:` catalog or the `/` view is absent (§4 invariant 3). `Storage:` is
-never a parent volume that other volumes live *inside*.
+never a parent volume that other volumes live *inside*: `/Storage` is a mount
+with no backing, stored on no volume, so its listing is exactly the attached
+volumes and nothing can be stored in it — a mutation of it or of a name in it
+is refused `ReadOnly`.
 
 **Enumeration is landed** (`plans/DEVICES.md` D3d): listing a directory
 merges the driver-backed mounts sitting directly beneath it into the
 listing (`MountTable::direct_children`, consumed by the `fs_readdir`
-service), so a runtime `/Storage/<name>` mount appears in `/Storage` even
-though the parent volume holds no node of that name — deduplicated against
-any same-named real node, rendered as a structural directory entry with the
-same `UNIX_EPOCH` stamp any stampless backing reports. The mount points
-follow the volume's own entries in name order, so a batched listing resumes
-after the last one it returned.
+service), and listing the catalog is that merge alone, so a runtime
+`/Storage/<name>` mount appears in `/Storage` as a structural directory
+entry with the same `UNIX_EPOCH` stamp any stampless backing reports. The
+mount points list in name order, so a batched listing resumes after the last
+one it returned.
 
 ## 11. Fail-closed rules
 
@@ -319,11 +323,16 @@ capability tokens.
 
 Every open/read/write/mutate still enforces inode owner/mode/ACL, the optional
 per-inode capability requirement (`AGENTS.md` §5.3), MAC policy, and the mount
-flags. The flags `ro`, `nosuid`, `nodev`, `noexec` attach to **root
-publications and view bindings**, not only to Unix-style mountpoints. A view
-binding may only preserve or restrict them; relaxing a flag from the source
-root requires the explicit relax capability and is audited (§23 of the brief;
-`fs.flags.relax.*`). A filesystem-backed resolver (`adfs::`, `fat32::`,
+flags. The flags `ro` and `noexec` attach to **root publications and view
+bindings**, not only to Unix-style mountpoints. There are no setuid programs
+or device files, so the `nosuid` and `nodev` of a Unix mount have nothing to
+restrict and do not exist. A view
+binding may only preserve or restrict them: its flags are its volume's plus
+what it adds, and no operation widens them, so relaxing a flag has no path
+today; one would need an explicit relax capability, minted with the operation
+that enforces it, and would be audited (`fs.flags.relax.*`). `noexec` refuses
+every program read, which is how a bundle on such a binding is refused at
+spawn. A filesystem-backed resolver (`adfs::`, `fat32::`,
 `arxfs::`) enforces the identical capability/ACL/flag/MAC/audit rules as
 `alias::` / `id::` access to the same object — it is never a policy bypass.
 
@@ -338,8 +347,8 @@ state (§6). This preserves `AGENTS.md` §16.1's ban on fabricating a `/proc`.
 ## 17. Installer defaults
 
 The installer (`AGENTS.md` §11) creates the required machine aliases
-(`System:`, `Users:`, `Apps:`, `Storage:`) and the default `/` view containing
-exactly those four projected entries. Expert mode may not introduce a legacy
+(`System:`, `Users:`, `Storage:`) and the default `/` view containing
+exactly those three projected entries. Expert mode may not introduce a legacy
 POSIX top-level name into the default root view (`AGENTS.md` §11, §16.1), and
 `/Storage/<name>` entries are always projections of independent aliases, never
 canonical mountpoints. Single-volume and multi-volume installs both produce the
@@ -352,7 +361,7 @@ The shell displays and consumes alias paths (`cd`, prompt, word/tilde expansion,
 completion) through `lib/path` — never a fixed top-level directory set and never
 a second parser. `cd` changes a per-process current root/directory that is a
 typed `Root` + components, not a raw string. The file manager shows the alias
-forest (`System`, `Home`, `Apps`, `Storage`, plus published volume aliases);
+forest (`System`, `Home`, `Storage`, plus published volume aliases);
 recent-file lists store durable `id::` references so they survive alias
 churn.
 
@@ -408,10 +417,11 @@ resolved path to a new file descriptor (consumed by, not invented in,
 and the ergonomic I/O layer opens files over the same `Read`/`Write`
 vocabulary. Every path-taking call resolves at the single kernel entry point
 through `lib/path`, and **machine-alias resolution** is wired there:
-`Alias:/path` and the expanded `alias::Name/path` resolve for the four machine
+`Alias:/path` and the expanded `alias::Name/path` resolve for the three machine
 aliases, which are the canonical roots the `/` view projects as `/<Name>`
-(`kernel/core::fs::resolve_machine_alias`, derived from the one root template
-so the view and the alias namespace cannot drift). **Durable `id::`
+(`kernel/core::fs::resolve_machine_alias`, derived from the one root-view
+definition, `tairix_abi::ROOT_VIEW`, so the view and the alias namespace
+cannot drift). **Durable `id::`
 resolution is wired at the same entry point** (`plans/DEVICES.md` D3a): the
 kernel volume forest (`kernel/core::fs::volumes::VolumeForest`, installed via
 `BootInfo::with_volumes`) maps each mounted volume's stable identity — the
@@ -504,7 +514,7 @@ policy set is logged.
   resolvers do not bypass ACLs/caps/flags; raw `dev::` is denied without
   authority; inventory is not reachable via `/proc`/`/sys`.
 - **Installer / hotplug** (resolver + installer stages): default install creates
-  the aliases and exactly the four view entries; expert mode refuses legacy
+  the aliases and exactly the three view entries; expert mode refuses legacy
   names; insertion publishes an `id::` root; removal invalidates only that root.
 
 ## 25. Rejected designs

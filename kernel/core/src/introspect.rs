@@ -70,6 +70,15 @@ pub trait IntrospectSource: Sync {
     /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
     fn mounts(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
 
+    /// Encode up to `max_records` [`tairix_abi::sysinfo::ViewBindingRecord`]s
+    /// beginning at record index `offset`, on the terms of
+    /// [`Self::mounts`].
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from the default [`NullIntrospectSource`].
+    fn views(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno>;
+
     /// Encode up to `max_records`
     /// [`tairix_abi::sysinfo::VolumeIoHealthRecord`]s beginning at record
     /// index `offset`, in a stable order, packed little-endian back-to-back —
@@ -350,6 +359,10 @@ impl IntrospectSource for NullIntrospectSource {
     }
 
     fn mounts(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn views(&self, _offset: u64, _max_records: usize) -> Result<Vec<u8>, Errno> {
         Err(Errno::NotImplemented)
     }
 

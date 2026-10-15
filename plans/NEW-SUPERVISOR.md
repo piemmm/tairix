@@ -41,9 +41,9 @@ exception.
   1. `[Press ESC for supervisor]` — shown for 2 seconds, once console 0
      can deliver a key: at once on a line live from boot, such as a UART;
      on a console fed by an input device (the Pi's framebuffer console and
-     its USB keyboard), when a driver binds one. Until then the line reads
-     `[Waiting for a keyboard]` and (1) is drawn over it; if none binds
-     within 30 seconds the line is cleared.
+     its USB keyboard), once a keyboard's driver marks its node a key
+     source. Until then the line reads `[Waiting for a keyboard]` and (1) is
+     drawn over it; if none comes within 30 seconds the line is cleared.
   2. `ARXFS passphrase: ` — replaces (1) in place after the window, for an
      encrypted root; a plaintext root's line collapses to `ARXFS` instead
      and mounts with no prompt.
@@ -135,7 +135,8 @@ State machine (all timed reads are parks, never spins):
 
 0. **Wait for a key source.** The port says whether console 0's keys come
    from a live line or an input device (`KeySource`). An input-device console
-   parks until the live hardware tree holds an `Input` node a driver serves,
+   parks until the live hardware tree holds a key source — a node whose
+   driver said, through `hw_node_key_source`, that its keys reach the seat —
    for at most 30 s, its line reading `\r\n[Waiting for a keyboard]`. Once a
    key can arrive the announcement is drawn over it,
    `\r[Press ESC for supervisor]\x1b[K`; with none the waiting text is erased

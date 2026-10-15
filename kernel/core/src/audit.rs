@@ -64,6 +64,8 @@
 //! | 4264 | Info | `HW_NODE_REMOVED`   | audit | An owned hardware-tree node was retired by `hw_remove_node`. The `node` field names the removed node and `mode` the removal posture (`surprise` for a vanished device, `orderly` for an idle stop-if-idle retirement). |
 //! | 4265 | Warn | `HW_NODE_REMOVE_REFUSED` | audit | An orderly `hw_remove_node` was refused because a volume is still attached on a block-service endpoint the node declares; nothing was removed (fail closed, `Errno::Busy`). The `node` field names the node left in place. |
 //! | 4266 | Warn | `TASK_LATENCY_OVERRUN` | log | An interactive surface overran the frame budget it declared with `latency_watch`. The `budget_ms`/`elapsed_ms`/`blocked_ms`/`calls` fields say where the budget went, `blocked_in` names the syscall that carried the span over, `top_calls` names the syscalls the span made most (which is what a stall spent in thousands of short calls has instead of one culprit), and `pc`/`bt` carry the stalling code as offsets into the program's own load base. Debug images only. |
+//! | 4267 | Warn | `VOLUME_RESERVE_ENTERED` | audit | A mounted volume is down to its reserve: ordinary writes may be refused while the system's own writes and deletes go on into it. `volume` names the mount handle and `source` the volume. |
+//! | 4268 | Info | `VOLUME_RESERVE_LEFT` | audit | A volume that was down to its reserve has room outside it again. `volume` names the mount handle and `source` the volume. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -756,6 +758,15 @@ pub enum AuditEvent {
     /// operations into it, serves no further writes — so the volume is now
     /// read-only and behind. It carries no secret or capability token.
     VolumeWritebackFailed,
+    /// A mounted volume is down to its reserve
+    /// (`docs/src/filesystem/arxfs-spec.md` §6): ordinary writes may be
+    /// refused, while the system's own writes and deletes go on into it.
+    ///
+    /// The `volume` field names the mount handle and `source` the volume.
+    /// It is the operator's warning while the system still has runway.
+    VolumeReserveEntered,
+    /// A volume that was down to its reserve has room outside it again.
+    VolumeReserveLeft,
     /// An interactive surface overran the frame budget it declared
     /// (`plans/FIX-STALLTRACE.md`).
     ///
@@ -863,6 +874,8 @@ impl AuditEvent {
             Self::HwNodeRemoveRefused => 4265,
             Self::VolumeWritebackFailed => 4263,
             Self::TaskLatencyOverrun => 4266,
+            Self::VolumeReserveEntered => 4267,
+            Self::VolumeReserveLeft => 4268,
         })
     }
 
@@ -951,6 +964,8 @@ impl AuditEvent {
             Self::HwNodeRemoved => "hardware-tree node removed",
             Self::HwNodeRemoveRefused => "hardware-tree node removal refused (busy)",
             Self::VolumeWritebackFailed => "volume write-back publish failed",
+            Self::VolumeReserveEntered => "volume down to its reserve",
+            Self::VolumeReserveLeft => "volume has room outside its reserve again",
             Self::TaskLatencyOverrun => "interactive surface overran its frame budget",
         }
     }
@@ -1061,6 +1076,8 @@ mod tests {
         AuditEvent::HwNodeRemoved,
         AuditEvent::HwNodeRemoveRefused,
         AuditEvent::TaskLatencyOverrun,
+        AuditEvent::VolumeReserveEntered,
+        AuditEvent::VolumeReserveLeft,
     ];
 
     #[test]
@@ -1068,7 +1085,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 80, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 82, "a new event belongs in `ALL`");
     }
 
     #[test]

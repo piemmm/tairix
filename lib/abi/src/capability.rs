@@ -356,7 +356,7 @@ impl CapabilityId {
     /// a file the inode model denies is still refused — so it is the
     /// "may use the filesystem at all" gate, not ambient authority
     /// (no ambient authority; capability checks before state touches).
-    /// Mount flags (`ro`/`nosuid`/`nodev`/`noexec`) are honoured
+    /// Mount flags (`ro`/`noexec`) are honoured
     /// independently. The early bring-up and ordinary file-using
     /// principals (login, the shell, services, apps) hold it; a sandboxed
     /// parser that should reach no filesystem does not.

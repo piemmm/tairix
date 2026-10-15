@@ -199,7 +199,7 @@ logged as `4209` `BOOT_TREE_REFUSED` carrying the `errno`.
 
 ### Presence: removable, settled, hot
 
-Each node carries four presence bits, and only one is the emitter's to state:
+Each node carries five presence bits, and only one is the emitter's to state:
 
 | Bit | Set by | Meaning |
 |---|---|---|
@@ -207,8 +207,9 @@ Each node carries four presence bits, and only one is the emitter's to state:
 | settled | the kernel | the node's driver has brought up what was present when it started |
 | hot arrival | the kernel | the node was published under a parent that had already settled |
 | driven | the kernel | a live driver holds the node: set as the kernel admits the driver, cleared with settled as its process ends |
+| key source | the kernel, on its driver's word | the node's driver delivers its device's key presses to the seat |
 
-The kernel takes its three bits back from whatever a publish carried
+The kernel takes its four bits back from whatever a publish carried
 (`HwNode::admit_published`), so an emitter can neither forge a hot arrival nor
 claim its own children settled. A node whose driver may publish (`CAP_HW_EMIT`,
 or any bundle driver) is unsettled from admission; one whose driver cannot is
@@ -218,6 +219,15 @@ and bumps the generation on the edge only. A bus driver calls it after its
 initial walk — xHCI once no skipped-port retry is armed — a channel driver once
 its channel node is published, and a driver with nothing to enumerate as it
 starts.
+
+A keyboard's driver marks its node a key source with `hw_node_key_source`
+(no. 145, `CAP_INPUT_INJECT`, no arguments) once its keys reach the seat: the
+USB HID driver for an interface with a keyboard application, the virtio-input
+driver for a device reporting a key below the buttons. The kernel marks only a
+driven node, the caller's own, and forgets the mark as that driver ends or a
+successor is admitted, so it never outlives the keys it announces. A boot whose
+console is fed by an input device waits for one before the Supervisor window
+opens ([The Supervisor](../architecture/supervisor.md)).
 
 The driven bit is how the device manager learns a driver ended, and the
 node's ending (`HwNode::driver_ending`) how: the kernel reads the driver's exit

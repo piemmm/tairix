@@ -279,7 +279,7 @@ a draw needs* and *producing it*:
 
   The order is the identity order, `tairix_appstore::identity_roots`
   ([`lib/appstore`](appstore.md)) — **not** the command-search order
-  (`lib/cmdres`), which carries `PATH` and omits the service store and `/Apps`,
+  (`lib/cmdres`), which carries `PATH` and omits the service store,
   while a running image can come from any store that holds a bundle and never
   from a `PATH` entry. Every read-only, system-signed store is tried before the
   asking session's own two, so planting a bundle of a system program's name

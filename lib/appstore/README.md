@@ -23,7 +23,7 @@ own manifest decode. This crate is that walk, defined once.
   bundle); `Err` is a real refusal.
 - `MACHINE_ROOTS`, `user_roots(home)`, `store_roots(home)` — the store roots
   in the precedence a program name resolves against them: `/System/Commands`,
-  `/System/Applications`, `/Apps`, then the account's own `Commands` and
+  `/System/Applications`, then the account's own `Commands` and
   `Applications` — none for a home that is relative or has an empty, `.` or
   `..` component, since it could name somewhere else.
 - `IDENTITY_MACHINE_ROOTS`, `identity_roots(home)` — the same roots with

@@ -119,43 +119,8 @@ mod program {
             Ok(buf)
         }
 
-        fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
-            let file = File::open(
-                path.as_bytes(),
-                OpenFlags::WRITE
-                    .union(OpenFlags::CREATE)
-                    .union(OpenFlags::TRUNCATE),
-            )
-            .map_err(Errno::from_syscall)?;
-            let mut done = 0usize;
-            while done < bytes.len() {
-                let written = file
-                    .write_at(done as u64, &bytes[done..])
-                    .map_err(Errno::from_syscall)?;
-                if written == 0 {
-                    return Err(Errno::NoSpace);
-                }
-                done += written;
-            }
-            // The publish step renames this file over the live document, so
-            // the bytes must be on the medium before the rename makes them
-            // the document: without the flush a crash could leave the name
-            // pointing at a shorter file than the caller committed.
-            file.sync().map_err(Errno::from_syscall)
-        }
-
-        fn rename(&mut self, src: &str, dst: &str) -> Result<(), Errno> {
-            // Publishing replaces the live document, so the move must replace.
-            let ret = tairix_rt::fs_rename(
-                src.as_bytes(),
-                dst.as_bytes(),
-                tairix_abi::RenameFlags::empty(),
-            );
-            if ret == 0 {
-                Ok(())
-            } else {
-                Err(Errno::from_syscall(ret))
-            }
+        fn replace(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+            tairix_rt::replace_file(path.as_bytes(), bytes, tairix_rt::ParentDir::Existing)
         }
 
         fn mkdir(&mut self, path: &str, mode: u32) -> Result<(), Errno> {

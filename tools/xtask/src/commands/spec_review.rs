@@ -14,6 +14,8 @@
 
 use std::path::Path;
 
+use super::source_tree;
+
 /// The distinctive token of the draft marker (`// SPEC-DRAFT:`). Matching the
 /// bare token rather than the exact comment punctuation catches every spelling
 /// (`//!`, `///`, trailing text) without a brittle regex.
@@ -34,28 +36,12 @@ pub struct Violation {
 /// Scan the workspace rooted at `root` and return every draft marker found.
 pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
     let mut out = Vec::new();
-    let mut dirs = vec![root.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("spec-review: cannot read {}: {e}", dir.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("spec-review: dir entry: {e}"))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| format!("spec-review: file type {}: {e}", path.display()))?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if file_type.is_dir() {
-                if name == "target" || name == ".git" {
-                    continue;
-                }
-                dirs.push(path);
-            } else if file_type.is_file() && name.ends_with(".rs") && name != SELF_FILE {
-                scan_file(&path, &relative(root, &path), &mut out)?;
-            }
+    source_tree::for_each_file(root, "spec-review", |path, rel, name| {
+        if source_tree::is_rust(name) && name != SELF_FILE {
+            scan_file(path, rel, &mut out)?;
         }
-    }
+        Ok(())
+    })?;
     out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
     Ok(out)
 }
@@ -73,13 +59,6 @@ fn scan_file(path: &Path, rel: &str, out: &mut Vec<Violation>) -> Result<(), Str
         }
     }
     Ok(())
-}
-
-fn relative(base: &Path, path: &Path) -> String {
-    path.strip_prefix(base)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
 
 /// Run the check, printing a report and returning an error if any draft

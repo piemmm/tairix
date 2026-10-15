@@ -21,6 +21,7 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel_core::{spawn_kthread, CooperativeYield, KthreadIrqWaiter, YielderHandle};
 use tairix_kernel_irq::{block_until_ready, IrqController, IrqTable, MaskError, WaitOutcome};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -30,25 +31,19 @@ use tairix_log::{log, Event, EventId, Level};
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-/// Bump heap backing the leaked `IrqTable`, the scheduler, the arch
-/// handle, and the kthread's kernel stack. 2 MiB is generous headroom; it
-/// lives in `.bss` (zeroed by the boot trampoline).
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
-/// Page-aligned backing store for the bump heap.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: tairix_kalloc::FreeListAllocator = unsafe {
-    tairix_kalloc::FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
-};
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 // --- PL031 RTC (the `virt` board's GICv2 SPI device) --------------
 

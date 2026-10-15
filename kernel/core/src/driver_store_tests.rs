@@ -67,6 +67,8 @@ impl MockNode {
 struct MockStore {
     nodes: BTreeMap<u64, MockNode>,
     next: u64,
+    /// Every name lookup the driver has answered, so a test can count walks.
+    lookups: usize,
 }
 
 impl MockStore {
@@ -78,6 +80,7 @@ impl MockStore {
         Self {
             nodes,
             next: ROOT_ID + 1,
+            lookups: 0,
         }
     }
 
@@ -180,6 +183,7 @@ impl FilesystemRead for MockStore {
     }
 
     fn lookup(&mut self, dir: NodeId, name: &[u8]) -> Result<NodeId, DriverError> {
+        self.lookups += 1;
         let name = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
         match self.child(dir.raw(), name) {
             Some(id) => Ok(NodeId::from_raw(id)),
@@ -448,6 +452,38 @@ fn a_prefix_read_reads_the_head_of_a_bundle_and_no_more() {
         )
         .expect("a bundle shorter than the prefix");
     assert_eq!(buf.as_slice(), b"MANIFEST|program bytes");
+}
+
+/// Regression: the reader stat-ed a bundle's path and then read it, walking
+/// every directory on the way twice.
+#[test]
+fn a_bundle_and_a_boot_file_are_each_read_in_one_walk() {
+    let mut fs = MockStore::new();
+    fs.add_file_with("/System/Drivers/network/genet", b"MANIFEST|program bytes");
+    fs.add_file_with("/System/Security/Users", b"root:x:0:0");
+
+    let reader = DriverImageReader::open().expect("root mount builds");
+    let mut buf = Vec::new();
+    reader
+        .read_image_prefix(
+            &mut fs,
+            DRIVER_STORE_PATH,
+            "/System/Drivers/network/genet",
+            8,
+            &mut buf,
+        )
+        .expect("an in-store bundle");
+    assert_eq!(buf.as_slice(), b"MANIFEST");
+    assert_eq!(fs.lookups, 4, "one lookup per path component");
+
+    fs.lookups = 0;
+    let file = crate::fs::BootstrapFile {
+        path: "/System/Security/Users",
+        max_len: 64,
+    };
+    let bytes = crate::fs::read_bootstrap_file(&mut fs, file).expect("a readable boot file");
+    assert_eq!(bytes.as_slice(), b"root:x:0:0");
+    assert_eq!(fs.lookups, 3);
 }
 
 #[test]

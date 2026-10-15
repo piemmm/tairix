@@ -135,9 +135,6 @@ use tairix_abi::time::Duration64;
 use tairix_abi::MAX_TIME_SERVERS;
 use tairix_util::conf::{setting_line, Located, ValueShape};
 
-/// The directory that holds the boot-time configuration store.
-pub const CONFIG_DIR: &str = "/System/Settings/Configuration";
-
 /// The configuration store document, named by the closed
 /// `/System/Settings/` file set so this engine and the pre-unlock reader that
 /// serves it cannot name different files.
@@ -181,8 +178,8 @@ pub const MAX_CONFIG_LEN: usize = 4096;
 /// (`os.loginType`). System policy, never a per-login prompt.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum LoginType {
-    /// The text login: the authenticated account's shell. A shell user
-    /// starts the desktop on demand with the `desktop` command.
+    /// The text login: the authenticated account's shell. The desktop runs
+    /// only from a graphical login.
     Text,
     /// The graphical login — the default, and the value an absent store
     /// implies: an authenticated user's session starts the desktop
@@ -1967,7 +1964,6 @@ mod tests {
 
     #[test]
     fn path_constants_are_inside_the_settings_subtree() {
-        assert!(CONFIG_PATH.starts_with(super::CONFIG_DIR));
         assert!(CONFIG_PATH.starts_with("/System/Settings/"));
     }
 

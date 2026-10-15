@@ -15,8 +15,9 @@ use tairix_procinfo::{CallError, ListError};
 /// frozen [`Errno`] so no parallel error set is invented.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DfError {
-    /// The `MOUNT_LIST` query failed: the transport errored, the service
-    /// refused, or the reply did not decode against `sysinfo-v1`.
+    /// The `MOUNT_LIST` or `VIEW_LIST` query failed: the transport errored,
+    /// the service refused, or the reply did not decode against
+    /// `sysinfo-v1`.
     Service(Errno),
     /// A table row (or the short help) could not be written to the
     /// terminal.

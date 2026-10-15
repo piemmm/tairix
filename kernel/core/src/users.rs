@@ -5,8 +5,8 @@
 //! database: given the live [`FilesystemRead`] +
 //! [`FilesystemSecurity`] driver of the mounted root volume (arxfs on a
 //! real installation), it resolves [`USERS_DB_PATH`] through the VFS's
-//! -checked per-inode delegation ([`crate::fs::Vfs::read_via_secured`]), bounds
-//! the file against [`tairix_users::MAX_DB_LEN`] *before* reading it,
+//! -checked per-inode delegation ([`crate::fs::Vfs::read_bounded_via_secured`]),
+//! bounds the file against [`tairix_users::MAX_DB_LEN`] *before* reading it,
 //! and parses the bytes through the fail-closed
 //! [`tairix_users::UsersDb`] parser. The parsed database is what the
 //! login path holds to authenticate sessions.
@@ -39,7 +39,7 @@ use tairix_users::{LocatedError, UsersDb, MAX_DB_LEN};
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
-use crate::fs::{read_bootstrap_file, BootstrapFile, BootstrapReadError, VfsError};
+use crate::fs::{read_bootstrap_file, BootstrapFile, BoundedReadError, VfsError};
 
 /// Absolute path of the user database on the root volume.
 pub const USERS_DB_PATH: &str = "/System/Security/Users";
@@ -502,14 +502,14 @@ impl From<VfsError> for UsersLoadError {
     }
 }
 
-impl From<BootstrapReadError> for UsersLoadError {
-    fn from(err: BootstrapReadError) -> Self {
+impl From<BoundedReadError> for UsersLoadError {
+    fn from(err: BoundedReadError) -> Self {
         match err {
-            BootstrapReadError::Vfs(err) => Self::Vfs(err),
-            BootstrapReadError::NotAFile => Self::NotAFile,
-            BootstrapReadError::TooLarge => Self::TooLarge,
-            BootstrapReadError::ShortRead => Self::ShortRead,
-            BootstrapReadError::OutOfMemory => Self::OutOfMemory,
+            BoundedReadError::Vfs(err) => Self::Vfs(err),
+            BoundedReadError::NotAFile => Self::NotAFile,
+            BoundedReadError::TooLarge => Self::TooLarge,
+            BoundedReadError::ShortRead => Self::ShortRead,
+            BoundedReadError::OutOfMemory => Self::OutOfMemory,
         }
     }
 }

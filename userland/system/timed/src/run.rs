@@ -77,8 +77,7 @@ mod program {
     };
     use tairix_timesync::events::{SERVERS_FROM_FALLBACK, SERVICE_UNAVAILABLE, TIMED_RANGE_START};
     use tairix_timesync::{
-        select_servers, ServerSelection, ServerSource, TimeServer, RECORD_DIR, RECORD_LEN,
-        RECORD_PATH,
+        select_servers, ServerSelection, ServerSource, TimeServer, RECORD_LEN, RECORD_PATH,
     };
     use tairix_util::retry::RetryLadder;
 
@@ -175,29 +174,15 @@ mod program {
         }
 
         fn write(&self, bytes: &[u8]) -> Result<(), Errno> {
-            let file = match tairix_rt::create(RECORD_PATH.as_bytes()) {
-                Ok(file) => file,
-                // The directory is absent only on a volume laid out before
-                // this service existed. Creating it is attempted only then:
-                // `/System/Settings` is system-owned, so an unconditional
-                // attempt is refused on every provisioned machine and would
-                // file a denied-mutation record on each successful sync,
-                // burying a real denial in routine noise.
-                Err(ret) if Errno::from_syscall(ret) == Errno::NotFound => {
-                    let made = tairix_rt::fs_mkdir(RECORD_DIR.as_bytes());
-                    if made != 0 && Errno::from_syscall(made) != Errno::AlreadyExists {
-                        return Err(Errno::from_syscall(made));
-                    }
-                    tairix_rt::create(RECORD_PATH.as_bytes()).map_err(Errno::from_syscall)?
-                }
-                Err(ret) => return Err(Errno::from_syscall(ret)),
-            };
-            let written = file.write_at(0, bytes).map_err(Errno::from_syscall)?;
-            if written == bytes.len() {
-                Ok(())
-            } else {
-                Err(Errno::BufferTooSmall)
-            }
+            // The directory is absent only on a volume laid out before this
+            // service existed, so it is created only when found missing: an
+            // unconditional attempt under the system-owned `/System/Settings`
+            // would be refused, and audited, on every sync.
+            tairix_rt::replace_file(
+                RECORD_PATH.as_bytes(),
+                bytes,
+                tairix_rt::ParentDir::CreatedIfMissing,
+            )
         }
     }
 

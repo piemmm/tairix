@@ -21,7 +21,7 @@ use tairix_abi::{
     BootId, CapabilitySummary, Duration64, Origin, ProcId, Time64, TrustDomain, WallClockReading,
     WallTimeState, BOOT_ID_LEN, ORIGIN_CONSOLE_NONE, PROC_ID_LEN,
 };
-use tairix_log::journal::{Journal, SegmentStore};
+use tairix_log::journal::{Journal, SegmentStore, Stamp};
 use tairix_log::{
     machine_id_hash, verify_segment, BootRing, CallerContent, LogAttestationKey, Stream,
     STREAM_COUNT,
@@ -152,10 +152,15 @@ fn one_round(rng: &mut tairix_fuzzseed::Prng) {
         // The commit may reject an over-cap record; it must never panic.
         let _ = journal.commit(
             &adm,
-            cpu,
-            cpu_seq,
-            Duration64::from_secs(i64::from(cpu)),
-            WallClockReading::new(Time64::from_secs(1_700_000_000), WallTimeState::Trusted),
+            Stamp {
+                cpu,
+                cpu_seq,
+                monotonic: Duration64::from_secs(i64::from(cpu)),
+                wall: WallClockReading::new(
+                    Time64::from_secs(1_700_000_000),
+                    WallTimeState::Trusted,
+                ),
+            },
             caller,
             &[],
             scratch,

@@ -30,8 +30,8 @@ cuenta ordinaria puede leer los ajustes pero no cambiarlos.
   (el valor por defecto) inicia directamente la sesión de escritorio
   tras la autenticación, y recurre al inicio de sesión de texto en una
   máquina que no puede ejecutar ninguna; `text` inicia el shell de la
-  cuenta — el escritorio puede iniciarse bajo demanda con el comando
-  `desktop`.
+  cuenta — el escritorio solo se ejecuta desde un inicio de sesión
+  gráfico.
 - `cache.all` — `on` u `off`: el conmutador maestro de caché. `on` (el
   valor por defecto) deja que cada clase de caché de abajo siga su
   propio ajuste; `off` es un techo que desactiva toda caché en memoria

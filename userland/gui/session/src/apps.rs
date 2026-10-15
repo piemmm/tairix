@@ -329,6 +329,13 @@ impl BundleIndex {
     fn facts_of(&self, path: &str) -> Option<&BundleFacts> {
         self.facts.get(path)
     }
+
+    /// Whether the walk found a bundle at the directory `path` whose manifest
+    /// decoded.
+    #[must_use]
+    pub fn holds(&self, path: &str) -> bool {
+        self.facts.contains_key(path)
+    }
 }
 
 /// The session's icon-bar service: every application's declaration, the

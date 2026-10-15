@@ -371,9 +371,9 @@ draws into itself.
 | `mount(src, flags)` | `CAP_FS_MOUNT` (plus driver handle).            |
 | `unmount()`         | `CAP_FS_MOUNT` (plus driver handle).            |
 
-`MountFlags` is a checked bitmap of `READ_ONLY`, `NOSUID`, `NODEV`,
-`NOEXEC`. The installer's secure default layout (`AGENTS.md` §11.3,
-§16.3) sets `NOSUID | NODEV` on `/Users` and `/Apps` via this type.
+`MountFlags` is a checked bitmap of `READ_ONLY` and `NOEXEC`. The boot
+layout sets `NOEXEC` on the writable `/System/Logs` and `/System/Settings`,
+and every runtime volume under `/Storage` is attached with it.
 
 `Filesystem` carries only mount/unmount and a `DriverHandle`, so it
 cannot perform path I/O. The read surface the VFS uses to delegate
@@ -504,15 +504,17 @@ widening of) the others (`AGENTS.md` §2.4 / §9):
 |-----------|--------------------|
 | `stats()` | Driver handle.     |
 
-`stats` returns a `VolumeStats { block_size, total_blocks, free_blocks,
-avail_blocks, files, files_free }` record: whole blocks of the unit the
-mounted format actually allocates in, with every count 64-bit
+`stats` returns a `VolumeStats { block_size, in_reserve, total_blocks,
+free_blocks, avail_blocks, files, files_free }` record: whole blocks of the
+unit the mounted format actually allocates in, with every count 64-bit
 (`AGENTS.md` §26.6 — a volume may exceed what 32 bits hold).
 `avail_blocks` is the portion of `free_blocks` an ordinary data
-allocation may consume (a format that withholds a reserve — arxfs's
-metadata reserve — reports the smaller number), so `avail_blocks ≤
-free_blocks ≤ total_blocks` always holds and consumers are never
-promised space the driver would refuse. `files`/`files_free` report a
+allocation may consume (a format that withholds a reserve — arxfs's,
+`filesystem/arxfs-spec.md` §6 — reports the smaller number), so
+`avail_blocks ≤ free_blocks ≤ total_blocks` always holds and consumers are
+never promised space the driver would refuse. `in_reserve` says the volume
+is down to that reserve, so an ordinary write may be refused; a format that
+keeps none always reports `false`. `files`/`files_free` report a
 fixed inode table's capacity; a format that allocates inodes dynamically
 (arxfs) carries the honest `0`/`0` "untracked" pair, never a fabricated
 total. The report is a read of the driver's own accounting, never a

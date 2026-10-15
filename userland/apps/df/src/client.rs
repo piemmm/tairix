@@ -1,5 +1,5 @@
-//! The `df` engine: fetch the mount table, select and filter the
-//! filesystems, and render the usage report.
+//! The `df` engine: read the namespace, select and filter the filesystems,
+//! and render the usage report.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -7,8 +7,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
+use tairix_abi::sysinfo::{MountRecord, ViewBindingRecord};
 use tairix_help::{own_short_help, HelpSource};
-use tairix_procinfo::{for_each_mount, Transport, VolumeBytes, WalkStep};
+use tairix_procinfo::{field_lossy, Namespace, Transport, VolumeBytes};
 use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
 
 use crate::command::{Command, Options};
@@ -23,13 +24,50 @@ pub const USAGE: &str =
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "df";
 
-/// One mounted filesystem, decoded from its wire record.
+/// What a binding showing no volume reads as in both name columns, as GNU
+/// `df -a` names a pseudo filesystem.
+const NO_VOLUME: &str = "none";
+
+/// One row of the report: a volume's figures under the view path it is
+/// reported at.
 #[derive(Clone, Debug)]
 struct Fs {
     source: String,
     target: String,
     fstype: String,
     usage: VolumeStats,
+}
+
+impl Fs {
+    /// `volume` reported at the view path `target`, `-` when no view path
+    /// shows it.
+    fn of(volume: &MountRecord, target: &[u8]) -> Self {
+        Self {
+            source: field_lossy(volume.source_bytes()),
+            target: if target.is_empty() {
+                String::from("-")
+            } else {
+                field_lossy(target)
+            },
+            fstype: field_lossy(volume.fstype_bytes()),
+            usage: volume.usage(),
+        }
+    }
+
+    /// The row of `view` in `namespace`: its volume's figures at its path, a
+    /// figureless `none` row for a binding showing no volume, and `None` for
+    /// one whose volume left between the namespace's two reads.
+    fn of_binding(namespace: &Namespace, view: &ViewBindingRecord) -> Option<Self> {
+        if !view.shows_volume() {
+            return Some(Self {
+                source: String::from(NO_VOLUME),
+                target: field_lossy(view.target_bytes()),
+                fstype: String::from(NO_VOLUME),
+                usage: VolumeStats::default(),
+            });
+        }
+        Some(Self::of(namespace.volume_of(view)?, view.target_bytes()))
+    }
 }
 
 /// Run a parsed `df` command against the injected seams.
@@ -40,7 +78,7 @@ struct Fs {
 ///
 /// # Errors
 ///
-/// * [`DfError::Service`] — the mount-table query failed.
+/// * [`DfError::Service`] — the mount or view list could not be read.
 /// * [`DfError::Output`] — a row (or the short help) could not be
 ///   written.
 /// * [`DfError::NothingProcessed`] — the type filters left nothing
@@ -64,31 +102,19 @@ pub fn run(
         Command::Report(options) => options,
     };
 
-    // The live mount table, in service order (the permanent root first).
-    let mut mounts: Vec<Fs> = Vec::new();
-    for_each_mount(transport, |record| {
-        mounts.push(Fs {
-            source: String::from_utf8_lossy(record.source_bytes()).into_owned(),
-            target: String::from_utf8_lossy(record.target_bytes()).into_owned(),
-            fstype: String::from_utf8_lossy(record.fstype_bytes()).into_owned(),
-            usage: record.usage(),
-        });
-        Ok(WalkStep::Continue)
-    })
-    .map_err(DfError::from)?;
-
+    let namespace = Namespace::read(transport).map_err(DfError::from)?;
     let mut clean = true;
     let (selected, hidden) = if options.paths.is_empty() {
-        select_all(&options, &mounts)
+        select_all(&options, &namespace)
     } else {
-        let selected = select_operands(&options, &mounts, probe, err, &mut clean)?;
+        let selected = select_operands(&options, &namespace, probe, err, &mut clean)?;
         (selected, 0)
     };
 
     // The type filters apply to whatever was selected; leaving nothing is
     // the GNU `no file systems processed` outcome.
     let rows: Vec<&Fs> = selected
-        .into_iter()
+        .iter()
         .filter(|fs| type_selected(&options, fs))
         .collect();
     if rows.is_empty() {
@@ -106,43 +132,64 @@ pub fn run(
     Ok(clean)
 }
 
-/// The default whole-table selection: hide capacity-less mounts (the
-/// in-RAM layout bindings) and further mounts of an already-listed
-/// volume, unless `-a` asks for everything. Returns the kept rows and
-/// how many were hidden.
-fn select_all<'a>(options: &Options, mounts: &'a [Fs]) -> (Vec<&'a Fs>, u64) {
+/// The whole-namespace selection and how many rows `-a` would add to it.
+///
+/// By default, one row per attached volume that reports a capacity, at the
+/// view path showing its root. `-a` lists every binding instead — a volume's
+/// further bindings as rows of their own, as GNU `df -a` lists bind mounts,
+/// and the `/Storage` catalog as a pseudo filesystem — then any volume no
+/// binding shows.
+fn select_all(options: &Options, namespace: &Namespace) -> (Vec<Fs>, u64) {
+    let every = every_row(namespace);
     if options.all {
-        return (mounts.iter().collect(), 0);
+        return (every, 0);
     }
-    let mut seen_sources: Vec<&str> = Vec::new();
-    let mut kept = Vec::new();
-    let mut hidden = 0u64;
-    for fs in mounts {
-        let pseudo = VolumeBytes::of(&fs.usage).is_none();
-        let duplicate = !fs.source.is_empty() && seen_sources.contains(&fs.source.as_str());
-        if pseudo || duplicate {
-            hidden += 1;
-            continue;
-        }
-        if !fs.source.is_empty() {
-            seen_sources.push(&fs.source);
-        }
-        kept.push(fs);
-    }
-    (kept, hidden)
+    let reported: Vec<Fs> = namespace
+        .volumes()
+        .iter()
+        .filter(|volume| VolumeBytes::of(&volume.usage()).is_some())
+        .map(|volume| Fs::of(volume, volume.target_bytes()))
+        .collect();
+    let hidden = every.len().saturating_sub(reported.len());
+    (reported, u64::try_from(hidden).unwrap_or(u64::MAX))
 }
 
-/// Resolve each `file` operand to the mount that contains it (the
-/// longest mount-point prefix). A missing, unreachable, or relative
-/// operand is diagnosed and skipped; the report continues.
-fn select_operands<'a>(
+/// Every binding's row, then every volume no binding shows.
+fn every_row(namespace: &Namespace) -> Vec<Fs> {
+    let mut rows: Vec<Fs> = namespace
+        .views()
+        .iter()
+        .filter_map(|view| Fs::of_binding(namespace, view))
+        .collect();
+    let mut shown: Vec<[u8; 16]> = namespace
+        .views()
+        .iter()
+        .filter_map(|view| namespace.volume_of(view))
+        .map(MountRecord::volume_id)
+        .collect();
+    shown.sort_unstable();
+    rows.extend(
+        namespace
+            .volumes()
+            .iter()
+            .filter(|volume| shown.binary_search(&volume.volume_id()).is_err())
+            .map(|volume| Fs::of(volume, volume.target_bytes())),
+    );
+    rows
+}
+
+/// Resolve each `file` operand to the binding covering it and the volume
+/// that binding shows. A missing, unreachable, or relative operand is
+/// diagnosed and skipped; the report continues.
+fn select_operands(
     options: &Options,
-    mounts: &'a [Fs],
+    namespace: &Namespace,
     probe: &dyn PathProbe,
     err: &dyn Output,
     clean: &mut bool,
-) -> Result<Vec<&'a Fs>, DfError> {
-    let mut rows: Vec<&Fs> = Vec::new();
+) -> Result<Vec<Fs>, DfError> {
+    let mut rows: Vec<Fs> = Vec::new();
+    let mut reported: Vec<&ViewBindingRecord> = Vec::new();
     for path in &options.paths {
         if let Err(errno) = probe.probe(path) {
             diagnose(err, &format!("{path}: {errno}"))?;
@@ -159,33 +206,23 @@ fn select_operands<'a>(
             *clean = false;
             continue;
         }
-        let Some(covering) = covering_mount(mounts, path) else {
-            // A live table always carries the root mount, so this is a
-            // service anomaly worth diagnosing, never a silent skip.
-            diagnose(err, &format!("{path}: no mount covers this path"))?;
+        let covering = namespace.covering(path.as_bytes());
+        let Some((view, row)) =
+            covering.and_then(|view| Some((view, Fs::of_binding(namespace, view)?)))
+        else {
+            // A live namespace always binds `/`, so this is a service
+            // anomaly worth diagnosing, never a silent skip.
+            diagnose(err, &format!("{path}: no listed volume holds this path"))?;
             *clean = false;
             continue;
         };
-        // One row per filesystem, however many operands it covers.
-        if !rows.iter().any(|fs| core::ptr::eq::<Fs>(*fs, covering)) {
-            rows.push(covering);
+        // One row per binding, however many operands it covers.
+        if !reported.iter().any(|known| core::ptr::eq(*known, view)) {
+            reported.push(view);
+            rows.push(row);
         }
     }
     Ok(rows)
-}
-
-/// The mount with the longest mount-point path that is a prefix of
-/// `path` (`/` covers everything).
-fn covering_mount<'a>(mounts: &'a [Fs], path: &str) -> Option<&'a Fs> {
-    mounts
-        .iter()
-        .filter(|fs| {
-            fs.target == "/"
-                || path == fs.target
-                || (path.starts_with(&fs.target)
-                    && path.as_bytes().get(fs.target.len()) == Some(&b'/'))
-        })
-        .max_by_key(|fs| fs.target.len())
 }
 
 /// Whether the `-t`/`-x` filters keep `fs` in the report.
@@ -468,19 +505,20 @@ fn diagnose(err: &dyn Output, message: &str) -> Result<(), DfError> {
 }
 
 /// Emit the `fs.mounts_omitted` advisory (fd 3) when the default view
-/// hid capacity-less or duplicate mounts: a tool or user then knows the
-/// table is not exhaustive and how to see the rest. Advisory only —
-/// never affects the table, the exit status, or ordering.
+/// left out rows `-a` shows — a volume reporting no capacity, a further
+/// binding of a volume, the catalog — so a tool or user knows the table is
+/// not exhaustive and how to see the rest. Advisory only — never affects
+/// the table, the exit status, or ordering.
 fn emit_omission_record(out: &dyn Output, omitted: u64) {
     let message = if omitted == 1 {
-        String::from("1 pseudo or duplicate mount not shown.")
+        String::from("1 pseudo or bind mount not shown.")
     } else {
-        format!("{omitted} pseudo or duplicate mounts not shown.")
+        format!("{omitted} pseudo or bind mounts not shown.")
     };
     let ai = format!(
         "{{\"subject\":\"filesystem_report\",\
          \"omission\":{{\"reason\":\"hidden_by_default\",\
-         \"entry_class\":\"pseudo_or_duplicate_mount\",\"omitted_count\":{omitted},\
+         \"entry_class\":\"pseudo_or_bind_mount\",\"omitted_count\":{omitted},\
          \"stdout_is_exhaustive\":false}},\
          \"suggestion\":{}}}",
         Suggestion::new(&["df", "-a"])
@@ -510,23 +548,27 @@ mod tests {
     use core::cell::RefCell;
     use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
     use tairix_abi::sysinfo::{
-        MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoRequestHeader,
+        MountAvailability, MountRecord, MountVolumeState, PageRequest, SysinfoQueryId,
+        SysinfoRequestHeader, ViewBindingRecord,
     };
     use tairix_abi::Errno;
     use tairix_help::{HelpSource, SourceError};
     use tairix_procinfo::Transport;
 
-    /// An in-memory `sysinfod` stand-in answering mount-list queries from
-    /// a fixture, decoding the request the same way the real service does.
+    /// An in-memory `sysinfod` stand-in answering the mount and view lists
+    /// from a fixture, decoding the request the same way the real service
+    /// does.
     struct Fixture {
         records: Vec<MountRecord>,
+        views: Vec<ViewBindingRecord>,
         fail: Option<Errno>,
     }
 
     impl Fixture {
-        fn new(records: Vec<MountRecord>) -> Self {
+        fn new(records: Vec<MountRecord>, views: Vec<ViewBindingRecord>) -> Self {
             Self {
                 records,
+                views,
                 fail: None,
             }
         }
@@ -541,16 +583,26 @@ mod tests {
             let payload = &request[SysinfoRequestHeader::WIRE_LEN
                 ..SysinfoRequestHeader::WIRE_LEN + header.payload_len as usize];
             let req = PageRequest::from_bytes(payload)?;
-            let offset = req.offset as usize;
-            if offset >= self.records.len() {
-                return Ok(Vec::new());
-            }
-            let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
-            let mut out = Vec::with_capacity(take * MountRecord::WIRE_LEN);
-            for record in &self.records[offset..offset + take] {
-                out.extend_from_slice(&record.to_le_bytes());
-            }
-            Ok(out)
+            let encoded: Vec<Vec<u8>> = match header.query {
+                SysinfoQueryId::MOUNT_LIST => self
+                    .records
+                    .iter()
+                    .map(|r| r.to_le_bytes().to_vec())
+                    .collect(),
+                SysinfoQueryId::VIEW_LIST => self
+                    .views
+                    .iter()
+                    .map(|v| v.to_le_bytes().to_vec())
+                    .collect(),
+                _ => return Err(Errno::NotImplemented),
+            };
+            Ok(encoded
+                .iter()
+                .skip(req.offset as usize)
+                .take(req.limit as usize)
+                .flatten()
+                .copied()
+                .collect())
         }
     }
 
@@ -636,6 +688,7 @@ mod tests {
     fn usage(block_size: u32, total: u64, free: u64, avail: u64) -> VolumeStats {
         VolumeStats {
             block_size,
+            in_reserve: false,
             total_blocks: total,
             free_blocks: free,
             avail_blocks: avail,
@@ -644,7 +697,7 @@ mod tests {
         }
     }
 
-    fn record(source: &str, target: &str, fstype: &str, stats: VolumeStats) -> MountRecord {
+    fn record(source: &str, target: &str, fstype: &str, stats: VolumeStats, id: u8) -> MountRecord {
         MountRecord::new(
             source.as_bytes(),
             target.as_bytes(),
@@ -655,26 +708,46 @@ mod tests {
                 availability: MountAvailability::Available,
                 medium: None,
             },
-            [0u8; 16],
+            [id; 16],
         )
         .expect("record")
     }
 
-    /// The production shape: a backed root volume, a read-only system
-    /// volume, rebased sub-mounts of the root volume, and an unbacked
-    /// in-RAM binding.
+    fn view(target: &str, subtree: &str, id: u8) -> ViewBindingRecord {
+        ViewBindingRecord::new(
+            target.as_bytes(),
+            subtree.as_bytes(),
+            MountFlags::default(),
+            [id; 16],
+        )
+        .expect("view")
+    }
+
+    /// The production shape: the root volume at `/` and carved out at
+    /// `/System/Logs`, the read-only system volume at `/System`, the
+    /// `/Storage` catalog showing no volume, and an attached stick that
+    /// reports no capacity.
     fn table() -> Fixture {
-        Fixture::new(alloc::vec![
-            record("ARXFSRoot", "/", "arxfs", usage(512, 4096, 2048, 2032)),
-            record(
-                "ARXFSSystem",
-                "/System",
-                "arxfs",
-                usage(512, 1024, 128, 112),
-            ),
-            record("ARXFSRoot", "/Users", "arxfs", usage(512, 4096, 2048, 2032)),
-            record("", "/System/Logs", "", VolumeStats::default()),
-        ])
+        Fixture::new(
+            alloc::vec![
+                record("ARXFSRoot", "/", "arxfs", usage(512, 4096, 2048, 2032), 1),
+                record(
+                    "ARXFSSystem",
+                    "/System",
+                    "arxfs",
+                    usage(512, 1024, 128, 112),
+                    2
+                ),
+                record("odd", "/Storage/odd", "fat32", VolumeStats::default(), 3),
+            ],
+            alloc::vec![
+                view("/", "/", 1),
+                view("/System", "/", 2),
+                view("/System/Logs", "/System/Logs", 1),
+                view("/Storage", "", 0),
+                view("/Storage/odd", "/", 3),
+            ],
+        )
     }
 
     fn run_case(
@@ -690,10 +763,10 @@ mod tests {
     }
 
     #[test]
-    fn default_report_hides_pseudo_and_duplicate_mounts_and_notes_it() {
+    fn default_report_lists_each_reporting_volume_once_and_notes_the_rest() {
         let (clean, out, err, records) = run_case(&[], &table(), &MemProbe::new(&[]));
         assert!(clean);
-        // Root: 2048 KiB total, 1024 used, 1016 available, 50% of
+        // Root: 2048 KiB total, 1024 used, 1016 available, 51% of
         // (1024 + 1016 = 2040). System: 512 total, 448 used, 56 avail.
         assert_eq!(
             out,
@@ -702,26 +775,47 @@ mod tests {
              ARXFSSystem       512  448        56  89% /System\n"
         );
         assert!(err.is_empty());
-        // The duplicate /Users mount and the unbacked binding were hidden
-        // and noted on fd 3.
+        // The carved-out /System/Logs, the catalog, and the capacity-less
+        // stick are what -a adds, noted on fd 3.
         assert_eq!(records.len(), 1);
         assert!(
             records[0].contains("\"code\":\"fs.mounts_omitted\""),
             "{}",
             records[0]
         );
-        assert!(records[0].contains("2 pseudo or duplicate mounts not shown."));
+        assert!(records[0].contains("3 pseudo or bind mounts not shown."));
     }
 
     #[test]
-    fn all_shows_every_mount_without_a_record() {
+    fn all_shows_every_binding_without_a_record() {
         let (clean, out, _, records) = run_case(&["-a"], &table(), &MemProbe::new(&[]));
         assert!(clean);
-        assert!(out.contains("/Users"));
-        assert!(out.contains("/System/Logs"));
-        // The unbacked binding reports the honest unknowns.
-        assert!(out.contains("- "), "empty source renders as '-': {out}");
+        let rows: Vec<&str> = out.lines().skip(1).collect();
+        assert_eq!(rows.len(), 5, "{out}");
+        // A further binding of the root volume reports the volume's figures
+        // at its own path, as GNU `df -a` lists a bind mount.
+        assert!(rows[2].starts_with("ARXFSRoot") && rows[2].ends_with(" /System/Logs"));
+        // The catalog is a pseudo filesystem with no figures.
+        assert!(rows[3].starts_with("none") && rows[3].ends_with(" /Storage"));
+        assert!(rows[4].ends_with(" /Storage/odd"));
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn a_volume_no_binding_shows_is_still_listed_by_all() {
+        let fixture = Fixture::new(
+            alloc::vec![
+                record("ARXFSRoot", "/", "arxfs", usage(512, 4096, 2048, 2032), 1),
+                record("hidden", "", "arxfs", usage(512, 64, 32, 32), 2),
+            ],
+            alloc::vec![view("/", "/", 1)],
+        );
+        let (_, all, _, _) = run_case(&["-a"], &fixture, &MemProbe::new(&[]));
+        assert!(all
+            .lines()
+            .any(|line| line.starts_with("hidden") && line.ends_with(" -")));
+        let (_, default, _, _) = run_case(&[], &fixture, &MemProbe::new(&[]));
+        assert!(default.lines().any(|line| line.starts_with("hidden")));
     }
 
     #[test]
@@ -733,7 +827,7 @@ mod tests {
         let (clean, out, _, _) = run_case(&["-a", "-x", "arxfs"], &table(), &MemProbe::new(&[]));
         assert!(clean);
         assert!(!out.contains("arxfs"));
-        assert!(out.contains("/System/Logs"));
+        assert!(out.contains("/Storage/odd"));
         let result = {
             let command = parse(&["-t", "ext4"]).expect("parse");
             run(
@@ -801,15 +895,35 @@ mod tests {
     }
 
     #[test]
-    fn an_operand_selects_its_covering_mount_once() {
+    fn an_operand_selects_its_covering_binding_once() {
         let probe = MemProbe::new(&["/Users/jo/notes.txt", "/Users/mo"]);
         let (clean, out, err, _) =
             run_case(&["/Users/jo/notes.txt", "/Users/mo"], &table(), &probe);
         assert!(clean);
         assert!(err.is_empty());
-        // Both operands live on the /Users mount: one row, not two.
-        assert_eq!(out.matches("/Users").count(), 1, "{out}");
-        assert!(!out.contains("/System"), "{out}");
+        // Both operands live on the root volume's `/` binding: one row.
+        let rows: Vec<&str> = out.lines().skip(1).collect();
+        assert_eq!(rows.len(), 1, "{out}");
+        assert!(rows[0].starts_with("ARXFSRoot") && rows[0].ends_with(" /"));
+    }
+
+    #[test]
+    fn an_operand_reports_the_volume_its_binding_shows_at_that_binding() {
+        let probe = MemProbe::new(&["/System/Logs/boot", "/System/Commands", "/Storage"]);
+        let (clean, out, err, _) = run_case(
+            &["/System/Logs/boot", "/System/Commands", "/Storage"],
+            &table(),
+            &probe,
+        );
+        assert!(clean, "{err}");
+        let rows: Vec<&str> = out.lines().skip(1).collect();
+        assert_eq!(rows.len(), 3, "{out}");
+        // A carved-out directory is the root volume's, not /System's.
+        assert!(rows[0].starts_with("ARXFSRoot") && rows[0].ends_with(" /System/Logs"));
+        assert!(rows[1].starts_with("ARXFSSystem") && rows[1].ends_with(" /System"));
+        // The catalog holds no volume, and the one above it does not stand
+        // in for it.
+        assert!(rows[2].starts_with("none") && rows[2].ends_with(" /Storage"));
     }
 
     #[test]

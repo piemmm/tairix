@@ -152,16 +152,20 @@ Storing a limit is not enough — it is **enforced on the path that consumes the
 resource**, before the resource is committed, and fails closed (`AGENTS.md`
 §24.3 / §5.4):
 
-- **`AddressSpaceBytes` on `mem_map`.** The kernel keeps each task's running
-  total of anonymous memory mapped through `mem_map` in the per-task
-  `AddressSpaceRegistry` (`mapped_anon_bytes`, accrued on a successful map,
-  credited on `mem_unmap`, dropped at exit — the same lifecycle and `TaskId`
-  key as the limit set, no parallel registry, §2.2). The `mem_map` handler
-  rounds the request up to whole pages and, *before* reaching the producer,
-  refuses it with `OutOfRange` if the task's live total plus the request would
-  exceed its soft `AddressSpaceBytes` bound. A task at the default
-  `RLIMIT_INFINITY` is never affected; a tightened ceiling is honoured rather
-  than silently ignored.
+- **`AddressSpaceBytes` on every mapping path.** The kernel keeps each
+  process's running total of mapped address space in the
+  `AddressSpaceRegistry` (`mapped_aspace_bytes`): `mem_map` and `file_map`
+  regions, and every thread's committed stack — the first thread's initial
+  commit at admission, a created thread's first page, and each growth page —
+  credited as each is released and dropped at exit. Growth is charged
+  *before* the memory is mapped, by one `try_charge_aspace_bytes` step that
+  checks and charges under the registry's write lock, so threads of one
+  process growing at once cannot pass the bound together; a map that then
+  fails credits its charge back. A request past the soft bound is refused with
+  `OutOfRange` (`thread_create` refuses a thread whose first page would pass
+  it, and a stack growth past it fault-kills the thread). A process at the
+  default `RLIMIT_INFINITY` is never affected; a tightened ceiling is honoured
+  rather than silently ignored.
 - **`StackBytes` on the demand-grown stack fault path.** Each admitted
   process's reserved stack span (recorded at admission, see
   [the memory page](./memory.md) §7c) grows on fault through the
@@ -175,16 +179,13 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   the default bound (the span itself) grows to the structural span bound;
   a lowered `ulimit` stack bound stops growth exactly where it says.
 - **`PinnedMemoryBytes` on `mem_pin` and every growth path while pinned.**
-  The pinned footprint is the task's mapped address space plus its
-  committed stack — the same single accounting the `AddressSpaceBytes`
+  The pinned footprint is the same mapped total the `AddressSpaceBytes`
   ceiling reads, so the two bounds can never drift (file-backed pages are
   counted although the compressed tier never takes them: that only
   tightens the cap). `mem_pin` refuses a footprint already past the soft
   bound with `OutOfRange` and stores nothing; while the task is pinned the
-  shared `check_map_growth` projection bounds `mem_map` and `file_map`
-  growth by the same budget, and the stack-growth resolver refuses a
-  committed extent past the remaining budget exactly as it refuses the
-  `StackBytes` bound. Unpinning lifts the budget; the limit itself stays
+  same charge step bounds every growth — `mem_map`, `file_map`, a new
+  thread's first page, and stack growth — by the budget too. Unpinning lifts the budget; the limit itself stays
   settable and inherited like every other kind, and the live usage the
   `sysinfo limits` query reports for `pinned-memory-bytes` is the whole
   footprint while pinned and zero otherwise — the budget is only consumed

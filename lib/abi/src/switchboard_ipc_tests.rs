@@ -653,7 +653,7 @@ fn an_owner_bundle_frame_refuses_the_kernel_a_dirty_tail_and_a_bad_length() {
     let owner = ProcId::from_raw([1u8; crate::PROC_ID_LEN]);
     let good = SwitchboardCommand::OwnerBundle {
         owner,
-        bundle: OwnerBundleDir::new("/Apps/A.app").expect("within bounds"),
+        bundle: OwnerBundleDir::new("/System/Applications/A.app").expect("within bounds"),
     }
     .to_le_bytes();
 

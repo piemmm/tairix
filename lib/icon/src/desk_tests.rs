@@ -386,8 +386,14 @@ fn a_stopping_desk_records_nothing_and_hands_out_nothing() {
 #[test]
 fn a_bundle_and_an_asset_of_the_same_spelling_are_different_decodes() {
     let mut desk = ArtworkDesk::new();
-    let _ = desk.collect(&ArtworkKey::Asset(String::from("/Apps/E.app")), 8);
-    let _ = desk.collect(&ArtworkKey::Bundle(String::from("/Apps/E.app")), 8);
+    let _ = desk.collect(
+        &ArtworkKey::Asset(String::from("/System/Applications/E.app")),
+        8,
+    );
+    let _ = desk.collect(
+        &ArtworkKey::Bundle(String::from("/System/Applications/E.app")),
+        8,
+    );
     assert!(desk.next_job().is_some());
     assert!(desk.next_job().is_some());
     assert!(desk.next_job().is_none());

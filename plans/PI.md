@@ -686,11 +686,11 @@ on its own before the next.
   crypto and **no `unsafe`** (verified: the linked aarch64 PIE exports
   `_start`/`__tairix_rt_main`/`rust_rt_start` and the mangled
   `tairix_rt::console_write`, with zero `tairix_sys_*` and zero crypto symbols).
-  A self-contained `build.rs` sets the `freestanding` cfg from `target_os`
-  only (no `target_arch`, so `cfg-check` stays clean; no dependency on the
-  tests harness, so §17.4 layering stays clean); `Run.ld` mirrors the proven
-  PIE link layout — the one shared `lib/rt/Run.ld` the userland runtimes
-  link. Host DoD green (3 new
+  Its `build.rs` enables the `freestanding` cfg through `lib/buildcfg`, which
+  keys off `target_os` only (no `target_arch`, so `cfg-check` stays clean;
+  no dependency on the tests harness, so §17.4 layering stays clean); `Run.ld`
+  mirrors the proven PIE link layout — the one shared `lib/rt/Run.ld` the
+  userland runtimes link. Host DoD green (3 new
   `tairix-rt` tests + 10 startup-config tests + the freestanding aarch64 build
   via `build-std=core,alloc,compiler_builtins`). The end-to-end EL0 spawn of
   this binary is P6c.
@@ -1810,9 +1810,9 @@ user mode (operator metal acceptance).
   written. `armstub8.bin` is optional and unpinned — no official binary
   exists and the boot stub parks secondaries itself; it joins the
   manifest when SMP-on-metal needs it.
-- Root partition: an ARXFS volume carrying the §16 skeleton (`/System` +
-  its twelve subdirectories incl. `Security/{Keys,Policy}`, `/Users`,
-  `/Apps`, `/Storage`); the §11 databases/users are the installer's
+- Root partition: an ARXFS volume carrying the §16 skeleton (the writable
+  `/System` subtree incl. `Security/{Keys,Policy}`, and `/Users`; the
+  `/Storage` catalog is stored on no volume); the §11 databases/users are the installer's
   first-boot job. It is **plaintext** in both profiles, so the image boots
   with no passphrase. `--encrypt-root`, a debug image's only
   (`ImageKind::new`), instead formats it under a key derived from
@@ -2052,8 +2052,8 @@ root keeps only the secret-bearing user data (`/Users`, app/user installs,
 **On-disk layout (the §16/§11 image; `tools/mkimage`):** three MBR
 partitions — (1) FAT boot (firmware, kernel, `root.unlock`); (2) **`/System`
 — read-only `ARXFS`, unencrypted, the signed-bundle store**; (3) the data
-root — encrypted `ARXFS` carrying `/Users`/`/Apps`/`/Storage` and
-`/System/Security/Users`. The installer (§11) authors the same split, and
+root — encrypted `ARXFS` carrying `/Users` and the writable `/System`
+subtree, `/System/Security/Users` among it. The installer (§11) authors the same split, and
 expert mode may not collapse it.
 
 **Boot sequencing (no ambient authority, fail closed §5.4):**

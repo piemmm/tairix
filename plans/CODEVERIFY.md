@@ -1099,8 +1099,7 @@ that found them.
   the shared home (created for `lib/display`'s device-occupancy measurement),
   but `lib/appload::Clock` and `lib/rt`'s private `cachereport::Clock` are the
   same one-method abstraction and still define their own. Migrating
-  `lib/appload` reaches `kernel/core`, `userland/system/appmgr` and six
-  integration fixtures, so it is its own change.
+  `lib/appload` reaches `kernel/core` and six integration fixtures, so it is its own change.
 - **Seven hand-written `AppInfoHeader` fixture builders.** Each crate that
   reads a manifest spelled the header's two dozen fields itself:
   `lib/abi`, `lib/appload`, `lib/icon`, `lib/browse`, `userland/apps/files`,

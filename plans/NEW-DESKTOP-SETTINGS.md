@@ -580,9 +580,11 @@ The contract it delivers, which no later stage re-derives:
 ### DS2 — the Settings shell, every category reachable, nothing faked
 
 `userland/apps/settings` (`tairix-settings`) is the bundle: a signed
-`AppInfo.toml` declaring `os.tairix.settings`, `kind = "application"`,
-`library = "SystemTools"` and `capabilities = ["CAP_CONSOLE_WRITE",
-"CAP_SHM"]` with its own SVG master in `Resources/`, a `Help/` tree in every
+`AppInfo.toml` declaring `os.tairix.settings`, `kind = "component"` (so it
+is planted in `/System/Components`, opened by the system menu's *Settings…*
+row and never listed in the program library) and
+`capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM"]` with its own SVG master in
+`Resources/`, a `Help/` tree in every
 required locale, a `README.md`, and a `build.rs` mirroring the sibling apps'
 `freestanding` cfg so the shell is host-testable and `Run` is a freestanding
 program. Its two hand-maintained pins — the harness's discovered-bundle list

@@ -15,7 +15,7 @@ fn entry(leaf: &str, category: LibraryCategory) -> LibraryEntry {
     LibraryEntry::new(
         id(leaf),
         name(leaf),
-        BundlePath::new(&format!("/Apps/{leaf}.app")).expect("bundle path"),
+        BundlePath::new(&format!("/System/Applications/{leaf}.app")).expect("bundle path"),
         category,
         None,
     )

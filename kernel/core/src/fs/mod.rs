@@ -28,10 +28,11 @@
 //!
 //! # Layout enforcement
 //!
-//! * [`Vfs::with_default_layout`] provides exactly the four top-level
-//!   directories the charter permits (`/System`, `/Users`, `/Apps`,
-//!   `/Storage`) and mounts `/System` read-only with its `/System/Logs`
-//!   and `/System/Settings` children as writable child mounts. The OS
+//! * [`Vfs::with_default_layout`] provides exactly the root-view entries
+//!   the charter permits (`/System`, `/Users`, `/Storage`), mounts `/System`
+//!   read-only with its `/System/Logs` and `/System/Settings` children as
+//!   writable child mounts, and leaves `/Storage` the unbacked catalog of
+//!   attached volumes. The OS
 //!   never authors the reserved legacy POSIX top-level names; refusing a
 //!   user's own request to create one is not the VFS's job — a top-level
 //!   create is governed by ordinary write permission on the root
@@ -74,14 +75,12 @@ pub use delegate::{
 };
 pub use fscache::CachedFs;
 pub use listing::{DirPosition, ListEnd, Listing, ListingRegistry, ResumeName};
-pub use mount::{ChildMounts, MountBacking, MountPoint, MountTable};
+pub use mount::{Attachment, ChildMounts, CoveredPair, CoveredPath, MountPoint, MountTable};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
     MountedFilesystemService,
 };
-pub use path::{
-    resolve_machine_alias, spell, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS, ROOT_TEMPLATE,
-};
+pub use path::{resolve_machine_alias, spell, Path, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
 pub use retained::{JournaledBlock, ReplaySnapshot, RetainedWrites};
 pub use service::{
@@ -93,6 +92,7 @@ pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
 
 use core::fmt;
 
+use tairix_abi::driver::filesystem::MountFlags;
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::Errno;
 use tairix_kernel_sec::{GroupId, UserId};
@@ -126,20 +126,24 @@ pub(crate) fn root_backed_vfs() -> Result<Vfs, VfsError> {
     let handle = DriverHandle::from_raw(PRIVATE_ROOT_HANDLE).map_err(|_| VfsError::Io)?;
     // A private, short-lived reader over a driver the caller already holds:
     // it never sees the block device, so it records an unknown medium rather
-    // than one it cannot have learned.
-    vfs.mounts_write()
-        .back_root(MountBacking::new(handle, None))?;
+    // than one it cannot have learned, and it only reads.
+    {
+        let mut mounts = vfs.mounts_write();
+        mounts.attach(Attachment::new(handle, None, MountFlags::READ_ONLY))?;
+        mounts.back_root(handle)?;
+    }
     Ok(vfs)
 }
 
-/// Why [`read_bootstrap_file`] could not return a file's exact bytes.
+/// Why a bounded whole-file read ([`DelegatedFs::read_bounded`]) could not
+/// return a file's bytes.
 ///
-/// The structural refusals every boot-time reader of a `/System/Security`
-/// database shares; each reader maps these onto its own load-error type.
+/// The structural refusals every boot-time reader shares; each maps these
+/// onto its own error type.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum BootstrapReadError {
-    /// Resolving, stat-ing, or reading the path failed (missing file,
-    /// permission refusal, driver fault, …).
+pub enum BoundedReadError {
+    /// Resolving or reading the path failed (missing file, permission
+    /// refusal, driver fault, …).
     Vfs(VfsError),
     /// The path names a directory, not a regular file.
     NotAFile,
@@ -147,7 +151,7 @@ pub enum BootstrapReadError {
     /// byte is read.
     TooLarge,
     /// The driver returned fewer bytes than the file's reported size; a
-    /// truncated database is never parsed.
+    /// truncated file is never parsed.
     ShortRead,
     /// The kernel heap could not hold the file.
     OutOfMemory,
@@ -163,7 +167,7 @@ pub struct BootstrapFile {
     pub max_len: usize,
 }
 
-impl From<VfsError> for BootstrapReadError {
+impl From<VfsError> for BoundedReadError {
     fn from(err: VfsError) -> Self {
         Self::Vfs(err)
     }
@@ -184,18 +188,16 @@ impl From<VfsError> for BootstrapReadError {
 ///
 /// # Errors
 ///
-/// The [`BootstrapReadError`] naming the first check that refused.
+/// The [`BoundedReadError`] naming the first check that refused.
 pub fn read_bootstrap_file<F>(
     fs: &mut F,
     file: BootstrapFile,
-) -> Result<alloc::vec::Vec<u8>, BootstrapReadError>
+) -> Result<alloc::vec::Vec<u8>, BoundedReadError>
 where
     F: tairix_abi::driver::filesystem::FilesystemRead
         + tairix_abi::driver::filesystem::FilesystemSecurity
         + ?Sized,
 {
-    use tairix_abi::driver::filesystem::NodeKind;
-
     let vfs = root_backed_vfs()?;
     let caps = tairix_caps::CapabilitySet::empty();
     let cred = Credentials {
@@ -205,29 +207,15 @@ where
         caps: &caps,
     };
     let path = Path::parse(file.path)?;
-
-    // Bound the file against the format's own maximum before reading a
-    // single byte.
-    let info = vfs.stat_via_secured(&cred, &path, fs, FinalLink::Follow)?;
-    if info.kind != NodeKind::RegularFile {
-        return Err(BootstrapReadError::NotAFile);
-    }
-    if info.size > file.max_len as u64 {
-        return Err(BootstrapReadError::TooLarge);
-    }
-    let size = usize::try_from(info.size).map_err(|_| BootstrapReadError::TooLarge)?;
-
     let mut buf = alloc::vec::Vec::new();
-    buf.try_reserve_exact(size)
-        .map_err(|_| BootstrapReadError::OutOfMemory)?;
-    buf.resize(size, 0);
-    let read = vfs.read_via_secured(&cred, &path, fs, 0, &mut buf)?;
-    if read != size {
-        // A truncated file is never parsed; zero the partial read before
-        // release in case it held credential bytes.
-        buf.fill(0);
-        return Err(BootstrapReadError::ShortRead);
-    }
+    vfs.read_bounded_via_secured(
+        &cred,
+        &vfs.cover(&path),
+        fs,
+        file.max_len as u64,
+        usize::MAX,
+        &mut buf,
+    )?;
     Ok(buf)
 }
 

@@ -24,7 +24,7 @@ fn every_program_store_path_definition_is_admitted() {
     let home = tairix_users::default_home("ada");
     let app = tairix_abi::BUNDLE_SUFFIX;
     for path in [
-        alloc::format!("{}/Editor{app}", tairix_abi::INSTALLED_APP_STORE),
+        alloc::format!("{}/Editor{app}", tairix_abi::SYSTEM_APPLICATION_STORE),
         alloc::format!("{}/Editor{app}", tairix_abi::SYSTEM_COMMAND_STORE),
         alloc::format!("{}/Editor{app}", tairix_abi::SYSTEM_APPLICATION_STORE),
         alloc::format!("{home}/{}/Editor{app}", tairix_abi::HOME_COMMAND_STORE_DIR),
@@ -157,9 +157,6 @@ fn a_display_name_that_would_forge_a_line_is_refused() {
 #[test]
 fn a_bundle_path_admits_every_program_store_and_plain_nesting() {
     for path in [
-        "/Apps/Editor.app",
-        "/Apps/games/chess.app",
-        "/Apps/games/board/chess.app",
         "/Users/ada/Commands/tally.app",
         "/Users/ada/Commands/games/tally.app",
         "/Users/ada/Applications/Editor.app",
@@ -168,6 +165,7 @@ fn a_bundle_path_admits_every_program_store_and_plain_nesting() {
         "/System/Commands/extras/ps.app",
         "/System/Applications/files.app",
         "/System/Applications/extras/files.app",
+        "/System/Applications/games/board/chess.app",
     ] {
         let bundle = BundlePath::new(path).expect("permitted bundle path");
         assert_eq!(bundle.as_str(), path);
@@ -184,7 +182,7 @@ fn a_bundle_path_outside_a_program_store_is_refused() {
         "/Users/ada/Documents/Editor.app",
         "/Users/ada/Editor.app",
         "/Editor.app",
-        "/Apps",
+        "/Apps/Editor.app",
         "/System/Commands",
         "/System/Applications",
         "/Users/ada/Commands",
@@ -202,7 +200,6 @@ fn a_bundle_path_outside_a_program_store_is_refused() {
 #[test]
 fn a_directory_that_merely_starts_like_a_store_is_refused() {
     for hostile in [
-        "/AppsEvil/Editor.app",
         "/SystemEvil/Commands/Editor.app",
         "/System/CommandsEvil/Editor.app",
         "/System/ApplicationsEvil/Editor.app",
@@ -224,10 +221,10 @@ fn a_directory_that_merely_starts_like_a_store_is_refused() {
 #[test]
 fn a_bundle_path_must_name_a_bundle_directory() {
     for hostile in [
-        "/Apps/Editor",
-        "/Apps/.app",
-        "/Apps/Editor.app/Run",
-        "/Apps//Editor.app",
+        "/System/Applications/Editor",
+        "/System/Applications/.app",
+        "/System/Applications/Editor.app/Run",
+        "/System/Applications//Editor.app",
     ] {
         assert_eq!(
             BundlePath::new(hostile),
@@ -240,31 +237,37 @@ fn a_bundle_path_must_name_a_bundle_directory() {
 #[test]
 fn a_bundle_path_cannot_nest_a_bundle_inside_a_bundle() {
     assert_eq!(
-        BundlePath::new("/Apps/Suite.app/Editor.app"),
+        BundlePath::new("/System/Applications/Suite.app/Editor.app"),
         Err(EntryError::MalformedBundlePath)
     );
 }
 
 #[test]
 fn a_traversal_is_normalised_and_judged_by_where_it_lands() {
-    let inside = BundlePath::new("/Apps/games/../Editor.app").expect("lands in the store");
-    assert_eq!(inside.as_str(), "/Apps/Editor.app");
+    let inside =
+        BundlePath::new("/System/Applications/games/../Editor.app").expect("lands in the store");
+    assert_eq!(inside.as_str(), "/System/Applications/Editor.app");
     assert_eq!(
-        BundlePath::new("/Apps/../Storage/Editor.app"),
+        BundlePath::new("/System/Applications/../Storage/Editor.app"),
         Err(EntryError::MalformedBundlePath)
     );
 }
 
 #[test]
 fn redundant_spellings_of_one_bundle_collapse_to_one_value() {
-    let canonical = BundlePath::new("/Apps/Editor.app").expect("permitted bundle path");
+    let canonical =
+        BundlePath::new("/System/Applications/Editor.app").expect("permitted bundle path");
     for spelling in [
-        "/Apps/./Editor.app",
-        "/Apps/games/../Editor.app",
-        "/Apps/games/board/../../Editor.app",
+        "/System/Applications/./Editor.app",
+        "/System/Applications/games/../Editor.app",
+        "/System/Applications/games/board/../../Editor.app",
     ] {
         let bundle = BundlePath::new(spelling).expect("permitted bundle path");
-        assert_eq!(bundle.as_str(), "/Apps/Editor.app", "{spelling:?}");
+        assert_eq!(
+            bundle.as_str(),
+            "/System/Applications/Editor.app",
+            "{spelling:?}"
+        );
         assert_eq!(bundle, canonical, "{spelling:?}");
     }
 }
@@ -272,9 +275,8 @@ fn redundant_spellings_of_one_bundle_collapse_to_one_value() {
 #[test]
 fn a_relative_or_alias_rooted_bundle_path_is_refused() {
     for hostile in [
-        "Apps/Editor.app",
-        "System:/Apps/Editor.app",
-        "Apps:/Editor.app",
+        "System/Applications/Editor.app",
+        "System:/Applications/Editor.app",
     ] {
         assert_eq!(
             BundlePath::new(hostile),
@@ -286,7 +288,7 @@ fn a_relative_or_alias_rooted_bundle_path_is_refused() {
 
 #[test]
 fn an_over_long_bundle_path_is_refused_before_it_is_parsed() {
-    let hostile = alloc::format!("/Apps/{}.app", long(MAX_BUNDLE_PATH_LEN));
+    let hostile = alloc::format!("/System/Applications/{}.app", long(MAX_BUNDLE_PATH_LEN));
     assert_eq!(
         BundlePath::new(&hostile),
         Err(EntryError::BundlePathTooLong)
@@ -308,7 +310,7 @@ fn an_icon_asset_that_escapes_its_bundle_is_refused() {
         "..",
         "../../System/Security/Users",
         "sub/icon.svg",
-        "/Apps/Other.app/Resources/icon.svg",
+        "/System/Applications/Other.app/Resources/icon.svg",
         "icon\nother.icon evil.svg",
         "Alias:icon.svg",
     ] {
@@ -367,7 +369,7 @@ fn entry() -> LibraryEntry {
     LibraryEntry::new(
         EntryId::new("com.example.editor").expect("id"),
         DisplayName::new("Editor").expect("name"),
-        BundlePath::new("/Apps/Editor.app").expect("bundle"),
+        BundlePath::new("/System/Applications/Editor.app").expect("bundle"),
         LibraryCategory::Accessories,
         None,
     )
@@ -378,7 +380,7 @@ fn an_entry_reads_back_the_fields_it_was_built_from() {
     let entry = entry();
     assert_eq!(entry.id().as_str(), "com.example.editor");
     assert_eq!(entry.name().as_str(), "Editor");
-    assert_eq!(entry.bundle().as_str(), "/Apps/Editor.app");
+    assert_eq!(entry.bundle().as_str(), "/System/Applications/Editor.app");
     assert_eq!(entry.category(), LibraryCategory::Accessories);
     assert!(entry.icon().is_none());
     assert!(!entry.hidden(), "an entry is visible until suppressed");
@@ -406,5 +408,5 @@ fn a_rename_a_re_file_and_a_re_icon_replace_only_their_own_field() {
     assert_eq!(entry.category(), LibraryCategory::Office);
     assert_eq!(entry.icon().map(IconAsset::as_str), Some("notes.svg"));
     assert_eq!(entry.id().as_str(), "com.example.editor");
-    assert_eq!(entry.bundle().as_str(), "/Apps/Editor.app");
+    assert_eq!(entry.bundle().as_str(), "/System/Applications/Editor.app");
 }

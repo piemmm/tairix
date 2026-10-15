@@ -613,7 +613,8 @@ mod program {
         }
 
         // 9. A worker held to its memory ceiling: within it the worker
-        //    answers, past it the worker ends out of memory and the caller
+        //    answers, past it the worker ends over its bound — not out of
+        //    memory, since asking again cannot cure it — and the caller
         //    survives.
         let sink = CountingSink::default();
         let mut hog = ParserSandbox::new(
@@ -628,7 +629,7 @@ mod program {
         }
         let past = (2 * tairix_sandbox::memory::MESSAGE_WORKER_BYTES).to_le_bytes();
         match hog.request(&past) {
-            Err(SandboxError::WorkerFailed(WorkerEnd::OutOfMemory)) => {}
+            Err(SandboxError::WorkerFailed(WorkerEnd::OverBound)) => {}
             Ok(_) => return 92,
             Err(_) => return 93,
         }

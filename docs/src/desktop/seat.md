@@ -411,11 +411,10 @@ Both `Run` binaries hosting those halves are live (stages D7b–D7c):
 
 Stage D7d (`plans/DISPLAY.md`) proves the whole chain end to end in the
 autoload QEMU vertical: the boot display node, the autoloaded framebuffer
-service, the `root`/`root` login typed at the seat keyboard followed by
-the `desktop` command at the text shell the vertical's planted
-`os.loginType text` drops it to (the desktop is the system application
-store's `desktop.app`, the same bundle the `os.loginType graphical`
-default spawns directly), the spawned
+service, the fixture account chosen and its password typed at the
+graphical login screen the vertical's unconfigured `os.loginType` puts up
+(which starts the desktop session component, `desktop.app` in the
+component store), the spawned
 session's first present — witnessed by the service's one-shot
 `FIRST_PRESENT` record — and a host-side QEMU screendump asserted to be
 dominated by the theme's desktop colour, so the composited frame

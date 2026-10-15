@@ -111,28 +111,13 @@ mod program {
         }
 
         fn write(&self, document: &Document) -> Result<(), Errno> {
-            // The ProgramLibrary directory may not exist yet (a machine store
-            // on an image predating it); create it first. `AlreadyExists` is
-            // the normal steady state.
-            if let Some((dir, _)) = self.path.rsplit_once('/') {
-                let ret = tairix_rt::fs_mkdir(dir.as_bytes());
-                if ret != 0 && Errno::from_syscall(ret) != Errno::AlreadyExists {
-                    return Err(Errno::from_syscall(ret));
-                }
-            }
-            let flags = OpenFlags::WRITE
-                .union(OpenFlags::CREATE)
-                .union(OpenFlags::TRUNCATE);
-            let ret = tairix_rt::fs_open(self.path.as_bytes(), flags);
-            if ret < 0 {
-                return Err(Errno::from_syscall(ret));
-            }
-            // `ret >= 0` is a descriptor by the syscall contract.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let fd = ret as u32;
-            let outcome = tairix_rt::fs_write_all(fd, 0, document.render().as_bytes());
-            let _ = tairix_rt::fs_close(fd);
-            outcome
+            // The ProgramLibrary directory may not exist yet (a store on an
+            // image predating it), so it is created when missing.
+            tairix_rt::replace_file(
+                self.path.as_bytes(),
+                document.render().as_bytes(),
+                tairix_rt::ParentDir::CreatedIfMissing,
+            )
         }
     }
 

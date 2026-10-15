@@ -790,6 +790,21 @@ pub fn wait_arch() -> Option<&'static (dyn WaitQueueArch + 'static)> {
     }
 }
 
+/// Park the calling task off the run queue on the CPU it is running on now,
+/// reporting whether it was parked.
+///
+/// The CPU is read here, never handed in: a task woken on another core than
+/// it parked on would otherwise suspend through its old core's resume handle,
+/// suspending whatever task that core runs instead.
+#[must_use]
+pub fn park_calling_task() -> bool {
+    wait_arch()
+        .and_then(WaitQueueArch::current_cpu)
+        .is_some_and(|cpu| {
+            crate::kthread::reschedule_current(cpu, crate::dispatch_slot::RescheduleAction::Park)
+        })
+}
+
 /// The wait-queue holding the in-kernel driver-store **server** kthread
 /// while it has no pending call to serve (Design D D2b-2c). Unlike
 /// [`CALL_WAITQ`] (which holds the *callers* awaiting a reply), this holds

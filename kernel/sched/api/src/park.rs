@@ -4,39 +4,170 @@
 //!
 //! Parking and stopping are the task lifecycle, not scheduling policy: which
 //! CPU a woken task lands on differs per policy, but the window between
-//! "decide to park" and "actually parked" — and the token that closes it — is
-//! identical, as is how a stop is completed by whichever party next holds the
-//! task, and how a returning body's request is reconciled with whatever a
+//! "decide to park" and "actually parked" — and the wake token that closes it
+//! — is identical, as is how a stop is completed by whichever party next holds
+//! the task, and how a returning body's request is reconciled with whatever a
 //! stop, wake or kill did while it ran. One definition here, so the three
 //! policies carry only their own placement.
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use core::cell::Cell;
-use core::sync::atomic::{fence, AtomicBool, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU8, Ordering};
 
 use tairix_sync::RwLock;
 
 use crate::{CpuId, SchedError, SchedResult, SchedulerArch, TaskAction, TaskId, TaskState};
 
-/// The lifecycle state and wake token the handshake needs from a policy's own
-/// per-task record.
+/// A task's lifecycle state together with its wake token.
+///
+/// The token is a wake that reached the task before it committed to park,
+/// owed to the park it commits next. Holding both in one word is what ties a
+/// token to the park it answers: the transition that would park consumes the
+/// token in the same compare-exchange, so no other party — in particular a
+/// CPU still finishing an earlier park of the same task — can take it in
+/// between.
+///
+/// A parked or exited word never carries the token: a park consumes it
+/// instead of sleeping, and a wake of a parked task ends the park directly.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Lifecycle {
+    /// The lifecycle state.
+    pub state: TaskState,
+    /// A wake is owed to the next park.
+    pub woken: bool,
+}
+
+impl Lifecycle {
+    /// The token's bit; every [`TaskState`] encodes below it.
+    const WOKEN: u8 = 0x80;
+
+    /// `state`, with no wake owed.
+    #[must_use]
+    pub const fn of(state: TaskState) -> Self {
+        Self {
+            state,
+            woken: false,
+        }
+    }
+
+    /// The word's encoding, for whatever atomic holds it.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        if self.woken {
+            self.state.as_u8() | Self::WOKEN
+        } else {
+            self.state.as_u8()
+        }
+    }
+
+    /// Decode a word. A corrupt one reads as terminal, so it can neither
+    /// revive a task nor panic.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        match TaskState::from_u8(bits & !Self::WOKEN) {
+            Some(state) => Self {
+                state,
+                woken: bits & Self::WOKEN != 0,
+            },
+            None => Self::of(TaskState::Exited),
+        }
+    }
+}
+
+/// A lifecycle word in a kernel atomic: the backing each policy's per-task
+/// record holds.
+#[derive(Debug)]
+pub struct AtomicLifecycle(AtomicU8);
+
+impl AtomicLifecycle {
+    /// A word in `state`, with no wake owed.
+    #[must_use]
+    pub const fn new(state: TaskState) -> Self {
+        Self(AtomicU8::new(Lifecycle::of(state).bits()))
+    }
+
+    /// Load the word.
+    pub fn load(&self) -> Lifecycle {
+        Lifecycle::from_bits(self.0.load(Ordering::Acquire))
+    }
+
+    /// Compare-exchange the word, reporting the observed value on failure.
+    ///
+    /// # Errors
+    /// The word observed when it was not `expected`.
+    pub fn compare_exchange(&self, expected: Lifecycle, new: Lifecycle) -> Result<(), Lifecycle> {
+        self.0
+            .compare_exchange(
+                expected.bits(),
+                new.bits(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(Lifecycle::from_bits)
+    }
+
+    /// Store `new` unconditionally, returning the word it replaced.
+    pub fn swap(&self, new: Lifecycle) -> Lifecycle {
+        Lifecycle::from_bits(self.0.swap(new.bits(), Ordering::AcqRel))
+    }
+
+    /// Store `new` over a word no other party can yet reach.
+    pub fn store(&self, new: Lifecycle) {
+        self.0.store(new.bits(), Ordering::Release);
+    }
+}
+
+/// The lifecycle word the handshake needs from a policy's own per-task
+/// record.
 pub trait ParkableTask {
+    /// Load the lifecycle word.
+    fn load_lifecycle(&self) -> Lifecycle;
+
+    /// Compare-exchange the lifecycle word, reporting the observed value on
+    /// failure.
+    ///
+    /// # Errors
+    /// The word observed when it was not `expected`.
+    fn cas_lifecycle(&self, expected: Lifecycle, new: Lifecycle) -> Result<(), Lifecycle>;
+
+    /// Store `new` unconditionally, returning the word it replaced.
+    fn swap_lifecycle(&self, new: Lifecycle) -> Lifecycle;
+
     /// The task's current lifecycle state.
-    fn load_state(&self) -> TaskState;
+    fn load_state(&self) -> TaskState {
+        self.load_lifecycle().state
+    }
 
-    /// Compare-exchange the state, reporting the observed value on failure.
-    fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState>;
+    /// Move the state from `expected` to `new`, keeping any wake owed.
+    ///
+    /// Never used to commit a park: [`settle`] does that, consuming an owed
+    /// wake rather than carrying it into the parked state.
+    ///
+    /// # Errors
+    /// The state observed when it was not `expected`.
+    fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState> {
+        let mut current = self.load_lifecycle();
+        loop {
+            if current.state != expected {
+                return Err(current.state);
+            }
+            let next = Lifecycle {
+                state: new,
+                woken: current.woken,
+            };
+            match self.cas_lifecycle(current, next) {
+                Ok(()) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
 
-    /// Store `new` unconditionally, returning the state it replaced.
-    fn swap_state(&self, new: TaskState) -> TaskState;
-
-    /// Record that a wake arrived before the task committed to park, so the
-    /// next park is cancelled.
-    fn set_wake_pending(&self);
-
-    /// Consume the wake token, reporting whether one was set.
-    fn take_wake_pending(&self) -> bool;
+    /// Store `new` with no wake owed, returning the state it replaced.
+    fn swap_state(&self, new: TaskState) -> TaskState {
+        self.swap_lifecycle(Lifecycle::of(new)).state
+    }
 
     /// Whether the task holds a place in a CPU's competition — queued or on
     /// a CPU, including a stop not yet completed — which is the condition a
@@ -55,61 +186,16 @@ pub trait ParkableTask {
 /// A shared handle has its task's lifecycle, so a policy whose run queues hold
 /// handles admits the very handle a wake or resume was delivered through.
 impl<T: ParkableTask + ?Sized> ParkableTask for Arc<T> {
-    fn load_state(&self) -> TaskState {
-        (**self).load_state()
+    fn load_lifecycle(&self) -> Lifecycle {
+        (**self).load_lifecycle()
     }
 
-    fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState> {
-        (**self).cas_state(expected, new)
+    fn cas_lifecycle(&self, expected: Lifecycle, new: Lifecycle) -> Result<(), Lifecycle> {
+        (**self).cas_lifecycle(expected, new)
     }
 
-    fn swap_state(&self, new: TaskState) -> TaskState {
-        (**self).swap_state(new)
-    }
-
-    fn set_wake_pending(&self) {
-        (**self).set_wake_pending();
-    }
-
-    fn take_wake_pending(&self) -> bool {
-        (**self).take_wake_pending()
-    }
-
-    fn in_competition(&self) -> bool {
-        (**self).in_competition()
-    }
-}
-
-/// End a committed park with a wake: a parked task is made ready and
-/// admitted, and one a stop holds is left owed its run for the `resume`.
-///
-/// Each transition is a compare-exchange, which keeps the admission single
-/// when two wakers — or a waker and the task's own park commit — reach it
-/// together, and a stop or `resume` landing in between is followed to the
-/// state it left.
-fn deliver_wake<T, F>(task: &T, admit: F)
-where
-    T: ParkableTask + ?Sized,
-    F: FnOnce(&T),
-{
-    loop {
-        match task.load_state() {
-            TaskState::Parked => {
-                if task.cas_state(TaskState::Parked, TaskState::Ready).is_ok() {
-                    admit(task);
-                    return;
-                }
-            }
-            TaskState::StoppedParked => {
-                if task
-                    .cas_state(TaskState::StoppedParked, TaskState::Stopped)
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-            _ => return,
-        }
+    fn swap_lifecycle(&self, new: Lifecycle) -> Lifecycle {
+        (**self).swap_lifecycle(new)
     }
 }
 
@@ -117,79 +203,42 @@ where
 /// one that claimed it out of [`TaskState::Parked`].
 ///
 /// Cancellation-safe: a wake of a task that has not yet committed to park
-/// records a token rather than erroring, so it is never lost. A wake of a
-/// stopped task leaves it stopped — only `resume` ends a stop — but is kept: a
+/// leaves the token rather than erroring, so it is never lost, and the park
+/// the task commits next consumes it instead of sleeping. A wake of a stopped
+/// task leaves it stopped — only `resume` ends a stop — but is kept: a
 /// [`TaskState::StoppedParked`] task becomes [`TaskState::Stopped`], runnable
-/// once resumed, and a [`TaskState::Stopped`] one keeps the token, so a park
-/// it commits once resumed does not sleep through the wake that arrived
-/// meanwhile.
+/// once resumed, and a [`TaskState::Stopped`] one keeps the token for the park
+/// it commits once resumed.
 ///
 /// # Errors
 /// [`SchedError::InvalidState`] only when the task is terminal, which is the
-/// one answer meaning it can never run again. A wake another waker (or
-/// the task's own park commit) already satisfied is `Ok` — the task is
-/// runnable, which is what the wake asked for. Reading that as a failure is
-/// what let a wait-queue ownership handoff mistake a live waiter for a corpse
-/// and delete its registration.
+/// one answer meaning it can never run again. A wake another waker already
+/// satisfied is `Ok` — the task is runnable, which is what the wake asked for;
+/// reading it as a failure would let a wait-queue handoff mistake a live
+/// waiter for a corpse.
 pub fn unpark_task<T, F>(task: &T, admit: F) -> SchedResult<()>
 where
     T: ParkableTask + ?Sized,
     F: FnOnce(&T),
 {
-    match task.load_state() {
-        TaskState::Exited => Err(SchedError::InvalidState),
-        TaskState::Stopped => {
-            task.set_wake_pending();
-            Ok(())
-        }
-        // Already committed to park: end the park directly.
-        TaskState::Parked | TaskState::StoppedParked => {
-            deliver_wake(task, admit);
-            match task.load_state() {
-                TaskState::Exited => Err(SchedError::InvalidState),
-                _ => Ok(()),
+    let mut current = task.load_lifecycle();
+    loop {
+        let next = match current.state {
+            TaskState::Exited => return Err(SchedError::InvalidState),
+            TaskState::Parked => Lifecycle::of(TaskState::Ready),
+            TaskState::StoppedParked => Lifecycle::of(TaskState::Stopped),
+            _ if current.woken => return Ok(()),
+            state => Lifecycle { state, woken: true },
+        };
+        match task.cas_lifecycle(current, next) {
+            Ok(()) => {
+                if current.state == TaskState::Parked {
+                    admit(task);
+                }
+                return Ok(());
             }
+            Err(observed) => current = observed,
         }
-        // Not yet committed (running its body, or already queued, its stop
-        // not yet completed). Record the token, then re-read the state: this
-        // store-then-load against [`commit_park`]'s store-then-take, fenced on
-        // each side, forbids the store-buffering outcome where the waker sees
-        // the task not-yet-parked *and* the parker misses the token — one side
-        // always observes the other. A stop that a `resume` withdraws before
-        // the body returns leaves that body to park, so its token must stand.
-        TaskState::Ready
-        | TaskState::Running
-        | TaskState::StoppedOnQueue
-        | TaskState::StoppedOnCpu => {
-            task.set_wake_pending();
-            fence(Ordering::SeqCst);
-            if matches!(
-                task.load_state(),
-                TaskState::Parked | TaskState::StoppedParked
-            ) && task.take_wake_pending()
-            {
-                deliver_wake(task, admit);
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Complete a park the dispatcher has just published, re-admitting the task
-/// through `admit` when a wake raced the commit.
-///
-/// The caller stores [`TaskState::Parked`] — or [`TaskState::StoppedParked`],
-/// for a body that parked as a stop landed — itself, together with whatever
-/// per-CPU accounting the transition owes, and calls this to consume any token
-/// a waker left behind.
-pub fn commit_park<T, F>(task: &T, admit: F)
-where
-    T: ParkableTask + ?Sized,
-    F: FnOnce(&T),
-{
-    fence(Ordering::SeqCst);
-    if task.take_wake_pending() {
-        deliver_wake(task, admit);
     }
 }
 
@@ -328,14 +377,13 @@ where
 pub enum Settled {
     /// The task is [`TaskState::Exited`]: retire it.
     Retire,
-    /// The task is [`TaskState::Parked`] by its own request — or
-    /// [`TaskState::StoppedParked`], for one a stop landed on: finish with
-    /// [`commit_park`].
-    Park,
+    /// The task asked to park, but the wake owed to that park had already
+    /// arrived, so it is [`TaskState::Ready`] again: admit it as woken.
+    Woken,
     /// The task yielded and is [`TaskState::Ready`] again: enqueue it.
     Requeue,
-    /// Nothing is owed: a stop that landed while the body ran is complete,
-    /// or another party already holds the task.
+    /// Nothing is owed: the task parked, a stop that landed while the body ran
+    /// is complete, or another party already holds the task.
     Released,
 }
 
@@ -410,54 +458,60 @@ pub fn drop_record<T>(tasks: &RwLock<BTreeMap<TaskId, Arc<T>>>, id: TaskId, task
 /// Move a task whose body just returned `action` off its CPU.
 ///
 /// A dispatch owns its task until it settles: no entry exists for a running
-/// task, so only a stop, its withdrawal, or an exit can land while the body
-/// unwinds. Each transition is a compare-exchange from the state it was
-/// decided on, so one landing in between is honoured rather than overwritten.
+/// task, so only a stop, its withdrawal, a wake's token, or an exit can land
+/// while the body unwinds. Each transition is a compare-exchange from the word
+/// it was decided on, so one landing in between is honoured rather than
+/// overwritten. A park and the token that cancels it are decided in that one
+/// exchange, which is what keeps a token for the park it was left for.
 /// `doomed` — a termination requested while the task ran, read through
 /// [`observe_doom`] — wins over anything but its own park, since a task parked
 /// inside a syscall holds kernel state only its own unwind can release. A stop
 /// wins over the body's own yield or park, so no ordinary wake can run the
 /// task; a park it asked for is kept beneath the stop, for the wake it waits
-/// on to end. `depart` performs a transition out of the
-/// competition together with whatever competing-weight accounting the policy
-/// keeps, and returns the transition's result.
+/// on to end. `depart` performs a transition out of the competition together
+/// with whatever competing-weight accounting the policy keeps, and returns the
+/// transition's result.
 pub fn settle<T, D>(task: &T, action: TaskAction, doomed: bool, depart: D) -> Settled
 where
     T: ParkableTask + ?Sized,
     D: Fn(&dyn Fn() -> bool) -> bool,
 {
-    let exit = action == TaskAction::Exit || (doomed && action != TaskAction::Park);
+    let park = action == TaskAction::Park;
+    let exit = action == TaskAction::Exit || (doomed && !park);
     loop {
-        let observed = task.load_state();
-        let settled = match observed {
-            TaskState::Exited => return Settled::Retire,
-            _ if exit => depart(&|| task.cas_state(observed, TaskState::Exited).is_ok())
-                .then_some(Settled::Retire),
-            TaskState::StoppedOnCpu if action == TaskAction::Park => depart(&|| {
-                task.cas_state(TaskState::StoppedOnCpu, TaskState::StoppedParked)
-                    .is_ok()
-            })
-            .then_some(Settled::Park),
-            TaskState::StoppedOnCpu => depart(&|| {
-                task.cas_state(TaskState::StoppedOnCpu, TaskState::Stopped)
-                    .is_ok()
-            })
-            .then_some(Settled::Released),
-            TaskState::Running if action == TaskAction::Park => depart(&|| {
-                task.cas_state(TaskState::Running, TaskState::Parked)
-                    .is_ok()
-            })
-            .then_some(Settled::Park),
-            TaskState::Running => task
-                .cas_state(TaskState::Running, TaskState::Ready)
+        let observed = task.load_lifecycle();
+        let moved = |state, woken| {
+            task.cas_lifecycle(observed, Lifecycle { state, woken })
                 .is_ok()
-                .then_some(Settled::Requeue),
+        };
+        let settled = match observed.state {
+            TaskState::Exited => return Settled::Retire,
+            _ if exit => depart(&|| moved(TaskState::Exited, false)).then_some(Settled::Retire),
+            TaskState::StoppedOnCpu if park && observed.woken => {
+                depart(&|| moved(TaskState::Stopped, false)).then_some(Settled::Released)
+            }
+            TaskState::StoppedOnCpu if park => {
+                depart(&|| moved(TaskState::StoppedParked, false)).then_some(Settled::Released)
+            }
+            TaskState::StoppedOnCpu => {
+                depart(&|| moved(TaskState::Stopped, observed.woken)).then_some(Settled::Released)
+            }
+            TaskState::Running if park && observed.woken => {
+                moved(TaskState::Ready, false).then_some(Settled::Woken)
+            }
+            TaskState::Running if park => {
+                depart(&|| moved(TaskState::Parked, false)).then_some(Settled::Released)
+            }
+            TaskState::Running => {
+                moved(TaskState::Ready, observed.woken).then_some(Settled::Requeue)
+            }
             // No transition reaches these from a task on a CPU; whoever put
             // the task there owns its next step.
-            TaskState::Parked | TaskState::StoppedParked => return Settled::Park,
-            TaskState::Ready | TaskState::Stopped | TaskState::StoppedOnQueue => {
-                return Settled::Released
-            }
+            TaskState::Parked
+            | TaskState::StoppedParked
+            | TaskState::Ready
+            | TaskState::Stopped
+            | TaskState::StoppedOnQueue => return Settled::Released,
         };
         if let Some(settled) = settled {
             return settled;
@@ -472,16 +526,14 @@ mod tests {
     /// A bare `ParkableTask` with no scheduler behind it: the handshake is
     /// pure state, so the model needs nothing more.
     struct Model {
-        state: Cell<TaskState>,
-        token: Cell<bool>,
+        word: Cell<Lifecycle>,
         admits: Cell<usize>,
     }
 
     impl Model {
         fn new(state: TaskState) -> Self {
             Self {
-                state: Cell::new(state),
-                token: Cell::new(false),
+                word: Cell::new(Lifecycle::of(state)),
                 admits: Cell::new(0),
             }
         }
@@ -489,40 +541,41 @@ mod tests {
         fn admit(&self) {
             self.admits.set(self.admits.get() + 1);
         }
+
+        fn woken(&self) -> bool {
+            self.word.get().woken
+        }
+
+        /// A dispatch claiming the task from its queue entry.
+        fn dispatch(&self) {
+            assert_eq!(self.cas_state(TaskState::Ready, TaskState::Running), Ok(()));
+        }
     }
 
     impl ParkableTask for Model {
-        fn load_state(&self) -> TaskState {
-            self.state.get()
+        fn load_lifecycle(&self) -> Lifecycle {
+            self.word.get()
         }
 
-        fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState> {
-            let current = self.state.get();
+        fn cas_lifecycle(&self, expected: Lifecycle, new: Lifecycle) -> Result<(), Lifecycle> {
+            let current = self.word.get();
             if current == expected {
-                self.state.set(new);
+                self.word.set(new);
                 Ok(())
             } else {
                 Err(current)
             }
         }
 
-        fn swap_state(&self, new: TaskState) -> TaskState {
-            self.state.replace(new)
-        }
-
-        fn set_wake_pending(&self) {
-            self.token.set(true);
-        }
-
-        fn take_wake_pending(&self) -> bool {
-            self.token.replace(false)
+        fn swap_lifecycle(&self, new: Lifecycle) -> Lifecycle {
+            self.word.replace(new)
         }
     }
 
     /// A task whose first compare-exchange loses to `beaten_by`, landing in
     /// between the read and the exchange; every later one is honest.
     struct Raced {
-        state: Cell<TaskState>,
+        word: Cell<Lifecycle>,
         beaten_by: TaskState,
         lost: Cell<bool>,
         admits: Cell<usize>,
@@ -531,7 +584,7 @@ mod tests {
     impl Raced {
         fn new(state: TaskState, beaten_by: TaskState) -> Self {
             Self {
-                state: Cell::new(state),
+                word: Cell::new(Lifecycle::of(state)),
                 beaten_by,
                 lost: Cell::new(false),
                 admits: Cell::new(0),
@@ -544,32 +597,27 @@ mod tests {
     }
 
     impl ParkableTask for Raced {
-        fn load_state(&self) -> TaskState {
-            self.state.get()
+        fn load_lifecycle(&self) -> Lifecycle {
+            self.word.get()
         }
 
-        fn cas_state(&self, expected: TaskState, new: TaskState) -> Result<(), TaskState> {
+        fn cas_lifecycle(&self, expected: Lifecycle, new: Lifecycle) -> Result<(), Lifecycle> {
             if !self.lost.replace(true) {
-                self.state.set(self.beaten_by);
-                return Err(self.beaten_by);
+                let beaten = Lifecycle::of(self.beaten_by);
+                self.word.set(beaten);
+                return Err(beaten);
             }
-            let current = self.state.get();
+            let current = self.word.get();
             if current == expected {
-                self.state.set(new);
+                self.word.set(new);
                 Ok(())
             } else {
                 Err(current)
             }
         }
 
-        fn swap_state(&self, new: TaskState) -> TaskState {
-            self.state.replace(new)
-        }
-
-        fn set_wake_pending(&self) {}
-
-        fn take_wake_pending(&self) -> bool {
-            false
+        fn swap_lifecycle(&self, new: Lifecycle) -> Lifecycle {
+            self.word.replace(new)
         }
     }
 
@@ -614,21 +662,104 @@ mod tests {
     fn a_wake_before_the_park_commits_cancels_it() {
         let task = Model::new(TaskState::Running);
         assert_eq!(unpark_task(&task, Model::admit), Ok(()));
-        assert!(task.token.get(), "the token is owed to the coming park");
-        // The dispatcher publishes the park and consumes the token, so the
-        // task is re-admitted rather than slept.
-        task.state.set(TaskState::Parked);
-        commit_park(&task, Model::admit);
-        assert_eq!(task.load_state(), TaskState::Ready);
-        assert_eq!(task.admits.get(), 1);
+        assert!(task.woken(), "the token is owed to the coming park");
+        assert_eq!(task.admits.get(), 0, "a running task is not admitted");
+        assert_eq!(
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Woken, 0),
+            "the park consumes the token and the task never leaves the competition"
+        );
+        assert_eq!(task.load_lifecycle(), Lifecycle::of(TaskState::Ready));
     }
 
     #[test]
     fn a_park_with_no_token_takes_effect() {
-        let task = Model::new(TaskState::Parked);
-        commit_park(&task, Model::admit);
-        assert_eq!(task.load_state(), TaskState::Parked);
-        assert_eq!(task.admits.get(), 0, "no wake was owed");
+        let task = Model::new(TaskState::Running);
+        assert_eq!(
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Released, 1)
+        );
+        assert_eq!(task.load_lifecycle(), Lifecycle::of(TaskState::Parked));
+    }
+
+    /// The interleaving that hung a task for good while the token was a word
+    /// of its own: CPU A parks the task on one lock and is interrupted before
+    /// finishing the park; that lock's releaser wakes it onto CPU B, where it
+    /// registers on a second lock; the second releaser finds it running and
+    /// leaves a token. A's late finish then took that token and dropped it, so
+    /// the park B commits slept with the second lock handed to it. The park
+    /// and its token are now one exchange, so there is no late finish to run.
+    #[test]
+    fn a_wake_left_for_a_later_park_is_kept_for_that_park() {
+        let task = Model::new(TaskState::Running);
+        assert_eq!(
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Released, 1),
+            "CPU A parks the task on the first lock"
+        );
+        assert_eq!(
+            unpark_task(&task, Model::admit),
+            Ok(()),
+            "the first release"
+        );
+        assert_eq!(task.admits.get(), 1);
+        task.dispatch();
+        assert_eq!(
+            unpark_task(&task, Model::admit),
+            Ok(()),
+            "the second release"
+        );
+        assert!(task.woken());
+        assert_eq!(
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Woken, 0),
+            "CPU B's park answers the second release"
+        );
+        assert_eq!(task.load_state(), TaskState::Ready);
+    }
+
+    #[test]
+    fn a_word_round_trips_and_a_corrupt_one_reads_as_terminal() {
+        for state in [
+            TaskState::Ready,
+            TaskState::Running,
+            TaskState::Parked,
+            TaskState::Exited,
+            TaskState::Stopped,
+            TaskState::StoppedOnQueue,
+            TaskState::StoppedOnCpu,
+            TaskState::StoppedParked,
+        ] {
+            for woken in [false, true] {
+                let word = Lifecycle { state, woken };
+                assert_eq!(Lifecycle::from_bits(word.bits()), word, "{word:?}");
+            }
+        }
+        assert_eq!(Lifecycle::from_bits(0x7f), Lifecycle::of(TaskState::Exited));
+        assert_eq!(Lifecycle::from_bits(0xff), Lifecycle::of(TaskState::Exited));
+    }
+
+    /// Every transition short of a park carries an owed wake with it, so the
+    /// token reaches the park it was left for whatever happens on the way.
+    #[test]
+    fn an_owed_wake_survives_every_transition_short_of_a_park() {
+        let task = Model::new(TaskState::Ready);
+        assert_eq!(unpark_task(&task, Model::admit), Ok(()));
+        task.dispatch();
+        assert_eq!(stop_task(&task), Ok(TaskState::StoppedOnCpu));
+        assert_eq!(resume_task(&task, Model::admit), Ok(()));
+        assert_eq!(
+            settle_counting(&task, TaskAction::Yield, false),
+            (Settled::Requeue, 0)
+        );
+        assert!(task.woken(), "a yield keeps the wake");
+        task.dispatch();
+        assert_eq!(
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Woken, 0)
+        );
+        assert!(!task.woken());
+        assert_eq!(task.admits.get(), 0);
     }
 
     #[test]
@@ -672,6 +803,7 @@ mod tests {
         let task = Model::new(TaskState::Stopped);
         assert_eq!(unpark_task(&task, Model::admit), Ok(()));
         assert_eq!(task.load_state(), TaskState::Stopped);
+        assert!(task.woken(), "kept for the park it commits once resumed");
         assert_eq!(task.admits.get(), 0);
     }
 
@@ -689,19 +821,14 @@ mod tests {
             TaskState::Ready,
             "the continue re-runs it"
         );
-        task.state.set(TaskState::Running);
-        let departures = Cell::new(0);
+        task.dispatch();
         assert_eq!(
-            settle(&task, TaskAction::Park, false, counting(&departures)),
-            Settled::Park
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Woken, 0),
+            "the wake was not lost"
         );
-        commit_park(&task, Model::admit);
-        assert_eq!(task.load_state(), TaskState::Ready, "the wake was not lost");
-        assert_eq!(
-            task.admits.get(),
-            2,
-            "admitted by the continue and the wake"
-        );
+        assert_eq!(task.load_state(), TaskState::Ready);
+        assert_eq!(task.admits.get(), 1, "admitted by the continue");
     }
 
     /// A wake that reaches a running task whose stop is then withdrawn is
@@ -712,14 +839,12 @@ mod tests {
         assert_eq!(unpark_task(&task, Model::admit), Ok(()));
         assert_eq!(resume_task(&task, Model::admit), Ok(()));
         assert_eq!(task.load_state(), TaskState::Running);
-        let departures = Cell::new(0);
         assert_eq!(
-            settle(&task, TaskAction::Park, false, counting(&departures)),
-            Settled::Park
+            settle_counting(&task, TaskAction::Park, false),
+            (Settled::Woken, 0),
+            "the wake was not lost"
         );
-        commit_park(&task, Model::admit);
-        assert_eq!(task.load_state(), TaskState::Ready, "the wake was not lost");
-        assert_eq!(task.admits.get(), 1);
+        assert_eq!(task.load_state(), TaskState::Ready);
     }
 
     #[test]
@@ -956,7 +1081,7 @@ mod tests {
         let taken = take_entry(
             &task,
             || {
-                task.state.set(TaskState::StoppedOnQueue);
+                task.word.set(Lifecycle::of(TaskState::StoppedOnQueue));
                 false
             },
             counting(&departures),
@@ -985,7 +1110,7 @@ mod tests {
         let task = Model::new(TaskState::Running);
         assert_eq!(
             settle_counting(&task, TaskAction::Park, false),
-            (Settled::Park, 1)
+            (Settled::Released, 1)
         );
         assert_eq!(task.load_state(), TaskState::Parked);
 
@@ -1012,13 +1137,11 @@ mod tests {
         let task = Model::new(TaskState::StoppedOnCpu);
         assert_eq!(
             settle_counting(&task, TaskAction::Park, false),
-            (Settled::Park, 1)
+            (Settled::Released, 1)
         );
-        assert_eq!(task.load_state(), TaskState::StoppedParked);
-        commit_park(&task, Model::admit);
         assert_eq!(
-            task.load_state(),
-            TaskState::StoppedParked,
+            task.load_lifecycle(),
+            Lifecycle::of(TaskState::StoppedParked),
             "nothing woke it"
         );
     }
@@ -1031,10 +1154,13 @@ mod tests {
         assert_eq!(unpark_task(&task, Model::admit), Ok(()), "a token");
         assert_eq!(
             settle_counting(&task, TaskAction::Park, false),
-            (Settled::Park, 1)
+            (Settled::Released, 1)
         );
-        commit_park(&task, Model::admit);
-        assert_eq!(task.load_state(), TaskState::Stopped, "owed its run");
+        assert_eq!(
+            task.load_lifecycle(),
+            Lifecycle::of(TaskState::Stopped),
+            "owed its run"
+        );
         assert_eq!(task.admits.get(), 0, "and still held");
         assert_eq!(resume_task(&task, Model::admit), Ok(()));
         assert_eq!(task.load_state(), TaskState::Ready);
@@ -1051,9 +1177,10 @@ mod tests {
         let task = Model::new(TaskState::Running);
         assert_eq!(
             settle_counting(&task, TaskAction::Park, true),
-            (Settled::Park, 1),
+            (Settled::Released, 1),
             "a task parked in a syscall must unwind before it can die"
         );
+        assert_eq!(task.load_state(), TaskState::Parked);
         let task = Model::new(TaskState::StoppedOnCpu);
         assert_eq!(
             settle_counting(&task, TaskAction::Yield, true),
@@ -1064,7 +1191,7 @@ mod tests {
         let task = Model::new(TaskState::StoppedOnCpu);
         assert_eq!(
             settle_counting(&task, TaskAction::Park, true),
-            (Settled::Park, 1),
+            (Settled::Released, 1),
             "parked beneath the stop, it too must unwind before it can die"
         );
         assert_eq!(task.load_state(), TaskState::StoppedParked);
@@ -1114,7 +1241,7 @@ mod tests {
             let task = Model::new(state);
             assert_eq!(
                 settle_counting(&task, TaskAction::Yield, false),
-                (Settled::Park, 0),
+                (Settled::Released, 0),
                 "{state:?}"
             );
             assert_eq!(task.load_state(), state, "{state:?}");

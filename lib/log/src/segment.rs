@@ -330,10 +330,17 @@ impl<'a> SegmentWriter<'a> {
     /// The record chain starts at `header.prev_segment_hash` (the previous
     /// segment's hash, or the stream genesis for a stream's first segment).
     ///
+    /// A writer can always close: `buf` must hold the footer as well as the
+    /// header, and every append keeps the footer's room free.
+    ///
     /// # Errors
     ///
-    /// [`SegmentError::BufferTooSmall`] if `buf` cannot hold the header.
+    /// [`SegmentError::BufferTooSmall`] if `buf` cannot hold the header and
+    /// the footer.
     pub fn begin(buf: &'a mut [u8], header: &SegmentHeader) -> Result<Self, SegmentError> {
+        if buf.len() < SEGMENT_HEADER_LEN + SEGMENT_FOOTER_LEN {
+            return Err(SegmentError::BufferTooSmall);
+        }
         header.encode(buf)?;
         let chain = LogChain::resume(header.first_seq, header.prev_segment_hash);
         Ok(Self {
@@ -430,8 +437,8 @@ impl<'a> SegmentWriter<'a> {
     /// # Errors
     ///
     /// [`SegmentError::SealKeyRequired`] if the stream requires a seal but no
-    /// key was given; [`SegmentError::BufferTooSmall`] if the footer does not
-    /// fit.
+    /// key was given. The footer always fits, since [`Self::begin`] and every
+    /// append keep its room free.
     pub fn finish(
         self,
         seal_key: Option<&LogAttestationKey>,

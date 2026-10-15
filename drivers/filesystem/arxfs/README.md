@@ -470,12 +470,12 @@ solid-state and paravirtual, widest where a command is dearest.
 
 Between operations nothing in the driver runs, so the **host** enforces that
 window: the driver names each transaction's deadline through the
-`FilesystemWrite::set_writeback_host` seam as the transaction opens and names
+`FilesystemWrite::set_volume_host` seam as the transaction opens and names
 its absence as it closes, and the kernel's write-back flusher parks until the
 soonest deadline any mounted volume published, then calls the ordinary
 `fs_sync` on each volume that is due. Nothing polls, and a machine with no
 dirty volume arms nothing. The clock and the timer arrive together
-(`ARXFS::with_writeback_host`), so a handle can never defer against a window
+(`ARXFS::with_volume_host`), so a handle can never defer against a window
 nothing will fire; a handle given neither publishes at every operation rather
 than deferring durability it can neither measure nor have published for it.
 
@@ -597,9 +597,12 @@ It also writes nothing on the *verifying* paths, which do not allocate: the one
 copy-repair site and both the scrub cursor and the health baseline are gated on
 the same flag, so a scrub or health pass on such a handle verifies and reports
 without touching the medium. Block allocation draws data upward and metadata
-downward from the pool with a small metadata reserve, so a delete can
-copy-on-write itself even on a full volume. No `unwrap`/`expect`/`panic!` and no
-`unsafe`.
+downward from the pool, stepping over the reserve (`reserve` module,
+`docs/src/filesystem/arxfs-spec.md` §6): free runs held back from ordinary
+allocation that the system's own writes, deletes and a commit's root may draw
+on, so a full volume still takes the system's writes and still frees space.
+`with_system_reserve` holds the larger system reserve on the volume backing the
+system's writable grafts. No `unwrap`/`expect`/`panic!` and no `unsafe`.
 
 > **Staged build.** A volume is a mountable copy-on-write
 > filesystem with B-tree metadata in two physical copies, **sealed** as its

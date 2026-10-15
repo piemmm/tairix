@@ -44,3 +44,6 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # `_start`, the mechanism's thread, and the `cpufreq_bind` / `cpufreq_wait`
 # wrappers.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

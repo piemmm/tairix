@@ -31,8 +31,7 @@ compte ordinaire peut lire les paramètres mais pas les changer.
   `graphical` (la valeur par défaut) lance directement la session de
   bureau après l'authentification, et se replie sur la connexion texte
   sur une machine qui ne peut en exécuter aucune ; `text` lance le shell
-  du compte — le bureau peut toujours être lancé à la demande avec la
-  commande `desktop`.
+  du compte — le bureau ne s'exécute que depuis une connexion graphique.
 - `cache.all` — `on` ou `off` : le commutateur de cache principal. `on`
   (la valeur par défaut) laisse chaque classe de cache ci-dessous
   suivre son propre réglage ; `off` est un plafond qui désactive tout

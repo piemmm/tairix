@@ -168,7 +168,7 @@ impl Storage for TestFs {
         self.files.get(path).cloned().ok_or(Errno::NotFound)
     }
 
-    fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+    fn replace(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
         self.offline()?;
         // A write into a directory that does not exist would be a path the
         // engine composed wrongly; surface it rather than inventing the
@@ -179,13 +179,6 @@ impl Storage for TestFs {
         }
         self.files.insert(path.to_string(), bytes.to_vec());
         self.owners.insert(path.to_string(), CONFD_UID.0);
-        Ok(())
-    }
-
-    fn rename(&mut self, src: &str, dst: &str) -> Result<(), Errno> {
-        self.offline()?;
-        let bytes = self.files.remove(src).ok_or(Errno::NotFound)?;
-        self.files.insert(dst.to_string(), bytes);
         Ok(())
     }
 

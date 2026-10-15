@@ -9,7 +9,7 @@
 //! tests. What only a real machine can show is that those pieces are
 //! **wired to each other and to the running application**: that the
 //! session's `SetDateTime` outcome opens the prompt, that the broker starts
-//! `/System/Applications/datetime.app/Run` as the authenticated account,
+//! `/System/Components/datetime.app/Run` as the authenticated account,
 //! and that the application creates a window the desktop session serves.
 //!
 //! So the guest boots the **production** aarch64 pipeline
@@ -63,12 +63,8 @@ mod kernel {
     // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-    /// Static boot heap, mirroring the production aarch64 kernel binary's
-    /// `.bss`-resident heap (zeroed by the boot trampoline).
-    ///
-    /// `static mut` because the allocator hands out disjoint slices under
-    /// its own lock; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -76,7 +72,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Audit observer that replays the whole trail to serial and latches the
     /// two PASS witnesses described in the module docs.
@@ -141,11 +137,7 @@ mod kernel {
                     continue;
                 }
                 if let tairix_log::FieldValue::Str(value) = field.value {
-                    if names_bundle(
-                        value,
-                        tairix_abi::SYSTEM_APPLICATION_STORE,
-                        DATETIME_APP_NAME,
-                    ) {
+                    if names_bundle(value, tairix_abi::SYSTEM_COMPONENT_STORE, DATETIME_APP_NAME) {
                         self.app_launched.store(true, Ordering::Release);
                     }
                 }

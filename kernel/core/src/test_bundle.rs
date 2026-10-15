@@ -42,9 +42,9 @@ pub(crate) const PUBLISHER_SEED: [u8; 32] = [9u8; 32];
 /// every mutating operation fails closed, mirroring the read paths the
 /// bundle store actually exercises.
 ///
-/// `read_calls` counts, per path, how many times [`FilesystemService::read`]
-/// was invoked, so a test can prove a file (e.g. `Run`) is read from disk
-/// the expected number of times.
+/// `read_calls` counts, per path, how many times a file's bytes were read,
+/// so a test can prove a file (e.g. `Run`) is read from disk the expected
+/// number of times.
 pub(crate) struct MemFs {
     pub(crate) files: BTreeMap<String, Vec<u8>>,
     read_calls: std::sync::Mutex<BTreeMap<String, usize>>,
@@ -52,6 +52,8 @@ pub(crate) struct MemFs {
     /// Paths the fixture reports as symbolic links rather than regular
     /// files, so the bundle store's refusal of a link can be exercised.
     links: BTreeSet<String>,
+    /// Whether every file is served as a `noexec` mount serves it.
+    noexec: bool,
 }
 
 impl MemFs {
@@ -64,7 +66,15 @@ impl MemFs {
             read_calls: std::sync::Mutex::new(BTreeMap::new()),
             stat_error: None,
             links: BTreeSet::new(),
+            noexec: false,
         }
+    }
+
+    /// Serve every file as a `noexec` mount does: readable as data, refused
+    /// as a program.
+    pub(crate) fn with_noexec(mut self) -> Self {
+        self.noexec = true;
+        self
     }
 
     /// Report `path` as a symbolic link. Its bytes stay in the map, so a
@@ -85,7 +95,7 @@ impl MemFs {
         self
     }
 
-    /// How many times [`FilesystemService::read`] was called for `path`.
+    /// How many times the bytes of `path` were read.
     pub(crate) fn read_calls(&self, path: &str) -> usize {
         self.read_calls
             .lock()
@@ -93,6 +103,24 @@ impl MemFs {
             .get(path)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// Read `path`'s bytes from `offset`, counting the read.
+    fn serve(&self, path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
+        *self
+            .read_calls
+            .lock()
+            .expect("read-call counter not poisoned")
+            .entry(path.to_string())
+            .or_insert(0) += 1;
+        let bytes = self.files.get(path).ok_or(Errno::NotFound)?;
+        let start = usize::try_from(offset).map_err(|_| Errno::OutOfRange)?;
+        if start >= bytes.len() {
+            return Ok(0);
+        }
+        let read = buf.len().min(bytes.len() - start);
+        buf[..read].copy_from_slice(&bytes[start..start + read]);
+        Ok(read)
     }
 
     /// The immediate children of `dir`, derived from the file paths.
@@ -159,20 +187,21 @@ impl FilesystemService for MemFs {
         offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, Errno> {
-        *self
-            .read_calls
-            .lock()
-            .expect("read-call counter not poisoned")
-            .entry(path.to_string())
-            .or_insert(0) += 1;
-        let bytes = self.files.get(path).ok_or(Errno::NotFound)?;
-        let start = usize::try_from(offset).map_err(|_| Errno::OutOfRange)?;
-        if start >= bytes.len() {
-            return Ok(0);
+        self.serve(path, offset, buf)
+    }
+
+    fn read_program(
+        &self,
+        _uid: u32,
+        _caps: &dyn CapabilityQuery,
+        path: &str,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize, Errno> {
+        if self.noexec {
+            return Err(Errno::PermissionDenied);
         }
-        let read = buf.len().min(bytes.len() - start);
-        buf[..read].copy_from_slice(&bytes[start..start + read]);
-        Ok(read)
+        self.serve(path, offset, buf)
     }
 
     fn write(

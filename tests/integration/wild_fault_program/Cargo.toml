@@ -23,3 +23,6 @@ path = "src/main.rs"
 [target.'cfg(target_os = "none")'.dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

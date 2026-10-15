@@ -91,7 +91,8 @@ use tairix_abi::sysinfo::{
     CacheLedgerRecord, CpuInfoRecord, CpuLoadRecord, CpuTimeRecord, CrashFaultBucket,
     CrashFaultClass, CrashNamedReg, CrashRecord, DmaGroupRecord, DmaNodeRecord, DmaUnitRecord,
     GroupDirectoryRecord, IrqRecord, MountRecord, ProcessRecord, SeatRecord, UserDirectoryRecord,
-    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord, CRASH_MAX_FRAMES,
+    ViewBindingRecord, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
+    CRASH_MAX_FRAMES,
 };
 #[cfg(feature = "watchdog-diagnostics")]
 use tairix_abi::time::NANOS_PER_MILLI;
@@ -3531,42 +3532,6 @@ where
         });
     }
 
-    /// Enforce the caller's address-space growth bounds before a map of
-    /// `charged` further bytes: the `AddressSpaceBytes` ceiling always,
-    /// and — while the caller is pinned — the `PinnedMemoryBytes` budget
-    /// over the whole pinned footprint (mapped address space + committed
-    /// stack). One definition shared by `mem_map` and `file_map`, so the
-    /// two paths can never drift (fail closed; the limits are stored
-    /// against the kernel-trusted caller id, and a saturated/overflowing
-    /// projection denies rather than wrapping into a bogus small total).
-    ///
-    /// # Errors
-    ///
-    /// [`Errno::OutOfRange`] when the projected total would cross the
-    /// operative soft bound — the same refusal a settable-but-ignored
-    /// limit would otherwise fail open on.
-    fn check_map_growth(&self, caller: &CallerContext<'_>, charged: u64) -> Result<(), Errno> {
-        let aspaces = self.aspaces.read();
-        let limits = aspaces.limits(caller.process());
-        let projected = aspaces
-            .mapped_aspace_bytes(caller.process())
-            .checked_add(charged)
-            .ok_or(Errno::OutOfRange)?;
-        if projected > limits.get(LimitKind::AddressSpaceBytes).soft {
-            return Err(Errno::OutOfRange);
-        }
-        if aspaces.is_pinned(caller.process()) {
-            let pinned_projected = aspaces
-                .pinned_footprint_bytes(caller.process())
-                .checked_add(charged)
-                .ok_or(Errno::OutOfRange)?;
-            if pinned_projected > limits.get(LimitKind::PinnedMemoryBytes).soft {
-                return Err(Errno::OutOfRange);
-            }
-        }
-        Ok(())
-    }
-
     /// Resolve a user-mode fault at `fault_va` as demand-grown stack for
     /// `task`, returning `true` when the faulting page is now resident and
     /// the access should simply be retried.
@@ -3608,30 +3573,15 @@ where
         thread: SecTaskId,
         fault_va: u64,
     ) -> bool {
-        let (span, soft, pinned_room) = {
+        let (span, soft) = {
             let aspaces = self.aspaces.read();
             let Some(span) = aspaces.stack_span(thread) else {
                 return false;
             };
-            let limits = aspaces.limits(process);
-            // While the process is pinned, stack growth also consumes the
-            // pinned-memory budget: every committed stack page joins the
-            // exempt footprint, so the budget left over the mapped bytes
-            // bounds the committed extent exactly as it bounds `mem_map`
-            // growth (fail closed — the guard page below the span stays
-            // the terminal defence). Saturating: a footprint already past
-            // the budget leaves zero room, refusing any further growth.
-            let pinned_room = if aspaces.is_pinned(process) {
-                Some(
-                    limits
-                        .get(LimitKind::PinnedMemoryBytes)
-                        .soft
-                        .saturating_sub(aspaces.mapped_aspace_bytes(process)),
-                )
-            } else {
-                None
-            };
-            (span, limits.get(LimitKind::StackBytes).soft, pinned_room)
+            (
+                span,
+                aspaces.limits(process).get(LimitKind::StackBytes).soft,
+            )
         };
         if !span.in_growth_room(fault_va) {
             return false;
@@ -3642,12 +3592,19 @@ where
         if span.top() - page_va > soft {
             return false;
         }
-        if let Some(room) = pinned_room {
-            // The committed extent the fault would reach is the whole
-            // stack contribution to the pinned footprint.
-            if span.top() - page_va > room {
-                return false;
-            }
+        // The new pages join the process's mapped footprint, which the
+        // `AddressSpaceBytes` ceiling and, while pinned, the pinned budget
+        // bound: charged before any is mapped, and what the walk does not
+        // map is credited back. Cannot underflow: `page_va < committed_base`
+        // inside the growth room.
+        let growth_bytes = span.committed_base() - page_va;
+        if self
+            .aspaces
+            .write()
+            .try_charge_aspace_bytes(process, growth_bytes)
+            .is_err()
+        {
+            return false;
         }
         // Reserve physical headroom for every growth page this fault will
         // back, *before* touching any page table: stack growth is subject to
@@ -3657,10 +3614,13 @@ where
         // committed pages are consumed one at a time by the `map` calls
         // below (each `map_anonymous` converts one reservation to
         // residency), and any still-uncommitted on an early stop are
-        // released when the task is reclaimed. Cannot underflow:
-        // `page_va < committed_base` inside the growth room.
-        let growth_pages = (span.committed_base() - page_va) / PAGE_SIZE as u64;
+        // released when the task is reclaimed.
+        let growth_pages = growth_bytes / PAGE_SIZE as u64;
+        let uncharge = |unmapped: u64| {
+            self.aspaces.write().credit_aspace_bytes(process, unmapped);
+        };
         if self.mem_map.commit(growth_pages).is_err() {
+            uncharge(growth_bytes);
             return false;
         }
         // Walk downward from the page below the committed base to the
@@ -3669,23 +3629,31 @@ where
         // Cannot underflow: `page_va < committed_base` inside the growth
         // room, so every `next` in the walk is `>= page_va > 0`.
         let mut next = span.committed_base() - PAGE_SIZE as u64;
+        let mut committed = 0u64;
         loop {
             match self.mem_map.map(PAGE_SIZE, MapFlags::FIXED, next) {
                 // Freshly backed, or already resident because another
-                // resolution won the race — either way the page is there.
+                // resolution won the race — either way the page is there,
+                // and whichever resolution commits it keeps its charge.
                 Ok(_) | Err(Errno::BadAddress) => {
-                    self.aspaces.write().commit_stack_page(thread, next);
+                    committed += self.aspaces.write().commit_stack_page(thread, next);
                 }
                 // Frame exhaustion or an uninstalled producer: fatal to
                 // the task and only the task — deterministic OOM, never a
                 // panic. Pages already committed above stay resident and
-                // recorded.
-                Err(_) => return false,
+                // recorded; the rest of the charge is given back.
+                Err(_) => {
+                    uncharge(growth_bytes - committed);
+                    return false;
+                }
             }
             if next == page_va {
                 break;
             }
             next -= PAGE_SIZE as u64;
+        }
+        if committed < growth_bytes {
+            uncharge(growth_bytes - committed);
         }
         // The walk backed exactly the pages it reserved room for, so publish
         // that range rather than the caller's whole resident set.
@@ -5591,7 +5559,7 @@ const CONSOLE_READ_MAX: usize = 4096;
 /// looking it up in the registry, so an unbounded `path_len` would let a
 /// caller force an arbitrarily large kernel allocation whose failure path
 /// could OOM (deterministic OOM behaviour). An absolute
-/// program path (`/Apps/<Name>.app/Run`) is far shorter
+/// program path (`/System/Applications/<Name>.app/Run`) is far shorter
 /// than this; a longer request is refused with [`Errno::NotFound`] (it
 /// cannot name any registered program) rather than allocated.
 const SPAWN_PATH_MAX: usize = 1024;
@@ -7575,11 +7543,12 @@ where
             .div_ceil(PAGE_SIZE as u64)
             .checked_mul(PAGE_SIZE as u64)
             .ok_or(Errno::OutOfRange)?;
-        // Enforce the caller's growth bounds *before* mapping (check
-        // capacity before touching state, fail closed): the
-        // `AddressSpaceBytes` ceiling, and — while the caller is pinned —
-        // the pinned-memory budget over the exempt footprint.
-        self.check_map_growth(caller, charged)?;
+        // Charge the caller's growth bounds *before* mapping, in the same step
+        // that checks them: the `AddressSpaceBytes` ceiling and, while the
+        // caller is pinned, the pinned-memory budget.
+        self.aspaces
+            .write()
+            .try_charge_aspace_bytes(caller.process(), charged)?;
         // Hand the request to the installed `kernel/mem` producer, which
         // *reserves* the region's address space in the caller's own live
         // space and returns its base (`plans/SPAWN.md` SP5b). No frame is
@@ -7591,13 +7560,18 @@ where
         // closed with `NotImplemented`, never pretending a region was
         // reserved. Window exhaustion surfaces as `OutOfMemory`
         // (deterministic).
-        let base = self.mem_map.reserve(len, flags, addr_hint)?;
-        // The reservation grew the caller's mapped address space: record it
-        // so the anonymous fault path can tell a legitimate first-touch of
-        // this region apart from a wild access (fail closed on a miss), and
-        // charge the page-rounded size against the task's address-space
-        // accounting (the reservation is what the `AddressSpaceBytes`
-        // ceiling bounds). `charged` is a whole number of pages by
+        let base = match self.mem_map.reserve(len, flags, addr_hint) {
+            Ok(base) => base,
+            Err(errno) => {
+                self.aspaces
+                    .write()
+                    .credit_aspace_bytes(caller.process(), charged);
+                return Err(errno);
+            }
+        };
+        // Record the reservation so the anonymous fault path can tell a
+        // legitimate first-touch of this region apart from a wild access
+        // (fail closed on a miss). `charged` is a whole number of pages by
         // construction.
         let page_count = charged / PAGE_SIZE as u64;
         {
@@ -7609,13 +7583,13 @@ where
                 // as `file_map` does: two records over one address would make
                 // a fault's backing, and a release's extent, a choice between
                 // them.
+                aspaces.credit_aspace_bytes(caller.process(), charged);
                 drop(aspaces);
                 let _ = self.retiring(caller.process(), |retire| {
                     self.mem_map.unmap(base, len, retire)
                 });
                 return Err(region_errno(refused));
             }
-            aspaces.charge_aspace_bytes(caller.process(), charged);
         }
         // The registry snapshot needs no republishing: `MemMap::reserve`
         // commits no frame and makes no page-table entry, so the live
@@ -7922,7 +7896,7 @@ where
         // guard so the bound check and the store are a single step against
         // any concurrent growth of the caller's own footprint. The bound
         // is the caller's effective `PinnedMemoryBytes` soft limit over the
-        // whole pinned footprint (mapped address space + committed stack) —
+        // whole mapped footprint, every thread's committed stack included —
         // a footprint already past the budget is refused closed, exactly as
         // a map past the budget would be, so the limit cannot be dodged by
         // growing first and pinning after. Already pinned is success: the
@@ -7933,7 +7907,7 @@ where
             .limits(caller.process())
             .get(LimitKind::PinnedMemoryBytes)
             .soft;
-        if aspaces.pinned_footprint_bytes(caller.process()) > soft {
+        if aspaces.mapped_aspace_bytes(caller.process()) > soft {
             return Err(Errno::OutOfRange);
         }
         aspaces.set_pinned(caller.process());
@@ -8055,16 +8029,25 @@ where
         }
         let authority = PathAuthority::of(&handle, caller).ok_or(Errno::PermissionDenied)?;
         authority.admit()?;
-        // Enforce the caller's growth bounds *before* reserving — the same
-        // projection `mem_map` applies, over the same shared accounting, so
-        // the `ulimit -v`-style ceiling and the pinned-memory budget cover
-        // file mappings too (fail closed, checked against the
-        // kernel-trusted caller id).
-        self.check_map_growth(caller, charged)?;
+        // Charge the caller's growth bounds *before* reserving — the same
+        // charge `mem_map` takes over the same shared accounting, so the
+        // `ulimit -v`-style ceiling and the pinned-memory budget cover file
+        // mappings too.
+        self.aspaces
+            .write()
+            .try_charge_aspace_bytes(caller.process(), charged)?;
         // Reserve pure address space in the caller's own live space — no
         // page is read or backed until a fault lands in the region. The
         // default `NULL_FILE_MAP` fails closed with `NotImplemented`.
-        let base = self.file_map.reserve(len)?;
+        let base = match self.file_map.reserve(len) {
+            Ok(base) => base,
+            Err(errno) => {
+                self.aspaces
+                    .write()
+                    .credit_aspace_bytes(caller.process(), charged);
+                return Err(errno);
+            }
+        };
         // Record the region under the kernel-trusted caller id, carrying the
         // mapping-time identity (uid + effective capability snapshot) the
         // fault path re-checks every demand-paged read under — the same
@@ -8089,13 +8072,13 @@ where
                 // extent, a choice between them. The release undoes exactly
                 // what the reserve above did; its own failure has no further
                 // recovery and leaves the record absent.
+                aspaces.credit_aspace_bytes(caller.process(), charged);
                 drop(aspaces);
                 let _ = self.retiring(caller.process(), |retire| {
                     self.file_map.release(base, len, retire)
                 });
                 return Err(region_errno(refused));
             }
-            aspaces.charge_aspace_bytes(caller.process(), charged);
         }
         Ok(base)
     }
@@ -8676,6 +8659,9 @@ where
             IntrospectDomain::Mounts => self
                 .introspect
                 .mounts(arg, records_that_fit(out_cap, MountRecord::WIRE_LEN)?)?,
+            IntrospectDomain::Views => self
+                .introspect
+                .views(arg, records_that_fit(out_cap, ViewBindingRecord::WIRE_LEN)?)?,
             IntrospectDomain::VolumeIoHealth => self.introspect.volume_io_health(
                 arg,
                 records_that_fit(out_cap, VolumeIoHealthRecord::WIRE_LEN)?,
@@ -10235,6 +10221,20 @@ where
         Ok(0)
     }
 
+    fn hw_node_key_source(&self, caller: &CallerContext<'_>) -> SyscallResult {
+        // The dispatcher has already checked `CAP_INPUT_INJECT`, the grant
+        // the keys are delivered under. The node is the caller's own, from
+        // kernel-trusted state, so a driver marks only the node it was loaded
+        // for.
+        let node_id = self
+            .aspaces
+            .read()
+            .loaded_node(caller.process())
+            .ok_or(Errno::PermissionDenied)?;
+        self.hw_tree.mark_key_source(node_id)?;
+        Ok(0)
+    }
+
     fn console_relocate(&self, caller: &CallerContext<'_>, buf: u64, len: usize) -> SyscallResult {
         // The dispatcher enforced `CAP_MEM_DMA`. The node is the caller's own,
         // from kernel-trusted state, and only one discovery marked may move
@@ -11652,9 +11652,13 @@ where
         let limit = self.soft_limit(caller, LimitKind::FileLocks);
         let pid = caller.process();
         let task = caller.task_id.0;
-        let cpu = SchedulerArch::current_cpu(self.arch);
         let nonblock = flags.is_nonblock();
-        let deadline_ns = crate::waitq::deadline_for(self.arch.monotonic_ns(cpu), timeout_ns);
+        // Read per use: a park may resume this task on another core.
+        let now = || {
+            self.arch
+                .monotonic_ns(SchedulerArch::current_cpu(self.arch))
+        };
+        let deadline_ns = crate::waitq::deadline_for(now(), timeout_ns);
         let mut queued: Option<WakeKey> = None;
 
         let outcome = loop {
@@ -11692,7 +11696,10 @@ where
                         queued = Some(key);
                         continue;
                     }
-                    if !reschedule_current(cpu, RescheduleAction::Park) {
+                    if !reschedule_current(
+                        SchedulerArch::current_cpu(self.arch),
+                        RescheduleAction::Park,
+                    ) {
                         // Not a resumable task, so it cannot be parked. Fail
                         // closed rather than return a "granted" the caller
                         // would act on.
@@ -11704,9 +11711,7 @@ where
                     if crate::procsignal::kill_pending(task) {
                         break Err(Errno::Interrupted);
                     }
-                    if deadline_ns != crate::waitq::NO_DEADLINE
-                        && self.arch.monotonic_ns(cpu) >= deadline_ns
-                    {
+                    if deadline_ns != crate::waitq::NO_DEADLINE && now() >= deadline_ns {
                         break Err(Errno::TimedOut);
                     }
                 }
@@ -13664,9 +13669,11 @@ fn body_load_bundle(
     let cacheable = crate::appspawn::AppStore::cacheable_bundle(bundle);
     if cacheable {
         if let Some(app) = store.cached(bundle) {
+            // Re-authorised as a program read: the caller must still be able
+            // to read the entry point, and its mount still run programs.
             services
                 .filesystem()
-                .open(uid, effective, app.run_path(), OpenFlags::READ)?;
+                .read_program(uid, effective, app.run_path(), 0, &mut [])?;
             return Ok(app);
         }
     }
@@ -14461,9 +14468,9 @@ where
 }
 
 /// Park the calling task off the run queue for one wait iteration,
-/// suspending it on the CPU it is running on **right now** — which
-/// [`crate::kthread::reschedule_current`] resolves itself, so a wait loop
-/// that migrates across a park cannot suspend the wrong core's task.
+/// suspending it on the CPU it is running on **right now** — read here at
+/// every call, so a wait loop that migrates across a park cannot suspend
+/// the wrong core's task.
 ///
 /// The scheduler is never touched here. Re-enqueuing the caller from inside
 /// its own syscall would clear its per-CPU current-task slot while
@@ -19627,11 +19634,11 @@ mod tests {
     }
 
     /// Absolute program path the spawn tests register and look up.
-    static SPAWN_PATH: &[u8] = b"/Apps/Child.app/Run";
+    static SPAWN_PATH: &[u8] = b"/System/Applications/Child.app/Run";
     /// A syntactically well-formed path that is neither a registered
     /// boot-floor program nor a `<Name>.app/Run` store bundle (no `.app`
     /// component), so it resolves to nothing and fails closed synchronously.
-    static UNKNOWN_PATH: &[u8] = b"/Apps/Child/Run";
+    static UNKNOWN_PATH: &[u8] = b"/System/Applications/Child/Run";
     /// Stand-in `rxe` bytes; the host producer double only records them,
     /// it does not parse them (parsing is the arch producer's job, `SP3b`).
     static SPAWN_RXE: &[u8] = b"child-rxe-blob";
@@ -20816,27 +20823,56 @@ mod tests {
             )));
     }
 
-    /// A [`FilesystemService`] over the shared [`MemFs`] fixture that
-    /// counts data reads and can refuse `open`, so the cache tests can
-    /// prove a cached launch re-reads nothing and still authorises the
-    /// caller (a refused `open` is the secured VFS denying the read).
+    /// A [`FilesystemService`] over the shared [`MemFs`] fixture that counts
+    /// the bytes it serves and can have the caller's read revoked, so the
+    /// cache tests can prove a cached launch re-reads nothing and still
+    /// authorises the caller (a revoked read is the secured VFS denying it).
     struct InstrumentedFs {
         inner: crate::test_bundle::MemFs,
-        reads: core::sync::atomic::AtomicUsize,
-        deny_open: bool,
+        read_bytes: core::sync::atomic::AtomicUsize,
+        revoked: core::sync::atomic::AtomicBool,
+        noexec: core::sync::atomic::AtomicBool,
     }
 
     impl InstrumentedFs {
-        fn new(inner: crate::test_bundle::MemFs, deny_open: bool) -> Self {
+        fn new(inner: crate::test_bundle::MemFs) -> Self {
             Self {
                 inner,
-                reads: core::sync::atomic::AtomicUsize::new(0),
-                deny_open,
+                read_bytes: core::sync::atomic::AtomicUsize::new(0),
+                revoked: core::sync::atomic::AtomicBool::new(false),
+                noexec: core::sync::atomic::AtomicBool::new(false),
             }
         }
 
-        fn reads(&self) -> usize {
-            self.reads.load(core::sync::atomic::Ordering::Relaxed)
+        /// Serve every later program read as a `noexec` mount does.
+        fn stop_running_programs(&self) {
+            self.noexec
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn read_bytes(&self) -> usize {
+            self.read_bytes.load(core::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// Refuse every later read, as a permission change would.
+        fn revoke(&self) {
+            self.revoked
+                .store(true, core::sync::atomic::Ordering::Relaxed);
+        }
+
+        fn readable(&self) -> Result<(), Errno> {
+            if self.revoked.load(core::sync::atomic::Ordering::Relaxed) {
+                return Err(Errno::PermissionDenied);
+            }
+            Ok(())
+        }
+
+        fn counted(&self, read: Result<usize, Errno>) -> Result<usize, Errno> {
+            if let Ok(bytes) = read {
+                self.read_bytes
+                    .fetch_add(bytes, core::sync::atomic::Ordering::Relaxed);
+            }
+            read
         }
     }
 
@@ -20848,9 +20884,7 @@ mod tests {
             path: &str,
             flags: OpenFlags,
         ) -> Result<(), Errno> {
-            if self.deny_open {
-                return Err(Errno::PermissionDenied);
-            }
+            self.readable()?;
             self.inner.open(uid, caps, path, flags)
         }
 
@@ -20862,9 +20896,23 @@ mod tests {
             offset: u64,
             buf: &mut [u8],
         ) -> Result<usize, Errno> {
-            self.reads
-                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            self.inner.read(uid, caps, path, offset, buf)
+            self.readable()?;
+            self.counted(self.inner.read(uid, caps, path, offset, buf))
+        }
+
+        fn read_program(
+            &self,
+            uid: u32,
+            caps: &dyn tairix_abi::CapabilityQuery,
+            path: &str,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> Result<usize, Errno> {
+            self.readable()?;
+            if self.noexec.load(core::sync::atomic::Ordering::Relaxed) {
+                return Err(Errno::PermissionDenied);
+            }
+            self.counted(self.inner.read_program(uid, caps, path, offset, buf))
         }
 
         fn write(
@@ -21083,7 +21131,7 @@ mod tests {
     fn a_second_body_load_of_a_store_bundle_is_served_from_the_cache() {
         install_trace_filter();
         let (memfs, anchor, run) = crate::test_bundle::composed_bundle(alloc::vec![]);
-        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs, false)));
+        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs)));
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
         install_launch_cache(store);
@@ -21100,16 +21148,16 @@ mod tests {
         let first =
             body_load_bundle(services, 0, &grants, BUNDLE_ROOT).expect("first load verifies");
         assert_eq!(first.run_image(), run.as_slice());
-        let reads_after_first = fs.reads();
+        let reads_after_first = fs.read_bytes();
         assert!(reads_after_first > 0, "the first load reads the bundle");
 
         let second =
             body_load_bundle(services, 0, &grants, BUNDLE_ROOT).expect("second load serves cache");
         assert_eq!(second.run_image(), run.as_slice());
         assert_eq!(
-            fs.reads(),
+            fs.read_bytes(),
             reads_after_first,
-            "a cached launch performs no data reads"
+            "a cached launch reads no byte of the bundle"
         );
     }
 
@@ -21120,10 +21168,7 @@ mod tests {
     fn a_cached_body_load_still_authorises_the_read() {
         install_trace_filter();
         let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
-        // `deny_open` refuses the cache-hit re-authorisation `open`; the
-        // non-cache verify path uses the store's per-file `read`, so the
-        // first load still succeeds and caches.
-        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs, true)));
+        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs)));
         let store: &'static crate::appspawn::AppStore =
             Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
         install_launch_cache(store);
@@ -21139,14 +21184,45 @@ mod tests {
 
         body_load_bundle(services, 0, &grants, BUNDLE_ROOT)
             .expect("first load verifies and caches");
+        fs.revoke();
         // The second load hits the cache, but the secured VFS refuses the
-        // re-authorising open of the entry point: it fails closed.
+        // re-authorising read of the entry point: it fails closed.
         assert!(
             matches!(
                 body_load_bundle(services, 0, &grants, BUNDLE_ROOT),
                 Err(Errno::PermissionDenied)
             ),
             "a cache hit must re-authorise the read and fail closed"
+        );
+    }
+
+    /// A cache hit is a program read like any other: once the mount serving
+    /// the bundle runs no programs, the cached image is refused though the
+    /// entry point is still readable as data.
+    #[test]
+    fn a_cached_body_load_refuses_a_mount_that_runs_no_programs() {
+        install_trace_filter();
+        let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
+        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs)));
+        let store: &'static crate::appspawn::AppStore =
+            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+        install_launch_cache(store);
+        store.note_available();
+        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+        let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
+        let grants = full_grants();
+
+        body_load_bundle(services, 0, &grants, BUNDLE_ROOT)
+            .expect("first load verifies and caches");
+        fs.stop_running_programs();
+        assert_eq!(
+            body_load_bundle(services, 0, &grants, BUNDLE_ROOT).err(),
+            Some(Errno::PermissionDenied)
         );
     }
 
@@ -28771,10 +28847,24 @@ mod tests {
         CallerContext<'static>,
         std::sync::MutexGuard<'static, ()>,
     ) {
+        lock_fixture_on(node, TestArch::with_cpus(1))
+    }
+
+    /// [`lock_fixture`] over `arch`, for a case that moves the caller between
+    /// CPUs.
+    fn lock_fixture_on(
+        node: u64,
+        arch: TestArch,
+    ) -> (
+        &'static RwLock<AddressSpaceRegistry>,
+        KernelSyscallHandlers<'static, TestArch>,
+        CallerContext<'static>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
         let registry = crate::filelock::registry_guard();
         install_trace_filter();
         let sink = make_sink();
-        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(arch)));
         let sched = Box::leak(Box::new(make_sched(arch.clone())));
         let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
         let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
@@ -28819,6 +28909,53 @@ mod tests {
     /// A whole-file request, the shape most of the cases use.
     fn whole() -> (u64, u64) {
         (0, tairix_abi::LOCK_LEN_TO_END)
+    }
+
+    /// A lock waiter parks until the holder releases, and the wake may
+    /// resume it on another core: each park must suspend the waiter where it
+    /// runs then, never through the core it parked on before.
+    #[test]
+    fn a_lock_waiter_parks_on_the_core_it_runs_on() {
+        let (first, second) = (crate::test_boot::claim_cpu(), crate::test_boot::claim_cpu());
+        let (_aspaces, h, ctx, _registry) = lock_fixture_on(43, TestArch::on_cpu(second));
+        let (start, len) = whole();
+        let range = LockRange::new(start, len).expect("range");
+        let holder = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        let waiter = lock_open(&h, &ctx, OpenFlags::READ.union(OpenFlags::WRITE));
+        let lock = |fd, mode| {
+            h.fs_lock(
+                &ctx,
+                fd,
+                mode,
+                LockFlags::empty(),
+                range,
+                tairix_abi::LOCK_WAIT_FOREVER,
+            )
+        };
+        assert_eq!(lock(holder, LockMode::Exclusive), Ok(0));
+
+        h.arch.set_current_cpu(first);
+        let release = || assert_eq!(lock(holder, LockMode::Unlock), Ok(0));
+        // A second park here means the waiter parked through the core it
+        // left: release anyway, so the run ends on the assertions below.
+        let move_to_second = |park| {
+            h.arch.set_current_cpu(second);
+            if park > 1 {
+                release();
+            }
+        };
+        crate::test_boot::with_park_probe(first, move_to_second, |on_first| {
+            crate::test_boot::with_park_probe(
+                second,
+                |_| release(),
+                |on_second| {
+                    assert_eq!(lock(waiter, LockMode::Exclusive), Ok(0));
+                    assert_eq!(on_first.parks(), 1, "the first park, before the move");
+                    assert_eq!(on_second.parks(), 1, "the second, where the waiter runs");
+                },
+            );
+        });
+        assert_eq!(lock(waiter, LockMode::Unlock), Ok(0));
     }
 
     #[test]
@@ -30281,9 +30418,7 @@ mod tests {
                 .committed_base(),
             STACK_COMMITTED_BASE - page
         );
-        // Mapped bytes consume the same budget: with one further page
-        // charged, even the next single-page growth is refused …
-        aspaces.write().charge_aspace_bytes(ProcessId(2), 2 * page);
+        // At the budget, even the next single-page growth is refused …
         assert!(!h.resolve_stack_fault(
             ProcessId(2),
             SecTaskId(2),
@@ -30293,6 +30428,80 @@ mod tests {
         // far inside the default `StackBytes` bound).
         aspaces.write().clear_pinned(ProcessId(2));
         assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1));
+    }
+
+    /// Stack growth joins the process's mapped footprint, so the
+    /// `AddressSpaceBytes` ceiling bounds it as it bounds `mem_map`, and a
+    /// map then sees the grown stack.
+    #[test]
+    fn resolve_stack_fault_is_bounded_by_the_address_space_ceiling() {
+        let (_producer, aspaces, h, _sink) = stack_fault_fixture();
+        let page = PAGE_SIZE as u64;
+        let committed = STACK_TOP - STACK_COMMITTED_BASE;
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), committed);
+        let bound = ResourceLimit::new(committed + page, committed + page).expect("well-formed");
+        aspaces
+            .write()
+            .set_limit(ProcessId(2), LimitKind::AddressSpaceBytes, bound);
+        assert!(
+            !h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+            "two growth pages pass the ceiling"
+        );
+        assert_eq!(aspaces.read().mapped_aspace_bytes(ProcessId(2)), committed);
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        assert_eq!(
+            aspaces.read().mapped_aspace_bytes(ProcessId(2)),
+            committed + page
+        );
+        assert!(
+            !h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - page - 1),
+            "at the ceiling, no further page"
+        );
+        assert_eq!(
+            aspaces.write().try_charge_aspace_bytes(ProcessId(2), page),
+            Err(Errno::OutOfRange),
+            "a map sees the grown stack"
+        );
+    }
+
+    /// A growth charges each page once, however a race or an exhaustion ends
+    /// it: the mapped total stays equal to the stack actually committed.
+    #[test]
+    fn resolve_stack_fault_charges_only_the_pages_it_commits() {
+        let (producer, aspaces, h, _sink) = stack_fault_fixture();
+        let page = PAGE_SIZE as u64;
+        let mapped = |aspaces: &RwLock<AddressSpaceRegistry>| {
+            let aspaces = aspaces.read();
+            (
+                aspaces.mapped_aspace_bytes(ProcessId(2)),
+                aspaces.stack_committed_bytes(ProcessId(2)),
+            )
+        };
+        // A page a racing growth already committed is not charged again.
+        assert!(h.resolve_stack_fault(ProcessId(2), SecTaskId(2), STACK_COMMITTED_BASE - 1));
+        aspaces
+            .write()
+            .try_charge_aspace_bytes(ProcessId(2), page)
+            .expect("room");
+        assert_eq!(
+            aspaces
+                .write()
+                .commit_stack_page(SecTaskId(2), STACK_COMMITTED_BASE - page),
+            0,
+            "already committed"
+        );
+        aspaces.write().credit_aspace_bytes(ProcessId(2), page);
+        let (total, stack) = mapped(aspaces);
+        assert_eq!(total, stack);
+        // An exhaustion part-way gives back what it did not commit.
+        *producer.map_result.lock() = Err(Errno::OutOfMemory);
+        assert!(!h.resolve_stack_fault(
+            ProcessId(2),
+            SecTaskId(2),
+            STACK_COMMITTED_BASE - 4 * page
+        ));
+        let (total, stack) = mapped(aspaces);
+        assert_eq!(total, stack, "the refused walk left no charge behind");
     }
 
     /// A fault that jumps several pages below the committed base (a large
@@ -35023,7 +35232,8 @@ mod tests {
         let (aspaces, h) = pin_fixture();
         aspaces
             .write()
-            .charge_aspace_bytes(ProcessId(5), 3 * PAGE_SIZE as u64);
+            .try_charge_aspace_bytes(ProcessId(5), 3 * PAGE_SIZE as u64)
+            .expect("under the default bounds");
         let before = aspaces.read().mapped_aspace_bytes(ProcessId(5));
         // No global tier installed: a no-op that changes nothing.
         h.ramzip_direct_reclaim(ProcessId(5));
@@ -35111,7 +35321,10 @@ mod tests {
         aspaces
             .write()
             .set_limit(ProcessId(2), LimitKind::PinnedMemoryBytes, bound);
-        aspaces.write().charge_aspace_bytes(ProcessId(2), 3 * page);
+        aspaces
+            .write()
+            .try_charge_aspace_bytes(ProcessId(2), 3 * page)
+            .expect("unpinned, so only the default ceiling applies");
         assert_eq!(h.mem_pin(&ctx), Err(Errno::OutOfRange));
         assert!(!aspaces.read().is_pinned(ProcessId(2)));
         // Shrinking under the bound makes the same pin admissible.
@@ -35139,7 +35352,10 @@ mod tests {
         aspaces
             .write()
             .set_limit(ProcessId(2), LimitKind::PinnedMemoryBytes, bound);
-        aspaces.write().charge_aspace_bytes(ProcessId(2), page);
+        aspaces
+            .write()
+            .try_charge_aspace_bytes(ProcessId(2), page)
+            .expect("unpinned, so only the default ceiling applies");
         assert_eq!(h.mem_pin(&ctx), Ok(0));
         // One more page fits the budget: the bound admits it and the
         // request reaches the (inert) producer.
@@ -35772,6 +35988,8 @@ mod tests {
         // Every node id the handler settled, so a test can assert it settled
         // the caller's own node and nothing else.
         settled: RwLock<alloc::vec::Vec<u32>>,
+        // Every node id the handler marked a key source.
+        key_sources: RwLock<alloc::vec::Vec<u32>>,
         // The block-service endpoint base ids each node declares, keyed by
         // node id, so an orderly-removal test can give a node the endpoints
         // the busy check reasons about. A node absent from the map declares
@@ -35791,6 +36009,7 @@ mod tests {
                 unremovable: RwLock::new(alloc::vec::Vec::new()),
                 health_set: RwLock::new(alloc::vec::Vec::new()),
                 settled: RwLock::new(alloc::vec::Vec::new()),
+                key_sources: RwLock::new(alloc::vec::Vec::new()),
                 endpoints: RwLock::new(alloc::vec::Vec::new()),
             }
         }
@@ -35909,6 +36128,10 @@ mod tests {
             self.settled.write().push(node_id);
             Ok(())
         }
+        fn mark_key_source(&self, node_id: u32) -> Result<(), Errno> {
+            self.key_sources.write().push(node_id);
+            Ok(())
+        }
     }
 
     /// Build a wire-encoded `[HwTreeHeader][HwNode; n]` snapshot at
@@ -35951,6 +36174,9 @@ mod tests {
             Ok(self.kernel_memory.clone())
         }
         fn mounts(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+            Ok(alloc::vec::Vec::new())
+        }
+        fn views(&self, _offset: u64, _max_records: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
             Ok(alloc::vec::Vec::new())
         }
         fn volume_io_health(
@@ -37748,6 +37974,62 @@ mod tests {
             *source.settled.read(),
             alloc::vec![9],
             "a caller with no loaded node settles nothing"
+        );
+    }
+
+    /// `hw_node_key_source` marks the caller's own matched node, resolved
+    /// kernel-side, and a task with no loaded node marks nothing.
+    #[test]
+    fn hw_node_key_source_marks_the_callers_own_node_and_no_other() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        for task in [2, 3] {
+            let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[0u8]);
+            aspaces
+                .write()
+                .register(ProcessId(task), space, physmap)
+                .expect("registration succeeds");
+        }
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
+            .expect("the node has no live driver");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+
+        let driver_caps = make_caps_record(2, &[CapabilityId::INPUT_INJECT], sink);
+        let driver = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &driver_caps,
+        };
+        assert_eq!(h.hw_node_key_source(&driver), Ok(0));
+        assert_eq!(*source.key_sources.read(), alloc::vec![9]);
+
+        let stranger_caps = make_caps_record(3, &[CapabilityId::INPUT_INJECT], sink);
+        let stranger = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &stranger_caps,
+        };
+        assert_eq!(
+            h.hw_node_key_source(&stranger),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            *source.key_sources.read(),
+            alloc::vec![9],
+            "a caller with no loaded node marks nothing"
         );
     }
 
@@ -50951,20 +51233,25 @@ mod tests {
             status(read_watch_batch(&h, &ctx, fd)),
             DirWatchStatus::Changes
         );
-        let backing = crate::fs::MountBacking::new(
-            tairix_abi::driver::DriverHandle::from_raw(10).expect("handle"),
-            None,
-        );
-        fx.mounted
-            .vfs()
-            .expect("installed")
-            .mounts_write()
-            .mount(
-                crate::fs::Path::parse("/Storage/vol/usb").expect("a path"),
-                tairix_abi::driver::filesystem::MountFlags::NOSUID,
-                Some(backing),
-            )
-            .expect("mounted beneath");
+        let backing = tairix_abi::driver::DriverHandle::from_raw(10).expect("handle");
+        {
+            let vfs = fx.mounted.vfs().expect("installed");
+            let mut mounts = vfs.mounts_write();
+            mounts
+                .attach(crate::fs::Attachment::new(
+                    backing,
+                    None,
+                    tairix_abi::driver::filesystem::MountFlags::NOEXEC,
+                ))
+                .expect("attach");
+            mounts
+                .mount(
+                    crate::fs::Path::parse("/Storage/vol/usb").expect("a path"),
+                    tairix_abi::driver::filesystem::MountFlags::default(),
+                    Some(backing),
+                )
+                .expect("mounted beneath");
+        }
         assert_eq!(
             status(read_watch_batch(&h, &ctx, fd)),
             DirWatchStatus::Rescan

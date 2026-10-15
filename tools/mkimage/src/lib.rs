@@ -72,10 +72,11 @@ use tairix_users::{
     AccountState, Gid, GroupRecord, GroupsDb, Identity, Salt, Uid, UserRecord, UsersDb, STORAGE_GID,
 };
 
-/// Sectors in the `ARXFS` root partition: 64 MiB — the skeleton plus
-/// installer headroom. The installer grows the layout on first boot;
-/// `ARXFS::grow` expands a volume to its device, so a card-sized root is
-/// a first-boot job, not an image-build job.
+/// Sectors in the `ARXFS` root partition as the image is built: 64 MiB, the
+/// skeleton plus headroom. The root is the image's last partition, so the
+/// kernel's first writable mount on a larger card extends it to the card's end
+/// and grows the volume into it: a card-sized root is a first-boot job, not an
+/// image-build job.
 pub const ROOT_PART_SECTORS: u64 = 131_072;
 
 /// Everything that can go wrong while authoring an image. Every variant is
@@ -1014,10 +1015,12 @@ mod tests {
         // still *decode* (the program-library derivation reads every
         // planted app-store manifest and fails the build closed on
         // garbage); the `Run` bytes stay synthetic. The store paths mirror
-        // the real installs (`Apps/<name>.app/…`, `Services/<name>.app/…`).
+        // the real installs (`Commands/<name>.app/…`, `Services/<name>.app/…`).
         const RUN: &[u8] = b"a Run rxe image's bytes (synthetic)";
-        let ls_appinfo = crate::library::test_manifest("ls", None, None);
-        let login_appinfo = crate::library::test_manifest("login", None, None);
+        let ls_appinfo =
+            crate::library::test_manifest("ls", tairix_abi::ProgramKind::Command, None, None);
+        let login_appinfo =
+            crate::library::test_manifest("login", tairix_abi::ProgramKind::Service, None, None);
         let app_files: [(&[&[u8]], &[u8]); 4] = [
             (&[b"Commands", b"ls.app", b"AppInfo"], ls_appinfo.as_slice()),
             (&[b"Commands", b"ls.app", b"Run"], RUN),

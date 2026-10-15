@@ -411,7 +411,7 @@ pub fn build_users_root_image_keyed(
     let dev = VecBlock::new(TOTAL_SECTORS);
     let mut fs = ARXFS::format(dev, INODE_COUNT, keying, &mut FixtureEntropy { next: 1 })?;
     let root = fs.root();
-    for name in ["System", "Users", "Apps", "Storage"] {
+    for name in tairix_abi::stored_root_entries() {
         let node = fs.create(root, name.as_bytes(), NodeKind::Directory)?;
         if name == "System" {
             // The time service's state directory, owned by that service

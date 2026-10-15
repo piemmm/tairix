@@ -222,6 +222,7 @@ These are absolute. They override any local convenience.
       modifies, or deletes is one of those, the gate is **not** run: there is
       nothing for it to observe. `charter-cite` scans only
       `.rs`/`.s`/`.toml`/`.sh`/`.yml`/`.yaml`, `spec-review` only `.rs`,
+      `source-text` every source and document type except these four,
       `help-lint` only the `userland/` bundles, and `docs-check` (rustdoc,
       mdBook, the link and stale-symbol checks) only `docs/` — and nothing in
       the workspace compiles, includes, or tests a plan or this charter. A
@@ -607,6 +608,7 @@ tairix/
 │   ├── blkclient/       # Block-service client (RemoteBlock + its RtBlkCall transport).
 │   ├── bootload/        # Firmware-neutral boot-chain loader core.
 │   ├── browse/          # Shared directory-browser engine.
+│   ├── buildcfg/        # Build-script target classification: the freestanding cfg.
 │   ├── caps/            # Capability primitives.
 │   ├── clock/           # Clock-controller side (clock-v1 server).
 │   ├── cmdres/          # Shared command-word resolution policy.
@@ -735,7 +737,6 @@ tairix/
 │   ├── system/          # Long-running system services.
 │   │   ├── init/        # PID 1.
 │   │   ├── devmgr/      # Device manager: hardware-tree match + driver autoload.
-│   │   ├── appmgr/      # Application bundle loader.
 │   │   ├── audiod/      # Audio mixer/router: sole holder of CAP_AUDIO_DEVICE.
 │   │   ├── soundd/      # Cue authority: plays the desktop's sounds.
 │   │   ├── confd/       # App-data service: the per-app settings store.
@@ -911,10 +912,12 @@ an update to this section.
   `rmdir`, and `rename` (at either end, since replacing a name destroys its
   occupant) therefore demand the gate's capability, exactly as a mode or
   ownership change on the node already does.
-- Mounts have their own permission policy (`nosuid`, `nodev`, `noexec`,
-  `ro`, etc.) and the installer's default layout uses them aggressively.
-  The concrete defaults for `/System`, `/Users`, `/Apps`, and `/Storage`
-  are defined in §16.
+- Mounts have their own permission policy (`ro`, `noexec`), and the
+  default layout applies it wherever a different volume or a narrower
+  policy begins. There are no setuid programs or device files, so a Unix
+  mount's `nosuid` and `nodev` have nothing to restrict and do not exist.
+  The concrete defaults for `/System`, `/Users`, and `/Storage` are defined
+  in §16.
 
 ### 5.4 Mandatory rules for every IPC/syscall/driver entry point
 
@@ -1300,12 +1303,11 @@ an update to this section.
        create it.
      - `/System` mounted read-only (the only writable paths inside it
        are `/System/Logs` and `/System/Settings`, and they are mounted
-       `nosuid,nodev,noexec`).
-     - `/Users` mounted `nosuid,nodev`.
-     - `/Apps` mounted `nosuid,nodev` (application binaries are
-       capability-gated, not setuid).
-     - `/Storage` mounted `nosuid,nodev,noexec` by default; per-volume
-       overrides are capability-gated.
+       `noexec`).
+     - `/Users` a plain directory of the root volume `/` mounts.
+     - `/Storage` the catalog of attached volumes, stored on no volume;
+       each volume attached beneath it is mounted `noexec` by default,
+       and per-volume overrides are capability-gated.
   4. Allow expert mode for manual partitioning, but the default is the
      secure layout. Expert mode may not introduce legacy POSIX top-level
      directories (`/etc`, `/home`, `/usr`, `/var`, `/proc`, `/lib`,
@@ -1724,19 +1726,18 @@ source repository (the source layout is §3). It is binding.
 
 ### 16.1 Top-level directories
 
-TAIRiX exposes **exactly four** entries in the default session root
+TAIRiX exposes **exactly three** entries in the default session root
 view. Anything else in that view is a defect.
 
 ```
 /            # the default session root view — a projection, not storage identity
 ├── System/    # All OS-provided files. Read-only at runtime.
 ├── Users/     # One subdirectory per user account.
-├── Apps/      # Installed applications. One bundle per app.
 └── Storage/   # Catalog/view of published non-core storage roots.
 ```
 
-These four are synthetic **view bindings** backed by the first-class
-aliases `System:`, `Users:`, `Apps:`, and `Storage:`, not the canonical
+These three are synthetic **view bindings** backed by the first-class
+aliases `System:`, `Users:`, and `Storage:`, not the canonical
 identity of storage. The canonical identity of a storage root is its root
 ID (`id::<volume-id>/…`) or its alias path (`Alias:/…`), never the `/`
 view path: a process holding the authority to open `Backup:/file` can do
@@ -1791,8 +1792,8 @@ Authoritative subdirectories:
 │             #   These commands follow GNU coreutils options/output (§16.7).
 ├── Applications/
 │             # System application store: the OS-provided GRAPHICAL
-│             #   applications, one §16.5 bundle each (files.app,
-│             #   terminal.app, …). Searched second (§16.8), so a desktop
+│             #   applications, one §16.5 bundle each (terminal.app,
+│             #   view.app, …). Searched second (§16.8), so a desktop
 │             #   application is typeable by name too.
 │             # Both program stores hold FULL self-contained on-disk
 │             #   bundles — each bundle's own Run rxe, AppInfo, Help/, etc.
@@ -1821,8 +1822,12 @@ Authoritative subdirectories:
 │   └── Policy/   # MAC and capability policy.
 ├── Printing/    # Print spooler and drivers' user-space services.
 ├── Zoneinfo/    # Compiled IANA civil-time zone rules, read-only shipped data.
-├── Logs/        # Append-only structured logs (writable; nosuid,nodev,noexec).
-├── Settings/    # Machine-wide settings (writable; nosuid,nodev,noexec).
+├── Logs/        # Append-only structured logs (writable; noexec).
+├── Settings/    # Machine-wide settings (writable; noexec).
+├── Components/  # Parts of the OS the system starts by path: the desktop
+│             #   session and the file manager, Settings and Date & Time
+│             #   it opens. One §16.5 bundle each, never searched by a
+│             #   typed word (§16.8); a component runs only from here.
 └── Services/    # Long-running system services. A service is an app:
                  #   each ships as its own self-contained, signed
                  #   `<name>.app` bundle (§16.5) under /System/Services/,
@@ -1849,7 +1854,7 @@ unprovisioned system simply has no file, and a consumer fails closed rather
 than fabricating one.
 
 `/System/Logs` and `/System/Settings` are the only writable paths
-beneath `/System`. They are mounted `nosuid,nodev,noexec`; the rest of
+beneath `/System`. They are mounted `noexec`; the rest of
 `/System` is read-only. Write access is gated first by the per-inode
 owner/mode/ACL model (§5.3) under the caller's kernel-attested identity —
 these subtrees are owned by the system user with restrictive modes, so
@@ -1867,7 +1872,7 @@ never by vendor (§8): the namespace is `/System/Drivers/<class>[_<subtype>]/`
 `/System/Drivers/broadcom_usb/broadusb1234` (vendor as a namespace segment) is a
 defect.
 
-### 16.3 `/Users`, `/Apps`, `/Storage`
+### 16.3 `/Users`, `/Storage`
 
 - `/Users/<username>/` is the only place user-owned files live. It
   contains at least `UserFiles/` (the user's own files, holding
@@ -1920,27 +1925,24 @@ defect.
   trees, because it attests who owns the application's *data* and not who owns
   one file.
   See `plans/APPDATA.md`.
-  `/Users` is mounted `nosuid,nodev`.
+  `/Users` is a plain directory of the root volume, not a mount of its own.
   A store carries the same directory name at every scope, so the user's
   own stores are exactly the system stores' names under their home; both
   are on the fixed lookup order (§16.8) after the system pair, which is
-  what makes a user's own commands typeable with no `PATH` edit. `man`'s
-  recursive bundle search walks them after `/Apps`.
-- `/Apps/<Name>.app/` is the only place machine-wide applications live
-  (see §16.5); a user's own bundles live under their own two stores above.
-  Bundles in any of these stores may be filed in nested plain
-  subdirectories (`/Apps/games/chess.app`), and `man`'s recursive bundle
-  search finds their help wherever they are filed — a `.app` directory
-  itself is a sealed unit, never a container of further apps. `/Apps` is
-  mounted `nosuid,nodev`. It is deliberately **not** on the fixed lookup
-  order (§16.8): a machine-wide installed bundle is launched by the
-  desktop or by an explicit path, and appears on the command path only if
-  the user adds it to `PATH`. Apps acquire privilege through capabilities
-  declared in their manifest, never through setuid.
-- `/Storage/<volume>/` is where mounted volumes appear (removable media,
-  extra disks, network shares). Default mount flags are
-  `nosuid,nodev,noexec`; relaxations require `CAP_FS_MOUNT_RELAX` and
-  are recorded in the audit log.
+  what makes a user's own commands typeable with no `PATH` edit.
+- Machine-wide applications live only in `/System/Applications` (§16.2),
+  written by the installer and the updater under `CAP_SYSTEM_UPDATE`; a
+  user's own bundles live under their own two stores above. Bundles in a
+  user's stores may be filed in nested plain subdirectories
+  (`Applications/games/chess.app`), and `man`'s recursive bundle search
+  finds their help wherever they are filed — a `.app` directory itself is
+  a sealed unit, never a container of further apps. Apps acquire privilege
+  through capabilities declared in their manifest, never through setuid.
+- `/Storage/<volume>/` is where attached volumes appear (removable media,
+  extra disks, network shares). Each is mounted `noexec` by default;
+  relaxations require `CAP_FS_MOUNT_RELAX` and are recorded in the audit
+  log. `/Storage` itself is the catalog of those volumes: it is stored on
+  no volume, and nothing can be stored in it.
 
 ### 16.4 Shared libraries
 
@@ -1986,11 +1988,11 @@ dynamically linked.)
 
 ### 16.5 Application bundles (`.app`)
 
-An installed application is a directory named `<Name>.app` placed
-directly under `/Apps/`. The bundle layout is fixed:
+An application is a directory named `<Name>.app` in one of the program
+stores (§16.2, §16.3). The bundle layout is fixed:
 
 ```
-/Apps/Example.app/
+/System/Applications/Example.app/
 ├── AppInfo            # Signed manifest. Required. See below.
 ├── Run                # Entry-point rxe binary. Required.
 ├── Code/              # Additional rxe binaries / plugins.
@@ -2026,17 +2028,18 @@ or help may live.
 - **An app's code is NEVER compiled into, embedded in, or served from the
   kernel, the image builder, or any other component.** The `Run` binary (and
   every `Code/` binary) is an `rxe` file authored **on the volume inside the
-  bundle**, loaded and launched through `appmgr` with the full signature +
-  capability + interface-hash checks (§9, §18). Baking an application's
+  bundle**, loaded and launched by the kernel's `spawn` through the shared
+  bundle load gate (`lib/appload`) with the full signature + capability +
+  interface-hash checks (§9, §18). Baking an application's
   `rxe` into the kernel image and dispatching it by a byte-exact in-kernel path
   lookup, embedding an app binary via `include_bytes!` / `include!` into a
   kernel or tool crate, or shipping a compiled-in registry of "which apps
   exist", is exactly the defect this rule forbids: it makes the app *not*
   self-contained, hides it from the on-disk bundle a user browses (a bundle
   directory that shows only `Help/` because `Run` lives in the kernel is this
-  defect), and bypasses the `appmgr` verification path. An app that is not a
-  complete, launchable, verifiable directory under `/Apps` (or one of the
-  `/System` program stores, §16.2) is a defect, regardless of whether it runs.
+  defect), and bypasses the load gate's verification. An app that is not a
+  complete, launchable, verifiable directory in a program store (§16.2,
+  §16.3) is a defect, regardless of whether it runs.
 - **The bundle is the only home for the app's own libraries.** A static
   library or private shared library used *only* by this app is built into the
   bundle — statically linked into its binaries, or placed in the bundle's
@@ -2060,9 +2063,12 @@ or help may live.
 and declares at minimum:
 
 - Bundle identifier, human-readable name, version.
-- The program's kind — `command`, `application`, or `service` — which is
-  what decides the store the bundle installs into (§16.2, §16.8) and is the
-  only place that decision is recorded.
+- The program's kind — `command`, `application`, `service`, or
+  `component` — which is what decides the store the bundle installs into
+  (§16.2, §16.8) and is the only place that decision is recorded. It is
+  signed with the rest of the manifest, and the load gate refuses a bundle
+  launched from a store its kind does not name: a service or component runs
+  only from its own store, and each system store holds only its own kind.
 - Target ABI version (`abi-vN`) and required syscall hashes.
 - The exact set of capabilities the app requests (§5.2). The kernel
   grants only the intersection of these with the launching user's
@@ -2224,17 +2230,18 @@ four directories, followed by the user's `PATH`. The order is binding:
   `PATH` text cannot read as moving a store later in the order, and no
   resolution pays for a duplicate lookup (§2.16). An empty `PATH` entry is
   skipped, never widened into a current-directory search.
-- **A session's default `PATH` never repeats the prefix.** Login exports
-  only what is genuinely additional (`/Apps`, §16.3); listing a store that
-  is already built in would be duplication and would misleadingly imply the
-  store is overridable.
+- **A session has no default `PATH`.** The prefix names every program
+  store, so login exports none; listing a store that is already built in
+  would be duplication and would misleadingly imply the store is
+  overridable.
 - **Resolution is deterministic and fails closed.** The first candidate
   found runs; an unresolved name is `command not found` (`127`) and a
   resolved-but-non-executable bundle is `command not executable` (`126`).
   "Try everything until one runs" is forbidden (§2.1).
 
 Which store a shipped bundle lands in is decided by that bundle's own signed
-manifest kind (`command`, `application`, `service`) and by nothing else — no
+manifest kind (`command`, `application`, `service`, `component`) and by
+nothing else — no
 list of "which programs are commands" exists in the kernel, the image
 builder, or a fixture (§16.5, §2.2). The build refuses two bundles claiming
 the same name, so one store can never shadow a name in another by accident.

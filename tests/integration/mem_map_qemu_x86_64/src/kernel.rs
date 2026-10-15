@@ -69,9 +69,8 @@ static UNMAP_OK: AtomicBool = AtomicBool::new(false);
 /// cannot re-enter the test logic.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
-/// Static heap for the bump allocator (per the production bin); the boot
-/// pipeline and the spawn caller's startup-vector block allocate from it.
-static mut HEAP: Heap = Heap::ZERO;
+/// The global allocator's arena.
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -79,7 +78,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Page-table pool backing the new address space (lives in `.bss`).
 static PAGE_TABLE_POOL: paging::PageTablePool = paging::PageTablePool::new();

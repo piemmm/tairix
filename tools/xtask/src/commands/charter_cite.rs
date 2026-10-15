@@ -44,6 +44,8 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use super::source_tree;
+
 /// The charter file, both the label source and the name rule 1 refuses.
 const CHARTER: &str = "AGENTS.md";
 
@@ -536,30 +538,14 @@ fn scan_paragraph(text: &str, labels: &BTreeSet<String>) -> Vec<(usize, &'static
 pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
     let labels = charter_labels(root)?;
     let mut out = Vec::new();
-    let mut dirs = vec![root.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("charter-cite: cannot read {}: {e}", dir.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("charter-cite: dir entry: {e}"))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| format!("charter-cite: file type {}: {e}", path.display()))?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if file_type.is_dir() {
-                if name == "target" || name == ".git" {
-                    continue;
-                }
-                dirs.push(path);
-            } else if file_type.is_file() && name != SELF_FILE {
-                if let Some(syntax) = Syntax::of(&name) {
-                    scan_file(&path, &relative(root, &path), syntax, &labels, &mut out)?;
-                }
+    source_tree::for_each_file(root, "charter-cite", |path, rel, name| {
+        if name != SELF_FILE {
+            if let Some(syntax) = Syntax::of(name) {
+                scan_file(path, rel, syntax, &labels, &mut out)?;
             }
         }
-    }
+        Ok(())
+    })?;
     out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
     Ok(out)
 }
@@ -678,13 +664,6 @@ fn line_of<'a>(para: &[(usize, &'a str)], at: usize) -> Option<(usize, &'a str)>
         base += entry.1.len() + 1;
     }
     last
-}
-
-fn relative(base: &Path, path: &Path) -> String {
-    path.strip_prefix(base)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
 
 /// Run the check, printing a report and failing when any citation remains.

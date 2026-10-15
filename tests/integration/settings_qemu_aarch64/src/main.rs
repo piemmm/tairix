@@ -125,7 +125,7 @@ mod kernel {
             if field_str(event, "bundle").is_some_and(|bundle| {
                 names_bundle(
                     bundle,
-                    tairix_abi::SYSTEM_APPLICATION_STORE,
+                    tairix_abi::SYSTEM_COMPONENT_STORE,
                     SETTINGS_APP_NAME,
                 )
             }) {

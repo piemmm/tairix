@@ -78,7 +78,8 @@ pub enum PartitionType {
     /// signatures the load gate verifies, not from encryption.
     ARXFSSystem,
     /// The `ARXFS` data-root partition, plaintext or encrypted; carries
-    /// `/Users`, `/Apps`, `/Storage`, and `/System/Security`.
+    /// `/Users`, the writable `/System/Logs` and `/System/Settings`, and
+    /// `/System/Security`.
     ARXFSRoot,
     /// Any other partition; TAIRiX's boot path does not consume it.
     Other,
@@ -203,6 +204,42 @@ pub fn parse_partition_table<B: Block>(dev: &mut B) -> Result<PartitionTable, Pa
         read_lba0(dev, &geo, &mut lba0)?;
         mbr::parse(&lba0).map_err(PartitionError::Mbr)
     }
+}
+
+/// Grow the data root's partition on `dev` to the end of the medium, when it
+/// is the last partition and the medium reaches past it — the shape of an
+/// image written to a larger card — and make the new table durable.
+///
+/// Answers the grown extent, or `None` when there was nothing to grow. Only
+/// an MBR is grown: a GPT disk answers `None`, since moving its backup header
+/// is a different operation.
+///
+/// # Errors
+///
+/// A [`PartitionError`] if the table cannot be read or is malformed, or the
+/// device refuses the write or the barrier after it.
+pub fn grow_root_to_medium<B: Block>(dev: &mut B) -> Result<Option<Partition>, PartitionError> {
+    let geo = dev.geometry()?;
+    if gpt::is_gpt_disk(dev, &geo)? {
+        return Ok(None);
+    }
+    let bs = geo.block_size as usize;
+    if !(mbr::MBR_SECTOR_LEN..=gpt::MAX_BLOCK_SIZE).contains(&bs) {
+        return Err(PartitionError::NoScheme);
+    }
+    let mut block = [0u8; gpt::MAX_BLOCK_SIZE];
+    let block = &mut block[..bs];
+    dev.read_blocks(0, block)?;
+    let mut sector = [0u8; mbr::MBR_SECTOR_LEN];
+    sector.copy_from_slice(&block[..mbr::MBR_SECTOR_LEN]);
+    let Some(grown) = mbr::grow_root(&mut sector, geo.block_count).map_err(PartitionError::Mbr)?
+    else {
+        return Ok(None);
+    };
+    block[..mbr::MBR_SECTOR_LEN].copy_from_slice(&sector);
+    dev.write_blocks(0, block)?;
+    dev.flush()?;
+    Ok(Some(grown))
 }
 
 /// Read LBA 0 into a [`mbr::MBR_SECTOR_LEN`]-byte buffer regardless of the

@@ -32,6 +32,8 @@
 
 use std::path::Path;
 
+use super::source_tree;
+
 /// Directory prefixes (workspace-relative, `/`-separated) where
 /// target-conditional compilation is permitted by.
 const ALLOWED: &[&str] = &["kernel/arch/", ".cargo/", "tools/mkimage/", "tools/xtask/"];
@@ -92,60 +94,36 @@ pub struct Violation {
 /// outside the allow-list and grandfather list.
 pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
     let mut out = Vec::new();
-    let mut dirs = vec![root.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("cfg-check: cannot read {}: {e}", dir.display()))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("cfg-check: dir entry: {e}"))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .map_err(|e| format!("cfg-check: file type {}: {e}", path.display()))?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if file_type.is_dir() {
-                if name == "target" || name == ".git" {
-                    continue;
-                }
-                dirs.push(path);
-            } else if file_type.is_file() && name.ends_with(".rs") {
-                let rel = relative(root, &path);
-                if rel.starts_with(INTERPRETER_GATE_EXEMPT) {
-                    continue;
-                }
-                let src = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("cfg-check: cannot read {}: {e}", path.display()))?;
-                if is_freestanding_port(&rel) {
-                    scan_lines(
-                        &src,
-                        &rel,
-                        (Rule::ArchGateWithoutOs, arch_gate_lacks_os),
-                        &mut out,
-                    );
-                } else if !is_allowed(&rel) {
-                    scan_lines(
-                        &src,
-                        &rel,
-                        (Rule::TargetConditional, line_offends),
-                        &mut out,
-                    );
-                }
-                let lines: Vec<&str> = src.lines().collect();
-                out.extend(interpreter_gates(&src).into_iter().map(|line| {
-                    Violation {
-                        path: rel.clone(),
-                        line,
-                        text: lines
-                            .get(line - 1)
-                            .map_or("", |text| text.trim())
-                            .to_string(),
-                        rule: Rule::InterpreterGate,
-                    }
-                }));
-            }
+    source_tree::for_each_file(root, "cfg-check", |path, rel, name| {
+        if !source_tree::is_rust(name) || rel.starts_with(INTERPRETER_GATE_EXEMPT) {
+            return Ok(());
         }
-    }
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| format!("cfg-check: cannot read {}: {e}", path.display()))?;
+        if is_freestanding_port(rel) {
+            scan_lines(
+                &src,
+                rel,
+                (Rule::ArchGateWithoutOs, arch_gate_lacks_os),
+                &mut out,
+            );
+        } else if !is_allowed(rel) {
+            scan_lines(&src, rel, (Rule::TargetConditional, line_offends), &mut out);
+        }
+        let lines: Vec<&str> = src.lines().collect();
+        out.extend(interpreter_gates(&src).into_iter().map(|line| {
+            Violation {
+                path: rel.to_string(),
+                line,
+                text: lines
+                    .get(line - 1)
+                    .map_or("", |text| text.trim())
+                    .to_string(),
+                rule: Rule::InterpreterGate,
+            }
+        }));
+        Ok(())
+    })?;
     out.retain(|v| !is_grandfathered(&v.path));
     out.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
     Ok(out)
@@ -235,12 +213,20 @@ fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// A line offends when it mentions `cfg` and a forbidden predicate key.
+/// A line offends when it names `cfg` and a forbidden predicate key.
 /// Pairing the two keeps plain prose (a doc comment that merely names an
 /// architecture) from tripping the check while still catching every
 /// `cfg`/`cfg_attr`/`cfg!` form.
 fn line_offends(line: &str) -> bool {
-    line.contains("cfg") && FORBIDDEN_KEYS.iter().any(|k| line.contains(k))
+    names_cfg(line) && FORBIDDEN_KEYS.iter().any(|k| line.contains(k))
+}
+
+/// Whether `line` names `cfg` or `cfg_attr` as a whole identifier, so an
+/// identifier merely spelled with those letters — a `tairix_buildcfg` path —
+/// is not read as a predicate.
+fn names_cfg(line: &str) -> bool {
+    line.split(|c: char| !is_ident(c))
+        .any(|word| word == "cfg" || word == "cfg_attr")
 }
 
 /// Inside a freestanding port: a `cfg` gating on `target_arch` alone.
@@ -254,7 +240,7 @@ fn arch_gate_lacks_os(line: &str) -> bool {
     if trimmed.starts_with("//") {
         return false;
     }
-    line.contains("cfg") && line.contains("target_arch") && !line.contains("target_os")
+    names_cfg(line) && line.contains("target_arch") && !line.contains("target_os")
 }
 
 fn is_allowed(rel: &str) -> bool {
@@ -267,13 +253,6 @@ fn is_freestanding_port(rel: &str) -> bool {
 
 fn is_grandfathered(rel: &str) -> bool {
     GRANDFATHERED.iter().any(|p| rel.starts_with(p))
-}
-
-fn relative(base: &Path, path: &Path) -> String {
-    path.strip_prefix(base)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
 
 /// Run the check, printing a report and returning an error if any
@@ -392,6 +371,17 @@ fn my_cfg(miri: u32) -> u32 { miri }
         ));
         assert!(!line_offends("// runs on the x86_64 target_arch in prose"));
         assert!(!line_offends("#[cfg(target_os = \"none\")]"));
+    }
+
+    #[test]
+    fn an_identifier_spelled_with_cfg_is_not_a_predicate() {
+        assert!(line_offends("if cfg!(target_arch = \"aarch64\") {"));
+        assert!(!line_offends(
+            "    tairix_buildcfg::native_arch_of(target_os, target_arch).is_some()"
+        ));
+        assert!(!arch_gate_lacks_os(
+            "    let isa = buildcfg_arch(target_arch);"
+        ));
     }
 
     #[test]

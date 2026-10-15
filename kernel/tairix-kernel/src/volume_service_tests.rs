@@ -299,6 +299,37 @@ fn register_endpoint(id: u64, owner: u64) -> StdArc<CallEndpoint> {
 }
 
 #[test]
+fn a_recovered_volume_is_served_only_under_its_recovered_posture() {
+    let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
+    let handle = tairix_abi::DriverHandle::from_raw(0x7A11).expect("handle");
+    let path = tairix_kernel_core::Path::parse("/Storage/usb9").expect("path");
+    vfs.mounts_write()
+        .attach_at(
+            tairix_kernel_core::Attachment::new(handle, None, super::mount_flags(false)),
+            path.clone(),
+            super::mount_template(None),
+        )
+        .expect("the volume was attached writable");
+    let mut served = false;
+    super::reattach_then_serve(
+        &vfs,
+        tairix_kernel_core::Attachment::new(handle, None, super::mount_flags(true)),
+        path.clone(),
+        super::mount_template(None),
+        || {
+            served = true;
+            assert!(
+                vfs.mounts().resolve(&path).is_read_only(),
+                "the live driver is served only once the mount is read-only"
+            );
+            Ok(())
+        },
+    )
+    .expect("the volume is served again");
+    assert!(served);
+}
+
+#[test]
 fn an_unwired_service_fails_closed() {
     let service = RuntimeVolumeService::new();
     let attach = VolumeAttachRequest {
@@ -769,6 +800,19 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
             .all(|r| r.source_bytes() != b"usb2"),
         "the force-unmounted volume leaves the mount snapshot"
     );
+    assert_every_attached_volume_is_served();
+}
+
+/// A volume that leaves leaves the namespace, not only the driver registry:
+/// every volume the mount table still holds has a live driver.
+fn assert_every_attached_volume_is_served() {
+    let volumes = LATE_FILESYSTEM.vfs().expect("installed").mounts().volumes();
+    assert!(
+        volumes
+            .iter()
+            .all(|(volume, _)| LATE_FILESYSTEM.driver(volume.driver()).is_ok()),
+        "a retracted volume is still attached: {volumes:?}"
+    );
 }
 
 /// Surprise removal with nothing uncommitted: the volume is simply
@@ -807,6 +851,7 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
         Err(Errno::NotFound),
         "nothing remains to detach"
     );
+    assert_every_attached_volume_is_served();
 }
 
 /// One yank round for the re-insert scenarios: format a FAT32 image

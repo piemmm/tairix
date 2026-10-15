@@ -86,3 +86,6 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
 tairix-curses = { path = "../../../lib/curses", version = "=0.0.0", features = [
     "program",
 ] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

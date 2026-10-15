@@ -19,8 +19,8 @@ structured document per command or topic, per language. `man` resolves
 shown always documents the program the shell would run for the same word;
 `PATH` can neither reorder nor override that prefix. A trailing `.app`
 names the bundle directly. When none of those holds the word, `man`
-searches the app stores recursively — `/Apps` first, then your own
-`Commands` and `Applications` folders in your home — so a bundle filed
+searches your own `Commands` and `Applications` folders in your home
+recursively, so a bundle filed
 away in nested folders is still found; the search never looks inside
 another bundle, and the shallowest match wins.
 

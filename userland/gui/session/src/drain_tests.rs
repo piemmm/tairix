@@ -336,7 +336,8 @@ fn notes() -> DragItems {
 /// The target the program's slots offer a dragged file to.
 fn editor() -> DropTarget {
     DropTarget {
-        run_path: BundleRunPath::new("/Apps/textedit.app/Run").expect("a valid path"),
+        run_path: BundleRunPath::new("/System/Applications/textedit.app/Run")
+            .expect("a valid path"),
         writes_documents: true,
     }
 }

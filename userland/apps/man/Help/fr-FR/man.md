@@ -19,9 +19,9 @@ le préfixe fixe de magasins `/System/Commands`, `/System/Applications`,
 `PATH` — la page affichée documente donc toujours le programme que
 l'interpréteur lancerait pour le même mot ; `PATH` ne peut ni réordonner
 ni remplacer ce préfixe. Un suffixe `.app` nomme directement le paquet.
-Quand aucun d'eux ne contient le mot, `man` parcourt les magasins
-d'applications récursivement — d'abord `/Apps`, puis vos propres dossiers
-`Commands` et `Applications` de votre répertoire personnel — ainsi un
+Quand aucun d'eux ne contient le mot, `man` parcourt
+récursivement vos propres dossiers `Commands` et `Applications` de votre
+répertoire personnel ; ainsi un
 paquet rangé dans des dossiers imbriqués est tout de même trouvé ; la
 recherche ne regarde jamais à l'intérieur d'un autre paquet, et la
 correspondance la moins profonde l'emporte.

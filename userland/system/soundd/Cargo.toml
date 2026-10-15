@@ -42,3 +42,6 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", optional
 [dev-dependencies]
 # The encoder the tests author their sounds with.
 tairix-sound = { path = "../../../lib/sound", version = "=0.0.0", features = ["encode"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

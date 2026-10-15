@@ -37,6 +37,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `SYSTEM_IDENTITY`       | none                   | no      |
 | `UPTIME`                | none                   | no      |
 | `MOUNT_LIST`            | none                   | no      |
+| `VIEW_LIST`             | none                   | no      |
 | `RESOURCE_LIMITS`       | none (self-scoped)     | no      |
 | `PROCESS_IDENTITY`      | none (self-scoped)     | no      |
 | `LOAD_AVERAGE`          | none                   | no      |
@@ -89,11 +90,19 @@ own processes") require no capability; the global view does
 `PROCESS_FLAG_SANDBOXED` for a parser sandbox worker, whose parent link
 names its owner; every other bit is reserved, and a record carrying one is
 refused. The hardware-tree query gates the read-only view of
-the detected hardware tree (`AGENTS.md` §18.4). `MOUNT_LIST` is ungated:
-the mount table is system-wide and secret-free, so — like `UPTIME` and
-`SYSTEM_IDENTITY` — any task may read it; the privileged *act* of
-mounting is gated separately by `CAP_FS_MOUNT` (`AGENTS.md` §5.2) and is
-not part of this read-only API. `RESOURCE_LIMITS` is self-scoped — it
+the detected hardware tree (`AGENTS.md` §18.4). `MOUNT_LIST` and
+`VIEW_LIST` are ungated: the mount table is system-wide and secret-free, so
+— like `UPTIME` and `SYSTEM_IDENTITY` — any task may read it; the
+privileged *act* of mounting is gated separately by `CAP_FS_MOUNT`
+(`AGENTS.md` §5.2) and is not part of this read-only API. `MOUNT_LIST`
+reports each attached volume once — its source, type, attach flags,
+capacity, availability, medium and identity, and the view path showing its
+root — and `VIEW_LIST` each view binding: its path, the subtree of the
+volume it shows, the flags it narrows that volume to, and the volume's
+identity, so a consumer resolving a path takes the covering binding and
+joins it to its volume (`tairix_procinfo::Namespace`). A binding showing no
+volume, the `/Storage` catalog, carries the all-zero identity and so joins
+to nothing. `RESOURCE_LIMITS` is self-scoped — it
 returns the *caller's own* effective resource limits and live usage
 (`AGENTS.md` §24.3) — so, like `SELF_PROCESS_LIST`, it needs no capability;
 observing another principal's limits would be a separate, gated query.
@@ -732,16 +741,19 @@ the request/render libraries stay testable against in-memory fixtures.
 - [`MountRecord`] — one mount-table entry: the backing `source` (bounded
   by [`MOUNT_SOURCE_MAX`]), the `target` mount point ([`MOUNT_TARGET_MAX`]),
   the driver `fstype` ([`MOUNT_FSTYPE_MAX`]), the [`MountFlags`]
-  mount-policy bitmap (`ro`/`nosuid`/`nodev`/`noexec`), the volume's live
+  mount-policy bitmap (`ro`/`noexec`), the volume's live
   [`MountAvailability`] (so neither a surprise-removed volume nor one on a
   composed backing that has lost redundancy reads as healthy — a degraded
   array's completions carry that state across the block-service seam,
   [block drivers](../drivers/block.md)), its stable 16-byte volume identity ([`MOUNT_VOLUME_ID_LEN`],
   all-zero when the mount publishes none — the identity a `volume_detach`
   request names), the storage `medium` of the block device backing it, and
-  the volume's space accounting as a `VolumeStats` usage block (block size
-  plus 64-bit total/free/available block and inode counts) — the figures
-  `df` renders. Both the flag field and the usage block reuse the
+  the volume's space accounting as a `VolumeStats` usage block (block size,
+  whether the volume is down to its reserve, and 64-bit
+  total/free/available block and inode counts) — the figures `df` renders.
+  On the wire the reserve flag is the usage block's fifth byte, `0` or `1`;
+  any other value, or a non-zero byte in the three after it, refuses the
+  record. Both the flag field and the usage block reuse the
   filesystem-driver ABI's types rather than re-declaring them
   (`AGENTS.md` §2.2); a mount with no live backing volume carries the
   all-zero usage (the honest "no capacity known"), and a decode refuses an
@@ -776,9 +788,9 @@ the request/render libraries stay testable against in-memory fixtures.
   another. The two *shares* it offers are deliberately distinct and both
   named: `used_permille` is of the whole medium, which is what a desktop
   capacity bar means, while `df`'s GNU `Use%` is of `usable()` — what a
-  caller may actually allocate. A withheld metadata reserve is unallocated
-  to both numerators, but only the first counts it as part of the medium,
-  so on a reserved format `df` reads the higher figure.
+  caller may actually allocate. A withheld reserve is unallocated to both
+  numerators, but only the first counts it as part of the medium, so on a
+  reserved format `df` reads the higher figure.
 
   [`MountAvailability::health`] bands the six availability states into the
   three [`VolumeHealth`] answers a reader acts on — nothing to do, watch it,

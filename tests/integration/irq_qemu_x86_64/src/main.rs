@@ -95,9 +95,8 @@ mod kernel {
 
     // --- Bump-allocator-backed `#[global_allocator]` ---------------
 
-    /// Static heap for the bump allocator. Mirrors the production
-    /// `tairix-kernel` binary's allocator wiring.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by the module-private `HEAP` static.
     ///
@@ -106,7 +105,7 @@ mod kernel {
     /// `syscall_dispatch_qemu` template.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     // --- Stable audit identifiers --------------------------------
 

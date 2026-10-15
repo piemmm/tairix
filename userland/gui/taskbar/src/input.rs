@@ -214,6 +214,9 @@ pub enum TaskbarResponse {
     /// opens Settings at the pane that configures the interfaces; the bar
     /// changes nothing itself.
     OpenNetworkSettings,
+    /// The system menu's *Settings…* row was chosen. The embedder opens the
+    /// Settings component; the bar changes nothing itself.
+    OpenSettings,
 
     /// A gesture on the Switchboard capsule (or the readout's "Open
     /// Switchboard" safe action) asked to open the Switchboard window at a

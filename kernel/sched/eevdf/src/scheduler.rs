@@ -863,7 +863,7 @@ impl<A: SchedulerArch> Scheduler<A> {
                 self.drop_record(task);
             }
             // A woken task rejoins with zero lag, so the run is not charged.
-            Settled::Park => park::commit_park(task, |woken| self.admit_woken(woken)),
+            Settled::Woken => self.admit_woken(task),
             Settled::Released => {}
             Settled::Requeue => {
                 let dest = self.class_home(task.load_priority(), cpu);

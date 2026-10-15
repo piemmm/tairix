@@ -9,7 +9,7 @@ use alloc::collections::BTreeSet;
 
 use super::*;
 use crate::pagecache::MAX_CACHED_PAGES;
-use crate::wcache::TestWritebackHost;
+use crate::wcache::TestVolumeHost;
 use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::driver::filesystem::{
@@ -2559,10 +2559,10 @@ struct TestClusterCache {
 }
 
 impl ClusterCache for TestClusterCache {
-    fn get(&mut self, phys: u64) -> Option<&[u8]> {
+    fn lend(&mut self, phys: u64, read: &mut dyn FnMut(&[u8]) -> usize) -> Option<usize> {
         let entry = self.entries.get(&phys)?;
         CacheCounts::bump(&self.counts.hits);
-        Some(entry.1.as_slice())
+        Some(read(&entry.1))
     }
 
     fn put(&mut self, phys: u64, stored: u64, plaintext: &[u8]) {
@@ -2791,8 +2791,8 @@ fn a_wrong_sized_cache_entry_fails_closed_instead_of_stalling() {
     struct LyingCache;
 
     impl ClusterCache for LyingCache {
-        fn get(&mut self, _phys: u64) -> Option<&[u8]> {
-            Some(&[])
+        fn lend(&mut self, _phys: u64, read: &mut dyn FnMut(&[u8]) -> usize) -> Option<usize> {
+            Some(read(&[]))
         }
 
         fn put(&mut self, _phys: u64, _stored: u64, _plaintext: &[u8]) {}
@@ -3474,19 +3474,27 @@ fn a_volume_with_no_room_for_a_scratch_array_says_so() {
         assert!(idx <= 10_000, "never ran out of space");
     }
     assert!(idx > 0, "the volume holds something to verify");
-    // Then take the last of it a block at a time, down to the metadata reserve
-    // the allocator keeps back so a shrinking transaction can still
-    // copy-on-write itself.
+    // Then take the last of it a block at a time, until only the reserve and
+    // what ordinary allocation can no longer use are left.
     let mut at = 0;
     while fs.write_at(root, b"f0", at, &[0x11]).is_ok() {
         at += 512;
         assert!(at < 1 << 20, "never ran out of space");
     }
-    assert!(
-        fs.committed_free_count() <= 17,
-        "free after filling: {}",
-        fs.committed_free_count()
+    assert_eq!(
+        fs.create(root, b"one-more", NodeKind::RegularFile),
+        Err(DriverError::NoSpace),
+        "ordinary space is spent"
     );
+    // What ordinary allocation could not pair for metadata, the system's own
+    // writes take, so no run is left outside the reserve for a scratch array.
+    fs.set_allocation_class(AllocationClass::System);
+    while fs.has_ordinary_space().expect("writable") {
+        fs.write_at(root, b"f0", at, &[0x11])
+            .expect("the system writes on");
+        at += 512;
+    }
+    fs.set_allocation_class(AllocationClass::Ordinary);
 
     let report = scrub_full(&mut fs);
     assert_eq!(report.pass, PassVerdict::Complete, "{report:?}");
@@ -5049,7 +5057,7 @@ enum Publish {
     PerOperation,
     /// A host whose clock the test controls, so operations join one
     /// transaction until something closes it.
-    AsOneBatch(&'static TestWritebackHost),
+    AsOneBatch(&'static TestVolumeHost),
 }
 
 impl Publish {
@@ -5057,7 +5065,7 @@ impl Publish {
     fn apply(self, fs: ARXFS<MemBlock>) -> ARXFS<MemBlock> {
         match self {
             Self::PerOperation => fs,
-            Self::AsOneBatch(host) => fs.with_writeback_host(TestWritebackHost::volume(), host),
+            Self::AsOneBatch(host) => fs.with_volume_host(TestVolumeHost::volume(), host),
         }
     }
 }
@@ -5300,7 +5308,7 @@ fn crash_replay_at_every_step_of_a_batch_publishes_all_of_it_or_none() {
     // or none — a subset would mean a caller was told an operation happened
     // that the volume then forgot while keeping a later one.
     let baseline = crash_baseline();
-    let host = TestWritebackHost::leaked(0);
+    let host = TestVolumeHost::leaked(0);
     let implies = |a: bool, b: bool| !a || b;
     // Whether the device let all three operations through. Where it did, the
     // batch is one transaction and the outcome is all or nothing; where an
@@ -5857,7 +5865,7 @@ fn a_power_loss_after_a_commit_leaves_prior_or_new_whatever_it_drops() {
 #[test]
 fn a_power_loss_after_a_batchs_commit_publishes_all_of_it_or_none() {
     for kept in 0..4u8 {
-        let host = TestWritebackHost::leaked(0);
+        let host = TestVolumeHost::leaked(0);
         let (mut fs, slot) = volatile_volume(Publish::AsOneBatch(host));
         let root = fs.root();
         assert_eq!(
@@ -5933,9 +5941,9 @@ fn a_power_loss_after_a_batchs_commit_publishes_all_of_it_or_none() {
 /// was written, and every published byte is exact.
 #[test]
 fn a_crash_after_a_forced_commit_keeps_no_more_than_was_reported() {
-    let host = TestWritebackHost::leaked(0);
-    let mut fs = floor_bounded(fmt(CRASH_BS, CRASH_BC, 64))
-        .with_writeback_host(TestWritebackHost::volume(), host);
+    let host = TestVolumeHost::leaked(0);
+    let mut fs =
+        floor_bounded(fmt(CRASH_BS, CRASH_BC, 64)).with_volume_host(TestVolumeHost::volume(), host);
     let root = fs.root();
     fs.create(root, b"batched", NodeKind::RegularFile)
         .expect("create");
@@ -7919,8 +7927,8 @@ fn stats_report_tracks_allocation() {
     assert!(before.free_blocks <= before.total_blocks);
     assert_eq!(
         before.avail_blocks,
-        before.free_blocks - METADATA_RESERVE,
-        "the metadata reserve is withheld from ordinary data allocation"
+        before.free_blocks - fs.reserve_blocks(),
+        "the reserve is withheld from what ordinary writes may take"
     );
     assert_eq!((before.files, before.files_free), (0, 0));
 
@@ -10054,10 +10062,9 @@ fn fmt_batched_with_host(
     block_size: u32,
     block_count: u64,
     inodes: u32,
-) -> (ARXFS<MemBlock>, &'static TestWritebackHost) {
-    let host = TestWritebackHost::leaked(0);
-    let fs =
-        fmt(block_size, block_count, inodes).with_writeback_host(TestWritebackHost::volume(), host);
+) -> (ARXFS<MemBlock>, &'static TestVolumeHost) {
+    let host = TestVolumeHost::leaked(0);
+    let fs = fmt(block_size, block_count, inodes).with_volume_host(TestVolumeHost::volume(), host);
     (fs, host)
 }
 
@@ -10283,7 +10290,7 @@ fn every_barrier_requiring_operation_publishes_the_open_transaction_first() {
     )
     .expect("format")
     .with_clock(fixed_clock)
-    .with_writeback_host(TestWritebackHost::volume(), TestWritebackHost::leaked(0));
+    .with_volume_host(TestVolumeHost::volume(), TestVolumeHost::leaked(0));
     let root = fs.root();
 
     let mut ran = 0;
@@ -11222,11 +11229,11 @@ fn a_generation_lost_in_a_crash_is_never_handed_out_again() {
         .expect("create");
     let image = fs.into_block().expect("the volume closes").bytes();
 
-    let host = TestWritebackHost::leaked(0);
+    let host = TestVolumeHost::leaked(0);
     let mut fs = ARXFS::open(MemBlock::from_bytes(image, 4096, 512), TEST_KEYING)
         .expect("mount")
         .with_clock(fixed_clock)
-        .with_writeback_host(TestWritebackHost::volume(), host);
+        .with_volume_host(TestVolumeHost::volume(), host);
     fs.write_at(root, b"x", 0, b"durable").expect("first write");
     let durable = content_gen(&mut fs, b"x");
     // Committed before the write returned: the stride is on the device.
@@ -11258,3 +11265,6 @@ fn a_generation_lost_in_a_crash_is_never_handed_out_again() {
 
 #[path = "plaintext_tests.rs"]
 mod plaintext;
+
+#[path = "reserve_tests.rs"]
+mod reserve;

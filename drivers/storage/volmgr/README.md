@@ -34,7 +34,7 @@ public `tairix_abi::blkio` protocol.
    `CAP_FS_MOUNT`-gated, audited `volume_attach` syscall). The kernel
    re-validates the caller's grants, the extent, and the name, opens the
    filesystem itself, mounts under `/Storage/<name>`
-   (`nosuid,nodev,noexec`, `ro` per the device), and publishes the
+   (`noexec`, `ro` per the device), and publishes the
    durable `id::` root.
 5. Exits `0` — publication is a run-to-completion job; the kernel-held
    mount outlives the instance, and a re-plug re-discovers the node and

@@ -9,10 +9,12 @@
 //! thread of its own — so no start order changes what a test sees.
 
 use core::cell::{Cell, RefCell};
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use tairix_kernel_sched_api::{CpuId, TaskId};
+use tairix_kernel_sched_api::{CpuId, TaskAction, TaskId};
 
+use crate::cpu_state::ResumeHandle;
 use crate::waitq::WaitQueueArch;
 
 /// The key every test publishes, standing in for the boot path's draw from
@@ -169,6 +171,77 @@ fn claim() -> Claim {
     };
     CLAIM.with(|c| c.set(Some(claim)));
     claim
+}
+
+/// Resume the calling test's claimed task on `cpu` from now on, as a task
+/// woken on another core than it parked on.
+///
+/// `cpu` should be one [`claim_cpu`] handed this test, so a park there finds
+/// a per-CPU slot.
+pub(crate) fn run_claim_on(cpu: CpuId) {
+    let task = claim().task;
+    CLAIM.with(|c| c.set(Some(Claim { cpu, task })));
+}
+
+/// A resume handle published on a claimed CPU, standing in for the task the
+/// dispatcher switched in there: a park through it switches nothing, counts
+/// itself, and runs `on_park` with its ordinal before returning as the task
+/// resuming.
+pub(crate) struct ParkProbe<'a> {
+    count: AtomicU32,
+    on_park: &'a (dyn Fn(u32) + Sync + 'a),
+}
+
+impl ParkProbe<'_> {
+    /// How many times a task has parked through this probe.
+    pub(crate) fn parks(&self) -> u32 {
+        self.count.load(Ordering::SeqCst)
+    }
+}
+
+/// Run `body` with a [`ParkProbe`] published on `cpu`, which [`claim_cpu`]
+/// handed this test.
+///
+/// Scoped rather than an owned guard so the probe cannot be forgotten while
+/// published: it is retracted when `body` returns or unwinds, before the
+/// probe or anything `on_park` borrows goes away.
+pub(crate) fn with_park_probe<R>(
+    cpu: CpuId,
+    on_park: impl Fn(u32) + Sync,
+    body: impl FnOnce(&ParkProbe<'_>) -> R,
+) -> R {
+    struct Retract(&'static crate::cpu_state::CpuState);
+    impl Drop for Retract {
+        fn drop(&mut self) {
+            *self.0.resume.lock() = None;
+        }
+    }
+
+    let probe = ParkProbe {
+        count: AtomicU32::new(0),
+        on_park: &on_park,
+    };
+    let slot = crate::cpu_state::get(cpu).expect("a claimed CPU has a slot");
+    // SAFETY: `count_park` is compiled for `ParkProbe`, the type the pointer
+    // addresses, and `Retract` withdraws the handle before `probe` leaves
+    // scope on every path out of this frame.
+    *slot.resume.lock() = Some(unsafe { ResumeHandle::new(NonNull::from(&probe), count_park) });
+    let _retract = Retract(slot);
+    body(&probe)
+}
+
+/// A [`ParkProbe`]'s thunk: count the park and run the probe's closure.
+///
+/// # Safety
+///
+/// `ctl` addresses a [`ParkProbe`] whose [`with_park_probe`] has not
+/// returned.
+unsafe fn count_park(ctl: NonNull<()>, _action: TaskAction) {
+    // SAFETY: the caller's contract; the probe is reached only through
+    // shared references, and its counter is atomic.
+    let probe = unsafe { ctl.cast::<ParkProbe<'_>>().as_ref() };
+    let count = probe.count.fetch_add(1, Ordering::SeqCst) + 1;
+    (probe.on_park)(count);
 }
 
 /// The first CPU [`claim_cpu`] hands out. Slot 0 is the CPU every unpinned

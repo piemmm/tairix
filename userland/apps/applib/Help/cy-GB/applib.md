@@ -52,8 +52,8 @@ cuddio yn fater o gyflwyniad, nid awdurdod byth: mae lansio bwndel yn
 dal i gael ei reoli gan wiriadau llofnod a galluogrwydd (capability) y
 llwythwr waeth beth fo'r catalog.
 
-Mae `applib rescan` yn cerdded y storfeydd rhaglenni (`/System/Commands`,
-`/System/Applications` ac `/Apps`, neu `<home>/Commands` a
+Mae `applib rescan` yn cerdded y storfeydd rhaglenni (`/System/Commands` a
+`/System/Applications`, neu `<home>/Commands` a
 `<home>/Applications` y defnyddiwr ei hun o dan `--user`), yn darllen
 maniffest pob bwndel, ac yn cofrestru pob rhaglen sy'n gofyn am gael ei
 rhestru ac nad yw wedi'i chatalogio eto. Ni amharir byth ar gofnodion
@@ -92,9 +92,9 @@ popeth arall ei anwybyddu.
 
 - `applib` — dangos y llyfrgell ddatrys, ffolder wrth ffolder.
 - `applib list --category Games` — dangos un ffolder.
-- `applib add /Apps/chess.app` — cofrestru bwndel fel y mae ei faniffest
+- `applib add /System/Applications/chess.app` — cofrestru bwndel fel y mae ei faniffest
   yn gofyn.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   cofrestru bwndel nad yw'n datgan rhestriad, o dan ffolder benodol.
 - `applib remove os.tairix.chess` — gollwng cofnod wrth ei ddynodwr.
 - `applib hide os.tairix.chess --user` — ei guddio o'ch llyfrgell eich

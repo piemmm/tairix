@@ -2,8 +2,7 @@
 
 Shared `lib/*` crate (`AGENTS.md` §16.4, §16.5, §17.4). The one place a
 `<Name>.app/` bundle is judged before it may be launched — the gate the
-kernel boot-floor spawn path and the user-space `appmgr` service (`userland/
-system/appmgr`) both link, rather than each re-implementing it (§2.2).
+kernel's `spawn` loads every bundle through, defined once (§2.2).
 
 ## What this crate is
 

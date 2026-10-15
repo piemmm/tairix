@@ -5,13 +5,14 @@
 //! `.`/`..` traversal tokens outright: the VFS never resolves a path that
 //! could escape the tree, so there is no traversal logic to get wrong.
 //!
-//! [`ROOT_TEMPLATE`] lists the only four top-level directories the OS lays
-//! out; it is data, not control flow.
+//! The top-level names are [`tairix_abi::ROOT_VIEW`]: data, not control
+//! flow.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::fs::FS_SYMLINK_MAX;
+use tairix_abi::ROOT_VIEW;
 
 use super::VfsError;
 
@@ -27,27 +28,21 @@ pub const MAX_COMPONENT_LEN: usize = 255;
 /// here, not a per-call override.
 pub const MAX_PATH_COMPONENTS: usize = 64;
 
-/// The only four top-level directories TAIRiX has.
-///
-/// The default root template ([`super::Vfs::with_default_layout`])
-/// provides exactly these and nothing else.
-pub const ROOT_TEMPLATE: [&str; 4] = ["System", "Users", "Apps", "Storage"];
-
 /// Resolve a machine-alias name to the top-level view component it roots at.
 ///
 /// TAIRiX storage is a forest of named roots (`docs/src/filesystem/drives.md`):
 /// a path names its root explicitly, and `System:` is a canonical first-class
-/// root of which `/System` is merely the synthetic-view *projection*. The four
-/// **machine aliases** are therefore exactly [`ROOT_TEMPLATE`] — one
-/// definition, so the view template and the alias namespace can never drift
-/// apart. `System:/Kernel/x` and `/System/Kernel/x` name the same object.
+/// root of which `/System` is merely the synthetic-view *projection*. The
+/// **machine aliases** are therefore exactly [`ROOT_VIEW`] — one definition,
+/// so the view and the alias namespace can never drift apart.
+/// `System:/Kernel/x` and `/System/Kernel/x` name the same object.
 ///
 /// Session and volume aliases are published by their owning services when
 /// those land, never invented ahead of a live publisher, so an unknown name
 /// resolves to `None` and the caller fails closed.
 #[must_use]
 pub fn resolve_machine_alias(name: &str) -> Option<&'static str> {
-    ROOT_TEMPLATE.iter().copied().find(|root| *root == name)
+    ROOT_VIEW.iter().copied().find(|root| *root == name)
 }
 
 /// An absolute, normalised filesystem path.
@@ -381,7 +376,7 @@ mod tests {
         // Untrusted on-disk bytes: every bound refuses the whole target.
         let long_name = "a".repeat(MAX_COMPONENT_LEN + 1);
         assert_eq!(parse_link_target(&long_name), Err(VfsError::InvalidPath));
-        assert_eq!(parse_link_target("a b"), Err(VfsError::InvalidPath));
+        assert_eq!(parse_link_target("a\0b"), Err(VfsError::InvalidPath));
         let too_deep = (0..=MAX_PATH_COMPONENTS)
             .map(|_| "d")
             .collect::<Vec<_>>()
@@ -413,13 +408,14 @@ mod tests {
 
     #[test]
     fn every_machine_alias_roots_at_its_own_top_level_component() {
-        for name in ROOT_TEMPLATE {
+        for name in ROOT_VIEW {
             assert_eq!(resolve_machine_alias(name), Some(name));
         }
     }
 
     #[test]
     fn unknown_machine_alias_fails_closed() {
+        assert_eq!(resolve_machine_alias("Apps"), None, "there is no /Apps");
         assert_eq!(resolve_machine_alias("Home"), None);
         assert_eq!(resolve_machine_alias("system"), None);
         assert_eq!(resolve_machine_alias(""), None);

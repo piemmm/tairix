@@ -1799,6 +1799,7 @@ impl<B: Block> FilesystemStats for Adfs<B> {
                 let free = map.free_sectors();
                 Ok(VolumeStats {
                     block_size: OLD_SECTOR_SIZE_U32,
+                    in_reserve: false,
                     total_blocks: u64::from(map.disc_sectors()),
                     free_blocks: free,
                     avail_blocks: free,
@@ -1813,6 +1814,7 @@ impl<B: Block> FilesystemStats for Adfs<B> {
                 let free = map.free_bytes(&mut self.volume)? / bpmb;
                 Ok(VolumeStats {
                     block_size: u32::try_from(bpmb).unwrap_or(u32::MAX),
+                    in_reserve: false,
                     total_blocks: map.record.disc_size / bpmb,
                     free_blocks: free,
                     avail_blocks: free,

@@ -75,7 +75,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 // The one system page granule: the arena grows in whole pages, and `mem_map`
 // rounds its length up to this.
-use tairix_abi::PAGE_SIZE;
+use tairix_abi::{Errno, PAGE_SIZE};
 
 use tairix_reclaim::{shrink_target, CacheBudget, PressureBand, ReclaimClass};
 
@@ -132,9 +132,15 @@ impl Span {
 /// page-aligned and within the fixed arena window.
 trait Pager {
     /// Map `pages` fresh, zeroed `RW` pages at exactly `base`
-    /// (`MapFlags::FIXED`). Returns `true` on success; on failure the heap
-    /// reports OOM (deterministic, never a panic).
-    fn map(&self, base: u64, pages: usize) -> bool;
+    /// (`MapFlags::FIXED`).
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal — [`Errno::OutOfRange`] when the process's own
+    /// memory bound refuses the pages, [`Errno::OutOfMemory`] for want of
+    /// them — after which the heap reports OOM (deterministic, never a
+    /// panic).
+    fn map(&self, base: u64, pages: usize) -> Result<(), Errno>;
 
     /// Release `pages` previously mapped at `base`. Returns `true` on success;
     /// a failed shrink leaves the pages mapped (the heap keeps them as a free
@@ -162,10 +168,12 @@ trait SpanStore {
     /// The currently-allocated span slots, mutably.
     fn slots_mut(&mut self) -> &mut [Span];
 
-    /// Grow the store by at least one slot (one whole metadata page). Returns
-    /// `true` if capacity increased; `false` only on genuine resource
-    /// exhaustion (the page source could not map — the heap then fails closed).
-    fn grow(&mut self) -> bool;
+    /// Grow the store by at least one slot (one whole metadata page).
+    ///
+    /// # Errors
+    ///
+    /// The page source's refusal; the heap then fails closed.
+    fn grow(&mut self) -> Result<(), Errno>;
 }
 
 /// Free top-of-arena bytes this process may keep mapped at `band`, given the
@@ -323,6 +331,9 @@ struct HeapState<S: SpanStore> {
     /// storm, not a retry. The arena's extent is the only thing that can
     /// change the answer, so the next attempt waits for it to move.
     release_refused_at: Option<usize>,
+    /// Why the current allocation's last page request was refused, if one
+    /// was: the cause an exit over a failed allocation names.
+    refusal: Option<Errno>,
 }
 
 impl<S: SpanStore> HeapState<S> {
@@ -334,6 +345,7 @@ impl<S: SpanStore> HeapState<S> {
             count: 0,
             mapped_end: ARENA_BASE as usize,
             release_refused_at: None,
+            refusal: None,
         }
     }
 
@@ -347,7 +359,16 @@ impl<S: SpanStore> HeapState<S> {
     /// Returns `false` only when the store cannot grow (genuine OOM) — the
     /// caller then fails closed.
     fn ensure_slot(&mut self) -> bool {
-        self.count < self.capacity() || self.store.grow()
+        if self.count < self.capacity() {
+            return true;
+        }
+        match self.store.grow() {
+            Ok(()) => true,
+            Err(errno) => {
+                self.refusal = Some(errno);
+                false
+            }
+        }
     }
 
     /// Remove the free span at `index`, shifting the tail down.
@@ -455,6 +476,7 @@ impl<S: SpanStore> HeapState<S> {
     /// On no fit the arena is grown once through `pager`; a failed grow is a
     /// deterministic OOM (`None`, never a panic).
     fn alloc(&mut self, layout: Layout, pager: &dyn Pager, policy: ArenaPolicy) -> Option<usize> {
+        self.refusal = None;
         let align = layout.align();
         let size = layout.size().max(1);
         let mut grown = false;
@@ -510,12 +532,17 @@ impl<S: SpanStore> HeapState<S> {
         // allocation into a refusal: a padded map the kernel declines — for the
         // address-space limit, or for want of frames — is retried at exactly
         // what the caller asked for.
-        let bytes = if map_arena(base, padded, pager) {
-            padded
-        } else if padded != needed && map_arena(base, needed, pager) {
-            needed
-        } else {
-            return None;
+        let mapped = match map_arena(base, padded, pager) {
+            Ok(()) => Ok(padded),
+            Err(refusal) if padded == needed => Err(refusal),
+            Err(_) => map_arena(base, needed, pager).map(|()| needed),
+        };
+        let bytes = match mapped {
+            Ok(bytes) => bytes,
+            Err(refusal) => {
+                self.refusal = Some(refusal);
+                return None;
+            }
         };
         self.mapped_end = base.checked_add(bytes)?;
         self.insert_free(Span {
@@ -683,8 +710,11 @@ impl<S: SpanStore> HeapState<S> {
 /// Map `bytes` of fresh arena at `base`, reporting whether the kernel granted
 /// it. An extent that would overflow the address space is declined without a
 /// syscall.
-fn map_arena(base: usize, bytes: usize, pager: &dyn Pager) -> bool {
-    base.checked_add(bytes).is_some() && pager.map(base as u64, bytes / PAGE_SIZE)
+fn map_arena(base: usize, bytes: usize, pager: &dyn Pager) -> Result<(), Errno> {
+    if base.checked_add(bytes).is_none() {
+        return Err(Errno::OutOfMemory);
+    }
+    pager.map(base as u64, bytes / PAGE_SIZE)
 }
 
 /// Round `addr` up to the next multiple of `align` (a power of two per the
@@ -746,6 +776,12 @@ impl<P: Pager, S: SpanStore> Heap<P, S> {
     /// granule because it is about to want those pages back, while this is the
     /// machine asking for them — so it hands back everything the band no longer
     /// permits, leaving no granule behind at critical pressure.
+    /// Whether the last failed allocation was refused by the process's own
+    /// memory bound rather than for want of memory.
+    fn refused_by_own_bound(&self) -> bool {
+        self.state.lock().refusal == Some(Errno::OutOfRange)
+    }
+
     fn trim(&self) {
         let mut state = self.state.lock();
         let retain = retain_bytes(state.mapped_bytes(), crate::pressure::gauge().band());
@@ -822,16 +858,13 @@ struct SyscallPager;
 
 #[cfg(rt_native)]
 impl Pager for SyscallPager {
-    fn map(&self, base: u64, pages: usize) -> bool {
-        let len = pages * PAGE_SIZE;
+    fn map(&self, base: u64, pages: usize) -> Result<(), Errno> {
         // FIXED placement: the heap owns the arena layout, so the kernel must
         // map at exactly `base` or fail (it never relocates the region).
-        let ret = crate::mem_map(len, tairix_abi::MapFlags::FIXED, base);
-        #[allow(clippy::cast_sign_loss)]
-        // Guarded by `ret >= 0`; the non-negative result is the base address.
-        {
-            ret >= 0 && ret as u64 == base
-        }
+        mapped_at(
+            base,
+            crate::mem_map(pages * PAGE_SIZE, tairix_abi::MapFlags::FIXED, base),
+        )
     }
 
     fn unmap(&self, base: u64, pages: usize) -> bool {
@@ -842,6 +875,21 @@ impl Pager for SyscallPager {
         // The kernel mapped the arena outside the abstract machine, so its
         // provenance is exposed by definition.
         core::ptr::with_exposed_provenance_mut(addr)
+    }
+}
+
+/// A `FIXED` `mem_map` result as a placement at `base`: the kernel's refusal,
+/// or [`Errno::BadAddress`] for a region it put anywhere else.
+#[cfg(rt_native)]
+fn mapped_at(base: u64, ret: i64) -> Result<(), Errno> {
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    #[allow(clippy::cast_sign_loss)] // Non-negative: the region's base address.
+    if ret as u64 == base {
+        Ok(())
+    } else {
+        Err(Errno::BadAddress)
     }
 }
 
@@ -894,20 +942,17 @@ impl SpanStore for MappedSpanStore {
         unsafe { core::slice::from_raw_parts_mut(META_BASE as *mut Span, self.cap) }
     }
 
-    fn grow(&mut self) -> bool {
+    fn grow(&mut self) -> Result<(), Errno> {
         let (base, added) = metadata_growth(self.cap);
         // FIXED placement: the store owns the metadata window, so the kernel
         // must map at exactly `base` (immediately above the slots already
         // mapped) or fail; it never relocates the region.
-        let ret = crate::mem_map(PAGE_SIZE, tairix_abi::MapFlags::FIXED, base);
-        #[allow(clippy::cast_sign_loss)]
-        // Guarded by `ret >= 0`; the non-negative result is the base address.
-        if ret >= 0 && ret as u64 == base {
-            self.cap += added;
-            true
-        } else {
-            false
-        }
+        mapped_at(
+            base,
+            crate::mem_map(PAGE_SIZE, tairix_abi::MapFlags::FIXED, base),
+        )?;
+        self.cap += added;
+        Ok(())
     }
 }
 
@@ -919,6 +964,14 @@ impl SpanStore for MappedSpanStore {
 #[global_allocator]
 static GLOBAL: Heap<SyscallPager, MappedSpanStore> =
     Heap::new(SyscallPager, MappedSpanStore::new());
+
+/// Whether the allocation that just failed was refused by the process's own
+/// memory bound — its `address-space-bytes` limit, or its pinned budget —
+/// rather than for want of memory.
+#[cfg(rt_native)]
+pub(crate) fn refused_by_own_bound() -> bool {
+    GLOBAL.refused_by_own_bound()
+}
 
 /// Give back the top-of-arena pages the newly-reported band no longer permits.
 ///
@@ -959,9 +1012,9 @@ mod tests {
     }
 
     impl Pager for FakePager {
-        fn map(&self, base: u64, pages: usize) -> bool {
+        fn map(&self, base: u64, pages: usize) -> Result<(), Errno> {
             self.events.borrow_mut().push((true, base, pages));
-            true
+            Ok(())
         }
         fn unmap(&self, base: u64, pages: usize) -> bool {
             self.events.borrow_mut().push((false, base, pages));
@@ -995,9 +1048,13 @@ mod tests {
     }
 
     impl Pager for StingyPager {
-        fn map(&self, _base: u64, pages: usize) -> bool {
+        fn map(&self, _base: u64, pages: usize) -> Result<(), Errno> {
             self.events.borrow_mut().push(pages);
-            pages <= self.limit
+            if pages <= self.limit {
+                Ok(())
+            } else {
+                Err(Errno::OutOfRange)
+            }
         }
         fn unmap(&self, _base: u64, _pages: usize) -> bool {
             true
@@ -1023,8 +1080,8 @@ mod tests {
     }
 
     impl Pager for RefusingPager {
-        fn map(&self, _base: u64, _pages: usize) -> bool {
-            true
+        fn map(&self, _base: u64, _pages: usize) -> Result<(), Errno> {
+            Ok(())
         }
         fn unmap(&self, _base: u64, _pages: usize) -> bool {
             self.attempts.set(self.attempts.get() + 1);
@@ -1038,8 +1095,8 @@ mod tests {
     /// A pager whose `map` always fails, to drive the deterministic-OOM path.
     struct DeadPager;
     impl Pager for DeadPager {
-        fn map(&self, _base: u64, _pages: usize) -> bool {
-            false
+        fn map(&self, _base: u64, _pages: usize) -> Result<(), Errno> {
+            Err(Errno::OutOfMemory)
         }
         fn unmap(&self, _base: u64, _pages: usize) -> bool {
             false
@@ -1092,13 +1149,13 @@ mod tests {
         fn slots_mut(&mut self) -> &mut [Span] {
             &mut self.spans
         }
-        fn grow(&mut self) -> bool {
+        fn grow(&mut self) -> Result<(), Errno> {
             let next = self.spans.len() + 1;
             if matches!(self.max_slots, Some(max) if next > max) {
-                return false;
+                return Err(Errno::OutOfMemory);
             }
             self.spans.push(Span { start: 0, len: 0 });
-            true
+            Ok(())
         }
     }
 
@@ -1601,6 +1658,27 @@ mod tests {
         assert_eq!(heap.alloc(layout(64, 8), &DeadPager, NO_RETENTION), None);
         assert_eq!(heap.mapped_end, base());
         assert_eq!(heap.count, 0);
+        assert_eq!(heap.refusal, Some(Errno::OutOfMemory), "a shortage");
+    }
+
+    /// The cause a failed allocation is ended over is its own: the process's
+    /// bound refusing the pages, or memory running short, and never an
+    /// earlier allocation's.
+    #[test]
+    fn a_failed_allocation_keeps_why_its_pages_were_refused() {
+        let stingy = StingyPager::new(1);
+        let mut heap = heap_state();
+        assert_eq!(
+            heap.alloc(layout(4 * PAGE_SIZE, 8), &stingy, NO_RETENTION),
+            None
+        );
+        assert_eq!(
+            heap.refusal,
+            Some(Errno::OutOfRange),
+            "the bound refused it"
+        );
+        assert!(heap.alloc(layout(64, 8), &stingy, NO_RETENTION).is_some());
+        assert_eq!(heap.refusal, None, "a later allocation starts clean");
     }
 
     /// Insert `n` deliberately non-adjacent free spans (each separated by a
@@ -1720,6 +1798,20 @@ mod tests {
             1,
             "the freed page was reused, not remapped"
         );
+    }
+
+    /// Over the whole wrapper, a null return carries why: the bound refusing
+    /// the pages is told apart from memory running short.
+    #[test]
+    fn the_wrapper_tells_a_bound_refusal_from_a_shortage() {
+        let bounded = Heap::new(StingyPager::new(1), VecSpanStore::unbounded());
+        // SAFETY: a valid non-zero layout over a freshly built wrapper.
+        assert!(unsafe { bounded.alloc(layout(4 * PAGE_SIZE, 8)) }.is_null());
+        assert!(bounded.refused_by_own_bound());
+        let short = Heap::new(DeadPager, VecSpanStore::unbounded());
+        // SAFETY: as above.
+        assert!(unsafe { short.alloc(layout(64, 8)) }.is_null());
+        assert!(!short.refused_by_own_bound());
     }
 
     /// The trim `pressure::report` drives, over the whole wrapper: it reads the

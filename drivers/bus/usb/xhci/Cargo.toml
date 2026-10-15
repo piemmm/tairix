@@ -59,3 +59,6 @@ tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
 # Fixed-buffer formatting helpers for numeric diagnostic fields, avoiding
 # allocation in the freestanding HCD.
 tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

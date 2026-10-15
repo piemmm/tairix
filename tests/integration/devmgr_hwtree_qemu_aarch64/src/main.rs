@@ -112,12 +112,8 @@ mod kernel {
     // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-    /// Static boot heap, mirroring the production aarch64 kernel binary's
-    /// `.bss`-resident heap (zeroed by the boot trampoline).
-    ///
-    /// `static mut` because the bump allocator hands out disjoint slices via
-    /// an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -125,7 +121,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Witness state machine: `ARMED` until `devmgr` is observed about to
     /// park, `BUMPED` after the generation bump is delivered, then PASS.
@@ -229,6 +225,10 @@ mod kernel {
 
         fn settle(&self, node_id: u32) -> Result<(), Errno> {
             HW_TREE_SOURCE.settle(node_id)
+        }
+
+        fn mark_key_source(&self, node_id: u32) -> Result<(), Errno> {
+            HW_TREE_SOURCE.mark_key_source(node_id)
         }
     }
 

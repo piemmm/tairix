@@ -61,8 +61,8 @@ const IDS: &[&str] = &[
 ];
 const NAMES: &[&str] = &["Text Editor", "Chess", "F", "Files & Folders"];
 const BUNDLES: &[&str] = &[
-    "/Apps/Editor.app",
-    "/Apps/games/Chess.app",
+    "/System/Applications/Editor.app",
+    "/System/Applications/games/Chess.app",
     "/Users/ada/Applications/Editor.app",
     "/System/Commands/ls.app",
 ];
@@ -90,9 +90,9 @@ const BAD_TOKENS: &[&str] = &[
     "trailing.",
     "utilities",
     "Development",
-    "/Apps/Editor",
-    "Apps/Editor.app",
-    "/Apps//Editor.app",
+    "/System/Applications/Editor",
+    "System/Applications/Editor.app",
+    "/System/Applications//Editor.app",
     "../escape.svg",
     "/absolute.svg",
     "yes",

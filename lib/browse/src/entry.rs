@@ -75,7 +75,7 @@ pub enum EntryKind {
 ///
 /// The leaf name is what decides bundle-ness, and it has to be the target's:
 /// a desktop shortcut is named for the application (`Editor`) while its
-/// target is the bundle (`/Apps/Editor.app`), so classifying on the link's own
+/// target is the bundle (`/System/Applications/Editor.app`), so classifying on the link's own
 /// name would show a shortcut to an application as a plain folder.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct LinkResolution<'a> {

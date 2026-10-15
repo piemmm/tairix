@@ -87,7 +87,7 @@
 //!    `CAP_IPC_BIND_PRIVILEGED` (only the display service may bind a
 //!    reserved endpoint id, so the witness is unforgeable by any other
 //!    process in the image).
-//! 5. The `appmgr` `APP_LOADED` record for [`TERMINAL_ROUND_TRIP_BUNDLE`]
+//! 5. The load gate's `APP_LOADED` record for [`TERMINAL_ROUND_TRIP_BUNDLE`]
 //!    (`/System/Commands/sleep.app`) — the shell resolved and ran the typed
 //!    command, attributed by the loaded bundle's own name rather than a
 //!    fragile delivery count: the
@@ -104,7 +104,7 @@
 //!    the AW4 shell round trip, every hop kernel-attested (the only
 //!    spawn that can occur after the typing gate is the shell executing
 //!    the typed command).
-//! 6. The `appmgr` `APP_LOADED` record for [`CTRL_C_RECOVERY_BUNDLE`]
+//! 6. The load gate's `APP_LOADED` record for [`CTRL_C_RECOVERY_BUNDLE`]
 //!    (`/System/Commands/true.app`), after the `sleep` round trip — the pty
 //!    `Ctrl-C` job-control round trip (`plans/PTY.md`), attributed by the
 //!    recovered bundle's own name. Once witness 5's `sleep` load latched the

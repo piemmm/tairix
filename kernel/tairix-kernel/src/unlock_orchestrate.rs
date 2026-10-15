@@ -29,7 +29,6 @@ use core::convert::Infallible;
 
 use tairix_abi::blkio::kernel_block_device;
 use tairix_abi::driver::block::Block;
-use tairix_abi::{HwDeviceClass, HwNode};
 use tairix_crypto::Ed25519PublicKey;
 use tairix_drv_fs_arxfs::{Keying, ARXFS};
 use tairix_drv_storage_virtio_blk::VirtioBlk;
@@ -40,8 +39,10 @@ use tairix_kernel_core::{
 };
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
-use tairix_log::{Level, Sink};
-use tairix_partition::{parse_partition_table, PartitionBlock, PartitionType};
+use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
+use tairix_partition::{
+    grow_root_to_medium, parse_partition_table, Partition, PartitionBlock, PartitionType,
+};
 use tairix_reclaim::MemoryPressure;
 use tairix_virtio::{Transport, VirtioHost};
 
@@ -58,9 +59,9 @@ use crate::root_mount::{
 };
 use crate::shared_block::{DriverStoreService, SharedBlock};
 use crate::system_mount::{
-    install_system_mount, register_writable_state, KernelFs, ROOT_VOLUME_HANDLE,
+    install_system_mount, register_writable_state, KernelFs, ROOT_VOLUME_HANDLE, SYSTEM_WRITE_SET,
 };
-use crate::transform_cache::TransformClusterCache;
+use crate::transform_cache::{SharedClusterCache, TransformClusterCache};
 use crate::unlock_service::{
     autoload_caps, loader_caps, note, store_endpoint_binder_caps, KthreadConsoleRead, UNLOCK_TASK,
     USERS_DB_INSTALLED_MESSAGE,
@@ -150,9 +151,9 @@ const BOOT_DISK_DEV: u64 = kernel_block_device(0);
 /// The live [`WritableRootSink`]: on a successful unlock it opens a second,
 /// independent `'static` read-write [`ARXFS`] window onto the `ARXFSRoot`
 /// partition under the just-derived key and registers it as the **writable
-/// root volume** backing — `/` itself and every writable sub-mount of it
-/// (`/Users`, `/Apps`, `/Storage`, `/System/Logs`, `/System/Settings`), which
-/// all resolve to this one volume
+/// root volume** backing — `/` itself, `/Users` with it, and the writable
+/// sub-mounts `/System/Logs` and `/System/Settings`, which all resolve to
+/// this one volume
 /// ([`crate::system_mount::register_writable_state`]).
 ///
 /// This is the only path that can mount the writable state: the root is the
@@ -164,6 +165,15 @@ const BOOT_DISK_DEV: u64 = kernel_block_device(0);
 /// writer of the volume. Fail-soft and audited: any partition/window/mount
 /// refusal leaves the writable tree failing closed and never disturbs the
 /// users/identity install.
+/// Audit event: the root grew to fill its medium — its partition (`what` is
+/// `partition`, `blocks` its new length) or the volume on it (`what` is
+/// `volume`, `blocks` what it gained).
+pub const ROOT_GROWN: EventId = EventId(4188);
+
+/// Audit event: growing the root to its medium was refused at `what`; it
+/// mounts at the size it had.
+pub const ROOT_GROWTH_REFUSED: EventId = EventId(4189);
+
 struct WritableStateSink<B: Block + 'static> {
     store: &'static DriverStoreService<B>,
     audit: &'static (dyn Sink + Sync),
@@ -173,6 +183,65 @@ struct WritableStateSink<B: Block + 'static> {
     /// The directory-watch registry the writable root volume claims its
     /// table from.
     watches: Option<&'static tairix_kernel_core::fswatch::WatchRegistry>,
+}
+
+/// The root partition `extent` on the disk `store` serves, grown to the end
+/// of the medium when it is short of it; as it was when there is nothing to
+/// grow, or growing is refused.
+fn grown_root<B: Block>(
+    store: &DriverStoreService<B>,
+    audit: &dyn Sink,
+    extent: Partition,
+) -> Partition {
+    match grow_root_to_medium(&mut store.window()) {
+        Ok(Some(grown)) => {
+            note_growth(audit, ROOT_GROWN, "partition", grown.block_count);
+            grown
+        }
+        Ok(None) => extent,
+        Err(_) => {
+            note_growth(audit, ROOT_GROWTH_REFUSED, "partition", 0);
+            extent
+        }
+    }
+}
+
+/// Grow the root volume `fs` into whatever its partition gained.
+fn grow_volume<B: Block>(fs: &mut ARXFS<B>, audit: &dyn Sink) {
+    match fs.grow() {
+        Ok(0) => {}
+        Ok(added) => note_growth(audit, ROOT_GROWN, "volume", added),
+        Err(_) => note_growth(audit, ROOT_GROWTH_REFUSED, "volume", 0),
+    }
+}
+
+fn note_growth(audit: &dyn Sink, id: EventId, what: &'static str, blocks: u64) {
+    let (level, message) = if id == ROOT_GROWN {
+        (Level::Info, "root-unlock: root grown to its medium")
+    } else {
+        (
+            Level::Warn,
+            "root-unlock: root growth refused; mounting at its size",
+        )
+    };
+    log(
+        audit,
+        &Event {
+            level,
+            id,
+            message,
+            fields: &[
+                Field {
+                    key: "what",
+                    value: FieldValue::Str(what),
+                },
+                Field {
+                    key: "blocks",
+                    value: FieldValue::UnsignedInt(blocks),
+                },
+            ],
+        },
+    );
 }
 
 impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
@@ -202,6 +271,9 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
             };
             extent
         };
+        // An image written to a larger medium leaves its root, the last
+        // partition, short of the medium's end: it takes the rest of it.
+        let extent = grown_root(self.store, self.audit, extent);
         let Ok(window) = PartitionBlock::from_partition(self.store.window(), &extent) else {
             note(
                 self.audit,
@@ -215,7 +287,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
         // mount, exactly as the read mount does. Compressed clusters are
         // served through the SMART3 transform cache, charged to the root
         // volume's mount identity and governed by the shared pressure gauge.
-        let Ok(fs) = ARXFS::open(window, keying) else {
+        let Ok(mut fs) = ARXFS::open(window, keying) else {
             note(
                 self.audit,
                 Level::Error,
@@ -223,11 +295,22 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
             );
             return None;
         };
-        let fs = fs.with_cluster_cache(TransformClusterCache::for_volume(
+        grow_volume(&mut fs, self.audit);
+        let fs = fs.with_cluster_cache(alloc::boxed::Box::new(TransformClusterCache::for_volume(
             ROOT_VOLUME_HANDLE,
             self.pressure,
             self.audit,
-        ));
+        )));
+        // The root backs the system's writable grafts, so it holds the whole
+        // system reserve: the system keeps writing once users fill it.
+        let Ok(fs) = fs.with_system_reserve(&SYSTEM_WRITE_SET) else {
+            note(
+                self.audit,
+                Level::Error,
+                "root-unlock: writable-state reserve unavailable",
+            );
+            return None;
+        };
         // Bound the volume's pinned write-back set to this machine's RAM and
         // publish its unwritten bytes, so a writer that outruns the device is
         // throttled by forced commits rather than by growth. A refusal means
@@ -263,8 +346,8 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
 }
 
 /// Console 0's key source as the Supervisor window waits for it: a live line
-/// at once, an input device once a driver in the live hardware tree serves
-/// one.
+/// at once, an input device once its driver in the live hardware tree says
+/// its keys reach the seat.
 struct HwTreeKeyArrival {
     source: KeySource,
     audit: &'static (dyn Sink + Sync),
@@ -272,7 +355,7 @@ struct HwTreeKeyArrival {
 
 impl KeyArrival for HwTreeKeyArrival {
     fn key_source_ready(&self) -> bool {
-        self.source == KeySource::Live || input_device_bound()
+        self.source == KeySource::Live || keyboard_present()
     }
 
     fn await_key_source(&self) -> bool {
@@ -282,36 +365,36 @@ impl KeyArrival for HwTreeKeyArrival {
         note(
             self.audit,
             Level::Info,
-            "root-unlock: waiting for an input device before the supervisor window",
+            "root-unlock: waiting for a keyboard before the supervisor window",
         );
-        let bound = wait_now_ns().is_some_and(|now| {
+        let present = wait_now_ns().is_some_and(|now| {
             park_on_until(
                 &HW_TREE_WAITQ,
                 deadline_for(now, KEY_SOURCE_WAIT_NS),
-                input_device_bound,
+                keyboard_present,
             )
-            .unwrap_or_else(|NotParkable| input_device_bound())
+            .unwrap_or_else(|NotParkable| keyboard_present())
         });
-        if !bound {
+        if !present {
             note(
                 self.audit,
                 Level::Warn,
-                "root-unlock: no input device bound in time; no supervisor window",
+                "root-unlock: no keyboard in time; no supervisor window",
             );
         }
-        bound
+        present
     }
 }
 
-/// Whether a driver serves an input device in the live hardware tree.
-fn input_device_bound() -> bool {
-    let mut bound = false;
-    crate::hwtree_store::HW_TREE.for_each_node(&mut |node| bound |= serves_input(node));
-    bound
+/// Whether a node in the live hardware tree delivers its keys to the seat.
+fn keyboard_present() -> bool {
+    holds_key_source(&crate::hwtree_store::HW_TREE)
 }
 
-fn serves_input(node: &HwNode) -> bool {
-    node.class() == Some(HwDeviceClass::Input) && node.is_driven()
+fn holds_key_source(tree: &crate::hwtree_store::HwTreeStore) -> bool {
+    let mut present = false;
+    tree.for_each_node(&mut |node| present |= node.is_key_source());
+    present
 }
 
 /// Admit the floor virtio-blk driver at the signed load gate, open the whole
@@ -454,8 +537,7 @@ pub fn finish_unlock<B: Block + 'static>(
             Some(&secret),
         );
         // Publish the writable root volume backing (`/` and its writable
-        // subtrees — `/Users`, `/Apps`, `/Storage`, `/System/Logs`,
-        // `/System/Settings`) on a successful unlock, from a second `'static`
+        // `/System` subtrees) on a successful unlock, from a second `'static`
         // read-write window onto the same `'static`-leaked disk (park-safe via
         // the device `SleepLock`), under the just-derived key.
         let writable = WritableStateSink {
@@ -565,13 +647,13 @@ pub fn finish_unlock<B: Block + 'static>(
     // serve loop below keeps its own independent window, so the two never
     // conflict. Fail-soft and audited: a disk with no readable `/System`
     // volume simply leaves the `fs_*` syscalls failing closed.
-    install_system_mount(store, audit, pressure, ctx.watches());
+    let system_cache = install_system_mount(store, audit, pressure, ctx.watches());
 
     // Become the persistent capability-gated driver-store serve loop the
     // user-space `devmgr` autoloads signed `/System` drivers through — bound
     // over the always-readable `/System` volume, independent of the user-data
     // passphrase (`plans/PI.md` design B). Never returns on success.
-    serve_driver_store(store, coop, env)
+    serve_driver_store(store, coop, env, system_cache)
 }
 
 /// Take the root mount's reads off `store`'s disk while the Supervisor window
@@ -615,6 +697,7 @@ fn serve_driver_store<B: Block + 'static>(
     store: &'static DriverStoreService<BlockCache<B>>,
     coop: &CooperativeYield<'_>,
     env: UnlockEnv,
+    system_cache: Option<SharedClusterCache>,
 ) -> Result<Infallible, &'static str> {
     let audit = env.audit;
     // The driver-signing trust anchor the autoload load gate verifies each
@@ -678,7 +761,7 @@ fn serve_driver_store<B: Block + 'static>(
     // returns, so the window stays borrowed for the life of the system.
     let outcome = {
         let mut window = store.window();
-        with_system_volume(&mut window, audit, |volume| {
+        with_system_volume(&mut window, audit, system_cache, |volume| {
             crate::driver_store_server::serve_system_store(volume, &serve_ctx, &binder, coop, audit)
         })
     };
@@ -712,15 +795,89 @@ fn serve_driver_store<B: Block + 'static>(
 mod tests {
     use super::*;
 
+    /// An image written to a medium four times its size grows its root
+    /// partition to the medium's end, and the volume on it then grows into
+    /// what the partition gained.
     #[test]
-    fn only_a_driven_input_device_is_a_key_source() {
-        let mut keyboard = HwNode::new(7, 1, HwDeviceClass::Input);
-        assert!(!serves_input(&keyboard), "found, but no driver yet");
-        keyboard.set_driven(true);
-        assert!(serves_input(&keyboard));
+    fn a_root_written_to_a_larger_medium_grows_to_fill_it() {
+        use tairix_abi::blkio::kernel_block_device;
+        use tairix_abi::driver::filesystem::FilesystemStats;
+        use tairix_kernel_core::fs::blkmeter::MeteredBlock;
+        use tairix_kernel_core::test_sink::TestSink;
 
-        let mut disk = HwNode::new(8, 1, HwDeviceClass::Storage);
-        disk.set_driven(true);
-        assert!(!serves_input(&disk));
+        use crate::shared_block::SharedBlock;
+        use crate::test_support::{RamBlock, BLOCK_SIZE};
+
+        let image = tairix_test_encrypted_root_image::build_plaintext_image().expect("image");
+        let medium = (image.len() / BLOCK_SIZE) as u64 * 4;
+        let mut disk = RamBlock::new(medium);
+        disk.data[..image.len()].copy_from_slice(&image);
+        let audit: &'static TestSink =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(TestSink::new()));
+        let device = MeteredBlock::new(disk, kernel_block_device(0), audit);
+        let io = device.io_source();
+        let store = DriverStoreService::new(SharedBlock::new(device).expect("geometry"), io);
+        let extent = parse_partition_table(&mut store.window())
+            .expect("table")
+            .first_of_type(PartitionType::ARXFSRoot)
+            .expect("root");
+
+        let grown = grown_root(&store, audit, extent);
+        assert_eq!(grown.start_lba, extent.start_lba);
+        assert_eq!(
+            grown.start_lba + grown.block_count,
+            medium,
+            "to the medium's end"
+        );
+        assert_eq!(
+            grown_root(&store, audit, grown),
+            grown,
+            "and a second boot finds nothing to grow"
+        );
+
+        let window = PartitionBlock::from_partition(store.window(), &grown).expect("window");
+        let mut fs = ARXFS::open(window, Keying::Plaintext).expect("the root mounts");
+        grow_volume(&mut fs, audit);
+        assert_eq!(fs.stats().expect("stats").total_blocks, grown.block_count);
+        let ids = audit.event_ids();
+        assert_eq!(
+            ids.iter().filter(|&&id| id == ROOT_GROWN.0).count(),
+            2,
+            "the partition and the volume each grew once: {ids:?}"
+        );
+        assert!(!ids.contains(&ROOT_GROWTH_REFUSED.0));
+    }
+
+    /// Regression: the window opened once any input device was bound, so a
+    /// mouse binding before the keyboard, or an interface its driver was
+    /// about to decline, started the countdown while no key could arrive.
+    #[test]
+    fn a_bound_input_device_is_no_key_source_until_its_driver_says_so() {
+        use crate::hwtree_store::HwTreeStore;
+        use tairix_abi::driver::DriverEnding;
+        use tairix_abi::hwtree::{HW_NODE_ROOT, HW_NODE_ROOT_ID};
+        use tairix_abi::{HwDeviceClass, HwNode};
+        use tairix_kernel_core::hwtree::HwDriverTree;
+
+        let tree = HwTreeStore::new();
+        tree.seed(alloc::vec![
+            HwNode::new(HW_NODE_ROOT_ID, HW_NODE_ROOT, HwDeviceClass::Root),
+            HwNode::new(2, HW_NODE_ROOT_ID, HwDeviceClass::Input),
+            HwNode::new(3, HW_NODE_ROOT_ID, HwDeviceClass::Input),
+        ])
+        .expect("a fresh store seeds");
+        tree.driver_admitted(2, 1, false);
+        assert!(
+            !holds_key_source(&tree),
+            "a mouse bound first opens nothing"
+        );
+        tree.driver_admitted(3, 2, false);
+        assert_eq!(tree.mark_key_source(3), Ok(()));
+        assert!(
+            holds_key_source(&tree),
+            "the keyboard's keys reach the seat"
+        );
+        tree.driver_released(3, 2, DriverEnding::Failed);
+        assert!(!holds_key_source(&tree), "an ended keyboard delivers none");
     }
 }

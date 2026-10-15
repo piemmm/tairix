@@ -49,8 +49,8 @@ use tairix_kernel::FreeListAllocator;
 
 // --- Bump-allocator-backed `#[global_allocator]` ---------------------
 
-/// Static heap for the bump allocator. Mirrors the production binary.
-static mut HEAP: Heap = Heap::ZERO;
+/// The global allocator's arena.
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by the module-private `HEAP` static, shared by
 /// every x86_64 virtio QEMU test that links this crate.
@@ -62,7 +62,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// only consumer. Identical justification to the other QEMU test bins.
 #[global_allocator]
 pub static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 // --- Stable identifiers ----------------------------------------------
 

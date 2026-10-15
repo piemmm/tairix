@@ -597,13 +597,13 @@ mod tests {
 
     #[test]
     fn single_command_with_args() {
-        let list = parse("ls -l /Apps").unwrap();
+        let list = parse("ls -l /Storage").unwrap();
         assert_eq!(list.entries.len(), 1);
         let entry = &list.entries[0];
         assert_eq!(entry.run_if, RunCondition::Always);
         assert!(!entry.background);
         assert_eq!(entry.pipeline.commands.len(), 1);
-        assert_eq!(argv(&entry.pipeline.commands[0]), ["ls", "-l", "/Apps"]);
+        assert_eq!(argv(&entry.pipeline.commands[0]), ["ls", "-l", "/Storage"]);
     }
 
     #[test]

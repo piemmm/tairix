@@ -119,7 +119,7 @@ cc.link(&LinkRequest {                            // ld.lld -> PIE ELF
 
 ## Loading: PIE, W^X, and the rxe envelope
 
-A program runs as a signed `/Apps/<Name>.app/` bundle whose `Run` binary is an
+A program runs as a signed `<Name>.app/` bundle in a program store whose `Run` binary is an
 `rxe` PIE image. The hardening invariants are enforced at one point,
 `tairix_abi::rxe::LoadImage::parse`, on a C binary exactly as on a Rust one:
 position-independence (PIE), `R`/`RX`/`RW`-only segments (no `RWX`), and the

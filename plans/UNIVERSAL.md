@@ -78,12 +78,12 @@ slice kind).
   per-slice interface hashes. The one `AppInfo` signature covers all slices;
   there is no per-slice signing ambiguity.
 - **Load gate.** Slice selection lives in the single load gate
-  (`lib/appload`), used by both the kernel boot-floor spawn path and `appmgr`
+  (`lib/appload`), through which the kernel's `spawn` loads every bundle
   (§2.2): pick the slice for the running architecture, then apply the existing
   checks (signature, capability intersection, interface-hash verification,
   PIE/W^X/CFI refusal rules) to the chosen slice unchanged. No native slice
   and no U2 fallback slice ⇒ refuse the bundle, fail closed (§5.4).
-- **Thinning.** The installer (and `appmgr` on install) may strip foreign-arch
+- **Thinning.** The installer may strip foreign-arch
   slices at install time, Apple-app-thinning style, so "universal" costs
   download size, not resident disk. Thinning re-verifies what remains against
   the manifest; a thinned bundle is still a valid, verifiable bundle.

@@ -14,6 +14,10 @@ pub const GREETER_RANGE_END: u32 = tairix_log::registry::GREETER.end();
 /// The seat is held, the mode is known, and the first frame is on screen.
 pub const SCREEN_READY: EventId = EventId(19_001);
 
+/// The [`SCREEN_READY`] record's message: what a test driving the screen
+/// waits for before it types.
+pub const SCREEN_READY_MESSAGE: &str = "greeter: the login screen is up";
+
 /// No screen could be brought up, so the greeter exits and the authority
 /// falls back to a text login.
 pub const SCREEN_UNAVAILABLE: EventId = EventId(19_002);

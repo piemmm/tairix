@@ -6,8 +6,8 @@ and changes the mount table, and the two halves take different paths.
 like `ps` — it goes through the typed, versioned, capability-checked System
 Information API (`sysinfo-v1`) served by `/System/Services/sysinfod.app/Run`
 (`AGENTS.md` §16.6): TAIRiX has no `/proc` and no mount-table file, so
-`mount` issues the ungated `MOUNT_LIST` query and has no privileged path
-that bypasses the capability check. **Attaching** a filesystem is
+`mount` issues the ungated `MOUNT_LIST` and `VIEW_LIST` queries and has no
+privileged path that bypasses the capability check. **Attaching** a filesystem is
 privileged — it needs `CAP_FS_MOUNT` (`AGENTS.md` §5.2) — and the kernel,
 not this tool, makes that decision (`AGENTS.md` §5.4).
 
@@ -26,23 +26,27 @@ mount [-r] [-t TYPE] [-o OPTIONS] [--] [SOURCE TARGET]
   SOURCE TARGET        mount SOURCE at TARGET (needs CAP_FS_MOUNT)
   -r, --read-only      mount read-only (same as -o ro)
   -t, --types TYPE     filesystem type (probed when omitted)
-  -o, --options LIST   comma-separated: ro,rw,nosuid,nodev,noexec
+  -o, --options LIST   comma-separated: ro,rw,noexec
   -h, --help           show the usage banner
 ```
 
 With no operands `mount` lists the table; with exactly `SOURCE TARGET` it
 attaches. Value options accept their value attached (`-text4`,
 `--types=ext4`) or as the following argument; `-r` may cluster with other
-toggles. `--` ends option parsing. The `-o` names map onto the frozen
-`MountFlags` bitmap (`AGENTS.md` §5.3).
+toggles. `--` ends option parsing. The `-o` names map onto the
+`MountFlags` bitmap; GNU `mount`'s `nosuid` and `nodev` are refused, since
+TAIRiX has no setuid programs or device files for them to restrict.
 
 ## Shared with the other `sysinfo` clients
 
-Listing pages the `MOUNT_LIST` reply through the same `lib/procinfo`
-machinery `ps` and `sysinfo` use — the `Transport`/`Output` seams, the
-request framing, and the generic `offset`/`limit` page walk — so none of it
-is copied (`AGENTS.md` §2.2). The shared renderer prints one familiar
-`source on target type fstype (options)` line per mount. Because sibling
+Listing reads the attached volumes and the view bindings onto them through
+the same `lib/procinfo` machinery `ps` and `sysinfo` use — the
+`Transport`/`Output` seams, the request framing, the generic
+`offset`/`limit` page walk, and the `Namespace` join of each binding to its
+volume — so none of it is copied (`AGENTS.md` §2.2). The shared renderer
+prints one familiar `source on target type fstype (options)` line per
+binding: a carved-out subtree reads `source[/subtree]`, and the `/Storage`
+catalog, which shows no volume, reads `none on /Storage type none`. Because sibling
 userland crates may not depend on one another (`AGENTS.md` §17.4), that
 shared piece is the `lib/procinfo` crate; `mount` owns only its own argument
 grammar, the `Mounter` attach seam, the usage banner, and `MountError`.
@@ -71,7 +75,7 @@ is no panic (`AGENTS.md` §2.9).
 
 `cargo test -p tairix-mount` drives the parser and the engine against an
 in-memory `sysinfod` fixture, a recording output, and an in-memory mounter:
-the command grammar, the mount-table listing and its query routing, the
+the command grammar, the binding listing and its query routing, the
 empty table, the service/output-failure paths, the attach request reaching
 the mounter with the right fields, and the denied-attach mapping.
 

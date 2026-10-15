@@ -52,9 +52,8 @@ const STACK_GUARD_BYTES: u64 = PAGE_SIZE as u64;
 /// The expected drain faults on the very first dispatch.
 const MAX_STEPS: u64 = 1_000_000;
 
-/// Static heap for the bump allocator (per the production bin); the boot
-/// pipeline and the test scheduler both allocate from it.
-static mut HEAP: Heap = Heap::ZERO;
+/// The global allocator's arena.
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -62,7 +61,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// The guard slot of the stack under test, published once it is drawn so
 /// the fault observer can name the address it expects. Zero until then,

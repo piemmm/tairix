@@ -17,8 +17,8 @@ use tairix_abi::sysinfo::{
     CpuLoadRecord, CpuTimeRecord, CrashRecord, DesktopFrameRecord, DesktopFrameTotals,
     DmaGroupRecord, DmaNodeRecord, DmaUnitRecord, GroupDirectoryRecord, IrqRecord, MountRecord,
     NetInterfaceRatesRequest, PageRequest, ProcessRecord, ReclaimClassRecord, ResourceLimitRecord,
-    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, VolumeIoHealthRecord,
-    VolumeIoQueueRecord, VolumeIoStatsRecord,
+    SeatRecord, SysinfoQueryId, SysinfoRequestHeader, UserDirectoryRecord, ViewBindingRecord,
+    VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::{Errno, LimitKind};
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -305,6 +305,10 @@ fn inventory_list(
         SysinfoQueryId::MOUNT_LIST => {
             page.of(|| source.mount_records(caller), MountRecord::to_le_bytes)
         }
+        SysinfoQueryId::VIEW_LIST => page.of(
+            || source.view_records(caller),
+            ViewBindingRecord::to_le_bytes,
+        ),
         SysinfoQueryId::SEAT_LIST => page.of(|| source.seats(caller), SeatRecord::to_le_bytes),
         SysinfoQueryId::USER_DIRECTORY => page.of(
             || source.user_directory(caller),
@@ -833,11 +837,11 @@ mod tests {
         LoadAverage, MemoryPressureBand, MemoryPressureStats, MemoryTotal, MountAvailability,
         MountRecord, MountVolumeState, PageRequest, ProcessRecord, ProcessState, RamzipStats,
         ReclaimClassRecord, ResourceLimitRecord, SeatRecord, SelfAccountRecord, SysinfoQueryId,
-        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoHealthRecord,
-        VolumeIoQueueRecord, VolumeIoStatsRecord, IRQ_FLAG_QUARANTINED, LOAD_FIXED_SHIFT,
-        MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES, RECLAIM_CLASS_COUNT, RESOURCE_LIMITS_REPORT_LEN,
-        SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
-        SYSINFO_VERSION_CURRENT,
+        SysinfoRequestHeader, SystemIdentity, Uptime, UserDirectoryRecord, ViewBindingRecord,
+        VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord, IRQ_FLAG_QUARANTINED,
+        LOAD_FIXED_SHIFT, MACHINE_ID_LEN, MAX_CACHE_REPORT_ENTRIES, RECLAIM_CLASS_COUNT,
+        RESOURCE_LIMITS_REPORT_LEN, SEAT_FLAG_OWNED, SYSINFO_MAX_REPLY, SYSINFO_REPLY_STATUS_LEN,
+        SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT,
     };
     use tairix_abi::sysinfo::{
         DmaFaultSignal, DmaGroupRecord, DmaNodeRecord, DmaOwnerState, DmaTables, DmaUnitFamily,
@@ -1163,7 +1167,7 @@ mod tests {
                         b"data",
                         b"/Storage/data",
                         b"arxfs",
-                        MountFlags::NOSUID.union(MountFlags::NODEV),
+                        MountFlags::NOEXEC,
                         MountVolumeState {
                             usage: VolumeStats::default(),
                             availability: MountAvailability::Available,
@@ -1268,6 +1272,16 @@ mod tests {
         }
         fn mount_records(&self, _caller: &Caller) -> Result<alloc::vec::Vec<MountRecord>, Errno> {
             Ok(self.mounts.to_vec())
+        }
+        fn view_records(
+            &self,
+            _caller: &Caller,
+        ) -> Result<alloc::vec::Vec<ViewBindingRecord>, Errno> {
+            Ok(alloc::vec![
+                ViewBindingRecord::new(b"/", b"/", MountFlags::READ_ONLY, [0u8; 16]).unwrap(),
+                ViewBindingRecord::new(b"/Storage/data", b"/", MountFlags::NOEXEC, [0u8; 16])
+                    .unwrap(),
+            ])
         }
         fn cpu_times(&self, _caller: &Caller) -> Result<alloc::vec::Vec<CpuTimeRecord>, Errno> {
             Ok(alloc::vec![
@@ -2313,6 +2327,36 @@ mod tests {
         let req_end = request_bytes(SysinfoQueryId::MOUNT_LIST, &mlr_end.to_le_bytes());
         assert_eq!(
             serve_once(&source, &caller(&caps), &sink, &req_end, &mut resp),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn view_list_needs_no_capability_and_pages() {
+        let source = FixtureSource::new();
+        let caps = Caps(&[]);
+        let sink = RecordingSink::new();
+        let page = |offset| {
+            request_bytes(
+                SysinfoQueryId::VIEW_LIST,
+                &PageRequest {
+                    offset,
+                    limit: 1,
+                    flags: 0,
+                    walk: PageRequest::FRESH,
+                }
+                .to_le_bytes(),
+            )
+        };
+        let mut resp = [0u8; 512];
+        let n = serve_once(&source, &caller(&caps), &sink, &page(1), &mut resp).unwrap();
+        assert_eq!(n, ViewBindingRecord::WIRE_LEN);
+        let second = ViewBindingRecord::from_bytes(&resp[..n]).unwrap();
+        assert_eq!(second.target_bytes(), b"/Storage/data");
+        assert_eq!(second.flags(), MountFlags::NOEXEC);
+        assert!(sink.events.borrow().as_slice().is_empty(), "not audited");
+        assert_eq!(
+            serve_once(&source, &caller(&caps), &sink, &page(2), &mut resp),
             Ok(0)
         );
     }

@@ -437,6 +437,10 @@ enum FsDisk {
     /// `/System/Security/Users` — the root-mount->login vertical's backing
     /// (`plans/PI.md` P11 Chunk B-2).
     EncryptedRootDisk,
+    /// The [`Self::EncryptedRootDisk`] image on a medium four times its size,
+    /// as an image written to a larger card is: the root, its last
+    /// partition, grows to fill the medium at its first writable mount.
+    GrownEncryptedRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout with a plaintext root and no
     /// unlock descriptor, as a shipped image has.
     PlaintextRootDisk,
@@ -906,18 +910,20 @@ const AUTOLOAD_TERMINAL_CTRL_C_RECOVERY: &str =
 /// time out loudly, never pass on the wrong exchange.)
 const AUTOLOAD_LOGIN_MARKER: &str = "users database loaded";
 
-/// The login + desktop-command dialogue the autoload vertical types at
-/// the seat keyboard: the fixture account's username and password
-/// (`root`/`root`), then the `desktop` command word at the text shell's
-/// prompt — the disk plants `os.loginType text`, so the authenticated
-/// session is the shell and the desktop is started exactly as a user
-/// starts it, by typing `desktop` (the system app store's `desktop.app`,
-/// the bundle a graphical login also spawns).
-/// Pinned against the fixture credentials below so the dialogue and the
-/// planted account cannot drift; a renamed bundle makes the vertical
-/// time out loudly at the [`AUTOLOAD_DESKTOP_REVEALED_MARKER`] gate, never
-/// pass on the wrong exchange.
-const AUTOLOAD_LOGIN_DIALOGUE: &str = "root\nroot\ndesktop\n";
+/// Serial marker a desktop vertical waits on before it logs in: the login
+/// screen's own announcement that it holds the seat and its first frame is
+/// up, so no keystroke reaches a screen that is not yet listening.
+const GREETER_READY_MARKER: &str = tairix_greeter_service::events::SCREEN_READY_MESSAGE;
+
+/// The login dialogue a desktop vertical types at the login screen: Enter on
+/// the focused tile — the fixture account, the first the chooser offers —
+/// then its password. The desktop disks plant no `os.loginType`, so login
+/// puts the graphical login screen up, and a verified secret starts the
+/// desktop session component exactly as for anybody logging in. Pinned
+/// against the fixture password below, so the dialogue and the planted
+/// account cannot drift; a wrong exchange times the vertical out loudly at
+/// the [`AUTOLOAD_DESKTOP_REVEALED_MARKER`] gate, never passes.
+const GREETER_LOGIN_DIALOGUE: &str = "\nroot\n";
 
 /// The login + command dialogue the SVG-text vertical types at the seat
 /// keyboard: the fixture account's credentials, then the fixture's own
@@ -1438,35 +1444,15 @@ const _: () = {
         ),
         "UNLOCK_PASSPHRASE_LINE drifted from the fixture passphrase"
     );
-    // The autoload login dialogue is `<username>\n<password>\n` from the
-    // shared fixture account, then the `desktop` command typed at the
-    // shell prompt the text login drops to.
+    // The login-screen dialogue is Enter on the focused account tile, then
+    // the shared fixture account's password line.
     assert!(
-        starts_with_bytes(
-            AUTOLOAD_LOGIN_DIALOGUE.as_bytes(),
-            SESSION_USERNAME_LINE.as_bytes()
-        ),
-        "AUTOLOAD_LOGIN_DIALOGUE must start with the fixture username line"
-    );
-    assert!(
-        starts_with_bytes(
-            AUTOLOAD_LOGIN_DIALOGUE
-                .as_bytes()
-                .split_at(SESSION_USERNAME_LINE.len())
-                .1,
-            SESSION_PASSWORD_LINE.as_bytes()
-        ),
-        "AUTOLOAD_LOGIN_DIALOGUE must continue with the fixture password line"
-    );
-    assert!(
-        bytes_eq(
-            AUTOLOAD_LOGIN_DIALOGUE
-                .as_bytes()
-                .split_at(SESSION_USERNAME_LINE.len() + SESSION_PASSWORD_LINE.len())
-                .1,
-            b"desktop\n"
-        ),
-        "AUTOLOAD_LOGIN_DIALOGUE must end with the `desktop` shell command"
+        GREETER_LOGIN_DIALOGUE.as_bytes()[0] == b'\n'
+            && bytes_eq(
+                GREETER_LOGIN_DIALOGUE.as_bytes().split_at(1).1,
+                SESSION_PASSWORD_LINE.as_bytes()
+            ),
+        "GREETER_LOGIN_DIALOGUE must choose the focused tile, then type the fixture password"
     );
     assert!(
         is_line_of(
@@ -1536,7 +1522,7 @@ const AUTOLOAD_INPUT_AARCH64: QemuTest = QemuTest {
             AUTOLOAD_INPUT_ARMED_OCCURRENCES,
             UNLOCK_PASSPHRASE_LINE,
         ),
-        TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         // AW4 terminal stage: type the shell command once the terminal
         // gains focus (its spawn is the PASS gate's round-trip witness).
         // Gated on the guest focus marker, not a raw count the files
@@ -6552,6 +6538,33 @@ static TESTS: &[QemuTest] = &[
         serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
         expect: Expect::Pass,
     },
+    // D1009: the image written to a larger medium. The admission vertical's
+    // production boot over the encrypted-root image planted on a disk four
+    // times its size; PASS once the kernel reports the root's *volume* grown
+    // into the partition it grew to the medium's end — the partition grows
+    // first, so the volume's record witnesses both — and FAIL on a refusal.
+    QemuTest {
+        package: "tairix-test-root-grow-qemu-aarch64",
+        binary: "tairix-test-root-grow-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(120),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::GrownEncryptedRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[("ARXFS passphrase: ", Duration::ZERO, UNLOCK_PASSPHRASE_LINE)],
+        expect: Expect::Pass,
+    },
     // `plans/NEW-SUPERVISOR.md` §7: the pre-boot **Supervisor** ESC vertical.
     // `tairix-test-supervisor-esc-qemu-aarch64` boots the *production* aarch64
     // pipeline over the same planted whole-disk encrypted-root image the
@@ -9376,12 +9389,11 @@ static TESTS: &[QemuTest] = &[
     // `CAP_IPC_BIND_PRIVILEGED`).
     //
     // D7d-2 grows the run into the desktop launch: after the unlock, the
-    // second typed step (keyed on the `UsersDbLoaded` serial witness)
-    // types the fixture account's `root`/`root` at login's video-console
-    // prompt — the disk plants `os.loginType text`, so login drops to the
-    // account's shell — and then the `desktop` command word, which the
-    // shell resolves in the system application store and spawns: the desktop is
-    // started exactly the way a user starts it from the command line.
+    // second typed step (keyed on the login screen's readiness) chooses the
+    // fixture account's tile and types its password — the disk plants no
+    // `os.loginType`, so login puts the graphical login screen up — and the
+    // verified secret starts the desktop session component exactly as for
+    // anybody logging in.
     //
     // AW3 (`plans/APPWIN.md`) grows the presented desktop into the full
     // click-through: the session's one-shot `DESKTOP_REVEALED` witness
@@ -9409,7 +9421,7 @@ static TESTS: &[QemuTest] = &[
     // the third window-frame map (the terminal's create) gates the
     // terminal-window click, after which the runner types `sleep 3600` +
     // Enter at the seat keyboard once the guest's terminal-focus marker
-    // appears. The guest PASS gate latches the `appmgr` load of
+    // appears. The guest PASS gate latches the load gate's load of
     // `/System/Commands/sleep.app` — `sleep` is loaded only by the shell running
     // the typed command, so this witness is uniquely attributable (no
     // fragile delivery count), and it proves the whole keyboard → session →
@@ -9502,7 +9514,7 @@ static TESTS: &[QemuTest] = &[
             ),
             // The fixture account's login, then `desktop` at the text
             // shell's prompt — the same bundle a graphical login spawns.
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -9586,7 +9598,7 @@ static TESTS: &[QemuTest] = &[
             ),
             // The fixture account's login, then `desktop` at the text
             // shell's prompt — the same bundle a graphical login spawns.
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[],
         pointer_script: Some(filepick_pointer_script),
@@ -9669,7 +9681,7 @@ static TESTS: &[QemuTest] = &[
             ),
             // The fixture account's login, then `desktop` at the text
             // shell's prompt — the same bundle a graphical login spawns.
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[ScreendumpPlan {
             marker: WINDOW_SHOWN_MARKER,
@@ -9736,7 +9748,7 @@ static TESTS: &[QemuTest] = &[
             ),
             // The fixture account's login, then `desktop` at the text
             // shell's prompt — the same bundle a graphical login spawns.
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[],
         pointer_script: Some(fsmutate_pointer_script),
@@ -9791,7 +9803,7 @@ static TESTS: &[QemuTest] = &[
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -9840,7 +9852,7 @@ static TESTS: &[QemuTest] = &[
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
             // The credential prompt is up and focused: offer the fixture
             // account. Tab moves from the account field to the password;
             // Enter submits. The broker starts datetime.app as that account.
@@ -9909,7 +9921,7 @@ static TESTS: &[QemuTest] = &[
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
             // The prompt opens with Keep Changes focused.
             TypedStep::text(TRIAL_SHOWN_MARKER, 1, "\n"),
         ],
@@ -9999,7 +10011,7 @@ static TESTS: &[QemuTest] = &[
                 NETMAP_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[ScreendumpPlan {
             marker: WINDOW_RETITLED_MARKER,
@@ -10050,7 +10062,7 @@ static TESTS: &[QemuTest] = &[
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
             // The terminal's window is on screen, so its shell is already
             // spawned and the line waits in its pty until the shell reads it.
             TypedStep::text(WINDOW_SHOWN_MARKER, 1, WINTERSUN_COMMAND_LINE),
@@ -10144,7 +10156,7 @@ static TESTS: &[QemuTest] = &[
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[
             ScreendumpPlan {
@@ -10218,7 +10230,7 @@ static TESTS: &[QemuTest] = &[
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[],
         pointer_script: Some(desktop_hover_pointer_script),
@@ -10251,7 +10263,7 @@ static TESTS: &[QemuTest] = &[
                 AUTOLOAD_INPUT_ARMED_OCCURRENCES,
                 UNLOCK_PASSPHRASE_LINE,
             ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
         ],
         screendumps: &[],
         pointer_script: Some(touch_pointer_script),
@@ -10350,13 +10362,11 @@ static TESTS: &[QemuTest] = &[
     },
     // `plans/NEW-DESKTOP-LOGIN.md` G7.1: a display-capable machine that
     // nobody has configured boots to the **graphical** login screen on its
-    // own. The sibling verticals above all plant `os.loginType text` because
-    // their scripts drive a shell; this one deliberately does not, so the
-    // compiled default is what decides — the state every fresh installation
-    // boots in, and the one no other vertical covers.
+    // own. Its disk plants no `os.loginType`, so the compiled default is what
+    // decides — the state every fresh installation boots in.
     //
-    // The script types the unlock passphrase and nothing else: no account,
-    // no `desktop` command. So the greeter's `SCREEN_READY` — emitted only
+    // The script types the unlock passphrase and nothing else: no account is
+    // chosen and no secret offered. So the greeter's `SCREEN_READY` — emitted only
     // once it holds the seat and its first frame is on screen — can only be
     // login's own choice, made after the encrypted root mounted and its
     // settings store answered "no configuration" rather than "not here".
@@ -11725,12 +11735,10 @@ fn root_volume_components(t: &QemuTest, path: &str) -> Result<Vec<String>, Strin
 /// parses.
 fn login_type_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
     let settings = match t.fs_disk {
-        FsDisk::AutoloadRootDisk | FsDisk::HoverRootDisk | FsDisk::SvgTextRootDisk => {
-            tairix_sysconfig::SystemConfig {
-                login_type: tairix_sysconfig::LoginType::Text,
-                ..tairix_sysconfig::SystemConfig::default()
-            }
-        }
+        FsDisk::SvgTextRootDisk => tairix_sysconfig::SystemConfig {
+            login_type: tairix_sysconfig::LoginType::Text,
+            ..tairix_sysconfig::SystemConfig::default()
+        },
         // The time vertical's server list lives on this same layer: `timed`
         // reads the store through the ordinary VFS, where `/System/Settings`
         // is the writable sub-mount the encrypted root backs, so a document
@@ -17595,11 +17603,15 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
             })?,
             total_sectors: tairix_test_arxfs_image::TOTAL_SECTORS,
         }),
-        FsDisk::EncryptedRootDisk => {
+        FsDisk::EncryptedRootDisk | FsDisk::GrownEncryptedRootDisk => {
             let bytes = root_disk_bytes(t, apps, ENCRYPTED_ROOT)?;
-            let total_sectors = image_total_sectors(&bytes);
+            let image = image_total_sectors(&bytes);
+            let (extension, total_sectors) = match t.fs_disk {
+                FsDisk::GrownEncryptedRootDisk => ("grown-root.img", image * 4),
+                _ => ("encrypted-root.img", image),
+            };
             Some(FsImage {
-                extension: "encrypted-root.img",
+                extension,
                 bytes,
                 total_sectors,
             })
@@ -19164,12 +19176,12 @@ mod tests {
     #[test]
     fn the_settings_guest_waits_for_the_bundle_the_menu_row_starts() {
         let bundle = super::bundle_path(
-            tairix_abi::SYSTEM_APPLICATION_STORE,
+            tairix_abi::SYSTEM_COMPONENT_STORE,
             tairix_test_settings_qemu_aarch64::SETTINGS_APP_NAME,
         );
         assert_eq!(
             tairix_appstore::entry_path(&bundle),
-            tairix_desktop_session::SETTINGS_RUN_PATH
+            tairix_abi::SETTINGS_RUN_PATH
         );
     }
 
@@ -19580,8 +19592,8 @@ mod tests {
     /// keep the leading `System` segment.
     #[test]
     fn a_shell_driving_vertical_plants_its_text_login_on_the_root_volume() {
-        let autoload = enrolment_with(FsDisk::AutoloadRootDisk, "autoload");
-        let (components, conf) = login_type_plant(autoload)
+        let svgtext = enrolment_with(FsDisk::SvgTextRootDisk, "svgtext");
+        let (components, conf) = login_type_plant(svgtext)
             .expect("the plant path is absolute")
             .expect("a shell-driving vertical asks for the text prompt");
         assert_eq!(

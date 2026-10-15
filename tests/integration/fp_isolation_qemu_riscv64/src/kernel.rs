@@ -119,12 +119,10 @@ static KERNEL_FP_RUNS: AtomicU64 = AtomicU64::new(0);
 /// Set once the round-trip has been driven so a re-entry cannot re-run it.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
 
-/// Static boot heap, in the linker's NOLOAD `.heap` section so the boot
-/// trampoline neither zeroes nor counts it in the usable memory map. The two
-/// user kthreads' kernel stacks + control blocks and the spawn caller's
-/// startup-vector blocks allocate from it.
+/// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+/// trampoline does not spend time zeroing it.
 #[link_section = ".heap"]
-static mut HEAP: Heap = Heap::ZERO;
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -132,7 +130,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Per-space page-table pools (one per U-mode address space). Each backs an
 /// Sv39 hierarchy whose root [`activate_user_root`] reinstalls (via `satp`)

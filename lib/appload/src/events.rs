@@ -1,4 +1,4 @@
-//! Stable [`tairix_log::EventId`] constants emitted by `appmgr`.
+//! Stable [`tairix_log::EventId`] constants emitted by the bundle load gate.
 //!
 //! Per `lib/log` convention every subsystem owns a
 //! 1 000-wide reserved range. The application loader occupies
@@ -8,10 +8,10 @@
 
 use tairix_log::EventId;
 
-/// Range start (inclusive) reserved for `appmgr` event identifiers.
-pub const APPMGR_RANGE_START: u32 = tairix_log::registry::APPMGR.start();
-/// Range end (exclusive) reserved for `appmgr` event identifiers.
-pub const APPMGR_RANGE_END: u32 = tairix_log::registry::APPMGR.end();
+/// Range start (inclusive) reserved for the load gate's event identifiers.
+pub const APPLOAD_RANGE_START: u32 = tairix_log::registry::APPLOAD.start();
+/// Range end (exclusive) reserved for the load gate's event identifiers.
+pub const APPLOAD_RANGE_END: u32 = tairix_log::registry::APPLOAD.end();
 
 /// A bundle was accepted: its layout validated, its manifest verified, and
 /// its capability ceiling computed.
@@ -52,17 +52,21 @@ pub const APP_RUN_IMAGE_INVALID: EventId = EventId(11_010);
 /// bundle cannot be attributed to a developer, so it gets no identity and no
 /// per-app store.
 pub const APP_PUBLISHER_INVALID: EventId = EventId(11_011);
+/// A bundle was refused because it was launched from a store its signed kind
+/// does not run from: a service or component outside its own store, or any
+/// bundle in another kind's system store.
+pub const APP_MISPLACED: EventId = EventId(11_012);
 
 #[cfg(test)]
 mod tests {
     use super::{
-        APPMGR_RANGE_END, APPMGR_RANGE_START, APP_CONTENT_MISMATCH, APP_INTERFACE_MISMATCH,
-        APP_LAYOUT_REJECTED, APP_LOADED, APP_MANIFEST_INVALID, APP_PUBLISHER_INVALID,
-        APP_RUN_IMAGE_INVALID, APP_SIGNATURE_INVALID, APP_STORE_ERROR, LIBRARY_REFUSED,
-        LIBRARY_RESOLVED,
+        APPLOAD_RANGE_END, APPLOAD_RANGE_START, APP_CONTENT_MISMATCH, APP_INTERFACE_MISMATCH,
+        APP_LAYOUT_REJECTED, APP_LOADED, APP_MANIFEST_INVALID, APP_MISPLACED,
+        APP_PUBLISHER_INVALID, APP_RUN_IMAGE_INVALID, APP_SIGNATURE_INVALID, APP_STORE_ERROR,
+        LIBRARY_REFUSED, LIBRARY_RESOLVED,
     };
 
-    const ALL: [u32; 11] = [
+    const ALL: [u32; 12] = [
         APP_LOADED.0,
         APP_LAYOUT_REJECTED.0,
         APP_MANIFEST_INVALID.0,
@@ -74,12 +78,13 @@ mod tests {
         LIBRARY_REFUSED.0,
         APP_RUN_IMAGE_INVALID.0,
         APP_PUBLISHER_INVALID.0,
+        APP_MISPLACED.0,
     ];
 
     #[test]
     fn ids_are_inside_reserved_range() {
         for id in ALL {
-            assert!((APPMGR_RANGE_START..APPMGR_RANGE_END).contains(&id));
+            assert!((APPLOAD_RANGE_START..APPLOAD_RANGE_END).contains(&id));
         }
     }
 
@@ -88,7 +93,7 @@ mod tests {
         let mut ids = ALL;
         ids.sort_unstable();
         for w in ids.windows(2) {
-            assert_ne!(w[0], w[1], "duplicate appmgr EventId");
+            assert_ne!(w[0], w[1], "duplicate load-gate EventId");
         }
     }
 }

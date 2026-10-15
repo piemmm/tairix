@@ -824,7 +824,7 @@ impl<A: SchedulerArch> Scheduler<A> {
                 }
                 self.drop_record(task);
             }
-            Settled::Park => park::commit_park(task, |woken| self.admit_woken(woken)),
+            Settled::Woken => self.admit_woken(task),
             Settled::Released => {}
             Settled::Requeue => {
                 // vruntime was already charged for this run above (every

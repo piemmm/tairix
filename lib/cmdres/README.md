@@ -43,13 +43,11 @@ policy.
   covers: the directory view of the same policy, which the shell's tab
   completion enumerates so it offers exactly the names launch would resolve.
 - `search_roots(home)` — the store roots `man`'s recursive bundle search walks
-  when the ordered candidates find nothing: the machine-wide `/Apps`
-  (`tairix_abi::INSTALLED_APP_STORE`), then the user's own two stores. The
+  when the ordered candidates find nothing: the user's own two stores. The
   flat system stores are absent by design — the ordered candidates already
   cover them and there is nothing nested to walk. Spelling only: the bounded
   walk itself lives in the consumer, and an unset or empty `home` contributes
-  no per-user root. Launch is unaffected; the shell never consults these
-  roots.
+  no root. Launch is unaffected; the shell never consults these roots.
 
 ## Design
 
@@ -61,8 +59,8 @@ policy.
   found under; existence is the host's I/O question.
 - The store and bundle spellings come from `lib/abi`
   (`SYSTEM_COMMAND_STORE`, `SYSTEM_APPLICATION_STORE`,
-  `HOME_COMMAND_STORE_DIR`, `HOME_APPLICATION_STORE_DIR`,
-  `INSTALLED_APP_STORE`, `BUNDLE_SUFFIX`, `BundleEntry::Run`), the same
+  `HOME_COMMAND_STORE_DIR`, `HOME_APPLICATION_STORE_DIR`, `BUNDLE_SUFFIX`,
+  `BundleEntry::Run`), the same
   definitions the kernel's program registry is drift-tested against, so the
   paths this crate spells and the paths the kernel registers cannot diverge.
 - Empty `PATH` entries are skipped, never widened into a silent

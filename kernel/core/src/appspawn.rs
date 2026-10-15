@@ -153,8 +153,8 @@ impl AppStore {
     /// Every program kind's store is such a store, so the set is derived
     /// from the one store definition rather than listed again here.
     ///
-    /// A bundle on a writable volume (an installed bundle under `/Apps`, a
-    /// bundle in a user's own store) is never cached: its bytes can change
+    /// A bundle on a writable volume, in a user's own store, is never cached:
+    /// its bytes can change
     /// between launches, so every launch re-verifies it through the full
     /// load gate.
     #[must_use]
@@ -277,10 +277,12 @@ const WALK_FILES_MAX: usize = 4096;
 /// The [`BundleStore`] over the kernel's mounted, secured VFS.
 ///
 /// Every read happens under the **caller's** kernel-attested identity
-/// (`uid` + effective capability set), so the per-inode owner/mode/ACL and
-/// mount-flag checks stay kernel-side and a caller can never launch a
-/// bundle it could not read. The store adds no authority and trusts no
-/// result: sizes, depths, and file counts are bounded fail-closed.
+/// (`uid` + effective capability set), so the per-inode owner/mode/ACL
+/// checks stay kernel-side and a caller can never launch a bundle it could
+/// not read. Every file is read as a program
+/// ([`FilesystemService::read_program`]), so a bundle served by a `noexec`
+/// mount is refused at its first byte. The store adds no authority and trusts
+/// no result: sizes, depths, and file counts are bounded fail-closed.
 pub struct FsBundleStore<'a> {
     fs: &'a dyn FilesystemService,
     uid: u32,
@@ -335,9 +337,13 @@ impl<'a> FsBundleStore<'a> {
         out.resize(size, 0);
         let mut filled = 0usize;
         while filled < size {
-            let read =
-                self.fs
-                    .read(self.uid, self.caps, path, filled as u64, &mut out[filled..])?;
+            let read = self.fs.read_program(
+                self.uid,
+                self.caps,
+                path,
+                filled as u64,
+                &mut out[filled..],
+            )?;
             if read == 0 {
                 break;
             }
@@ -583,60 +589,15 @@ pub fn app_error_errno(err: AppError) -> Errno {
 mod tests {
     use super::*;
     use crate::test_bundle::{
-        composed_bundle, composed_bundle_published_by, composed_bundle_signed_by, MemFs,
+        composed_bundle, composed_bundle_published_by, composed_bundle_signed_by, gate_load as load,
     };
-    use crate::test_sink::TestSink;
     use tairix_abi::rxe::{LoadHeader, Segment};
-    use tairix_abi::{BundleLayoutError, CapabilityId, RxeError, ABI_VERSION_CURRENT};
-    use tairix_appload::{AppLoader, AppLoaderConfig};
-    use tairix_caps::CapabilitySet;
+    use tairix_abi::{BundleLayoutError, CapabilityId, RxeError};
     use tairix_itest_harness::app_image::PublisherSource;
-    use tairix_kernel_syscall::SYSCALL_TABLE_HASH;
 
     extern crate std;
-    use std::boxed::Box;
     use std::string::ToString;
     use std::vec;
-
-    /// A `CapabilityQuery` granting nothing — the mock filesystem enforces
-    /// no permissions, so the store tests need no authority.
-    struct NoCaps;
-    impl CapabilityQuery for NoCaps {
-        fn holds(&self, _cap: CapabilityId) -> bool {
-            false
-        }
-    }
-
-    /// A fixed clock: these tests assert the load *outcome*, not the timing,
-    /// so a constant reading (zero-length phases) is sufficient.
-    struct TestClock;
-    impl Clock for TestClock {
-        fn now_ns(&self) -> u64 {
-            0
-        }
-    }
-
-    fn load(
-        fs: &MemFs,
-        anchor: [u8; 32],
-    ) -> Result<tairix_appload::LoadedApp, tairix_appload::AppError> {
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let store = FsBundleStore::new(fs, 1000, &NoCaps);
-        let verifier = AnchorVerifier::new(anchor);
-        let clock = TestClock;
-        let loader = AppLoader::new(AppLoaderConfig {
-            accepted_abi_version: ABI_VERSION_CURRENT,
-            syscall_table_hash: SYSCALL_TABLE_HASH,
-            store: &store,
-            verifier: &verifier,
-            clock: &clock,
-            sink,
-        });
-        loader.load(
-            "/System/Commands/ps.app",
-            &CapabilitySet::from_words([u64::MAX; 4]),
-        )
-    }
 
     #[test]
     fn a_composed_bundle_loads_end_to_end_with_its_manifest_request() {
@@ -743,6 +704,19 @@ mod tests {
         }
     }
 
+    /// Regression: a validly signed bundle on a `noexec` mount ran, since no
+    /// read the load made consulted the mount's flags.
+    #[test]
+    fn a_bundle_served_by_a_noexec_mount_is_refused_at_its_first_read() {
+        let (fs, anchor, _) = composed_bundle(vec![]);
+        let fs = fs.with_noexec();
+        assert_eq!(
+            load(&fs, anchor),
+            Err(AppError::Store(Errno::PermissionDenied))
+        );
+        assert_eq!(fs.read_calls("/System/Commands/ps.app/Run"), 0);
+    }
+
     #[test]
     fn a_tampered_run_fails_the_content_hash() {
         let (mut fs, anchor, _) = composed_bundle(vec![]);
@@ -803,8 +777,9 @@ mod tests {
         let parsed = bundle_run_path(b"/System/Commands/ps.app/Run").expect("store bundle");
         assert_eq!(parsed.bundle, "/System/Commands/ps.app");
         assert_eq!(parsed.command, "ps");
-        let parsed = bundle_run_path(b"/Apps/Example.app/Run").expect("user bundle");
-        assert_eq!(parsed.bundle, "/Apps/Example.app");
+        let parsed =
+            bundle_run_path(b"/Users/ada/Applications/Example.app/Run").expect("user bundle");
+        assert_eq!(parsed.bundle, "/Users/ada/Applications/Example.app");
         assert_eq!(parsed.command, "Example");
         let parsed = bundle_run_path(b"/System/Services/login.app/Run").expect("service bundle");
         assert_eq!(parsed.command, "login");
@@ -818,9 +793,9 @@ mod tests {
             b"/System/Commands/ps/Run",          // bundle dir not .app
             b"/System/Commands/.app/Run",        // empty stem
             b"/System/Commands/ps.app/Code/Run", // Run not at bundle root
-            b"/System/../Apps/ps.app/Run",       // traversal
-            b"/System//Apps/ps.app/Run",         // empty component
-            b"/System/./Apps/ps.app/Run",        // dot component
+            b"/System/../Users/ps.app/Run",      // traversal
+            b"/System//Commands/ps.app/Run",     // empty component
+            b"/System/./Commands/ps.app/Run",    // dot component
             b"/Run",                             // no bundle at all
             b"\xFF\xFEbad/ps.app/Run",           // not UTF-8
         ] {
@@ -855,7 +830,9 @@ mod tests {
         assert!(AppStore::cacheable_bundle("/System/Applications/files.app"));
         assert!(AppStore::cacheable_bundle("/System/Services/login.app"));
         // A writable-volume bundle can change between launches.
-        assert!(!AppStore::cacheable_bundle("/Apps/Example.app"));
+        assert!(!AppStore::cacheable_bundle(
+            "/Users/ada/Applications/Example.app"
+        ));
         assert!(!AppStore::cacheable_bundle("/Users/ada/Commands/own.app"));
         // A sibling directory sharing a store's prefix is not the store.
         assert!(!AppStore::cacheable_bundle("/System/CommandsEvil/ps.app"));

@@ -101,10 +101,8 @@
 
 /* Mount-flag bitmap (uint32_t); any bit outside KNOWN_MASK is reserved and rejected. */
 #define TAIRIX_MOUNT_FLAG_READ_ONLY ((uint32_t)0x1u)
-#define TAIRIX_MOUNT_FLAG_NOSUID ((uint32_t)0x2u)
-#define TAIRIX_MOUNT_FLAG_NODEV ((uint32_t)0x4u)
-#define TAIRIX_MOUNT_FLAG_NOEXEC ((uint32_t)0x8u)
-#define TAIRIX_MOUNT_FLAG_KNOWN_MASK ((uint32_t)0xfu)
+#define TAIRIX_MOUNT_FLAG_NOEXEC ((uint32_t)0x2u)
+#define TAIRIX_MOUNT_FLAG_KNOWN_MASK ((uint32_t)0x3u)
 
 /* Sentinel "no node"; a live NodeId travels as a uint64_t. */
 #define TAIRIX_NODE_ID_NONE ((uint64_t)0ull)
@@ -252,10 +250,12 @@ typedef struct tairix_dir_entry {
 
 /* A mounted volume's space accounting, in whole blocks of block_size bytes.
 * avail_blocks <= free_blocks <= total_blocks always holds; files/files_free
-* are 0 when the format tracks no fixed inode table. */
+* are 0 when the format tracks no fixed inode table. in_reserve is 1 when
+* the volume is down to its reserve, so an ordinary write may be refused. */
 typedef struct tairix_volume_stats {
     uint32_t block_size;
-    uint32_t reserved0;
+    uint8_t in_reserve;
+    uint8_t reserved0[3];
     uint64_t total_blocks;
     uint64_t free_blocks;
     uint64_t avail_blocks;

@@ -31,23 +31,40 @@ use tairix_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, UserId, User
 
 use super::{LateFilesystem, LateIdentity, MountedFilesystemService};
 use crate::fs::blkmeter::{BlkHealthCountersAtomic, BlkIoStatsAtomic, VolumeIoSource};
-use crate::fs::memfs::RwMockFs;
+use crate::fs::memfs::{RwMockFs, SYSTEM_ONLY_NAME};
 use crate::fs::perm::Credentials;
 use crate::fs::service::FilesystemService;
 use crate::fs::test_volume::{
     caps, dir_driver, driver, identity_table, vfs, NullSink, MOUNT, MOUNT_MEDIUM, TEST_GID,
     TEST_UID,
 };
-use crate::fs::{FinalLink, Listing, Mode, MountBacking, Path, Vfs};
+use crate::fs::{Attachment, FinalLink, Listing, Mode, Path, Vfs, VfsError};
 
-/// The test principal that owns the mounted volume's files.
+/// A removable volume served by `driver`, attached with the flags every
+/// runtime volume carries.
+fn removable(driver: DriverHandle) -> Attachment {
+    Attachment::new(driver, Some(BlkDeviceClass::Removable), MountFlags::NOEXEC)
+}
+
+/// Back the `/Storage` catalog with the volume `driver` serves, so a listing
+/// can merge the runtime mounts beneath it with names the volume holds.
+fn back_storage(vfs: &Vfs, driver: DriverHandle) {
+    let mut mounts = vfs.mounts_write();
+    mounts
+        .attach(Attachment::new(driver, None, MountFlags::default()))
+        .expect("attach");
+    mounts
+        .set_backing(&Path::parse("/Storage").expect("path"), driver, Vec::new())
+        .expect("back /Storage");
+}
+
 /// Two rebased sub-mounts that share **one** backing driver (the
 /// `/System/Logs` + `/System/Settings`-on-one-volume shape) route each to
 /// their own backing subtree and stay isolated; a second driver under a
 /// different handle is fully independent.
 #[test]
 fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
-    let nosuid = MountFlags::NOSUID;
+    let noexec = MountFlags::NOEXEC;
     let h_shared = DriverHandle::from_raw(9).expect("handle");
     let h_other = DriverHandle::from_raw(10).expect("handle");
 
@@ -74,7 +91,7 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
         supplementary_gids: &[],
         caps: &caps,
     };
-    for mp in ["/Storage/logs", "/Storage/settings", "/Storage/other"] {
+    for mp in ["/Users/logs", "/Users/settings", "/Users/other"] {
         vfs.mkdir(
             &cred,
             &Path::parse(mp).expect("path"),
@@ -82,24 +99,29 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
         )
         .expect("mount point");
     }
+    for driver in [h_shared, h_other] {
+        vfs.mounts_write()
+            .attach(Attachment::new(driver, None, MountFlags::default()))
+            .expect("attach");
+    }
     for (mount_point, subtree) in [
-        ("/Storage/logs", "LogsArea"),
-        ("/Storage/settings", "SettingsArea"),
+        ("/Users/logs", "LogsArea"),
+        ("/Users/settings", "SettingsArea"),
     ] {
         vfs.mounts_write()
             .mount_rebased(
                 Path::parse(mount_point).expect("path"),
-                nosuid,
-                Some(MountBacking::new(h_shared, None)),
+                noexec,
+                Some(h_shared),
                 alloc::vec![alloc::string::String::from(subtree)],
             )
             .expect("rebased mount");
     }
     vfs.mounts_write()
         .mount(
-            Path::parse("/Storage/other").expect("path"),
-            nosuid,
-            Some(MountBacking::new(h_other, None)),
+            Path::parse("/Users/other").expect("path"),
+            noexec,
+            Some(h_other),
         )
         .expect("other mount");
 
@@ -114,53 +136,35 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
     let svc = MountedFilesystemService::new(cell, identity);
 
     let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
-    svc.open(TEST_UID, &caps, "/Storage/logs/a", create)
+    svc.open(TEST_UID, &caps, "/Users/logs/a", create)
         .expect("create under logs");
-    svc.write(TEST_UID, &caps, "/Storage/logs/a", 0, false, b"L")
+    svc.write(TEST_UID, &caps, "/Users/logs/a", 0, false, b"L")
         .expect("write logs");
-    svc.open(TEST_UID, &caps, "/Storage/settings/b", create)
+    svc.open(TEST_UID, &caps, "/Users/settings/b", create)
         .expect("create under settings");
-    svc.write(TEST_UID, &caps, "/Storage/settings/b", 0, false, b"S")
+    svc.write(TEST_UID, &caps, "/Users/settings/b", 0, false, b"S")
         .expect("write settings");
-    svc.open(TEST_UID, &caps, "/Storage/other/c", create)
+    svc.open(TEST_UID, &caps, "/Users/other/c", create)
         .expect("create under other");
-    svc.write(TEST_UID, &caps, "/Storage/other/c", 0, false, b"O")
+    svc.write(TEST_UID, &caps, "/Users/other/c", 0, false, b"O")
         .expect("write other");
 
     // Each file reads back through its own mount.
-    let mut buf = [0u8; 1];
-    assert_eq!(
-        svc.read(TEST_UID, &caps, "/Storage/logs/a", 0, &mut buf),
-        Ok(1)
-    );
-    assert_eq!(&buf, b"L");
-    assert_eq!(
-        svc.read(TEST_UID, &caps, "/Storage/settings/b", 0, &mut buf),
-        Ok(1)
-    );
-    assert_eq!(&buf, b"S");
-    assert_eq!(
-        svc.read(TEST_UID, &caps, "/Storage/other/c", 0, &mut buf),
-        Ok(1)
-    );
-    assert_eq!(&buf, b"O");
+    let read = |path| {
+        let mut buf = [0u8; 1];
+        svc.read(TEST_UID, &caps, path, 0, &mut buf).map(|_| buf[0])
+    };
+    assert_eq!(read("/Users/logs/a"), Ok(b'L'));
+    assert_eq!(read("/Users/settings/b"), Ok(b'S'));
+    assert_eq!(read("/Users/other/c"), Ok(b'O'));
 
     // The two rebased mounts are isolated: `a` exists only under the logs
     // subtree, `b` only under settings.
-    assert_eq!(
-        svc.read(TEST_UID, &caps, "/Storage/settings/a", 0, &mut buf),
-        Err(Errno::NotFound)
-    );
-    assert_eq!(
-        svc.read(TEST_UID, &caps, "/Storage/logs/b", 0, &mut buf),
-        Err(Errno::NotFound)
-    );
+    assert_eq!(read("/Users/settings/a"), Err(Errno::NotFound));
+    assert_eq!(read("/Users/logs/b"), Err(Errno::NotFound));
     // The second driver is independent: its file is not visible on the
     // shared driver's subtrees.
-    assert_eq!(
-        svc.read(TEST_UID, &caps, "/Storage/logs/c", 0, &mut buf),
-        Err(Errno::NotFound)
-    );
+    assert_eq!(read("/Users/logs/c"), Err(Errno::NotFound));
 }
 
 /// Listing a driver-backed directory merges the mount points of its
@@ -197,27 +201,19 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
         .expect("note file");
 
     let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
-    vfs.mounts_write()
-        .set_backing(
-            &Path::parse("/Storage").expect("path"),
-            MountBacking::new(h_parent, None),
-            Vec::new(),
-        )
-        .expect("back /Storage");
+    back_storage(&vfs, h_parent);
     let template = Metadata::new(UserId(TEST_UID), GroupId(TEST_GID), Mode::from_bits(0o775));
     vfs.mounts_write()
-        .mount_with_template(
+        .attach_at(
+            removable(h_usb),
             Path::parse("/Storage/usb1").expect("path"),
-            MountFlags::NOSUID,
-            MountBacking::new(h_usb, Some(BlkDeviceClass::Removable)),
             template.clone(),
         )
         .expect("runtime mount");
     vfs.mounts_write()
-        .mount_with_template(
+        .attach_at(
+            removable(h_dup),
             Path::parse("/Storage/dup").expect("path"),
-            MountFlags::NOSUID,
-            MountBacking::new(h_dup, Some(BlkDeviceClass::Removable)),
             template,
         )
         .expect("colliding runtime mount");
@@ -311,6 +307,87 @@ fn service(
 /// A fully-installed writable service (the common case).
 fn ready() -> MountedFilesystemService<RwMockFs> {
     service(true, true, false)
+}
+
+/// `/Storage` is the catalog of attached volumes, served with no volume
+/// behind it: it stats and opens as a directory, lists exactly the volumes
+/// attached beneath it, and refuses anything stored in it.
+#[test]
+fn the_storage_catalog_lists_its_volumes_and_stores_nothing() {
+    let svc = ready();
+    let caps = caps();
+    let stat = svc
+        .stat(TEST_UID, &caps, "/Storage", FinalLink::Follow)
+        .expect("the catalog stats");
+    assert_eq!(stat.kind, FileKind::Directory);
+    assert_eq!((stat.uid, stat.gid, stat.mode), (TEST_UID, TEST_GID, 0o755));
+
+    let mut names = Vec::new();
+    svc.readdir(
+        TEST_UID,
+        &caps,
+        "/Storage",
+        FinalLink::Follow,
+        &mut Listing::default(),
+        &mut |entry| {
+            names.push(alloc::string::String::from_utf8_lossy(entry.name).into_owned());
+            DirVisit::Take
+        },
+    )
+    .expect("the catalog lists");
+    assert_eq!(names, ["vol"], "only the attached volume");
+    let looked = svc
+        .lookup_entries(
+            TEST_UID,
+            &caps,
+            "/Storage",
+            FinalLink::Follow,
+            &[b"vol", b"absent"],
+        )
+        .expect("the catalog looks up");
+    assert!(looked.entries[0].is_some() && looked.entries[1].is_none());
+
+    assert_eq!(
+        svc.open(TEST_UID, &caps, "/Storage", OpenFlags::DIRECTORY),
+        Ok(())
+    );
+    assert_eq!(
+        svc.open(TEST_UID, &caps, "/Storage", OpenFlags::READ),
+        Err(Errno::IsADirectory)
+    );
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, "/Storage", RealpathMode::Existing),
+        Ok(alloc::string::String::from("/Storage"))
+    );
+    assert_eq!(
+        svc.realpath(TEST_UID, &caps, "/Storage/new", RealpathMode::Final),
+        Ok(alloc::string::String::from("/Storage/new"))
+    );
+    assert_eq!(
+        svc.stat(TEST_UID, &caps, "/Storage/absent", FinalLink::Follow),
+        Err(Errno::NotFound)
+    );
+
+    let read_only = VfsError::ReadOnly.to_errno();
+    let create = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    assert_eq!(
+        svc.open(TEST_UID, &caps, "/Storage/new", create),
+        Err(read_only)
+    );
+    assert_eq!(svc.mkdir(TEST_UID, &caps, "/Storage/new"), Err(read_only));
+    assert_eq!(
+        svc.unlink(TEST_UID, &caps, "/Storage", UnlinkFlags::DIRECTORY),
+        Err(read_only)
+    );
+    assert_eq!(
+        svc.set_mode(TEST_UID, &caps, "/Storage", 0o777),
+        Err(read_only)
+    );
+    assert_eq!(
+        svc.mkdir(TEST_UID, &caps, "/Storage/absent/deeper"),
+        Err(Errno::NotFound),
+        "a name below a vacant one is simply not there"
+    );
 }
 
 /// A fully-installed writable service whose created directories are
@@ -659,18 +736,11 @@ fn a_listing_holds_no_mount_table_guard_into_its_driver() {
         );
     }));
     let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    back_storage(&vfs, h_parent);
     vfs.mounts_write()
-        .set_backing(
-            &Path::parse("/Storage").expect("path"),
-            MountBacking::new(h_parent, None),
-            Vec::new(),
-        )
-        .expect("back /Storage");
-    vfs.mounts_write()
-        .mount_with_template(
+        .attach_at(
+            removable(h_usb),
             Path::parse("/Storage/usb1").expect("path"),
-            MountFlags::NOSUID,
-            MountBacking::new(h_usb, Some(BlkDeviceClass::Removable)),
             crate::fs::perm::Metadata::new(
                 UserId(TEST_UID),
                 GroupId(TEST_GID),
@@ -1382,8 +1452,10 @@ fn set_owner_before_a_mount_is_installed_fails_closed() {
 /// volume's rebased sub-mounts (the shipped-image shape), so the listing
 /// must not judge those children against the read-only volume's driver.
 /// A refusal here is the "cannot list inside /System as a user" regression.
-#[test]
-fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
+/// The production layout over two memory volumes: the writable root as `/`,
+/// a read-only volume over `/System`, and the writable grafts rebased back
+/// out of it onto the root's own `/System/Logs` and `/System/Settings`.
+fn production_layout() -> MountedFilesystemService<RwMockFs> {
     // The read-only `/System` volume: content at the volume root, including
     // the same-named `Logs`/`Settings` the writable mounts shadow.
     let mut system = RwMockFs::new().with_create_owner(0, 0, 0o755);
@@ -1414,21 +1486,29 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
     let vfs = Vfs::with_default_layout(UserId(0), GroupId(0));
     let system_handle = DriverHandle::from_raw(9).expect("handle");
     let root_handle = DriverHandle::from_raw(10).expect("handle");
-    let root_backing = MountBacking::new(root_handle, None);
-    vfs.mounts_write().back_root(root_backing).expect("back /");
-    vfs.mounts_write()
-        .set_backing(
-            &Path::parse("/System").expect("path"),
-            MountBacking::new(system_handle, None),
-            Vec::new(),
-        )
-        .expect("back /System");
-    for sub in ["/System/Logs", "/System/Settings"] {
-        let path = Path::parse(sub).expect("path");
-        let subtree = path.components().to_vec();
-        vfs.mounts_write()
-            .set_backing(&path, root_backing, subtree)
-            .expect("back writable exception");
+    {
+        let mut mounts = vfs.mounts_write();
+        mounts
+            .attach(Attachment::new(root_handle, None, MountFlags::default()))
+            .expect("attach the root volume");
+        mounts
+            .attach(Attachment::new(system_handle, None, MountFlags::READ_ONLY))
+            .expect("attach the system volume");
+        mounts.back_root(root_handle).expect("back /");
+        mounts
+            .set_backing(
+                &Path::parse("/System").expect("path"),
+                system_handle,
+                Vec::new(),
+            )
+            .expect("back /System");
+        for sub in ["/System/Logs", "/System/Settings"] {
+            let path = Path::parse(sub).expect("path");
+            let subtree = path.components().to_vec();
+            mounts
+                .set_backing(&path, root_handle, subtree)
+                .expect("back writable exception");
+        }
     }
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
@@ -1439,8 +1519,12 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
         .expect("register root");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
-    let svc = MountedFilesystemService::new(cell, identity);
+    MountedFilesystemService::new(cell, identity)
+}
 
+#[test]
+fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
+    let svc = production_layout();
     let caps = caps();
     let entries = svc
         .readdir_bounded(TEST_UID, &caps, "/System", FinalLink::Follow, usize::MAX)
@@ -1452,33 +1536,64 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
     assert!(entries.iter().all(|e| e.kind == FileKind::Directory));
 }
 
-/// The mount snapshot carries the registration names and the live space
-/// accounting of a backed mount, and the honest empties (no names, the
-/// all-zero usage) for a mount whose backing is the in-RAM layout — the
-/// rows `df` renders. This is the regression guard for the "snapshot
-/// reported every source/fstype empty and no capacity" gap.
+/// The `/Storage` catalog is stored on no volume, so the root volume holds no
+/// node of that name: `/` shows it only through the mounts merged beneath it.
 #[test]
-fn mount_snapshot_reports_names_and_usage_from_the_registered_driver() {
+fn the_root_lists_and_finds_the_storage_catalog() {
+    let svc = production_layout();
+    let caps = caps();
+    let entries = svc
+        .readdir_bounded(TEST_UID, &caps, "/", FinalLink::Follow, usize::MAX)
+        .expect("an ordinary user lists /");
+    let catalog = entries
+        .iter()
+        .find(|e| e.name == tairix_abi::STORAGE_CATALOG)
+        .expect("the catalog is listed in /");
+    assert_eq!(catalog.kind, FileKind::Directory);
+    let looked = svc
+        .lookup_entries(
+            TEST_UID,
+            &caps,
+            "/",
+            FinalLink::Follow,
+            &[tairix_abi::STORAGE_CATALOG.as_bytes()],
+        )
+        .expect("an ordinary user looks a name up in /");
+    assert!(looked.entries[0].is_some(), "and found by name");
+}
+
+/// The writable grafts take the system's own writes, so a write through one
+/// reaches the root volume's driver under the system class — and a write
+/// anywhere else on the same volume does not.
+#[test]
+fn a_write_through_a_system_graft_carries_the_system_class() {
+    let svc = production_layout();
+    let caps = caps();
+    let name = core::str::from_utf8(SYSTEM_ONLY_NAME).expect("ascii");
+    let flags = OpenFlags::CREATE.union(OpenFlags::WRITE);
+    svc.open(0, &caps, &alloc::format!("/System/Settings/{name}"), flags)
+        .expect("a create through the graft is the system's");
+    assert_eq!(
+        svc.open(0, &caps, &alloc::format!("/{name}"), flags),
+        Err(Errno::NoSpace),
+        "the same create elsewhere on the volume is ordinary"
+    );
+}
+
+/// The mount snapshot reports each online volume once — its registration
+/// names, the flags it was attached with, where its root is shown, and the
+/// driver's live accounting — and nothing for the unbacked root or the
+/// `/Storage` catalog, which are no volume.
+#[test]
+fn mount_snapshot_reports_each_online_volume_once() {
     let svc = ready();
     let records = svc.mount_snapshot();
-    // The unbacked root mount reports the truthful "nothing known".
-    let root = records
-        .iter()
-        .find(|record| record.target_bytes() == b"/")
-        .expect("the root mount is always listed");
-    assert_eq!(root.source_bytes(), b"");
-    assert_eq!(root.fstype_bytes(), b"");
-    assert_eq!(root.usage().total_blocks, 0);
-    // With no block device behind it, the root mount's medium is unknown
-    // rather than a plausible-looking guess.
-    assert_eq!(root.medium(), None);
-    // The backed volume reports its registration names and the driver's
-    // live accounting.
-    let vol = records
-        .iter()
-        .find(|record| record.source_bytes() == b"vol")
-        .expect("the registered volume is listed by its source name");
+    assert_eq!(records.len(), 1, "only the registered volume: {records:?}");
+    let vol = &records[0];
+    assert_eq!(vol.source_bytes(), b"vol");
+    assert_eq!(vol.target_bytes(), MOUNT.as_bytes());
     assert_eq!(vol.fstype_bytes(), b"memfs");
+    assert_eq!(vol.flags(), MountFlags::default());
     // The medium the attach path recorded reaches the record userland reads.
     assert_eq!(vol.medium(), Some(MOUNT_MEDIUM));
     let usage = vol.usage();
@@ -1486,6 +1601,107 @@ fn mount_snapshot_reports_names_and_usage_from_the_registered_driver() {
     assert_eq!(usage.total_blocks, 4096);
     assert!(usage.avail_blocks <= usage.free_blocks);
     assert!(usage.free_blocks <= usage.total_blocks);
+}
+
+/// A volume shown at several view paths is one volume: the mount list reports
+/// it once, from the projection showing its root, reading its accounting
+/// once; the view list reports every binding, each naming the volume by its
+/// identity. Neither lists a volume whose driver is not yet online.
+///
+/// Regression: the mount list reported the root volume once per mount carved
+/// out of it, each row reading the driver's accounting again.
+#[test]
+fn a_volume_shown_at_several_paths_is_reported_once() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&reads);
+    let volume = driver().with_stats_probe(Box::new(move || {
+        counted.fetch_add(1, Ordering::Relaxed);
+    }));
+    let handle = DriverHandle::from_raw(21).expect("handle");
+    let id = [0x5Au8; 16];
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    {
+        let mut mounts = vfs.mounts_write();
+        mounts
+            .attach(Attachment::new(handle, None, MountFlags::default()))
+            .expect("attach");
+        mounts.back_root(handle).expect("back /");
+        for sub in ["/System/Logs", "/System/Settings"] {
+            let path = Path::parse(sub).expect("path");
+            let subtree = path.components().to_vec();
+            mounts.set_backing(&path, handle, subtree).expect("back");
+        }
+    }
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+
+    let views = |svc: &MountedFilesystemService<RwMockFs>| -> Vec<_> {
+        svc.view_snapshot()
+            .iter()
+            .map(|view| {
+                (
+                    alloc::string::String::from_utf8(view.target_bytes().to_vec()).expect("utf-8"),
+                    alloc::string::String::from_utf8(view.subtree_bytes().to_vec()).expect("utf-8"),
+                    view.flags(),
+                    view.volume_id(),
+                )
+            })
+            .collect()
+    };
+    let row = |target: &str, subtree: &str, flags, id| {
+        (
+            alloc::string::String::from(target),
+            alloc::string::String::from(subtree),
+            flags,
+            id,
+        )
+    };
+    let none = [0u8; 16];
+    let unbacked = [
+        row("/System", "", MountFlags::READ_ONLY, none),
+        row(
+            "/Storage",
+            "",
+            MountFlags::READ_ONLY.union(MountFlags::NOEXEC),
+            none,
+        ),
+    ];
+
+    assert!(svc.mount_snapshot().is_empty(), "the driver is not online");
+    assert_eq!(
+        views(&svc),
+        unbacked,
+        "only the bindings showing no volume are listed before it is"
+    );
+
+    cell.register(handle, volume, "root", "memfs", id, None)
+        .expect("register");
+    let records = svc.mount_snapshot();
+    assert_eq!(records.len(), 1, "one volume: {records:?}");
+    assert_eq!(records[0].target_bytes(), b"/");
+    assert_eq!(records[0].volume_id(), id);
+    assert_eq!(reads.load(Ordering::Relaxed), 1, "its accounting read once");
+
+    let [system, storage] = unbacked;
+    assert_eq!(
+        views(&svc),
+        [
+            row("/", "/", MountFlags::default(), id),
+            system,
+            row("/System/Logs", "/System/Logs", MountFlags::NOEXEC, id),
+            row(
+                "/System/Settings",
+                "/System/Settings",
+                MountFlags::NOEXEC,
+                id
+            ),
+            storage,
+        ]
+    );
 }
 
 /// A volume's driver coming, going, or changing availability moves what the
@@ -1646,7 +1862,13 @@ fn rename_to_a_path_outside_the_mounted_volume_fails_closed() {
     )
     .expect("create");
     assert_eq!(
-        svc.rename(TEST_UID, &caps, &src, "/Apps/b", RenameFlags::empty()),
+        svc.rename(
+            TEST_UID,
+            &caps,
+            &src,
+            "/System/Applications/b",
+            RenameFlags::empty()
+        ),
         Err(Errno::NotFound)
     );
 }
@@ -2415,15 +2637,18 @@ fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
     };
     vfs.mkdir(
         &cred,
-        &Path::parse("/Storage/area").expect("path"),
+        &Path::parse("/Users/area").expect("path"),
         Mode::from_bits(0o755),
     )
     .expect("mount point");
     vfs.mounts_write()
+        .attach(Attachment::new(h, None, MountFlags::default()))
+        .expect("attach");
+    vfs.mounts_write()
         .mount_rebased(
-            Path::parse("/Storage/area").expect("path"),
-            MountFlags::NOSUID,
-            Some(MountBacking::new(h, None)),
+            Path::parse("/Users/area").expect("path"),
+            MountFlags::NOEXEC,
+            Some(h),
             alloc::vec![alloc::string::String::from("Area")],
         )
         .expect("rebased mount");
@@ -2440,14 +2665,14 @@ fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
     // An absolute target names the mount's own root, so it reaches the
     // projected file rather than the volume-root decoy.
     assert_eq!(
-        svc.read(TEST_UID, &caps, "/Storage/area/abs", 0, &mut buf),
+        svc.read(TEST_UID, &caps, "/Users/area/abs", 0, &mut buf),
         Ok(1)
     );
     assert_eq!(&buf, b"I");
     // `..` is floored at the projected root, so ascending from the subtree
     // stays inside it.
     assert_eq!(
-        svc.read(TEST_UID, &caps, "/Storage/area/up", 0, &mut buf),
+        svc.read(TEST_UID, &caps, "/Users/area/up", 0, &mut buf),
         Ok(1)
     );
     assert_eq!(&buf, b"I");
@@ -2661,15 +2886,18 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
     };
     vfs.mkdir(
         &cred,
-        &Path::parse("/Storage/area").expect("path"),
+        &Path::parse("/Users/area").expect("path"),
         Mode::from_bits(0o755),
     )
     .expect("mount point");
     vfs.mounts_write()
+        .attach(Attachment::new(h, None, MountFlags::default()))
+        .expect("attach");
+    vfs.mounts_write()
         .mount_rebased(
-            Path::parse("/Storage/area").expect("path"),
-            MountFlags::NOSUID,
-            Some(MountBacking::new(h, None)),
+            Path::parse("/Users/area").expect("path"),
+            MountFlags::NOEXEC,
+            Some(h),
             alloc::vec![alloc::string::String::from("Area")],
         )
         .expect("rebased mount");
@@ -2681,18 +2909,18 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
 
-    let canonical = alloc::string::String::from("/Storage/area/inside");
+    let canonical = alloc::string::String::from("/Users/area/inside");
     assert_eq!(
         svc.realpath(
             TEST_UID,
             &caps,
-            "/Storage/area/inside",
+            "/Users/area/inside",
             RealpathMode::Existing
         ),
         Ok(canonical.clone())
     );
     assert_eq!(
-        svc.realpath(TEST_UID, &caps, "/Storage/area/up", RealpathMode::Existing),
+        svc.realpath(TEST_UID, &caps, "/Users/area/up", RealpathMode::Existing),
         Ok(canonical)
     );
 }
@@ -2859,4 +3087,80 @@ mod watch {
         .expect("unlink");
         assert_eq!(drained(), ["old.txt"]);
     }
+}
+
+/// A program is read only from a mount that runs programs, judged on the mount
+/// the bytes come from: a link resolves inside its own mount, so one on the
+/// root volume cannot reach the `noexec` stick, and one on the stick is still
+/// refused. Reading the same files as data is unaffected.
+///
+/// Regression: no read a spawn made consulted `noexec`.
+#[test]
+fn a_program_is_read_only_from_a_mount_that_runs_programs() {
+    let h_root = DriverHandle::from_raw(31).expect("handle");
+    let h_stick = DriverHandle::from_raw(32).expect("handle");
+    let mut root = dir_driver();
+    let root_dir = root.root();
+    root.create(root_dir, b"run", NodeKind::RegularFile)
+        .expect("run");
+    root.write_at(root_dir, b"run", 0, b"R").expect("contents");
+    root.create_link(root_dir, b"onto", b"/Storage/stick/run")
+        .expect("link");
+    let mut stick = dir_driver();
+    let stick_dir = stick.root();
+    stick
+        .create(stick_dir, b"run", NodeKind::RegularFile)
+        .expect("run");
+    stick
+        .write_at(stick_dir, b"run", 0, b"S")
+        .expect("contents");
+    stick.create_link(stick_dir, b"hop", b"/run").expect("link");
+
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    {
+        let mut mounts = vfs.mounts_write();
+        mounts
+            .attach(Attachment::new(h_root, None, MountFlags::default()))
+            .expect("attach");
+        mounts.back_root(h_root).expect("back /");
+        mounts
+            .attach_at(
+                removable(h_stick),
+                Path::parse("/Storage/stick").expect("path"),
+                crate::fs::Metadata::new(
+                    UserId(TEST_UID),
+                    GroupId(TEST_GID),
+                    Mode::from_bits(0o755),
+                ),
+            )
+            .expect("stick");
+    }
+    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    cell.register(h_root, root, "root", "memfs", [0u8; 16], None)
+        .expect("register root");
+    cell.register(h_stick, stick, "stick", "memfs", [0u8; 16], None)
+        .expect("register stick");
+    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+
+    let caps = caps();
+    let program = |path| {
+        let mut buf = [0u8; 1];
+        svc.read_program(TEST_UID, &caps, path, 0, &mut buf)
+            .map(|_| buf[0])
+    };
+    let data = |path| {
+        let mut buf = [0u8; 1];
+        svc.read(TEST_UID, &caps, path, 0, &mut buf).map(|_| buf[0])
+    };
+    assert_eq!(program("/run"), Ok(b'R'));
+    assert_eq!(program("/Storage/stick/run"), Err(Errno::PermissionDenied));
+    assert_eq!(data("/Storage/stick/run"), Ok(b'S'));
+    // The root volume's link resolves on the root volume, which stores no
+    // `/Storage`.
+    assert_eq!(program("/onto"), Err(Errno::NotFound));
+    assert_eq!(program("/Storage/stick/hop"), Err(Errno::PermissionDenied));
+    assert_eq!(data("/Storage/stick/hop"), Ok(b'S'));
 }

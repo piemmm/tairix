@@ -46,7 +46,7 @@ applib — إدارة مكتبة برامج سطح المكتب
 النظر عن الكتالوج.
 
 يمسح `applib rescan` مخازن التطبيقات (`/System/Commands` و`/System/Applications`
-و`/Apps` أو `<home>/Commands` و`<home>/Applications` الخاصين بالمنادي عند
+أو `<home>/Commands` و`<home>/Applications` الخاصين بالمنادي عند
 استخدام `--user`) ويقرأ بيان كل حزمة،
 ويسجل كل تطبيق يطلب إدراجه ولم يُفهرس بعد. السجلات الموجودة — بما في
 ذلك إعادات التسمية والإخفاءات التي قام بها المنسق — لا تُزعج أبدًا،
@@ -80,8 +80,8 @@ applib — إدارة مكتبة برامج سطح المكتب
 
 - `applib` — عرض المكتبة المحلولة، مجلدًا تلو الآخر.
 - `applib list --category Games` — عرض مجلد واحد.
-- `applib add /Apps/chess.app` — تسجيل حزمة كما يطلب بيانها.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/chess.app` — تسجيل حزمة كما يطلب بيانها.
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   تسجيل حزمة لا تعلن عن إدراج، تحت مجلد صريح.
 - `applib remove os.tairix.chess` — حذف مدخل بواسطة المعرف.
 - `applib hide os.tairix.chess --user` — إخفاؤه من مكتبتك الخاصة فقط.

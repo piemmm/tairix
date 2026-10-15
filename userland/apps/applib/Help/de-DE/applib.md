@@ -54,8 +54,8 @@ Darstellung, niemals die Berechtigung: Das Starten eines Pakets wird
 unabhängig vom Katalog weiterhin durch die Signatur- und
 Capability-Prüfungen des Loaders geregelt.
 
-`applib rescan` durchsucht die Anwendungsspeicher (`/System/Commands`,
-`/System/Applications` und `/Apps` oder die eigenen `<home>/Commands`
+`applib rescan` durchsucht die Anwendungsspeicher (`/System/Commands` und
+`/System/Applications` oder die eigenen `<home>/Commands`
 und `<home>/Applications` des Aufrufers bei `--user`),
 liest das Manifest jedes Pakets und registriert jede Anwendung, die um
 Listung bittet und noch nicht katalogisiert ist. Bestehende
@@ -97,9 +97,9 @@ dem Standard-Informationsstrom (fd 3) ausgegeben, den Skripte mit
 
 - `applib` — die aufgelöste Bibliothek Ordner für Ordner anzeigen.
 - `applib list --category Games` — einen einzelnen Ordner anzeigen.
-- `applib add /Apps/chess.app` — ein Paket so registrieren, wie es sein
+- `applib add /System/Applications/chess.app` — ein Paket so registrieren, wie es sein
   Manifest verlangt.
-- `applib add /Apps/tool.app --category Utilities --name "Disk Tool"` —
+- `applib add /System/Applications/tool.app --category Utilities --name "Disk Tool"` —
   ein Paket, das keine Listung deklariert, unter einem expliziten
   Ordner registrieren.
 - `applib remove os.tairix.chess` — einen Eintrag nach Kennung

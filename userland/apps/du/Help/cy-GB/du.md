@@ -67,7 +67,7 @@ raddfa gan opsiynau'n unig.
 - `du` — coeden y cyfeiriadur cyfredol, un rhes fesul cyfeiriadur.
 - `du -sh /Users/jo` — un cyfanswm darllenadwy ar gyfer `/Users/jo`.
 - `du -a docs` — pob ffeil a chyfeiriadur o dan `docs`.
-- `du -d1 -c /Apps /Users` — lefel gyntaf pob storfa, yna cyfanswm
+- `du -d1 -c /System/Applications /Users` — lefel gyntaf pob storfa, yna cyfanswm
   cyffredinol.
 
 ## EXIT STATUS

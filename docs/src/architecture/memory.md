@@ -1420,11 +1420,15 @@ ladder, and the frame allocator's `FreeMemorySource` binding.
   refused, and the producer serves uncached: no unowned,
   unclassifiable, or uninvalidatable memory exists in the model.
 - **Budgets with hysteresis.** A `CacheBudget` is derived from the
-  backing resource's size (`CacheBudget::from_backing` — 1/16 of the
-  kernel heap arena per cache; each boot volume carries two, the clean
-  filesystem cache and the transform cache, so the boot volumes' four
-  caches together stay at or under 1/4 of the heap and cache growth can
-  never exhaust it). Growth runs to the *hard* limit; a forced shrink
+  backing resource's size (`CacheBudget::from_backing` — 1/16 of it per
+  cache; the kernel's caches draw on discovered RAM,
+  `memstats::cache_backing_bytes`). The ceiling bounds one cache; what
+  keeps the caches together from exhausting memory is the pressure
+  gauge, which admits growth only above the reserve floor and drains the
+  caches as pressure rises. A volume mounted more than once shares one
+  transform cache between its mounts (`SharedClusterCache`: `/System`
+  and the driver-store server's window onto it), so a second mount adds
+  no budget. Growth runs to the *hard* limit; a forced shrink
   evicts down to the *low* watermark (3/4 of hard), never both on one
   threshold. A value no eviction could make room for is refused before
   any is made, so one oversized build never empties the cache.
@@ -1601,7 +1605,11 @@ with it, once per *cluster*.
   installed by the boot path on both mounted volumes (`system_mount`
   for the read-only `/System` volume, the unlock path for the writable
   root) via `ARXFS::with_cluster_cache`. The driver-store server's own
-  read-only window on `/System` has none (`plans/OPEN-DEFECTS.md` D993).
+  read-only window on `/System` shares the `/System` mount's cache
+  (`SharedClusterCache`), so a bundle devmgr's scan or a driver load
+  decompressed is served to the other from the one copy. A hit lends the
+  plaintext to the driver (`ClusterCache::lend`) rather than returning it,
+  which is what lets the shared cache keep it behind its lock.
   A volume without a cache
   behaves exactly as before, and the integrity passes (scrub, check,
   rescue) never consult it — they exist to verify the on-disk bytes.
@@ -1659,7 +1667,7 @@ re-verifies its Ed25519 signature; with it, once per boot.
   — and on any classification refusal — every launch is served uncached
   through the full load gate (fail closed).
 - **Only immutable bundles are cacheable.** A bundle on a writable
-  volume (`/Apps`, a user's own store) can change between launches and
+  volume, in a user's own store, can change between launches and
   is re-verified through the full gate every time
   (`AppStore::cacheable_bundle`). The read-only stores cannot change
   within a boot, so the boot *is* the entry's generation
@@ -2054,8 +2062,8 @@ costs only the pages actually touched, `AGENTS.md` §26.7):
   offset, non-zero length, no overflow), resolves the descriptor
   owner-checked against the kernel-trusted caller id (open for reading,
   `OpenBacking::Path` only — a resource/pipe has no positional bytes), and
-  checks the projected total against the caller's shared
-  `AddressSpaceBytes` accounting (one budget with `mem_map`). It then
+  charges the extent to the caller's shared `AddressSpaceBytes` accounting
+  (one budget with `mem_map` and the stacks) in the step that checks it. It then
   *reserves address space only* out of the task's file-mapping window
   (`LiveSpace`'s file `AnonWindowMap`, sized by `user_windows` §7f) and
   records a `FileRegion` — base, page-rounded length, resolved path,

@@ -18,6 +18,7 @@ use tairix_arch_aarch64::{
 use tairix_arch_api::{CpuId, BOOT_CPU};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel_core::{reschedule_current, spawn_kthread, RescheduleAction, Yielder};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 use tairix_log::{log, Event, EventId, Level};
@@ -55,25 +56,19 @@ const MAX_SPINS: u64 = 40_000_000_000;
 /// returns. The harness wall-clock budget is the ultimate backstop.
 const MAX_STEPS: u64 = 1_000_000;
 
-/// Bump heap backing the scheduler, the arch handle, and the kthread's kernel
-/// stack. 2 MiB is generous headroom; it lives in `.bss` (zeroed by the boot
-/// trampoline).
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
-/// Page-aligned backing store for the bump heap.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
 /// SAFETY: the page-aligned `HEAP` static outlives the binary and the
 /// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: tairix_kalloc::FreeListAllocator = unsafe {
-    tairix_kalloc::FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE)
-};
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 /// Per-CPU preemption backing for the single boot CPU (`PreemptStorage<1>` covers a single-core slice).
 static PREEMPT_STORAGE: PreemptStorage<1> = PreemptStorage::new();

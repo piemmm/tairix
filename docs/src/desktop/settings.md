@@ -1,9 +1,10 @@
 # Settings
 
-`settings.app` is the windowed application that configures the desktop and the
-machine, opened from the *Settings…* row of the Switchboard capsule's system
-quick-actions menu ([the taskbar](taskbar.md#the-system-quick-actions-menu)),
-from the desktop's Program Library, or by name from a shell. The staged build
+`settings.app` is the desktop component that configures the desktop and the
+machine, planted in `/System/Components` and opened from the *Settings…* row
+of the Switchboard capsule's system quick-actions menu
+([the taskbar](taskbar.md#the-system-quick-actions-menu)) and the panes other
+surfaces open it at; it is neither a library entry nor a typed command. The staged build
 plan is `plans/NEW-DESKTOP-SETTINGS.md`; this page describes what is on the
 tree.
 
@@ -44,7 +45,8 @@ process. It is a singleton, which is the manifest's own default: relaunching
 it while it is open raises the window that is already there rather than
 starting a second view of one machine's configuration, each able to overwrite
 the other's applies. The desktop's one launch funnel resolves that, so every
-route in — the system menu, the Program Library, a shell — behaves the same.
+route in — the system menu, the backdrop menu, the network menu — behaves the
+same.
 
 **Four write paths, and no fifth.** Every settable reaches one of exactly
 four owners: the desktop session, for the user's own desktop and sounds; the

@@ -421,15 +421,25 @@ impl TreeEdit {
     }
 }
 
+/// Leaf entries of `spec` one `block_size`-byte node holds.
+pub(crate) fn leaf_cap_of(block_size: usize, spec: TreeSpec) -> usize {
+    (block_size - N_ENTRIES) / spec.leaf_stride()
+}
+
+/// Internal entries one `block_size`-byte node holds.
+pub(crate) fn internal_cap_of(block_size: usize) -> usize {
+    (block_size - N_ENTRIES) / INTERNAL_STRIDE
+}
+
 impl<B: Block> ARXFS<B> {
     /// Maximum leaf entries that fit one node block.
     fn btree_leaf_cap(&self, spec: TreeSpec) -> usize {
-        (self.block_size - N_ENTRIES) / spec.leaf_stride()
+        leaf_cap_of(self.block_size, spec)
     }
 
     /// Maximum internal entries (separator + child) that fit one node block.
     fn btree_internal_cap(&self) -> usize {
-        (self.block_size - N_ENTRIES) / INTERNAL_STRIDE
+        internal_cap_of(self.block_size)
     }
 
     /// Entries one node block holds at `level`.

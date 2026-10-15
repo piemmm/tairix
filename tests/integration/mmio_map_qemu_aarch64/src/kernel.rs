@@ -33,7 +33,7 @@ use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::FreeListAllocator;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel_core::dmaquarantine::DmaQuarantine;
 use tairix_kernel_core::HwNodeLiveness;
 use tairix_kernel_core::UserThreadEntry;
@@ -213,15 +213,11 @@ fn on_fault(trap: KernelFault) -> ! {
     qemu_exit::exit_failure(FAIL_FAULT);
 }
 
-/// Size of the test's bump heap (startup block buffers + the user kthread's
-/// kernel stack + control block + leaked allocator). Lives in `.bss`.
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
-/// Page-aligned backing store for the bump heap.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -229,7 +225,7 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 /// Page-table pool backing the EL0 address space (the image mappings, the
 /// device-window tables the retained `LiveSpace` walks).

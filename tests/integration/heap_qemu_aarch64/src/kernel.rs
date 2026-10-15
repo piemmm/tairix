@@ -29,7 +29,7 @@ use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::FreeListAllocator;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel_core::UserThreadEntry;
 use tairix_kernel_core::{
     spawn_image, spawn_user_kthread, MemMap, SpawnMode, SpawnRequest, Yielder,
@@ -102,15 +102,11 @@ const FAIL_REFUSED_UNMAP: NonZeroU16 = fail_point!(12);
 /// identifiable.
 const FAIL_EXIT_BASE: NonZeroU16 = fail_point!(100);
 
-/// Size of the test's bump heap (startup block buffers + the user kthread's
-/// kernel stack + control block). Lives in `.bss` (zeroed by the trampoline).
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 2 * 1024 * 1024;
 
-/// Page-aligned backing store for the bump heap.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -118,7 +114,7 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 /// Page-table pool backing the EL0 address space.
 static PAGE_TABLES: PageTablePool = PageTablePool::new();

@@ -10,7 +10,7 @@ use core::ops::Range;
 
 use tairix_abi::stdinfo::{Human, StdInfoKind, StdInfoRecord};
 use tairix_abi::{Errno, BUNDLE_SUFFIX};
-use tairix_cmdres::{bundle_candidates, search_roots, CommandEnv};
+use tairix_cmdres::{help_candidates, search_roots, CommandEnv};
 use tairix_help::{load_raw, DocumentName, Fallback, LoadError, Locale, RawLoaded};
 use tairix_log::Sink;
 use tairix_sandbox::helpdoc::{render_help, HelpRefusal, HelpRenderFailure, RenderMode, Styling};
@@ -185,8 +185,8 @@ fn render_styling(console: &dyn Console, term: Option<&str>) -> Styling {
 /// The document a command word names inside its bundle: the word itself
 /// for a bare command, and the command name — the path leaf minus the
 /// bundle suffix — when the word spells the bundle (`top.app`,
-/// `/Apps/Example.app`), so both invocations of one program open the same
-/// page.
+/// `/System/Applications/Example.app`), so both invocations of one program
+/// open the same page.
 fn document_word(word: &str) -> &str {
     let leaf = word.rsplit('/').next().unwrap_or(word);
     leaf.strip_suffix(BUNDLE_SUFFIX).unwrap_or(leaf)
@@ -197,12 +197,11 @@ fn document_word(word: &str) -> &str {
 /// moves to the next candidate; any other refusal is final — exactly the
 /// shell's launch rule, so the page shown always documents the program the
 /// shell would run. When every ordered candidate is absent, a bare word
-/// falls back to the recursive app-store search: the machine-wide `/Apps`
-/// store, then the user's own `<home>/Commands` and `<home>/Applications`,
-/// walked breadth-first so the shallowest (most visible) copy of a bundle
-/// wins.
+/// falls back to the recursive search of the user's own `<home>/Commands`
+/// and `<home>/Applications`, walked breadth-first so the shallowest (most
+/// visible) copy of a bundle wins.
 fn resolve(word: &str, request: &Request<'_>, store: &dyn BundleStore) -> Result<String, ManError> {
-    let candidates = bundle_candidates(
+    let candidates = help_candidates(
         word,
         CommandEnv {
             home: request.home,

@@ -43,7 +43,7 @@ const WRITEBACK_FLUSHER_UNAVAILABLE: tairix_log::EventId = tairix_log::EventId(4
 /// here and the *arming* is left to the flusher's own first step.
 pub fn start(ctx: &'static (dyn InitSpawnCtx + Sync), audit: &'static (dyn Sink + Sync)) {
     if LATE_FILESYSTEM
-        .install_writeback_host(&LATE_FILESYSTEM)
+        .install_volume_host(&LATE_FILESYSTEM, audit)
         .is_err()
     {
         // A flusher is already wired for this boot; a second would publish

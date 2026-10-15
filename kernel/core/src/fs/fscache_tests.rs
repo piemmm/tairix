@@ -10,7 +10,7 @@ use super::*;
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::{Credentials, Metadata, Mode};
 use crate::fs::wrapper_conformance as conformance;
-use crate::fs::{MountBacking, Path, Vfs, VfsError};
+use crate::fs::{Attachment, Path, Vfs, VfsError};
 use crate::test_pressure::{free_for, pressured, unpressured, TestSource};
 use crate::test_sink::TestSink;
 
@@ -136,13 +136,17 @@ impl<F: FilesystemWrite> FilesystemWrite for Counting<F> {
         self.inner.flush()
     }
 
-    fn set_writeback_host(
+    fn set_volume_host(
         &mut self,
         volume: DriverHandle,
-        host: &'static dyn tairix_abi::driver::filesystem::WritebackHost,
+        host: &'static dyn tairix_abi::driver::filesystem::VolumeHost,
     ) {
         self.calls += 1;
-        self.inner.set_writeback_host(volume, host);
+        self.inner.set_volume_host(volume, host);
+    }
+
+    fn set_allocation_class(&mut self, class: tairix_abi::driver::filesystem::AllocationClass) {
+        self.inner.set_allocation_class(class);
     }
 }
 
@@ -652,12 +656,18 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
 
     let mut cache = CachedFs::new(Counting::new(fs), budget(), owner(), unpressured(), sink());
     let vfs = Vfs::new(Metadata::new(UserId(0), GroupId(0), Mode::from_bits(0o755)));
-    vfs.mounts_write()
-        .back_root(MountBacking::new(
-            DriverHandle::from_raw(1).expect("handle"),
-            None,
-        ))
-        .expect("backs root");
+    {
+        let driver = DriverHandle::from_raw(1).expect("handle");
+        let mut mounts = vfs.mounts_write();
+        mounts
+            .attach(Attachment::new(
+                driver,
+                None,
+                tairix_abi::driver::filesystem::MountFlags::default(),
+            ))
+            .expect("attach");
+        mounts.back_root(driver).expect("backs root");
+    }
 
     let caps = CapabilitySet::empty();
     let other = Credentials {
@@ -672,7 +682,7 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
     // security record).
     let mut buf = [0u8; 16];
     let n = vfs
-        .read_via_secured(&other, &path, &mut cache, 0, &mut buf)
+        .read_via_secured(&other, &vfs.cover(&path), &mut cache, 0, &mut buf)
         .expect("world-readable read succeeds");
     assert_eq!(&buf[..n], b"visible");
 
@@ -684,7 +694,7 @@ fn security_change_is_seen_by_the_secured_vfs_permission_check() {
     // The same caller is now refused: the cached record was
     // invalidated, so the permission check sees the tightened mode.
     assert_eq!(
-        vfs.read_via_secured(&other, &path, &mut cache, 0, &mut buf),
+        vfs.read_via_secured(&other, &vfs.cover(&path), &mut cache, 0, &mut buf),
         Err(VfsError::PermissionDenied),
         "a cached security record never outlives a security change"
     );

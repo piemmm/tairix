@@ -1,10 +1,9 @@
 # Signed-AppInfo manifest source for the `files` desktop file browser
 # (plans/APPWIN.md AW3). Discovered by the build's app-bundle composer,
 # which cross-compiles Run, signs the manifest, and plants the bundle on
-# the read-only /System/Applications store; the desktop session autostarts
+# the read-only /System/Components store; the desktop session autostarts
 # it at bring-up in its core role and launches it again to open a folder the
-# user activated (and the shell resolves it by name, like any program in
-# either system store).
+# user activated.
 # The capability list is the bundle's request: CAP_CONSOLE_WRITE for its
 # fail-loud stderr diagnostics, CAP_FS_ACCESS for the directory listings
 # it browses (every read is still permission-checked per inode under the
@@ -23,7 +22,7 @@ id = "os.tairix.files"
 name = "files"
 title = "Files"
 version = "0.1.0"
-kind = "application"
+kind = "component"
 # The identity the desktop's icon-bar information panel states, drawn from
 # this *signed* manifest rather than from anything the running process says
 # about itself (plans/NEW-TASKBAR.md).

@@ -217,10 +217,12 @@ impl SyscallNumber {
     /// (no global user heap, no cross-process mapping). The
     /// call is unprivileged — growing one's own address space needs no
     /// capability (precedent) — but the kernel validates
-    /// every argument and fails closed. A frame- or
-    /// page-table-allocation failure returns [`crate::Errno::OutOfMemory`]
-    /// rather than panicking; a build with no memory
-    /// service wired fails closed with [`crate::Errno::NotImplemented`].
+    /// every argument and fails closed. A region that would carry the
+    /// process past its address-space or pinned-memory bound is refused with
+    /// [`crate::Errno::OutOfRange`]; a frame- or page-table-allocation
+    /// failure returns [`crate::Errno::OutOfMemory`] rather than panicking;
+    /// a build with no memory service wired fails closed with
+    /// [`crate::Errno::NotImplemented`].
     pub const MEM_MAP: Self = Self(14);
     /// Release a region previously returned by [`SyscallNumber::MEM_MAP`]
     /// from the calling process's own address space (`plans/SPAWN.md` SP5).
@@ -641,8 +643,8 @@ impl SyscallNumber {
     /// answerable only by a kernel-resident service (the disk-owning
     /// driver-store kthread). This trio — `call_create` / `call_recv` /
     /// `call_reply` — lets an ordinary user-space process be the *callee*, so
-    /// a driver service (the autoloaded `vcmailbox` mailbox service, future
-    /// `appmgr`/shell services) can serve the one synchronous primitive
+    /// a driver or system service (the autoloaded `vcmailbox` mailbox service)
+    /// can serve the one synchronous primitive
     /// rather than a hand-rolled convention over two async ports.
     ///
     /// Arguments: `endpoint: u64` — the call-endpoint id to bind (a
@@ -998,7 +1000,7 @@ impl SyscallNumber {
     /// against the mounted secured VFS under the **caller's real
     /// `Credentials`** (the kernel supplies identity, never the caller), so
     /// every per-inode owner/mode/ACL/`required_cap` check and mount-flag
-    /// (`ro`/`nosuid`/`nodev`/`noexec`) decision stays kernel-side. Gated by
+    /// (`ro`/`noexec`) decision stays kernel-side. Gated by
     /// [`crate::CapabilityId::FS_ACCESS`]; the per-path authority remains the
     /// inode model. With [`crate::OpenFlags::CREATE`] a missing regular file
     /// is created; [`crate::OpenFlags::EXCLUSIVE`] refuses an existing one;
@@ -1619,8 +1621,8 @@ impl SyscallNumber {
     /// re-validates everything against live state — the endpoint, the
     /// window, the device geometry, the extent bounds, the name — opens
     /// the filesystem read-only or read-write per the device's write
-    /// policy, mounts it with the removable-media flags
-    /// (`nosuid,nodev,noexec`), and publishes its stable identity into
+    /// policy, mounts it `noexec` as removable media is, and publishes its
+    /// stable identity into
     /// the volume forest so `id::<volume-id>/…` paths resolve. Requires
     /// `CAP_FS_MOUNT`; every attach decision is audited.
     pub const VOLUME_ATTACH: Self = Self(80);
@@ -2899,6 +2901,19 @@ impl SyscallNumber {
     /// audited — the decision it feeds is the server's to log.
     pub const CALL_PEER_PORT: Self = Self(144);
 
+    /// Mark the calling driver's own node a key source: its device's key
+    /// presses now reach the seat, so a key pressed from here on arrives.
+    ///
+    /// Takes no arguments. Returns `0`, or `-errno`. The kernel resolves the
+    /// caller's own matched node from its task id, so a driver marks only the
+    /// node it was loaded for, and it forgets the mark as that driver ends.
+    /// Requires [`crate::CapabilityId::INPUT_INJECT`], the grant the key
+    /// presses are delivered under. A caller with no loaded node, or a build
+    /// with no hardware-tree store wired, fails closed
+    /// ([`Errno::PermissionDenied`] / [`Errno::NotImplemented`]). Not
+    /// audited: it changes no authority.
+    pub const HW_NODE_KEY_SOURCE: Self = Self(145);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -3190,6 +3205,7 @@ mod tests {
         assert_eq!(SyscallNumber::WAITSET_CLOSE.as_u16(), 142);
         assert_eq!(SyscallNumber::PORT_UNBIND.as_u16(), 143);
         assert_eq!(SyscallNumber::CALL_PEER_PORT.as_u16(), 144);
+        assert_eq!(SyscallNumber::HW_NODE_KEY_SOURCE.as_u16(), 145);
     }
 
     #[test]

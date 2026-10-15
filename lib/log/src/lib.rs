@@ -62,7 +62,7 @@ pub use dict::{
     DictionaryBuilder, DictionaryView, ARENA_BYTES, MAX_CANDIDATES, MAX_DICT_STRING, MAX_ENTRIES,
 };
 pub use ingress::{Admission, Ingress, DEFAULT_EFFECTIVE_LEVEL, STREAM_COUNT};
-pub use journal::{Journal, JournalError, SegmentStore};
+pub use journal::{Journal, JournalError, SegmentStore, Stamp, SEGMENT_BUF_BYTES};
 pub use ratelimit::{DropReport, RateDecision, RateLimit, RateLimiter};
 pub use record::{
     decode as decode_record, CallerContent, DataFieldIter, LogRecord, LogRecordRef,

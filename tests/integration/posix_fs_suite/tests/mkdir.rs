@@ -13,11 +13,16 @@ fn mkdir_creates_a_directory() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("d"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("d")), &mut fs)
         .expect("mkdir succeeds");
 
     let info = vfs
-        .stat_via_secured(&owner, &vol_path("d"), &mut fs, FinalLink::Follow)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("d")),
+            &mut fs,
+            FinalLink::Follow,
+        )
         .expect("stat the new directory");
     assert_eq!(info.kind, NodeKind::Directory);
 }
@@ -28,15 +33,15 @@ fn mkdir_creates_nested_directories() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("a"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("a")), &mut fs)
         .expect("mkdir a");
-    vfs.mkdir_via_secured(&owner, &vol_path("a/b"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("a/b")), &mut fs)
         .expect("mkdir a/b");
 
     let names: Vec<(NodeKind, String)> = vfs
         .list_all_via_secured(
             &owner,
-            &vol_path("a"),
+            &vfs.cover(&vol_path("a")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX,
@@ -54,10 +59,10 @@ fn mkdir_existing_name_is_already_exists() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("dup"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dup")), &mut fs)
         .expect("first mkdir");
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vol_path("dup"), &mut fs),
+        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dup")), &mut fs),
         Err(VfsError::AlreadyExists)
     );
 }
@@ -68,10 +73,10 @@ fn mkdir_over_existing_file_is_already_exists() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("f"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("f")), &mut fs)
         .expect("create file");
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vol_path("f"), &mut fs),
+        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("f")), &mut fs),
         Err(VfsError::AlreadyExists)
     );
 }
@@ -83,7 +88,7 @@ fn mkdir_in_missing_parent_is_not_found() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vol_path("missing/child"), &mut fs),
+        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("missing/child")), &mut fs),
         Err(VfsError::NotFound)
     );
 }
@@ -94,10 +99,10 @@ fn mkdir_with_file_as_parent_is_not_a_directory() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.create_via_secured(&owner, &vol_path("file"), &mut fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path("file")), &mut fs)
         .expect("create file");
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &vol_path("file/child"), &mut fs),
+        vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("file/child")), &mut fs),
         Err(VfsError::NotADirectory)
     );
 }
@@ -109,7 +114,7 @@ fn mkdir_of_the_mount_root_itself_is_invalid() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     assert_eq!(
-        vfs.mkdir_via_secured(&owner, &path(MOUNT), &mut fs),
+        vfs.mkdir_via_secured(&owner, &vfs.cover(&path(MOUNT)), &mut fs),
         Err(VfsError::InvalidPath)
     );
 }

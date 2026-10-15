@@ -60,3 +60,6 @@ tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 # seam: one place picks the per-run seed, logs it, and bounds the smoke/soak
 # loop. Test scaffolding only; never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

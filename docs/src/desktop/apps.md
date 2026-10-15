@@ -395,7 +395,7 @@ they are deliberately different questions:
 
 Bundle-ness is decided from the **target's** leaf name, not the link's: a
 desktop shortcut is named for the application (`Editor`) while its target is
-the bundle (`/Apps/Editor.app`), so classifying on the link's own name would
+the bundle (`/System/Applications/Editor.app`), so classifying on the link's own name would
 show a shortcut to an application as a plain folder. A `fs_readdir` stream
 reports only *that* a child is a link, so the resolution comes from an
 injected `LinkReader` (`readlink` plus one resolving `fs_stat`, paid only for

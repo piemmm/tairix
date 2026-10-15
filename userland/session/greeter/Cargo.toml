@@ -126,3 +126,6 @@ tairix-users = { path = "../../../lib/users", version = "=0.0.0" }
 # The capability set an authenticated identity carries, for the fixture
 # authenticator the end-to-end test injects.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

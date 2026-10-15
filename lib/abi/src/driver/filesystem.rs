@@ -25,17 +25,12 @@ pub struct MountFlags(u32);
 impl MountFlags {
     /// Mount the filesystem read-only.
     pub const READ_ONLY: Self = Self(1 << 0);
-    /// Reject `setuid` / `setgid` bits on this mount.
-    pub const NOSUID: Self = Self(1 << 1);
-    /// Reject device-special files on this mount.
-    pub const NODEV: Self = Self(1 << 2);
-    /// Reject executable mappings of files on this mount.
-    pub const NOEXEC: Self = Self(1 << 3);
+    /// Refuse to run a program the mount serves.
+    pub const NOEXEC: Self = Self(1 << 1);
 
     /// Bitwise OR of every flag defined in `abi-v1`. Any bit outside
     /// this mask is reserved and rejected on the wire.
-    pub const KNOWN_MASK: Self =
-        Self(Self::READ_ONLY.0 | Self::NOSUID.0 | Self::NODEV.0 | Self::NOEXEC.0);
+    pub const KNOWN_MASK: Self = Self(Self::READ_ONLY.0 | Self::NOEXEC.0);
 
     /// Raw bitmap.
     #[must_use]
@@ -69,9 +64,7 @@ impl MountFlags {
     /// The set of flags present in either `self` or `other`.
     ///
     /// Both operands are already-validated [`MountFlags`], so the union
-    /// stays within [`Self::KNOWN_MASK`] and needs no re-validation. Used
-    /// to build composite mount policies such as the `nosuid,nodev,noexec`
-    /// default for `/System/Logs`.
+    /// stays within [`Self::KNOWN_MASK`] and needs no re-validation.
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -447,17 +440,18 @@ pub trait FilesystemRead {
     ) -> Result<(), DriverError>;
 }
 
-/// The host's write-back timer, as a driver that defers durability sees it.
+/// What the host does for a mounted volume that the driver, which owns no
+/// thread and runs only inside a caller's operation, cannot: run its
+/// write-back timer, and pass on the news that its space ran into its reserve.
 ///
 /// A filesystem may keep one transaction open across several operations, so
 /// that the commit — its barrier, its root, and the metadata blocks every
 /// operation in it rewrote — costs once per burst rather than once per
 /// operation. That trades recency, which is only bounded if something
-/// publishes the transaction when the volume falls quiet. The driver cannot:
-/// it owns no thread and runs only inside a caller's operation. So the host
-/// runs the timer and the driver names the instant — the only direction that
-/// cannot lose a transaction, since the driver alone knows one is open.
-pub trait WritebackHost: Send + Sync {
+/// publishes the transaction when the volume falls quiet. So the host runs the
+/// timer and the driver names the instant — the only direction that cannot
+/// lose a transaction, since the driver alone knows one is open.
+pub trait VolumeHost: Send + Sync {
     /// Monotonic nanoseconds, or [`None`] where the host has no monotonic
     /// clock. A driver that cannot measure elapsed time publishes every
     /// operation instead of deferring against a clock it does not have.
@@ -470,6 +464,30 @@ pub trait WritebackHost: Send + Sync {
     /// an implementation records the deadline and returns: it must not park,
     /// perform I/O, or take a lock its caller may already hold.
     fn writeback_due(&self, volume: DriverHandle, deadline_ns: Option<u64>);
+
+    /// The volume registered as `volume` has run out of space outside its
+    /// reserve (`in_reserve`), or has room outside it again.
+    ///
+    /// Reported on the transition only, from inside the driver, on the same
+    /// terms as [`Self::writeback_due`].
+    fn reserve_crossed(&self, volume: DriverHandle, in_reserve: bool);
+}
+
+/// Who an allocating operation's space is for, which decides whether it may
+/// draw on the volume's reserve once everything else is gone.
+///
+/// The class follows the operation's destination, never its writer: the
+/// kernel sets it from the projection a write lands through, so a privileged
+/// service writing into a user's home is ordinary, and nothing a user writes
+/// can reach the reserve.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum AllocationClass {
+    /// User data, the default: refused once only the reserve remains.
+    #[default]
+    Ordinary,
+    /// The system's own bounded write set — its logs, its settings, its
+    /// account databases — which may draw on the reserve.
+    System,
 }
 
 /// Mutating structural access to a mounted filesystem.
@@ -772,21 +790,30 @@ pub trait FilesystemWrite {
     ///   than reporting durability it cannot vouch for.
     fn flush(&mut self) -> Result<(), DriverError>;
 
-    /// Install the host's write-back timer for this mount, registered under
-    /// `volume`.
+    /// Install the host for this mount, registered under `volume`.
     ///
     /// Called once, by the host, as the mount is registered — so a driver
     /// that defers durability can only ever do so with a timer that will
     /// publish it. A driver that publishes at every operation has no
     /// deadline to report and leaves this defaulted; one that *does* defer
     /// overrides it and, from then on, reports each transaction's deadline
-    /// through [`WritebackHost::writeback_due`] as the transaction opens and
+    /// through [`VolumeHost::writeback_due`] as the transaction opens and
     /// reports `None` as it closes.
     ///
     /// A driver never given a host must publish eagerly rather than hold a
     /// transaction nothing will close.
-    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+    fn set_volume_host(&mut self, volume: DriverHandle, host: &'static dyn VolumeHost) {
         let _ = (volume, host);
+    }
+
+    /// Set the class the operations that follow allocate under, until the
+    /// next call.
+    ///
+    /// The kernel scopes each setting to one operation and puts
+    /// [`AllocationClass::Ordinary`] back after it. A format that keeps no
+    /// reserve leaves this defaulted; a wrapper forwards it.
+    fn set_allocation_class(&mut self, class: AllocationClass) {
+        let _ = class;
     }
 }
 
@@ -1077,15 +1104,22 @@ pub trait FilesystemAttrs {
 
 /// The combined per-node view an attribute operation runs against: path
 /// resolution ([`FilesystemRead`]), the per-inode security records the VFS
-/// authorises with ([`FilesystemSecurity`]), and the attribute store itself
-/// ([`FilesystemAttrs`]) — one object, because the secured VFS must resolve
+/// authorises with ([`FilesystemSecurity`]), the attribute store itself
+/// ([`FilesystemAttrs`]), and the class a mutation of it allocates under
+/// ([`FilesystemWrite`]) — one object, because the secured VFS must resolve
 /// and authorise on the *same* driver it then reads or mutates.
 ///
-/// Blanket-implemented for every type carrying the three traits; never
+/// Blanket-implemented for every type carrying the four traits; never
 /// implemented by hand.
-pub trait FilesystemAttrsFs: FilesystemRead + FilesystemSecurity + FilesystemAttrs {}
+pub trait FilesystemAttrsFs:
+    FilesystemRead + FilesystemSecurity + FilesystemAttrs + FilesystemWrite
+{
+}
 
-impl<T: FilesystemRead + FilesystemSecurity + FilesystemAttrs + ?Sized> FilesystemAttrsFs for T {}
+impl<T: FilesystemRead + FilesystemSecurity + FilesystemAttrs + FilesystemWrite + ?Sized>
+    FilesystemAttrsFs for T
+{
+}
 
 /// Opt-in discovery of a driver's extended-attribute support.
 ///
@@ -1130,6 +1164,11 @@ pub trait FilesystemAttrsProvider {
 pub struct VolumeStats {
     /// The allocation unit, in bytes, the block counts are denominated in.
     pub block_size: u32,
+    /// The volume is down to its reserve: less than one operation's worth is
+    /// left outside it, so an ordinary write may be refused while the
+    /// system's own writes and deletes go on. Always `false` for a format
+    /// that keeps no reserve.
+    pub in_reserve: bool,
     /// Total data blocks the volume holds.
     pub total_blocks: u64,
     /// Blocks currently unallocated.
@@ -1233,38 +1272,30 @@ mod tests {
 
     #[test]
     fn known_mask_covers_every_named_flag() {
-        let all = MountFlags::READ_ONLY.bits()
-            | MountFlags::NOSUID.bits()
-            | MountFlags::NODEV.bits()
-            | MountFlags::NOEXEC.bits();
+        let all = MountFlags::READ_ONLY.bits() | MountFlags::NOEXEC.bits();
         assert_eq!(MountFlags::KNOWN_MASK.bits(), all);
     }
 
     #[test]
     fn from_bits_rejects_unknown() {
         assert_eq!(MountFlags::from_bits(1 << 31), Err(DriverError::OutOfRange));
+        assert_eq!(MountFlags::from_bits(1 << 2), Err(DriverError::OutOfRange));
     }
 
     #[test]
     fn union_combines_known_flags() {
-        let combined = MountFlags::NOSUID
-            .union(MountFlags::NODEV)
-            .union(MountFlags::NOEXEC);
-        assert!(combined.contains(MountFlags::NOSUID));
-        assert!(combined.contains(MountFlags::NODEV));
+        let combined = MountFlags::READ_ONLY.union(MountFlags::NOEXEC);
+        assert!(combined.contains(MountFlags::READ_ONLY));
         assert!(combined.contains(MountFlags::NOEXEC));
-        assert!(!combined.contains(MountFlags::READ_ONLY));
-        // The union of known flags is itself within the known mask.
-        assert_eq!(combined.bits() & !MountFlags::KNOWN_MASK.bits(), 0);
+        assert_eq!(combined, MountFlags::KNOWN_MASK);
     }
 
     #[test]
     fn contains_is_bitwise_subset() {
-        let Ok(f) = MountFlags::from_bits(MountFlags::NOSUID.bits() | MountFlags::NODEV.bits())
-        else {
+        let Ok(f) = MountFlags::from_bits(MountFlags::NOEXEC.bits()) else {
             unreachable!("known bits")
         };
-        assert!(f.contains(MountFlags::NOSUID));
+        assert!(f.contains(MountFlags::NOEXEC));
         assert!(!f.contains(MountFlags::READ_ONLY));
     }
 
@@ -2010,9 +2041,19 @@ mod tests {
     }
 
     #[test]
+    fn volume_stats_holds_its_reserve_flag_in_the_block_size_pad() {
+        // The C view names the byte at this offset, and the mount record's
+        // wire image puts it in the same place.
+        assert_eq!(core::mem::offset_of!(VolumeStats, in_reserve), 4);
+        assert_eq!(core::mem::offset_of!(VolumeStats, total_blocks), 8);
+        assert_eq!(core::mem::size_of::<VolumeStats>(), 48);
+    }
+
+    #[test]
     fn mock_stats_fs_reports_stored_record() {
         let stats = VolumeStats {
             block_size: 4096,
+            in_reserve: false,
             total_blocks: 1024,
             free_blocks: 512,
             avail_blocks: 480,

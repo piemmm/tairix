@@ -12,7 +12,7 @@ use tairix_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
 use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::FreeListAllocator;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_log::{log, Event, EventId, Level};
 
 /// Gigabytes of identity map the address space provides: `[0, 2 GiB)`
@@ -60,16 +60,11 @@ const FAIL_UNEXPECTED_FAULT: NonZeroU16 = fail_point!(12);
 /// setup bug; after it, a fault the Access-Flag path did not resolve.
 static SETUP_DONE: AtomicBool = AtomicBool::new(false);
 
-/// Size of the test's bump heap. The aarch64 port names `alloc`, so a
-/// `#[global_allocator]` must be present even though this test allocates
-/// nothing itself. Lives in `.bss` (zeroed by the trampoline).
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 1024 * 1024;
 
-/// Page-aligned backing store for the bump heap.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -77,7 +72,7 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 /// Page-table pool backing the address space.
 static PAGE_TABLES: PageTablePool = PageTablePool::new();

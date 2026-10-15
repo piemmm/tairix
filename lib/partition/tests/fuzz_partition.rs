@@ -165,9 +165,17 @@ fn exercise_never_panics(bytes: &[u8]) {
             }
         }
     }
-    // The raw MBR sector parser, fed the first 512 bytes directly.
+    // The raw MBR sector parser, fed the first 512 bytes directly; and any
+    // table it accepts, grown to a medium of any size, stays one it accepts.
     if bytes.len() >= mbr::MBR_SECTOR_LEN {
         let _ = mbr::parse(&bytes[..mbr::MBR_SECTOR_LEN]);
+        let mut sector = [0u8; mbr::MBR_SECTOR_LEN];
+        sector.copy_from_slice(&bytes[..mbr::MBR_SECTOR_LEN]);
+        let medium = u64::from_le_bytes(sector[440..448].try_into().expect("eight bytes"));
+        if let Ok(Some(grown)) = mbr::grow_root(&mut sector, medium) {
+            let table = mbr::parse(&sector).expect("a grown table is a valid table");
+            assert_eq!(table.first_of_type(PartitionType::ARXFSRoot), Some(grown));
+        }
     }
 }
 

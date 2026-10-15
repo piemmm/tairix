@@ -31,7 +31,7 @@ disagree about what a store says.
   claimed, so a rescan cannot resurrect what a curator suppressed; the
   overlay's verdict wins at resolve time.
 - `applib rescan [--user]` — walk the application stores
-  (`/System/Commands` and `/System/Applications`, then `/Apps`; under
+  (`/System/Commands` and `/System/Applications`; under
   `--user`, the caller's own `<home>/Commands` and `<home>/Applications`),
   read each bundle's manifest, and `lib/proglib::reconcile` every listed
   bundle the catalog does not know yet. Curation is never disturbed; a

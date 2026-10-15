@@ -1,6 +1,6 @@
 [package]
 name = "tairix-appload"
-description = "TAIRiX application-bundle load gate: validates a `<Name>.app/` bundle's fixed layout, verifies its signed `AppInfo` manifest and content hash, computes the granted capability set as the user's grants intersected with the manifest request, and enforces the dynamic-loader shared-library policy — the one gate the kernel boot-floor spawn path and the user-space `appmgr` service share."
+description = "TAIRiX application-bundle load gate: validates a `<Name>.app/` bundle's fixed layout, verifies its signed `AppInfo` manifest and content hash, computes the granted capability set as the user's grants intersected with the manifest request, and enforces the dynamic-loader shared-library policy — the one gate the kernel's spawn loads every bundle through."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,7 +26,7 @@ tairix-caps = { path = "../caps", version = "=0.0.0" }
 # identity. Deriving that identity in one place is what stops two hosts
 # keying the same developer's per-app state differently. Trust-rooting the
 # manifest *signer* stays behind the `Verifier` seam, because that policy
-# genuinely differs between the kernel's embedded anchor and `appmgr`.
+# genuinely differs between the kernel's embedded anchor and a test's.
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }
 # structured audit log: every load, refusal, and library decision is
 # recorded through a `tairix_log::Sink`.

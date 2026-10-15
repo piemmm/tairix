@@ -14,8 +14,7 @@ use core::fmt;
 
 use tairix_abi::{
     LibraryCategory, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR,
-    HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, LIBRARY_ICON_MAX, SYSTEM_APPLICATION_STORE,
-    SYSTEM_COMMAND_STORE,
+    HOME_COMMAND_STORE_DIR, LIBRARY_ICON_MAX, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
 };
 
 /// Maximum length, in bytes, of an entry identifier: the bundle identifier
@@ -210,8 +209,7 @@ impl fmt::Display for DisplayName {
 /// The program stores a library entry may name a bundle in, expressed as
 /// the leading `/`-view components of a bundle path.
 ///
-/// The machine-wide store is [`INSTALLED_APP_STORE`]; the OS-provided
-/// system stores are [`SYSTEM_COMMAND_STORE`] and
+/// The OS-provided system stores are [`SYSTEM_COMMAND_STORE`] and
 /// [`SYSTEM_APPLICATION_STORE`], holding the OS-shipped commands and
 /// graphical applications a fresh install's library lists (the file
 /// manager, the terminal); and a user's own stores are the
@@ -222,14 +220,10 @@ impl fmt::Display for DisplayName {
 /// the user-facing programs a launcher offers, and a catalog claiming one
 /// is malformed.
 ///
-/// Every store permits plain nesting (`/Apps/games/chess.app`), so only
-/// the prefix is fixed here; the depth beneath it is not.
+/// Every store permits plain nesting (`Applications/games/chess.app`), so
+/// only the prefix is fixed here; the depth beneath it is not.
 fn store_body(components: &[String]) -> Option<&[String]> {
-    for store in [
-        INSTALLED_APP_STORE,
-        SYSTEM_COMMAND_STORE,
-        SYSTEM_APPLICATION_STORE,
-    ] {
+    for store in [SYSTEM_COMMAND_STORE, SYSTEM_APPLICATION_STORE] {
         if let Some(rest) = strip_store_prefix(components, store) {
             return Some(rest);
         }

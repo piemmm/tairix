@@ -94,7 +94,7 @@ Per the issue, all service configuration and registration data lives under
 `/System/Security` holds identity/keys/MAC policy; service *enrolment* is
 system configuration, and `/System/Settings` is exactly the machine-wide
 settings tree (§16.2), already the one writable-by-the-trusted-path,
-`nosuid,nodev,noexec` location the kernel can read pre-unlock.
+`noexec` location the kernel can read pre-unlock.
 
 - System service registration store: `/System/Settings/Services/`.
 - Per-user service registration store: `/Users/<u>/Settings/Services/`.

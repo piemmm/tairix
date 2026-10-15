@@ -21,7 +21,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{BootSession, Errno, ProcId, SpawnAttach, SpawnSession, ENV_SHOWN_NAME};
+use tairix_abi::{
+    BootSession, Errno, ProcId, SpawnAttach, SpawnSession, DESKTOP_RUN_PATH, ENV_SHOWN_NAME,
+};
 use tairix_caps::CapabilitySet;
 use tairix_sysconfig::{LoginType, SystemConfig};
 
@@ -88,15 +90,6 @@ pub struct AuthenticatedUser {
     pub shell: String,
 }
 
-/// The default search path exported to a session: the machine-wide installed
-/// application store (`/Apps`). The two system stores and the user's own two
-/// stores are the fixed, non-overridable prefix the resolution policy itself
-/// searches first (`lib/cmdres`), so they must never be repeated here — doing
-/// so would be redundant and would misleadingly imply they are just another
-/// configurable `PATH` entry. TAIRiX has no `/usr/bin`, so this is the analogue
-/// of a POSIX login's default `PATH`.
-pub const DEFAULT_PATH: &str = "/Apps";
-
 /// The default `TERM` exported to a session. The system text console
 /// (`lib/fbcon`) renders the xterm 256-colour repertoire, so a session
 /// starts assuming that terminal type.
@@ -111,9 +104,11 @@ pub const DEFAULT_LANG: &str = "en-US";
 /// consumed by `spawn_with`).
 ///
 /// These are the identity- and locale-carrying variables a POSIX login sets
-/// (`USER`, `LOGNAME`, `HOME`, `SHELL`, `PWD`, `PATH`, `TERM`, `LANG`),
-/// filled from the authenticated account so the shell's prompt and
-/// `$USER`/`$HOME`/… reflect the real user rather than a guess. Shell-owned
+/// (`USER`, `LOGNAME`, `HOME`, `SHELL`, `PWD`, `TERM`, `LANG`), filled from
+/// the authenticated account so the shell's prompt and `$USER`/`$HOME`/…
+/// reflect the real user rather than a guess. No `PATH` is exported: the
+/// fixed lookup prefix (`lib/cmdres`) already names every program store, the
+/// system pair and the user's own, so there is nothing further to search. Shell-owned
 /// variables (`OLDPWD`, `ELSH_PROMPT`) and the hostname default are the
 /// shell's to fill; login sets only what it authoritatively knows.
 ///
@@ -131,21 +126,10 @@ pub fn session_environment(user: &AuthenticatedUser) -> Vec<String> {
         format!("HOME={}", user.home),
         format!("SHELL={}", user.shell),
         format!("PWD={}", user.home),
-        format!("PATH={DEFAULT_PATH}"),
         format!("TERM={DEFAULT_TERM}"),
         format!("LANG={DEFAULT_LANG}"),
     ]
 }
-
-/// Absolute path of the `desktop` application's `Run` binary — the
-/// program a [`SessionKind::Graphical`] session launches
-/// (`plans/DISPLAY.md` D7c/D7d). The desktop is a system application
-/// (`.app` bundle in the system application store, `/System/Applications/`),
-/// so the same bundle a graphical login starts is what a shell user runs by
-/// typing `desktop`. This is the one OS-wide spelling of its entry point:
-/// the launcher spawns it and login's availability probe checks the same
-/// path, so the two can never name different bundles.
-pub const DESKTOP_SESSION_PATH: &str = "/System/Applications/desktop.app/Run";
 
 /// Absolute path of the graphical login screen's `Run` binary — the
 /// service the authority starts as the `greeter` account when a graphical
@@ -159,8 +143,8 @@ pub const DESKTOP_SESSION_PATH: &str = "/System/Applications/desktop.app/Run";
 pub const GREETER_SERVICE_PATH: &str = "/System/Services/greeter.app/Run";
 
 /// The program a session of `kind` runs for `user`: the authenticated
-/// account's own shell of choice for a text session, the OS desktop
-/// session service ([`DESKTOP_SESSION_PATH`]) for a graphical one.
+/// account's own shell of choice for a text session, the desktop session
+/// component ([`DESKTOP_RUN_PATH`]) for a graphical one.
 ///
 /// One definition, so the launcher and every test agree on the mapping.
 /// The desktop session is deliberately *not* per-account data: which
@@ -170,7 +154,7 @@ pub const GREETER_SERVICE_PATH: &str = "/System/Services/greeter.app/Run";
 pub fn session_program(user: &AuthenticatedUser, kind: SessionKind) -> &str {
     match kind {
         SessionKind::Text => &user.shell,
-        SessionKind::Graphical => DESKTOP_SESSION_PATH,
+        SessionKind::Graphical => DESKTOP_RUN_PATH,
     }
 }
 
@@ -207,8 +191,7 @@ pub const fn elevated_attach(uid: u32, requester: ProcId) -> SpawnAttach {
 /// [`effective_session_kind`]), and a graphical result takes effect only
 /// when a graphical session is actually available (see
 /// [`LoginConfig::graphical_available`](crate::LoginConfig)) — otherwise
-/// the text shell runs. A shell user starts the desktop on demand with
-/// the `desktop` command instead.
+/// the text shell runs.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SessionKind {
     /// A text shell session.
@@ -473,7 +456,7 @@ pub trait SessionLauncher {
 mod tests {
     use super::{
         configured_session_kind, effective_session_kind, session_environment, AuthenticatedUser,
-        ConfigStore, Gid, SessionKind, Uid, DEFAULT_LANG, DEFAULT_PATH, DEFAULT_TERM,
+        ConfigStore, Gid, SessionKind, Uid, DEFAULT_LANG, DEFAULT_TERM,
     };
     use alloc::string::ToString;
     use alloc::vec::Vec;
@@ -527,7 +510,10 @@ mod tests {
         assert!(env.contains(&"SHELL=/System/Commands/elsh.app/Run".to_string()));
         assert!(env.contains(&"PWD=/Users/ada".to_string()));
         // The locale/path/term defaults are the documented OS values.
-        assert!(env.contains(&alloc::format!("PATH={DEFAULT_PATH}")));
+        assert!(
+            !env.iter().any(|entry| entry.starts_with("PATH=")),
+            "the fixed lookup prefix names every store; no PATH is exported"
+        );
         assert!(env.contains(&alloc::format!("TERM={DEFAULT_TERM}")));
         assert!(env.contains(&alloc::format!("LANG={DEFAULT_LANG}")));
         // Every entry is a well-formed NAME=value pair (no bare names).
@@ -554,13 +540,7 @@ mod tests {
         );
         assert_eq!(
             super::session_program(&user, SessionKind::Graphical),
-            super::DESKTOP_SESSION_PATH
-        );
-        // The desktop path is the system-application-store bundle spelling:
-        // the same bundle the shell's `desktop` command word resolves to.
-        assert_eq!(
-            super::DESKTOP_SESSION_PATH,
-            "/System/Applications/desktop.app/Run"
+            tairix_abi::DESKTOP_RUN_PATH
         );
     }
 

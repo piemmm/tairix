@@ -74,8 +74,8 @@ mod kernel {
     // Re-declared rather than re-exported because `#[global_allocator]` is a
     // per-binary attribute (see `kernel/tairix-kernel/Cargo.toml`).
 
-    /// Static heap for the bump allocator.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -84,7 +84,7 @@ mod kernel {
     /// consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     // --- Observer ----------------------------------------------------
 

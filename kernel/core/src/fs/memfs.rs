@@ -20,9 +20,9 @@ use alloc::vec::Vec;
 use core::ops::Bound;
 
 use tairix_abi::driver::filesystem::{
-    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats, WritebackHost,
+    AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
+    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_fsmeta::{AttrFlags, AttrSet};
@@ -73,7 +73,18 @@ pub struct RwMockFs {
     /// Run on entry to every lookup, so a test can check what its caller
     /// holds while inside the driver.
     lookup_probe: Option<Box<dyn Fn() + Send>>,
+    /// Run on entry to every space-accounting read, so a test can count them.
+    stats_probe: Option<Box<dyn Fn() + Send>>,
+    /// The class the kernel set for the operations that follow.
+    class: AllocationClass,
 }
+
+/// The one name this mock keeps for the system, as a volume keeps its
+/// reserve: creating it is refused unless the class the kernel set is
+/// [`AllocationClass::System`], which is what makes a wrapper's forwarding of
+/// the class observable
+/// ([`super::wrapper_conformance::assert_allocation_class_forwards`]).
+pub const SYSTEM_ONLY_NAME: &[u8] = b"system-only";
 
 impl Default for RwMockFs {
     fn default() -> Self {
@@ -99,6 +110,8 @@ impl RwMockFs {
             name_matching: NameMatching::AsciiCaseInsensitive,
             free: None,
             lookup_probe: None,
+            stats_probe: None,
+            class: AllocationClass::Ordinary,
         }
     }
 
@@ -122,6 +135,14 @@ impl RwMockFs {
     #[must_use]
     pub(crate) fn with_lookup_probe(mut self, probe: Box<dyn Fn() + Send>) -> Self {
         self.lookup_probe = Some(probe);
+        self
+    }
+
+    /// Run `probe` on entry to every space-accounting read.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_stats_probe(mut self, probe: Box<dyn Fn() + Send>) -> Self {
+        self.stats_probe = Some(probe);
         self
     }
 
@@ -387,6 +408,9 @@ impl FilesystemWrite for RwMockFs {
         if self.child_index(dir, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
+        if name == SYSTEM_ONLY_NAME && self.class != AllocationClass::System {
+            return Err(DriverError::NoSpace);
+        }
         let name = core::str::from_utf8(name)
             .map_err(|_| DriverError::LengthOutOfRange)?
             .to_string();
@@ -572,9 +596,13 @@ impl FilesystemWrite for RwMockFs {
     /// Report the mount's state to the host the moment the timer arrives,
     /// exactly as a driver that defers durability does — which is what makes
     /// the forwarding of this method observable through the host alone
-    /// ([`super::wrapper_conformance::assert_writeback_host_forwards`]).
-    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+    /// ([`super::wrapper_conformance::assert_volume_host_forwards`]).
+    fn set_volume_host(&mut self, volume: DriverHandle, host: &'static dyn VolumeHost) {
         host.writeback_due(volume, None);
+    }
+
+    fn set_allocation_class(&mut self, class: AllocationClass) {
+        self.class = class;
     }
 }
 
@@ -669,6 +697,9 @@ const MOCK_TOTAL_BLOCKS: u64 = 4096;
 
 impl FilesystemStats for RwMockFs {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
+        if let Some(probe) = &self.stats_probe {
+            probe();
+        }
         // Derived from the live tree, not fabricated: each file occupies
         // whole blocks of its byte length, over a fixed test capacity, so a
         // test observes the free count move with real writes. There is no
@@ -686,6 +717,7 @@ impl FilesystemStats for RwMockFs {
         let free = MOCK_TOTAL_BLOCKS.saturating_sub(used);
         Ok(VolumeStats {
             block_size: MOCK_BLOCK_SIZE,
+            in_reserve: false,
             total_blocks: MOCK_TOTAL_BLOCKS,
             free_blocks: free,
             avail_blocks: free,

@@ -32,8 +32,8 @@ Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
   folder-organised catalog of installed applications (Accessories,
   Programming, Games, Internet, …), programmatically add/removable exactly
   as an installer adds shortcuts;
-- to its right, a permanent **File Manager** icon that opens `files.app`
-  on its default view;
+- the file manager, a desktop component the session autostarts, holding the
+  leading application-strip slot;
 - then the **application strip**: one icon-only slot per *running
   application*, each slot standing for one kernel-attested process. A primary
   click performs what the application's declaration says (its own action, or
@@ -86,7 +86,7 @@ change today is allowed; it requires regenerating the C header
   `lib/*`. It **cannot** spawn processes, read privileged system state, or
   control other tasks. Every interaction produces a **typed response**; the
   capability-holding component resolves it: the session glue
-  (`tairix-session`) launches bundles (via `appmgr`, async — `plans/FIX-DESKTOP.md`)
+  (`tairix-session`) launches bundles (through `spawn`, async — `plans/FIX-DESKTOP.md`)
   and owns the theme; the Switchboard service (below) holds the
   `CAP_SYSINFO_*` / process-control authority. Authority is always enforced by
   the existing capability-checked syscall/IPC paths; a control only renders
@@ -417,7 +417,7 @@ the authority at the right granularity and, if so, uses it.
 ## 5. On-disk stores (data, never code)
 
 - **Machine-wide catalog:** `/System/Settings/ProgramLibrary/library.conf`
-  (writable `/System/Settings` subtree, `nosuid,nodev,noexec`, §16.2). A
+  (writable `/System/Settings` subtree, `noexec`, §16.2). A
   plain `lib/appconf` `key = value` document whose *registry* `lib/proglib`
   owns: each entry a fail-closed record of `bundle-path`, `category`,
   `display-name`, optional `icon` asset id, keyed by a stable `id`. Written
@@ -566,7 +566,7 @@ What now guarantees §16.5/§18.5's "no compiled-in app list":
   C header is regenerated (`cargo xtask c-header --write`); `lib/appload`
   consumers read the listing off the verified header's own accessors.
 - **The fold (`lib/proglib::Catalog::reconcile`)** + **`applib rescan`** —
-  the walk covers the system program stores then `/Apps` (machine) or the caller's
+  the walk covers the system program stores (machine) or the caller's
   own stores (`--user`), breadth-first in sorted order (deterministic
   duplicate resolution), descending nested plain subdirectories but never
   into a sealed `.app`, bounded by `MAX_WALK_DEPTH`/`MAX_WALK_ENTRIES`

@@ -57,12 +57,8 @@ mod kernel {
     /// The lookups the runner types: the browse, the resolve, the host.
     const LOOKUPS: u8 = 3;
 
-    /// Static boot heap, mirroring the production aarch64 kernel binary's
-    /// `.bss`-resident heap (zeroed by the boot trampoline).
-    ///
-    /// `static mut` because the free-list allocator hands out disjoint slices
-    /// via an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -70,7 +66,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// `EventId` the syscall dispatcher emits for an audited syscall that
     /// passed every check (pinned in `kernel/syscall/src/audit.rs`).

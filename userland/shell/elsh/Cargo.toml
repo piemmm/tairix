@@ -103,3 +103,6 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"
 # never a second copy of the locale list (plans/APPS.md §8.1). Test-only:
 # the host library never reads help at runtime.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

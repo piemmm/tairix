@@ -526,6 +526,12 @@ The footer contains:
 An open segment may lack a footer. Recovery scans forward to the last complete,
 checksum-valid committed record.
 
+A written segment is never rewritten: each is its own file, named by its
+segment id and the boot that wrote it and created exclusively, and a restarted
+journal numbers a stream's segments on from the highest already stored. A
+segment the store refuses stays in the journal's buffer and is offered again
+before the stream accepts another record.
+
 ### 6.2 Segment-local dictionaries
 
 The physical format encodes repeated strings with a segment-local dictionary,
@@ -786,6 +792,16 @@ keeping streams separate.
 Debug and trace records MAY have short retention and aggressive aggregation.
 Audit and security retention MUST be conservative and MUST NOT silently discard
 records because of storage pressure.
+
+The journal writes through `/System/Logs`, one of the system's writable grafts,
+so its writes may draw on the root volume's reserve once users have filled it
+(`docs/src/filesystem/arxfs-spec.md` §6); a segment per stream, twice over, is
+part of the write set the reserve is sized over. Once the volume reports
+`in_reserve`, the runtime and debug streams MUST rotate within what they already
+hold, deleting their oldest segment before writing the next, so they never grow
+into the reserve; audit and security MAY grow into it — that is the reserve's
+runway — and only an exhausted reserve fails an audited decision closed. This
+rotation lands with journald's launch.
 
 ## 11. Loss, rate limiting, and aggregation
 

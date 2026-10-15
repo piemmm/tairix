@@ -1,9 +1,10 @@
 //! `ARXFS` root-partition authoring.
 //!
 //! The root partition is a genuine `ARXFS` volume laid down by the real
-//! driver (`tairix-drv-fs-arxfs`) and pre-populated with the
-//! authoritative top-level layout: exactly `/System`, `/Users`, `/Apps`,
-//! and `/Storage`. It is the **writable** volume mounted as `/`, so under
+//! driver (`tairix-drv-fs-arxfs`) and pre-populated with the root-view
+//! entries it stores ([`stored_root_entries`]): `/System` and `/Users`, the
+//! `/Storage` catalog being stored on no volume. It is the **writable**
+//! volume mounted as `/`, so under
 //! `/System` it carries **only** the writable-state subtree
 //! ([`WRITABLE_SYSTEM_SUBDIRS`]: `Logs`, `Settings`, and `Security`) — the
 //! immutable `/System` content (`Kernel`, `Drivers`, `Libraries`, …) lives on
@@ -27,24 +28,20 @@
 
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeId, NodeKind};
 use tairix_abi::driver_store::SystemConfigFile;
-use tairix_abi::DriverError;
+use tairix_abi::{stored_root_entries, DriverError};
 use tairix_drv_fs_arxfs::{plant_nested_file, EntropySource, Keying, Security, ARXFS};
 use tairix_users::provision_home_shape;
 
 use crate::device::MemBlock;
 use crate::MkimageError;
 
-/// The top-level directories. Exactly these four; any
-/// other top-level name on a TAIRiX volume is a defect.
-pub const TOP_LEVEL_DIRS: [&str; 4] = ["System", "Users", "Apps", "Storage"];
-
 /// The full `/System` subtree the **read-only** `ARXFSSystem` volume ships
 /// (`build_system_partition`): the charter's `/System` layout. `Security`
 /// additionally carries its fixed `Keys` and `Policy` subdirectories; the
 /// `Users`/`Groups` databases inside it are installer-authored data, not
-/// image content. `Commands`, `Applications` and `Services` are the program
-/// stores the image pipeline plants each OS-provided bundle into.
-pub const SYSTEM_SUBDIRS: [&str; 15] = [
+/// image content. `Commands`, `Applications`, `Services` and `Components` are
+/// the program stores the image pipeline plants each OS-provided bundle into.
+pub const SYSTEM_SUBDIRS: [&str; 16] = [
     "Kernel",
     "Commands",
     "Applications",
@@ -60,6 +57,7 @@ pub const SYSTEM_SUBDIRS: [&str; 15] = [
     "Logs",
     "Settings",
     "Services",
+    "Components",
 ];
 
 /// The writable-state `/System` subtree the **root** volume ships
@@ -172,7 +170,7 @@ pub fn build_root_partition(
         .map_err(MkimageError::RootPartition)?;
     let root = fs.root();
 
-    for name in TOP_LEVEL_DIRS {
+    for name in stored_root_entries() {
         let node = fs
             .create(root, name.as_bytes(), NodeKind::Directory)
             .map_err(MkimageError::RootPartition)?;
@@ -559,7 +557,7 @@ mod tests {
     /// text is written verbatim"); the real derivation is pinned by
     /// `crate::library`'s own tests.
     const TEST_LIBRARY: &str =
-        "editor.name = Editor\neditor.bundle = /Apps/Editor.app\neditor.category = Office\n";
+        "editor.name = Editor\neditor.bundle = /System/Applications/Editor.app\neditor.category = Office\n";
 
     /// A recognisable managed-interface document for the planting contract:
     /// the writer must parse and re-render it rather than copy it blindly, so
@@ -601,22 +599,12 @@ mod tests {
     }
 
     #[test]
-    fn the_system_skeleton_holds_each_program_store_and_no_other() {
-        use tairix_abi::appinfo::{
-            SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE, SYSTEM_SERVICE_STORE,
-        };
-        for store in [
-            SYSTEM_COMMAND_STORE,
-            SYSTEM_APPLICATION_STORE,
-            SYSTEM_SERVICE_STORE,
-        ] {
+    fn the_system_skeleton_holds_every_kinds_store() {
+        for kind in tairix_abi::ProgramKind::ALL {
+            let store = kind.store();
             let leaf = store.strip_prefix("/System/").expect("a /System store");
             assert!(SYSTEM_SUBDIRS.contains(&leaf), "{store}");
         }
-        assert!(
-            !SYSTEM_SUBDIRS.contains(&"Apps"),
-            "/Apps is a top-level store, not a /System one"
-        );
     }
 
     #[test]
@@ -630,9 +618,15 @@ mod tests {
         let dev = MemBlock::from_bytes(bytes).expect("whole sectors");
         let mut fs = ARXFS::open(dev, Keying::Plaintext).expect("the plaintext root mounts");
         let root = fs.root();
-        for name in TOP_LEVEL_DIRS {
+        for name in stored_root_entries() {
             fs.lookup(root, name.as_bytes())
                 .unwrap_or_else(|_| panic!("/{name} exists"));
+        }
+        for absent in [tairix_abi::STORAGE_CATALOG, "Apps"] {
+            assert!(
+                fs.lookup(root, absent.as_bytes()).is_err(),
+                "the root volume stores no /{absent}"
+            );
         }
         let system = fs.lookup(root, b"System").expect("/System exists");
         // The root carries ONLY the writable-state /System subtree;

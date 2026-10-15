@@ -391,9 +391,9 @@ fn a_listing_installs_its_watch_only_where_the_consumer_landed() {
         took(None, [None, None]),
         "a reload with no new watch keeps the one in place"
     );
-    watches.offer(0, &at(&["Apps"]), 9);
+    watches.offer(0, &at(&["Archive"]), 9);
     assert_eq!(
-        watches.took(0, &at(&["Apps"])),
+        watches.took(0, &at(&["Archive"])),
         took(Some(9), [Some(8), None]),
         "the folder left behind is let go"
     );
@@ -434,7 +434,7 @@ fn a_drain_of_a_location_the_consumer_left_is_dropped() {
     installed(&mut watches, 0, &["Users"], 1);
     watches.want_drain(0);
     let (_, location, _) = watches.next_drain().expect("a drain");
-    installed(&mut watches, 0, &["Apps"], 2);
+    installed(&mut watches, 0, &["Archive"], 2);
     assert!(!watches.deliver(0, &location, changed("stale")));
     assert_eq!(watches.take_update(0), WatchUpdate::Quiet);
 }
@@ -443,7 +443,7 @@ fn a_drain_of_a_location_the_consumer_left_is_dropped() {
 fn closing_or_leaving_hands_the_watch_back_to_release() {
     let mut watches = Watches::new();
     installed(&mut watches, 0, &["Users"], 1);
-    installed(&mut watches, 1, &["Apps"], 2);
+    installed(&mut watches, 1, &["Archive"], 2);
     watches.want_drain(0);
     assert_eq!(watches.unwatch(0), Some(1));
     assert!(
@@ -460,7 +460,7 @@ fn a_stopping_desk_records_nothing() {
     installed(&mut watches, 0, &["Users"], 1);
     watches.stop();
     assert!(!watches.want_drain(0));
-    assert_eq!(watches.offer(0, &at(&["Apps"]), 2), Some(2));
+    assert_eq!(watches.offer(0, &at(&["Archive"]), 2), Some(2));
     assert_eq!(watches.took(0, &at(&["Users"])).join, None);
     assert!(watches.next_drain().is_none());
 }
@@ -631,23 +631,23 @@ fn a_reload_reads_through_the_watch_already_held_and_drops_what_it_supersedes() 
         "the read about to begin supersedes what was drained before it"
     );
     assert_eq!(
-        watches.relisting(0, &at(&["Apps"])),
+        watches.relisting(0, &at(&["Archive"])),
         None,
         "elsewhere arms afresh"
     );
-    assert_eq!(watches.offer(0, &at(&["Apps"]), 2), None);
+    assert_eq!(watches.offer(0, &at(&["Archive"]), 2), None);
     assert_eq!(
-        watches.relisting(0, &at(&["Apps"])),
+        watches.relisting(0, &at(&["Archive"])),
         Some(2),
         "an offer is held too"
     );
     assert_eq!(
-        watches.offer(0, &at(&["Apps"]), 3),
+        watches.offer(0, &at(&["Archive"]), 3),
         Some(2),
         "a displaced offer is handed back to let go of"
     );
     watches.stop();
-    assert_eq!(watches.offer(0, &at(&["Apps"]), 4), Some(4));
+    assert_eq!(watches.offer(0, &at(&["Archive"]), 4), Some(4));
 }
 
 /// A watch that reported its directory gone is spent: a reload arms afresh
@@ -690,14 +690,14 @@ fn a_listing_read_here_follows_its_folder_as_a_waited_one_does() {
         (listing(), None)
     });
     assert_eq!(reloaded, took(None, [None, None]), "and keeps it");
-    let (_, moved) = watches.read_here(0, &at(&["Apps"]), |_| (listing(), Some(2)));
+    let (_, moved) = watches.read_here(0, &at(&["Archive"]), |_| (listing(), Some(2)));
     assert_eq!(
         moved,
         took(Some(2), [Some(1), None]),
         "the folder left is let go"
     );
     assert!(!watches.follows(0, &at(&["Users"])));
-    assert!(watches.follows(0, &at(&["Apps"])));
+    assert!(watches.follows(0, &at(&["Archive"])));
 }
 
 /// A watch follows only the folder it is on, and only until it reports that
@@ -711,7 +711,7 @@ fn a_watch_follows_its_own_folder_until_it_is_gone() {
     );
     installed(&mut watches, 0, &["Users"], 1);
     assert!(watches.follows(0, &at(&["Users"])));
-    assert!(!watches.follows(0, &at(&["Apps"])), "nor another folder");
+    assert!(!watches.follows(0, &at(&["Archive"])), "nor another folder");
     assert!(
         !watches.follows(1, &at(&["Users"])),
         "nor for another consumer"
@@ -731,7 +731,7 @@ fn a_watch_follows_its_own_folder_until_it_is_gone() {
 #[test]
 fn a_read_here_hands_back_what_it_displaced() {
     let mut watches: Watches<u8, u32> = Watches::new();
-    watches.offer(0, &at(&["Apps"]), 4);
+    watches.offer(0, &at(&["Archive"]), 4);
     let (_, joined) = watches.read_here(0, &at(&["Users"]), |_| {
         (Ok(vec![Entry::file("a")]), Some(6))
     });
@@ -776,7 +776,7 @@ fn a_refused_read_here_installs_no_watch() {
 fn drains_here_land_what_each_wanted_watch_reported() {
     let mut watches: Watches<u8, u32> = Watches::new();
     installed(&mut watches, 0, &["Users"], 1);
-    installed(&mut watches, 1, &["Apps"], 2);
+    installed(&mut watches, 1, &["Archive"], 2);
     assert!(!watches.drain_here(|_| unreachable!("nothing was wanted")));
     assert!(watches.want_drain(0) && watches.want_drain(1));
     let mut drained = Vec::new();
@@ -803,9 +803,9 @@ fn drains_here_land_what_each_wanted_watch_reported() {
 #[test]
 fn stopping_lets_every_offer_go() {
     let mut watches = Watches::new();
-    assert_eq!(watches.offer(0, &at(&["Apps"]), 1), None);
+    assert_eq!(watches.offer(0, &at(&["Archive"]), 1), None);
     watches.stop();
-    assert_eq!(watches.took(0, &at(&["Apps"])).join, None);
+    assert_eq!(watches.took(0, &at(&["Archive"])).join, None);
     assert_eq!(watches.forget(0), [None, None]);
 }
 

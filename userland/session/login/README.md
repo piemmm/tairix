@@ -6,8 +6,7 @@ behalf. Which session runs is **system policy, never a per-login
 prompt**: the graphical desktop by default (`os.loginType graphical`,
 `lib/sysconfig`) when a graphical session is available, otherwise the
 authenticated account's text shell — never crashed, never errored
-(`AGENTS.md` §10) — and a shell user starts the desktop on demand with
-the `desktop` command. The installed binary lives at
+(`AGENTS.md` §10). The installed binary lives at
 `/System/Services/login.app/Run`.
 
 A round that *can* be graphical puts the login screen up instead of the

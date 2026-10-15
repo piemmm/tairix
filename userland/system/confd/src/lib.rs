@@ -181,13 +181,12 @@ pub struct DirEntry {
 
 /// The filesystem the store lives on, as the dispatcher needs it.
 ///
-/// Deliberately narrow: whole-file reads and writes, a rename, an unlink, a
-/// directory create, a stat, a directory listing, and the descriptor
-/// delegation the bulk scopes hand out. Configuration documents have no
-/// partial write and no seek, because such a document is only ever replaced
-/// whole — which is what makes the publish atomic; a blob is the opposite
-/// shape, which is exactly why it is reached as a descriptor rather than
-/// through this trait. Every method reports [`Errno::NotFound`] for an absent
+/// Deliberately narrow: whole-file reads and replaces, an unlink, a directory
+/// create, a stat, a directory listing, and the descriptor delegation the
+/// bulk scopes hand out. Configuration documents have no partial write and no
+/// seek, because such a document is only ever replaced whole — which is what
+/// makes the publish atomic; a blob is the opposite shape, which is exactly
+/// why it is reached as a descriptor rather than through this trait. Every method reports [`Errno::NotFound`] for an absent
 /// path so the engine can tell "not there" from "cannot be reached" and fail
 /// closed on the second.
 pub trait Storage {
@@ -199,19 +198,13 @@ pub trait Storage {
     /// [`Errno`] for a failed read.
     fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno>;
 
-    /// Replace the file at `path` with `bytes`, creating it if absent.
+    /// Replace the file at `path` with `bytes` whole, creating it if absent,
+    /// so a crash leaves the old contents or the new and never a torn file.
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the create, truncate, or write reports.
-    fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno>;
-
-    /// Rename `src` over `dst` within one directory.
-    ///
-    /// # Errors
-    ///
-    /// Any [`Errno`] the rename reports.
-    fn rename(&mut self, src: &str, dst: &str) -> Result<(), Errno>;
+    /// Any [`Errno`] the replace reports; the old contents stay in place.
+    fn replace(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno>;
 
     /// Create the directory `path` with permission bits `mode`.
     ///

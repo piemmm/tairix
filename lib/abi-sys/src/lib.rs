@@ -171,6 +171,7 @@ const NUM_HW_REMOVE_NODE: u64 = SyscallNumber::HW_REMOVE_NODE.as_u16() as u64;
 const NUM_HW_NODE_HEALTH: u64 = SyscallNumber::HW_NODE_HEALTH.as_u16() as u64;
 const NUM_HW_SELF_NODE: u64 = SyscallNumber::HW_SELF_NODE.as_u16() as u64;
 const NUM_HW_NODE_SETTLE: u64 = SyscallNumber::HW_NODE_SETTLE.as_u16() as u64;
+const NUM_HW_NODE_KEY_SOURCE: u64 = SyscallNumber::HW_NODE_KEY_SOURCE.as_u16() as u64;
 const NUM_CONSOLE_RELOCATE: u64 = SyscallNumber::CONSOLE_RELOCATE.as_u16() as u64;
 const NUM_MSI_ALLOC: u64 = SyscallNumber::MSI_ALLOC.as_u16() as u64;
 const NUM_SHM_CREATE: u64 = SyscallNumber::SHM_CREATE.as_u16() as u64;
@@ -2376,6 +2377,20 @@ pub extern "C" fn sys_hw_node_settle() -> i32 {
     unsafe { ret_i32(raw_syscall(NUM_HW_NODE_SETTLE, [0, 0, 0, 0, 0, 0])) }
 }
 
+/// `hw_node_key_source`: mark the calling driver's own node a key source
+/// (`SyscallNumber::HW_NODE_KEY_SOURCE`) once its device's key presses reach
+/// the seat. Requires `TAIRIX_CAP_INPUT_INJECT`; the kernel marks the caller's
+/// own matched node only, a caller with none fails closed, and the mark ends
+/// with the driver. Returns a `TAIRIX_E_*` code (`0` on success).
+#[must_use]
+#[export_name = "tairix_sys_hw_node_key_source"]
+pub extern "C" fn sys_hw_node_key_source() -> i32 {
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel resolves the
+    // caller's own matched node on the far side of the trap. No memory operand
+    // is passed.
+    unsafe { ret_i32(raw_syscall(NUM_HW_NODE_KEY_SOURCE, [0, 0, 0, 0, 0, 0])) }
+}
+
 /// `console_relocate`: move the kernel's framebuffer console off the
 /// firmware's memory onto memory the kernel owns and the caller's device
 /// reaches, writing that surface into `buf` (a buffer of `len` bytes) as one
@@ -3704,6 +3719,7 @@ mod tests {
         (NUM_HW_NODE_HEALTH, "hw_node_health", 1),
         (NUM_HW_SELF_NODE, "hw_self_node", 2),
         (NUM_HW_NODE_SETTLE, "hw_node_settle", 0),
+        (NUM_HW_NODE_KEY_SOURCE, "hw_node_key_source", 0),
         (NUM_CONSOLE_RELOCATE, "console_relocate", 2),
         (NUM_MSI_ALLOC, "msi_alloc", 2),
         (NUM_SHM_CREATE, "shm_create", 2),
@@ -3891,6 +3907,15 @@ mod tests {
             assert_eq!(sys_hw_node_settle(), 0);
         });
         assert_eq!(number, NUM_HW_NODE_SETTLE);
+        assert_eq!(args, NO_ARGS);
+    }
+
+    #[test]
+    fn hw_node_key_source_passes_no_operand() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_hw_node_key_source(), 0);
+        });
+        assert_eq!(number, NUM_HW_NODE_KEY_SOURCE);
         assert_eq!(args, NO_ARGS);
     }
 
@@ -4170,7 +4195,7 @@ mod tests {
 
     #[test]
     fn spawn_marshals_path_pointer_len_and_absent_blocks() {
-        let mut path = *b"/Apps/Child.app/Run";
+        let mut path = *b"/System/Applications/Child.app/Run";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let (number, args) = capture(7, || {
             assert_eq!(
@@ -4195,7 +4220,7 @@ mod tests {
 
     #[test]
     fn spawn_marshals_the_attach_and_startup_strings_blocks() {
-        let mut path = *b"/Apps/Child.app/Run";
+        let mut path = *b"/System/Applications/Child.app/Run";
         let ptr = path.as_mut_ptr().cast::<c_void>();
         let mut attach = tairix_abi::SpawnAttach::INHERIT.to_le_bytes();
         let attach_ptr = attach.as_mut_ptr().cast::<c_void>();
@@ -5227,7 +5252,7 @@ mod tests {
     fn fs_symlink_marshals_the_target_then_the_link() {
         // Argument order is target-first, matching the syscall spec: a
         // transposition here would create the link at the target's name.
-        let mut target = *b"/Apps/Real.app";
+        let mut target = *b"/System/Applications/Real.app";
         let mut link = *b"/Users/me/Desktop/Real";
         let target_ptr = target.as_mut_ptr().cast::<c_void>();
         let link_ptr = link.as_mut_ptr().cast::<c_void>();

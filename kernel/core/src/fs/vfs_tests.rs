@@ -28,13 +28,30 @@ fn default_vfs() -> Vfs {
 }
 
 #[test]
-fn default_layout_has_exactly_the_four_top_level_dirs() {
+fn default_layout_has_exactly_the_root_view_entries() {
     let vfs = default_vfs();
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut top = vfs.list(&admin, &Path::root()).expect("list root");
     top.sort();
-    assert_eq!(top, ["Apps", "Storage", "System", "Users"]);
+    assert_eq!(top, ["Storage", "System", "Users"]);
+}
+
+#[test]
+fn nothing_can_be_stored_in_the_storage_catalog() {
+    let mut vfs = default_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    assert_eq!(
+        vfs.mkdir(&admin, &p("/Storage/stick"), Mode::from_bits(0o755)),
+        Err(VfsError::ReadOnly)
+    );
+    let catalog = vfs.mounts().resolve(&p("/Storage/stick")).path().clone();
+    assert_eq!(catalog, p("/Storage"));
+    assert_eq!(
+        vfs.mounts().resolve(&p("/Users/alice")).path(),
+        &Path::root()
+    );
 }
 
 #[test]

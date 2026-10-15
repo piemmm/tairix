@@ -1355,8 +1355,8 @@ fn a_reported_owner_is_dropped_once_the_process_is_gone() {
     )]);
     let owner = first.processes[0].proc_id;
     let mut bundles = OwnerBundles::new();
-    bundles.record(owner, "/Apps/Terminal.app");
-    assert_eq!(bundles.of(owner), Some("/Apps/Terminal.app"));
+    bundles.record(owner, "/System/Applications/Terminal.app");
+    assert_eq!(bundles.of(owner), Some("/System/Applications/Terminal.app"));
 
     // A different process list no longer names it, so the roster follows the
     // machine rather than accumulating every application ever launched.
@@ -1381,7 +1381,7 @@ fn the_retained_roster_refuses_to_grow_past_its_stated_bound() {
         ProcId::from_raw(raw)
     };
     for index in 0..OWNER_BUNDLES_MAX {
-        bundles.record(owner_of(index), "/Apps/A.app");
+        bundles.record(owner_of(index), "/System/Applications/A.app");
     }
     assert_eq!(bundles.len(), OWNER_BUNDLES_MAX);
 
@@ -1389,13 +1389,13 @@ fn the_retained_roster_refuses_to_grow_past_its_stated_bound() {
     // than the prune cannot grow this without bound; its row draws the class
     // icon, which is the honest degradation.
     let beyond = owner_of(OWNER_BUNDLES_MAX);
-    bundles.record(beyond, "/Apps/B.app");
+    bundles.record(beyond, "/System/Applications/B.app");
     assert_eq!(bundles.len(), OWNER_BUNDLES_MAX);
     assert_eq!(bundles.of(beyond), None);
 
     // An owner already held is still *replaced*, so a re-launch corrects it.
-    bundles.record(owner_of(0), "/Apps/C.app");
-    assert_eq!(bundles.of(owner_of(0)), Some("/Apps/C.app"));
+    bundles.record(owner_of(0), "/System/Applications/C.app");
+    assert_eq!(bundles.of(owner_of(0)), Some("/System/Applications/C.app"));
     assert_eq!(bundles.len(), OWNER_BUNDLES_MAX);
 }
 

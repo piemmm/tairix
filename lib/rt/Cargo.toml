@@ -70,3 +70,6 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 # `std`-pulling seam never reaches a shipping build.
 [dev-dependencies]
 tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"] }

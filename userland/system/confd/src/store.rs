@@ -69,17 +69,6 @@ pub const VAULT_FILE: &str = "secret.vault";
 /// and key material may be in neither.
 pub const MASTER_FILE: &str = ".vault-master";
 
-/// Suffix of the sibling name a publish writes a new document to before
-/// renaming it over the live one.
-///
-/// A crash between the write and the rename therefore leaves either the old
-/// document or the new one, never a torn one. Deriving the temporary from the
-/// live name rather than declaring one per scope is what makes it always a
-/// sibling in the app's own store directory: two applications can never
-/// contend for it, two scopes can never collide on it, and the rename can
-/// never cross a volume.
-const TEMP_SUFFIX: &str = ".new";
-
 /// Name of the ownership-pin record inside an app's store.
 ///
 /// A leading dot cannot collide with a bundle identifier — the identifier
@@ -761,31 +750,16 @@ impl AppStore {
     }
 }
 
-/// Replace `dir/file` with `bytes`, atomically.
-///
-/// The bytes are written whole to a sibling temporary name and then renamed
-/// over the live name, so a crash mid-write leaves either the old contents or
-/// the new ones. A failed rename leaves the old contents live and the temporary
-/// behind; the next write overwrites the temporary, so a retry converges
-/// without a repair pass.
-///
-/// Deriving the temporary from the live name rather than declaring one per file
-/// is what keeps it always a sibling in the same directory: two applications
-/// can never contend for it, two scopes can never collide on it, and the rename
-/// can never cross a volume.
+/// Replace `dir/file` with `bytes` whole, so a crash leaves the old contents
+/// or the new.
 fn replace_atomically<S: Storage + ?Sized>(
     fs: &mut S,
     dir: &str,
     file: &str,
     bytes: &[u8],
 ) -> Result<(), StoreError> {
-    let mut temp_name = String::from(file);
-    temp_name.push_str(TEMP_SUFFIX);
-    let temp = join(dir, &temp_name);
-    let live = join(dir, file);
-    fs.write(&temp, bytes)
-        .map_err(|_| StoreError::Unavailable)?;
-    fs.rename(&temp, &live).map_err(|_| StoreError::Unavailable)
+    fs.replace(&join(dir, file), bytes)
+        .map_err(|_| StoreError::Unavailable)
 }
 
 /// The document the application `bundle_id` names publishes, inside the store
@@ -887,7 +861,7 @@ fn create_store<S: Storage + ?Sized>(
         Ok(()) | Err(Errno::AlreadyExists) => {}
         Err(_) => return Err(StoreError::Unavailable),
     }
-    fs.write(pin_path, &OwnerPin::new(publisher).encode())
+    fs.replace(pin_path, &OwnerPin::new(publisher).encode())
         .map_err(|_| StoreError::Unavailable)
 }
 

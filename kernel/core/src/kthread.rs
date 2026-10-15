@@ -652,6 +652,11 @@ where
 /// returning when the scheduler next dispatches it (never, for
 /// [`RescheduleAction::Exit`]).
 ///
+/// `cpu` must be the CPU the caller runs on now, read after its last park:
+/// a parked task can be woken on another core, and the core it left then
+/// runs another task, which this would suspend instead. A wait loop parks
+/// through [`crate::waitq::park_calling_task`], which reads it each time.
+///
 /// Two callers drive it: the bin-crate syscall-dispatch callback on a
 /// [`DispatchOutcome::Reschedule`](crate::DispatchOutcome::Reschedule) (a
 /// resumable user task that yielded, parked, or exited must be suspended

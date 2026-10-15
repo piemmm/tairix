@@ -288,6 +288,11 @@ fn main() -> i32 {
     };
     log_descriptor(&bound.descriptor);
     log_ready(&bound);
+    if bound.device.applications().keyboards > 0 {
+        // A boot waiting for a keyboard learns its keys can now arrive; a
+        // refused mark leaves the keys flowing all the same.
+        let _ = tairix_rt::hw_node_key_source();
+    }
     serve(&mut link, &mut bound)
 }
 

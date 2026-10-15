@@ -2632,10 +2632,12 @@ pub struct HwNode {
     /// registry, so the device manager binds a consumer only once its
     /// supplier is serving rather than merely loaded.
     served: u8,
-    /// How the device came and whether its driver has finished bringing it
-    /// up: [`is_removable`](Self::is_removable), declared by the emitter, and
-    /// [`is_settled`](Self::is_settled) and
-    /// [`is_hot_arrival`](Self::is_hot_arrival), which only the kernel sets.
+    /// How the device came and how its driver stands:
+    /// [`is_removable`](Self::is_removable), declared by the emitter, and
+    /// [`is_settled`](Self::is_settled),
+    /// [`is_hot_arrival`](Self::is_hot_arrival),
+    /// [`is_driven`](Self::is_driven) and
+    /// [`is_key_source`](Self::is_key_source), which only the kernel sets.
     presence: u8,
     /// How the driver that last held the node ended
     /// ([`driver_ending`](Self::driver_ending)), which only the kernel sets.
@@ -2660,9 +2662,15 @@ const PRESENCE_SETTLED: u8 = 1 << 1;
 const PRESENCE_HOT_ARRIVAL: u8 = 1 << 2;
 /// A live driver holds the node.
 const PRESENCE_DRIVEN: u8 = 1 << 3;
+/// The driver now driving the node delivers its device's key presses to the
+/// seat.
+const PRESENCE_KEY_SOURCE: u8 = 1 << 4;
 /// Every defined presence bit.
-const PRESENCE_DEFINED: u8 =
-    PRESENCE_REMOVABLE | PRESENCE_SETTLED | PRESENCE_HOT_ARRIVAL | PRESENCE_DRIVEN;
+const PRESENCE_DEFINED: u8 = PRESENCE_REMOVABLE
+    | PRESENCE_SETTLED
+    | PRESENCE_HOT_ARRIVAL
+    | PRESENCE_DRIVEN
+    | PRESENCE_KEY_SOURCE;
 
 /// Every bit of [`HwNode`]'s served set that names a role.
 const SERVED_DEFINED: u8 = {
@@ -2918,6 +2926,19 @@ impl HwNode {
         self.set_presence(PRESENCE_DRIVEN, driven);
     }
 
+    /// Whether the driver now driving this node delivers its device's key
+    /// presses to the seat, so a key pressed now arrives. Only that driver
+    /// says so, and the kernel forgets it as the driver ends.
+    #[must_use]
+    pub const fn is_key_source(&self) -> bool {
+        self.presence & PRESENCE_KEY_SOURCE != 0
+    }
+
+    /// Record whether the driver now driving this node delivers its keys.
+    pub fn set_key_source(&mut self, key_source: bool) {
+        self.set_presence(PRESENCE_KEY_SOURCE, key_source);
+    }
+
     /// Whether this node was published after its emitter had settled: its
     /// device arrived on a running machine rather than being found as the
     /// emitter came up.
@@ -2928,8 +2949,8 @@ impl HwNode {
 
     /// Discard every reading the kernel keeps for a node it is publishing —
     /// the served roles, the domain's health, whether a driver holds or has
-    /// settled it, and how one ended — none of which an emitter may claim,
-    /// and record whether it arrives on a running machine.
+    /// settled it or delivers its keys, and how one ended — none of which an
+    /// emitter may claim, and record whether it arrives on a running machine.
     ///
     /// What the emitter describes, its removability among it, is kept.
     pub fn admit_published(&mut self, hot_arrival: bool) {
@@ -5100,14 +5121,18 @@ mod tests {
     fn presence_round_trips_and_an_undefined_bit_is_dropped() {
         let fresh = sample_node();
         assert!(!fresh.is_removable() && !fresh.is_settled() && !fresh.is_hot_arrival());
+        assert!(!fresh.is_key_source());
         let mut node = fresh;
         node.set_removable(true);
         node.set_settled(true);
+        node.set_key_source(true);
         let decoded = HwNode::from_bytes(&node.to_le_bytes()).expect("decodes");
         assert_eq!(decoded, node);
         assert!(decoded.is_removable() && decoded.is_settled() && !decoded.is_hot_arrival());
+        assert!(decoded.is_key_source() && !decoded.is_driven());
         node.set_settled(false);
         node.set_removable(false);
+        node.set_key_source(false);
         assert_eq!(node, fresh);
         let mut bytes = fresh.to_le_bytes();
         bytes[18] = !PRESENCE_DEFINED;
@@ -5117,12 +5142,14 @@ mod tests {
     #[test]
     fn publishing_keeps_what_the_emitter_describes_and_nothing_the_kernel_keeps() {
         // An emitter claiming a serving supplier, a faulted domain and a
-        // settled driver for a node it has only just published.
+        // settled, key-delivering driver for a node it has only just
+        // published.
         let mut claimed = sample_node();
         claimed.set_removable(true);
         claimed.set_serves(LinkRole::ALL[0], true);
         claimed.set_fault_health(FaultDomainState::Offline);
         claimed.set_settled(true);
+        claimed.set_key_source(true);
         claimed.set_driver_ending(DriverEnding::Crashed);
         for hot in [false, true] {
             let mut node = claimed;
@@ -5131,6 +5158,7 @@ mod tests {
             assert!(LinkRole::ALL.iter().all(|&role| !node.serves(role)));
             assert_eq!(node.fault_health(), FaultDomainState::Healthy);
             assert!(!node.is_settled());
+            assert!(!node.is_key_source());
             assert_eq!(node.driver_ending(), DriverEnding::None);
             assert_eq!(node.is_hot_arrival(), hot);
             assert_eq!(node.match_keys(), claimed.match_keys());

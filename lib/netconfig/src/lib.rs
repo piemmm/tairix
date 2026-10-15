@@ -60,9 +60,6 @@ use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tairix_abi::driver_store::SystemConfigFile;
 use tairix_util::conf::{setting_line, Located, ValueShape};
 
-/// The directory that holds the network-configuration store.
-pub const CONFIG_DIR: &str = "/System/Settings/Network";
-
 /// The configuration store document, named by the closed
 /// `/System/Settings/` file set so this engine and the pre-unlock reader that
 /// serves it cannot name different files.
@@ -2088,7 +2085,6 @@ bond0.bond.primary eth0
 
     #[test]
     fn path_constants_are_inside_the_settings_subtree() {
-        assert!(CONFIG_PATH.starts_with(CONFIG_DIR));
         assert!(CONFIG_PATH.starts_with("/System/Settings/"));
     }
 

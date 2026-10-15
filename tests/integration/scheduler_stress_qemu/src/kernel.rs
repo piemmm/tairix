@@ -1,8 +1,7 @@
 //! x86_64 / `target_os = "none"` body of the QEMU scheduler-stress test.
 
-use core::alloc::{GlobalAlloc, Layout};
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
 extern crate alloc;
 use alloc::sync::Arc;
@@ -16,6 +15,7 @@ use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::smp;
 use tairix_arch_x86_64::{percpu, preempt};
 use tairix_arch_x86_64::{qemu_exit, serial};
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerArch, SchedulerConfig, TaskAction};
 
 // --- Workload sizing -----------------------------------------------
@@ -221,66 +221,16 @@ extern "C" fn scheduler_tick(cpu: u32) {
 /// `RunDeque` slots, and the closures we spawn.
 const HEAP_BYTES: usize = 64 * 1024 * 1024;
 
-#[repr(C, align(4096))]
-struct Heap([u8; HEAP_BYTES]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_BYTES> = Heap::ZERO;
 
-// SAFETY of `static mut`: this is the kernel binary's *only* mutable
-// static, accessed exclusively through `FreeListAllocator::alloc`. The
-// allocator serialises access through `cursor: AtomicUsize`; the heap
-// bytes themselves are never aliased because each allocation hands out
-// a disjoint slice from the bump cursor.
-static mut HEAP: Heap = Heap([0; HEAP_BYTES]);
-
-/// Forward-only bump allocator. puts shared utilities in
-/// `lib/`; this allocator is intentionally local because (a) it never
-/// frees (a documented limitation for the test binary only) and (b)
-/// nothing in `kernel/` or `lib/` should ever take a dependency on a
-/// leak-by-design allocator.
-struct BumpAllocator {
-    cursor: AtomicUsize,
-}
-
-unsafe impl GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: `HEAP` is exactly `HEAP_BYTES` long; the loop below
-        // performs CAS-driven bump allocation and never advances past
-        // `HEAP_BYTES`, so the returned pointer is in-bounds whenever
-        // the function returns non-null.
-        let base = unsafe { core::ptr::addr_of_mut!(HEAP.0).cast::<u8>() };
-        let align = layout.align();
-        let size = layout.size();
-        let mut cur = self.cursor.load(Ordering::Relaxed);
-        loop {
-            let aligned = (cur + align - 1) & !(align - 1);
-            let Some(next) = aligned.checked_add(size) else {
-                return core::ptr::null_mut();
-            };
-            if next > HEAP_BYTES {
-                return core::ptr::null_mut();
-            }
-            match self
-                .cursor
-                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Relaxed)
-            {
-                Ok(_) => {
-                    // SAFETY: `aligned < HEAP_BYTES` by the bound check
-                    // above, so `base.add(aligned)` is in-bounds.
-                    return unsafe { base.add(aligned) };
-                }
-                Err(observed) => cur = observed,
-            }
-        }
-    }
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Deliberate no-op. The binary runs once per QEMU invocation
-        // and the bump heap is reclaimed by QEMU exit.
-    }
-}
-
+/// Global allocator backed by [`HEAP`].
+///
+/// SAFETY: the page-aligned `HEAP` static outlives the binary and the
+/// allocator is its only consumer.
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator {
-    cursor: AtomicUsize::new(0),
-};
+static ALLOCATOR: FreeListAllocator =
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 // --- SchedulerArch impl -------------------------------------------
 

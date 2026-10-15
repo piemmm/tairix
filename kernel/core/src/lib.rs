@@ -235,11 +235,11 @@ pub use driver_store::{
 };
 pub use filemap::{FileMap, NullFileMap, NULL_FILE_MAP};
 pub use fs::{
-    read_bootstrap_file, Access, AclEntry, AclWho, BootstrapFile, BootstrapReadError, CachedFs,
-    Credentials, FilesystemAlreadyInstalled, FilesystemService, IdentityAlreadyInstalled,
-    LateFilesystem, LateIdentity, Metadata, Mode, MountBacking, MountPoint, MountTable,
-    MountedFilesystemService, NullFilesystemService, Path, Vfs, VfsError, VolumeForest,
-    VolumePublishError, VolumeService, NULL_FILESYSTEM, NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
+    read_bootstrap_file, Access, AclEntry, AclWho, Attachment, BootstrapFile, BoundedReadError,
+    CachedFs, Credentials, FilesystemAlreadyInstalled, FilesystemService, IdentityAlreadyInstalled,
+    LateFilesystem, LateIdentity, Metadata, Mode, MountPoint, MountTable, MountedFilesystemService,
+    NullFilesystemService, Path, Vfs, VfsError, VolumeForest, VolumePublishError, VolumeService,
+    NULL_FILESYSTEM, NULL_VOLUME_FOREST, NULL_VOLUME_SERVICE,
 };
 pub use groups::{
     build_identity_table, load_groups_db, system_identity_table, GroupsDbSource, GroupsLoadError,

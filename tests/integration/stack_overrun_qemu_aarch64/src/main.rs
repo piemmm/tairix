@@ -136,12 +136,10 @@ mod kernel {
     /// the fault handler can name the address it expects.
     static GUARD_SLOT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-    /// Static boot heap, placed in the linker's dedicated `.heap` (NOLOAD)
-    /// section so the boot trampoline does not zero it. `static mut`
-    /// because the bump allocator hands out disjoint slices via an atomic
-    /// cursor; the storage is otherwise never aliased.
+    /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+    /// trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static mut HEAP: Heap = Heap::ZERO;
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -149,7 +147,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// The fault handler: confirm the trap is a data/instruction abort on
     /// the unmapped guard slot, then report PASS. Anything else is a

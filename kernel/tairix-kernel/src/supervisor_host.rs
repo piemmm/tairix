@@ -304,7 +304,7 @@ impl<B: Block + 'static> SupervisorHost for KernelSupervisorHost<'_, B> {
         // Pre-mount the only readable volume is the always-readable `/System`
         // (the signed driver store lives there). Say so, then list its root.
         let mut window = self.store.window();
-        let listed = with_system_volume(&mut window, self.audit, |volume| {
+        let listed = with_system_volume(&mut window, self.audit, None, |volume| {
             out.line("/System (read-only, pre-mount):");
             let root = volume.root();
             let listed = volume.read_dir(root, 0, &[], &mut |entry, name| {

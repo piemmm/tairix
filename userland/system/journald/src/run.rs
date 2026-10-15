@@ -66,23 +66,19 @@ mod program {
     use tairix_abi::{Errno, MACHINE_ID_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_journald::store::{
-        segment_placement_for, LOG_ATTESTATION_KEY_PATH, MACHINE_ID_PATH,
+        next_segment_id, segment_placement_for, stream_directory, LOG_ATTESTATION_KEY_PATH,
+        MACHINE_ID_PATH,
     };
     use tairix_journald::{serve, Clock, Ingest};
     use tairix_log::{
-        machine_id_hash, Journal, LogAttestationKey, RateLimit, RateLimiter, SegmentStore,
-        LOG_ATTESTATION_KEY_FILE_LEN, MAX_RECORD_PAYLOAD, STREAM_COUNT,
+        machine_id_hash, Journal, LogAttestationKey, RateLimit, RateLimiter, SegmentStore, Stream,
+        LOG_ATTESTATION_KEY_FILE_LEN, MAX_RECORD_PAYLOAD, SEGMENT_BUF_BYTES, STREAM_COUNT,
     };
+    use tairix_rt::io::write_stderr_line;
 
     /// Outstanding-call capacity of the ingress endpoint (a fail-closed memory
     /// bound on queued, not-yet-serviced records).
     const CAPACITY: usize = 16;
-
-    /// Working-buffer size per stream. A stream's open segment is built in its
-    /// buffer, so this bounds the segment size (a full buffer rotates the
-    /// segment). 64 KiB keeps rotation infrequent while staying a modest
-    /// per-process heap cost across the six streams.
-    const SEGMENT_BUF_BYTES: usize = 64 * 1024;
 
     /// The journal's own ingest-lane CPU identity for the records it stamps at
     /// the user-space IPC boundary (records arriving over IPC have no
@@ -126,7 +122,8 @@ mod program {
     /// segment as its own file under `/System/Logs/<stream>/`, deriving the
     /// placement from the segment's own header (never a caller claim). It
     /// creates the per-stream directory on first use (an already-existing
-    /// directory is not an error) and syncs the file so a power loss cannot
+    /// directory is not an error), creates the segment's file exclusively so
+    /// no segment is ever overwritten, and syncs it so a power loss cannot
     /// lose an acknowledged segment.
     struct FsSegmentStore;
 
@@ -150,8 +147,7 @@ mod program {
                 }
             }
 
-            // Create the immutable segment file and write the whole image.
-            let file = tairix_rt::create(path.as_bytes()).map_err(Errno::from_syscall)?;
+            let file = tairix_rt::create_new(path.as_bytes()).map_err(Errno::from_syscall)?;
             let written = file.write_at(0, bytes).map_err(Errno::from_syscall)?;
             if written != bytes.len() {
                 return Err(Errno::NoSpace);
@@ -185,6 +181,29 @@ mod program {
         }
     }
 
+    /// The id each stream's next segment takes: one past the highest its
+    /// directory already holds, so a restart neither reuses nor overwrites a
+    /// segment an earlier run wrote. A stream with no directory yet starts at
+    /// zero.
+    fn next_segment_ids() -> Result<[u64; STREAM_COUNT], Errno> {
+        let mut next = [0u64; STREAM_COUNT];
+        for stream in Stream::ALL {
+            let id = match tairix_rt::read_dir_all(stream_directory(stream).as_bytes()) {
+                Ok(listing) => next_segment_id(&listing)?,
+                Err(raw) if Errno::from_syscall(raw) == Errno::NotFound => 0,
+                Err(raw) => return Err(Errno::from_syscall(raw)),
+            };
+            next[stream.as_u8() as usize] = id;
+        }
+        Ok(next)
+    }
+
+    /// State why the service cannot start, and end it.
+    fn refuse(reason: &str, status: i32) -> i32 {
+        write_stderr_line(reason);
+        status
+    }
+
     /// Bind the ingress endpoint and serve log records for the life of the
     /// service.
     fn main() -> i32 {
@@ -194,7 +213,7 @@ mod program {
         // its logs to a fabricated genesis.
         let mut machine_id = [0u8; MACHINE_ID_LEN];
         if read_exact_file(MACHINE_ID_PATH, &mut machine_id).is_err() {
-            return 2;
+            return refuse("journald: no machine id; the system is unprovisioned", 2);
         }
         let machine_hash = machine_id_hash(&machine_id);
 
@@ -202,14 +221,21 @@ mod program {
         // boot, so a failure here means the random subsystem never seeded and
         // the service fails closed (PID 1 relaunches).
         let Ok(boot_id) = tairix_rt::boot_id() else {
-            return 3;
+            return refuse("journald: no boot id", 3);
         };
 
         // The journal's own attested origin, for the trusted records it authors
         // itself (the `security` spoof-notes). Read from the kernel, never
         // self-claimed.
         let Ok(own_origin) = tairix_rt::self_origin() else {
-            return 4;
+            return refuse("journald: no attested origin", 4);
+        };
+
+        let Ok(next_ids) = next_segment_ids() else {
+            return refuse(
+                "journald: cannot list the stored segments to number the next",
+                5,
+            );
         };
 
         // The log-attestation key seals `audit`/`security` segments. It is
@@ -255,7 +281,8 @@ mod program {
             own_origin,
             bufs,
         )
-        .with_rate_limit(limiter);
+        .with_rate_limit(limiter)
+        .continuing_segments(next_ids);
         let mut ingest = Ingest::new(INGEST_CPU);
 
         // Publish the endpoint. Unrestricted-sender (empty `send_caps`): any
@@ -273,7 +300,7 @@ mod program {
         if bound != 0 {
             // Could not publish (already bound, or no registry): fail closed;
             // PID 1 supervises and relaunches.
-            return 1;
+            return refuse("journald: cannot bind the log ingress endpoint", 1);
         }
 
         let mut request = vec![0u8; LOG_INGRESS_MAX_REQUEST];

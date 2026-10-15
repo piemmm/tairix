@@ -88,12 +88,8 @@ mod kernel {
     // because QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-    /// Static boot heap, mirroring the production aarch64 kernel binary's
-    /// `.bss`-resident heap (zeroed by the boot trampoline).
-    ///
-    /// `static mut` because the free-list allocator hands out disjoint slices
-    /// via an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -101,7 +97,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Forward to the shared aarch64 panic bridge. A panic parks the CPU; the
     /// guest never self-exits, so the run times out and the harness reports

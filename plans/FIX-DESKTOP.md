@@ -1367,7 +1367,7 @@ Each stage is independently reviewable and must leave the whole-project
   font data into a single sandboxed OS service so no app carries it;
   complementary to this plan's async launch and demand-paged/CoW image build.
 - `plans/APPS.md`, `§16.5` — app bundles are loaded from disk through
-  `appmgr`/the load gate; the deferral does not change *what* is loaded
+  the load gate; the deferral does not change *what* is loaded
   or verified, only *which task* runs the load.
 - `plans/APPWIN.md`, `plans/DISPLAY.md` — the desktop window/present
   path whose loop must never freeze.

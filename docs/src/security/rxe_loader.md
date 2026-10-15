@@ -35,9 +35,8 @@ embedded-NUL reference. `LoadImage::needed_libraries()` exposes the
 validated list.
 
 `parse` only *validates and carries* the references; it does not resolve
-them. Binding each reference to a concrete file is the user-space
-dynamic-loader policy enforced by `userland/system/appmgr` (the
-application-bundle loader): a reference must lie inside the requesting
+them. Binding each reference to a concrete file is the dynamic-loader policy
+the bundle load gate (`lib/appload`) enforces: a reference must lie inside the requesting
 bundle's own `Libraries/` directory or the curated `/System/Libraries/`,
 with no `..` component, or the load fails closed. This is where the
 curated *System runtime / C ABI* library (`lib/abi-sys` + `lib/crt0`)

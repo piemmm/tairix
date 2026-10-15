@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 
 use crate::fs::delegate::SYMLINK_HOP_MAX;
 use crate::fs::{
-    FinalLink, Mode, MountBacking, Path, Vfs, VfsError, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS,
+    Attachment, FinalLink, Metadata, Mode, Path, Vfs, VfsError, MAX_COMPONENT_LEN,
+    MAX_PATH_COMPONENTS,
 };
 
 use tairix_abi::driver::filesystem::{
@@ -43,11 +44,22 @@ fn p(text: &str) -> Path {
     Path::parse(text).expect("valid path")
 }
 
-/// A mount backing by driver `raw`. Delegation is indifferent to the
-/// device medium, so these fixtures record it as unknown rather than
-/// naming one no mock device reported.
-fn backing_of(raw: u64) -> MountBacking {
-    MountBacking::new(DriverHandle::from_raw(raw).expect("non-zero handle"), None)
+/// The volume driver `raw` serves, attached with `flags`. Delegation is
+/// indifferent to the device medium, so these fixtures record it as unknown
+/// rather than naming one no mock device reported.
+fn volume(raw: u64, flags: MountFlags) -> Attachment {
+    Attachment::new(
+        DriverHandle::from_raw(raw).expect("non-zero handle"),
+        None,
+        flags,
+    )
+}
+
+/// Attach the volume driver `raw` serves to `vfs` with `flags`.
+fn attached(vfs: &Vfs, raw: u64, flags: MountFlags) -> DriverHandle {
+    let attachment = volume(raw, flags);
+    vfs.mounts_write().attach(attachment).expect("attach");
+    attachment.driver()
 }
 
 fn cred(uid: u32, gid: u32, caps: &CapabilitySet) -> Credentials<'_> {
@@ -259,17 +271,24 @@ impl FilesystemRead for BadFs {
     }
 }
 
-/// A default-layout VFS with `/Storage/usb0` created and mounted as a
-/// driver-backed mount (owner `admin`, mode `mount_mode`).
+/// A default-layout VFS with a volume attached at `/Storage/usb0` as a
+/// runtime mount (owner `admin`, mode `mount_mode`).
 fn backed_vfs(mount_mode: u16) -> Vfs {
-    let mut vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
-    let caps = CapabilitySet::empty();
-    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
-    vfs.mkdir(&admin, &p("/Storage/usb0"), Mode::from_bits(mount_mode))
-        .expect("create mount point");
-    let backing = backing_of(7);
+    attached_vfs(mount_mode, MountFlags::READ_ONLY, 7)
+}
+
+/// A default-layout VFS with the volume `raw` attached at `/Storage/usb0`
+/// under `flags`, its mount point owned by `admin` with mode `mount_mode`, as
+/// a runtime attach carries its template.
+fn attached_vfs(mount_mode: u16, flags: MountFlags, raw: u64) -> Vfs {
+    let vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
+    let template = Metadata::new(
+        UserId(ADMIN_UID),
+        GroupId(ADMIN_GID),
+        Mode::from_bits(mount_mode),
+    );
     vfs.mounts_write()
-        .mount(p("/Storage/usb0"), MountFlags::READ_ONLY, Some(backing))
+        .attach_at(volume(raw, flags), p("/Storage/usb0"), template)
         .expect("mount backed");
     vfs
 }
@@ -284,7 +303,7 @@ fn delegated_read_resolves_through_subdir() {
     let n = vfs
         .read_via(
             &admin,
-            &p("/Storage/usb0/docs/readme.txt"),
+            &vfs.cover(&p("/Storage/usb0/docs/readme.txt")),
             &mut fs,
             0,
             &mut buf,
@@ -302,12 +321,18 @@ fn delegated_read_honours_offset_and_eof() {
     let mut buf = [0u8; 32];
     let path = p("/Storage/usb0/docs/readme.txt");
     let n = vfs
-        .read_via(&admin, &path, &mut fs, 6, &mut buf)
+        .read_via(&admin, &vfs.cover(&path), &mut fs, 6, &mut buf)
         .expect("read");
     assert_eq!(&buf[..n], b"world");
     // Reading at EOF yields zero bytes.
     assert_eq!(
-        vfs.read_via(&admin, &path, &mut fs, README_BODY.len() as u64, &mut buf),
+        vfs.read_via(
+            &admin,
+            &vfs.cover(&path),
+            &mut fs,
+            README_BODY.len() as u64,
+            &mut buf
+        ),
         Ok(0)
     );
 }
@@ -324,7 +349,7 @@ fn delegated_realpath_spells_a_view_path_under_the_mount_point() {
     assert_eq!(
         vfs.realpath_via(
             &admin,
-            &p("/Storage/usb0/docs/readme.txt"),
+            &vfs.cover(&p("/Storage/usb0/docs/readme.txt")),
             &mut fs,
             RealpathMode::Existing
         ),
@@ -333,28 +358,33 @@ fn delegated_realpath_spells_a_view_path_under_the_mount_point() {
     // The mount point is its own canonical name: the walk lands on the
     // projected root, which contributes no component of its own.
     assert_eq!(
-        vfs.realpath_via(&admin, &p("/Storage/usb0"), &mut fs, RealpathMode::Existing),
+        vfs.realpath_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0")),
+            &mut fs,
+            RealpathMode::Existing
+        ),
         Ok(String::from("/Storage/usb0"))
     );
     // A vacant final name is refused under the strict reading and carried
     // into the answer under the tolerant one.
     let vacant = p("/Storage/usb0/docs/absent");
     assert_eq!(
-        vfs.realpath_via(&admin, &vacant, &mut fs, RealpathMode::Existing),
+        vfs.realpath_via(&admin, &vfs.cover(&vacant), &mut fs, RealpathMode::Existing),
         Err(VfsError::NotFound)
     );
     assert_eq!(
-        vfs.realpath_via(&admin, &vacant, &mut fs, RealpathMode::Final),
+        vfs.realpath_via(&admin, &vfs.cover(&vacant), &mut fs, RealpathMode::Final),
         Ok(String::from("/Storage/usb0/docs/absent"))
     );
     // Only `Missing` names a path whose *ancestor* is absent too.
     let deep = p("/Storage/usb0/gone/away/leaf");
     assert_eq!(
-        vfs.realpath_via(&admin, &deep, &mut fs, RealpathMode::Final),
+        vfs.realpath_via(&admin, &vfs.cover(&deep), &mut fs, RealpathMode::Final),
         Err(VfsError::NotFound)
     );
     assert_eq!(
-        vfs.realpath_via(&admin, &deep, &mut fs, RealpathMode::Missing),
+        vfs.realpath_via(&admin, &vfs.cover(&deep), &mut fs, RealpathMode::Missing),
         Ok(String::from("/Storage/usb0/gone/away/leaf"))
     );
     // A directory the caller may not search hides what is under it from
@@ -363,7 +393,7 @@ fn delegated_realpath_spells_a_view_path_under_the_mount_point() {
     // against, so a mount with no search bit refuses at the first step.
     let closed = backed_vfs(0o600);
     assert_eq!(
-        closed.realpath_via(&admin, &deep, &mut fs, RealpathMode::Missing),
+        closed.realpath_via(&admin, &closed.cover(&deep), &mut fs, RealpathMode::Missing),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -377,7 +407,7 @@ fn delegated_list_of_mount_point_lists_driver_root() {
     let names = vfs
         .list_all_via(
             &admin,
-            &p("/Storage/usb0"),
+            &vfs.cover(&p("/Storage/usb0")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX,
@@ -405,7 +435,7 @@ fn delegated_list_of_subdir() {
     let names = vfs
         .list_all_via(
             &admin,
-            &p("/Storage/usb0/docs"),
+            &vfs.cover(&p("/Storage/usb0/docs")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX,
@@ -444,7 +474,7 @@ fn delegated_stat_reports_kind_size_and_template() {
     let file = vfs
         .stat_via(
             &admin,
-            &p("/Storage/usb0/kernel.img"),
+            &vfs.cover(&p("/Storage/usb0/kernel.img")),
             &mut fs,
             FinalLink::Follow,
         )
@@ -456,7 +486,12 @@ fn delegated_stat_reports_kind_size_and_template() {
     assert_eq!(file.meta.mode, Mode::from_bits(0o755));
 
     let dir = vfs
-        .stat_via(&admin, &p("/Storage/usb0/docs"), &mut fs, FinalLink::Follow)
+        .stat_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/docs")),
+            &mut fs,
+            FinalLink::Follow,
+        )
         .expect("stat dir");
     assert_eq!(dir.kind, NodeKind::Directory);
     assert_eq!(dir.size, 0);
@@ -470,7 +505,13 @@ fn delegated_read_of_directory_is_is_a_directory() {
     let mut fs = MockFs;
     let mut buf = [0u8; 8];
     assert_eq!(
-        vfs.read_via(&admin, &p("/Storage/usb0/docs"), &mut fs, 0, &mut buf),
+        vfs.read_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/docs")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::IsADirectory)
     );
 }
@@ -484,7 +525,7 @@ fn delegated_list_of_file_is_not_a_directory() {
     assert_eq!(
         vfs.list_all_via(
             &admin,
-            &p("/Storage/usb0/kernel.img"),
+            &vfs.cover(&p("/Storage/usb0/kernel.img")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX
@@ -501,7 +542,13 @@ fn delegated_missing_child_is_not_found() {
     let mut fs = MockFs;
     let mut buf = [0u8; 8];
     assert_eq!(
-        vfs.read_via(&admin, &p("/Storage/usb0/docs/nope"), &mut fs, 0, &mut buf),
+        vfs.read_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/docs/nope")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::NotFound)
     );
 }
@@ -515,7 +562,13 @@ fn delegation_on_non_backed_mount_is_not_found() {
     let mut fs = MockFs;
     let mut buf = [0u8; 8];
     assert_eq!(
-        vfs.read_via(&admin, &p("/Users/admin/x"), &mut fs, 0, &mut buf),
+        vfs.read_via(
+            &admin,
+            &vfs.cover(&p("/Users/admin/x")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::NotFound)
     );
 }
@@ -532,7 +585,7 @@ fn delegated_traversal_enforces_search_permission_on_template() {
     assert_eq!(
         vfs.read_via(
             &other,
-            &p("/Storage/usb0/docs/readme.txt"),
+            &vfs.cover(&p("/Storage/usb0/docs/readme.txt")),
             &mut fs,
             0,
             &mut buf
@@ -549,7 +602,13 @@ fn device_fault_surfaces_as_io() {
     let mut fs = BadFs;
     let mut buf = [0u8; 8];
     assert_eq!(
-        vfs.read_via(&admin, &p("/Storage/usb0/x"), &mut fs, 0, &mut buf),
+        vfs.read_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/x")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::Io)
     );
 }
@@ -563,7 +622,7 @@ fn non_utf8_directory_name_surfaces_as_io() {
     assert_eq!(
         vfs.list_all_via(
             &admin,
-            &p("/Storage/usb0"),
+            &vfs.cover(&p("/Storage/usb0")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX
@@ -586,17 +645,7 @@ use tairix_abi::CapabilityId;
 /// A default-layout VFS with `/Storage/usb0` mounted writable (no
 /// `READ_ONLY` flag), owner `admin`, mode `mount_mode`.
 fn backed_vfs_rw(mount_mode: u16) -> Vfs {
-    let mut vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
-    let caps = CapabilitySet::empty();
-    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
-    vfs.mkdir(&admin, &p("/Storage/usb0"), Mode::from_bits(mount_mode))
-        .expect("create mount point");
-    let backing = backing_of(8);
-    let flags = MountFlags::from_bits(0).expect("empty flags");
-    vfs.mounts_write()
-        .mount(p("/Storage/usb0"), flags, Some(backing))
-        .expect("mount backed");
-    vfs
+    attached_vfs(mount_mode, MountFlags::default(), 8)
 }
 
 #[test]
@@ -607,12 +656,16 @@ fn delegated_create_then_write_and_read_back() {
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/notes.txt");
 
-    vfs.create_via(&admin, &path, &mut fs).expect("create");
-    assert_eq!(vfs.write_via(&admin, &path, &mut fs, 0, b"hi there"), Ok(8));
+    vfs.create_via(&admin, &vfs.cover(&path), &mut fs)
+        .expect("create");
+    assert_eq!(
+        vfs.write_via(&admin, &vfs.cover(&path), &mut fs, 0, b"hi there"),
+        Ok(8)
+    );
 
     let mut buf = [0u8; 16];
     let n = vfs
-        .read_via(&admin, &path, &mut fs, 0, &mut buf)
+        .read_via(&admin, &vfs.cover(&path), &mut fs, 0, &mut buf)
         .expect("read");
     assert_eq!(&buf[..n], b"hi there");
 }
@@ -624,18 +677,18 @@ fn delegated_mkdir_then_create_inside() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
 
-    vfs.mkdir_via(&admin, &p("/Storage/usb0/sub"), &mut fs)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/Storage/usb0/sub")), &mut fs)
         .expect("mkdir");
     let inner = p("/Storage/usb0/sub/inner.bin");
-    vfs.create_via(&admin, &inner, &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&inner), &mut fs)
         .expect("create inside");
-    vfs.write_via(&admin, &inner, &mut fs, 0, b"nested")
+    vfs.write_via(&admin, &vfs.cover(&inner), &mut fs, 0, b"nested")
         .expect("write inside");
 
     let names = vfs
         .list_all_via(
             &admin,
-            &p("/Storage/usb0/sub"),
+            &vfs.cover(&p("/Storage/usb0/sub")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX,
@@ -655,13 +708,14 @@ fn delegated_truncate_changes_size() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/t.bin");
-    vfs.create_via(&admin, &path, &mut fs).expect("create");
-    vfs.write_via(&admin, &path, &mut fs, 0, b"0123456789")
+    vfs.create_via(&admin, &vfs.cover(&path), &mut fs)
+        .expect("create");
+    vfs.write_via(&admin, &vfs.cover(&path), &mut fs, 0, b"0123456789")
         .expect("write");
-    vfs.truncate_via(&admin, &path, &mut fs, 4)
+    vfs.truncate_via(&admin, &vfs.cover(&path), &mut fs, 4)
         .expect("truncate");
     assert_eq!(
-        vfs.stat_via(&admin, &path, &mut fs, FinalLink::Follow)
+        vfs.stat_via(&admin, &vfs.cover(&path), &mut fs, FinalLink::Follow)
             .expect("stat")
             .size,
         4
@@ -675,12 +729,13 @@ fn delegated_remove_unlinks() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/gone.txt");
-    vfs.create_via(&admin, &path, &mut fs).expect("create");
-    vfs.remove_via(&admin, &path, &mut fs, false)
+    vfs.create_via(&admin, &vfs.cover(&path), &mut fs)
+        .expect("create");
+    vfs.remove_via(&admin, &vfs.cover(&path), &mut fs, false)
         .expect("remove");
     let mut buf = [0u8; 4];
     assert_eq!(
-        vfs.read_via(&admin, &path, &mut fs, 0, &mut buf),
+        vfs.read_via(&admin, &vfs.cover(&path), &mut fs, 0, &mut buf),
         Err(VfsError::NotFound)
     );
 }
@@ -692,9 +747,10 @@ fn delegated_create_existing_is_already_exists() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/dup.txt");
-    vfs.create_via(&admin, &path, &mut fs).expect("create");
+    vfs.create_via(&admin, &vfs.cover(&path), &mut fs)
+        .expect("create");
     assert_eq!(
-        vfs.create_via(&admin, &path, &mut fs),
+        vfs.create_via(&admin, &vfs.cover(&path), &mut fs),
         Err(VfsError::AlreadyExists)
     );
 }
@@ -705,10 +761,10 @@ fn delegated_write_to_directory_is_is_a_directory() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
-    vfs.mkdir_via(&admin, &p("/Storage/usb0/d"), &mut fs)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/Storage/usb0/d")), &mut fs)
         .expect("mkdir");
     assert_eq!(
-        vfs.write_via(&admin, &p("/Storage/usb0/d"), &mut fs, 0, b"x"),
+        vfs.write_via(&admin, &vfs.cover(&p("/Storage/usb0/d")), &mut fs, 0, b"x"),
         Err(VfsError::IsADirectory)
     );
 }
@@ -719,12 +775,12 @@ fn delegated_remove_non_empty_directory_is_not_empty() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
-    vfs.mkdir_via(&admin, &p("/Storage/usb0/d"), &mut fs)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/Storage/usb0/d")), &mut fs)
         .expect("mkdir");
-    vfs.create_via(&admin, &p("/Storage/usb0/d/f"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/Storage/usb0/d/f")), &mut fs)
         .expect("create child");
     assert_eq!(
-        vfs.remove_via(&admin, &p("/Storage/usb0/d"), &mut fs, false),
+        vfs.remove_via(&admin, &vfs.cover(&p("/Storage/usb0/d")), &mut fs, false),
         Err(VfsError::NotEmpty)
     );
 }
@@ -739,12 +795,13 @@ fn delegated_dir_only_remove_of_a_file_is_not_a_directory() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/plain.txt");
-    vfs.create_via(&admin, &path, &mut fs).expect("create");
+    vfs.create_via(&admin, &vfs.cover(&path), &mut fs)
+        .expect("create");
     assert_eq!(
-        vfs.remove_via(&admin, &path, &mut fs, true),
+        vfs.remove_via(&admin, &vfs.cover(&path), &mut fs, true),
         Err(VfsError::NotADirectory)
     );
-    vfs.stat_via(&admin, &path, &mut fs, FinalLink::Follow)
+    vfs.stat_via(&admin, &vfs.cover(&path), &mut fs, FinalLink::Follow)
         .expect("file survives");
 }
 
@@ -754,12 +811,17 @@ fn delegated_dir_only_remove_of_an_empty_directory_succeeds() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
-    vfs.mkdir_via(&admin, &p("/Storage/usb0/d"), &mut fs)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/Storage/usb0/d")), &mut fs)
         .expect("mkdir");
-    vfs.remove_via(&admin, &p("/Storage/usb0/d"), &mut fs, true)
+    vfs.remove_via(&admin, &vfs.cover(&p("/Storage/usb0/d")), &mut fs, true)
         .expect("dir-only remove of an empty directory");
     assert_eq!(
-        vfs.stat_via(&admin, &p("/Storage/usb0/d"), &mut fs, FinalLink::Follow),
+        vfs.stat_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/d")),
+            &mut fs,
+            FinalLink::Follow
+        ),
         Err(VfsError::NotFound)
     );
 }
@@ -772,9 +834,44 @@ fn delegated_write_on_read_only_mount_is_read_only() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     assert_eq!(
-        vfs.create_via(&admin, &p("/Storage/usb0/x"), &mut fs),
+        vfs.create_via(&admin, &vfs.cover(&p("/Storage/usb0/x")), &mut fs),
         Err(VfsError::ReadOnly)
     );
+}
+
+#[test]
+fn an_operation_is_judged_against_the_mount_its_path_was_resolved_under() {
+    // The read-only volume covers the path when it is resolved, and a
+    // writable one is attached at the same point before the create runs: the
+    // create carries the first volume's driver, so it keeps that mount's
+    // flags too.
+    let vfs = backed_vfs(0o755);
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let covered = vfs.cover(&p("/Storage/usb0/x"));
+    let template = Metadata::new(
+        UserId(ADMIN_UID),
+        GroupId(ADMIN_GID),
+        Mode::from_bits(0o755),
+    );
+    {
+        let mut mounts = vfs.mounts_write();
+        mounts
+            .detach(covered.mount().backing().expect("backed"))
+            .expect("detach");
+        mounts
+            .attach_at(
+                volume(8, MountFlags::default()),
+                p("/Storage/usb0"),
+                template,
+            )
+            .expect("attach a writable volume at the same point");
+    }
+    assert_eq!(
+        vfs.create_via_secured(&admin, &covered, &mut RwMockFs::new()),
+        Err(VfsError::ReadOnly)
+    );
+    assert!(!vfs.cover(&p("/Storage/usb0/x")).mount().is_read_only());
 }
 
 #[test]
@@ -786,7 +883,7 @@ fn delegated_create_without_write_permission_is_denied() {
     let other = cred(9, 9, &caps);
     let mut fs = RwMockFs::new();
     assert_eq!(
-        vfs.create_via(&other, &p("/Storage/usb0/x"), &mut fs),
+        vfs.create_via(&other, &vfs.cover(&p("/Storage/usb0/x")), &mut fs),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -798,7 +895,7 @@ fn delegated_mutation_of_mount_root_is_invalid() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     assert_eq!(
-        vfs.create_via(&admin, &p("/Storage/usb0"), &mut fs),
+        vfs.create_via(&admin, &vfs.cover(&p("/Storage/usb0")), &mut fs),
         Err(VfsError::InvalidPath)
     );
 }
@@ -808,8 +905,9 @@ fn delegated_mutation_of_mount_root_is_invalid() {
 /// lands a top-level directory on the volume.
 fn root_backed_rw_vfs() -> Vfs {
     let vfs = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
+    let root = attached(&vfs, 9, MountFlags::default());
     vfs.mounts_write()
-        .back_root(backing_of(9))
+        .back_root(root)
         .expect("back the root mount");
     vfs
 }
@@ -827,16 +925,15 @@ fn delegated_create_of_legacy_top_level_name_is_allowed() {
     let mut fs = RwMockFs::new();
 
     for name in ["/etc", "/home", "/usr", "/bin", "/tmp", "/dev", "/proc"] {
-        vfs.mkdir_via(&admin, &p(name), &mut fs)
+        vfs.mkdir_via(&admin, &vfs.cover(&p(name)), &mut fs)
             .unwrap_or_else(|e| panic!("delegated mkdir of {name} is allowed, got {e:?}"));
     }
 
-    vfs.mkdir_via(&admin, &p("/Scratch"), &mut fs)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/Scratch")), &mut fs)
         .expect("create a renameable source");
     vfs.rename_via(
         &admin,
-        &p("/Scratch"),
-        &p("/var"),
+        &vfs.cover_pair(&p("/Scratch"), &p("/var")),
         &mut fs,
         tairix_abi::RenameFlags::empty(),
     )
@@ -853,17 +950,17 @@ fn delegated_rename_across_two_backed_mounts_is_cross_volume() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let flags = MountFlags::from_bits(0).expect("empty flags");
+    let second = attached(&vfs, 11, flags);
     vfs.mounts_write()
-        .mount(p("/Storage/usb0"), flags, Some(backing_of(11)))
+        .mount(p("/Storage/usb0"), flags, Some(second))
         .expect("mount a second backed volume");
     let mut fs = RwMockFs::new();
-    vfs.mkdir_via(&admin, &p("/Scratch"), &mut fs)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/Scratch")), &mut fs)
         .expect("create a renameable source on the root volume");
     assert_eq!(
         vfs.rename_via(
             &admin,
-            &p("/Scratch"),
-            &p("/Storage/usb0/Scratch"),
+            &vfs.cover_pair(&p("/Scratch"), &p("/Storage/usb0/Scratch")),
             &mut fs,
             tairix_abi::RenameFlags::empty()
         ),
@@ -879,18 +976,23 @@ fn delegated_link_gives_one_node_a_second_name() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
-    vfs.create_via(&admin, &p("/file"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/file")), &mut fs)
         .expect("create the node");
-    vfs.write_via(&admin, &p("/file"), &mut fs, 0, b"body")
+    vfs.write_via(&admin, &vfs.cover(&p("/file")), &mut fs, 0, b"body")
         .expect("write it");
 
-    vfs.link_via(&admin, &p("/file"), &p("/alias"), &mut fs, FinalLink::Keep)
-        .expect("add a second name");
+    vfs.link_via(
+        &admin,
+        &vfs.cover_pair(&p("/file"), &p("/alias")),
+        &mut fs,
+        FinalLink::Keep,
+    )
+    .expect("add a second name");
     let first = vfs
-        .stat_via(&admin, &p("/file"), &mut fs, FinalLink::Keep)
+        .stat_via(&admin, &vfs.cover(&p("/file")), &mut fs, FinalLink::Keep)
         .expect("stat the first name");
     let second = vfs
-        .stat_via(&admin, &p("/alias"), &mut fs, FinalLink::Keep)
+        .stat_via(&admin, &vfs.cover(&p("/alias")), &mut fs, FinalLink::Keep)
         .expect("stat the second name");
     assert_eq!(first.node, second.node);
     assert_eq!(second.nlink, 2);
@@ -898,7 +1000,7 @@ fn delegated_link_gives_one_node_a_second_name() {
     // One node, so a write through either name is one file's bytes.
     let mut buf = [0u8; 4];
     let read = vfs
-        .read_via(&admin, &p("/alias"), &mut fs, 0, &mut buf)
+        .read_via(&admin, &vfs.cover(&p("/alias")), &mut fs, 0, &mut buf)
         .expect("read through the second name");
     assert_eq!(&buf[..read], b"body");
 }
@@ -911,14 +1013,19 @@ fn delegated_link_refuses_a_directory_before_touching_the_new_parent() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
-    vfs.mkdir_via(&admin, &p("/dir"), &mut fs)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/dir")), &mut fs)
         .expect("create a directory");
     assert_eq!(
-        vfs.link_via(&admin, &p("/dir"), &p("/alias"), &mut fs, FinalLink::Keep),
+        vfs.link_via(
+            &admin,
+            &vfs.cover_pair(&p("/dir"), &p("/alias")),
+            &mut fs,
+            FinalLink::Keep
+        ),
         Err(VfsError::IsADirectory)
     );
     assert_eq!(
-        vfs.stat_via(&admin, &p("/alias"), &mut fs, FinalLink::Keep)
+        vfs.stat_via(&admin, &vfs.cover(&p("/alias")), &mut fs, FinalLink::Keep)
             .map(|i| i.size),
         Err(VfsError::NotFound)
     );
@@ -933,15 +1040,20 @@ fn delegated_link_takes_its_posture_from_the_caller_for_the_existing_name() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
-    vfs.create_via(&admin, &p("/target"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/target")), &mut fs)
         .expect("create the target");
-    vfs.symlink_via(&admin, &p("/sym"), &mut fs, "/target")
+    vfs.symlink_via(&admin, &vfs.cover(&p("/sym")), &mut fs, "/target")
         .expect("create the symbolic link");
 
-    vfs.link_via(&admin, &p("/sym"), &p("/kept"), &mut fs, FinalLink::Keep)
-        .expect("name the link itself");
+    vfs.link_via(
+        &admin,
+        &vfs.cover_pair(&p("/sym"), &p("/kept")),
+        &mut fs,
+        FinalLink::Keep,
+    )
+    .expect("name the link itself");
     assert_eq!(
-        vfs.stat_via(&admin, &p("/kept"), &mut fs, FinalLink::Keep)
+        vfs.stat_via(&admin, &vfs.cover(&p("/kept")), &mut fs, FinalLink::Keep)
             .expect("stat")
             .kind,
         NodeKind::Symlink
@@ -949,16 +1061,20 @@ fn delegated_link_takes_its_posture_from_the_caller_for_the_existing_name() {
 
     vfs.link_via(
         &admin,
-        &p("/sym"),
-        &p("/followed"),
+        &vfs.cover_pair(&p("/sym"), &p("/followed")),
         &mut fs,
         FinalLink::Follow,
     )
     .expect("name what the link names");
     assert_eq!(
-        vfs.stat_via(&admin, &p("/followed"), &mut fs, FinalLink::Keep)
-            .expect("stat")
-            .kind,
+        vfs.stat_via(
+            &admin,
+            &vfs.cover(&p("/followed")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .expect("stat")
+        .kind,
         NodeKind::RegularFile
     );
 }
@@ -969,19 +1085,23 @@ fn delegated_link_refuses_a_taken_name_and_a_missing_source() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
-    vfs.create_via(&admin, &p("/file"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/file")), &mut fs)
         .expect("create the node");
-    vfs.create_via(&admin, &p("/taken"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/taken")), &mut fs)
         .expect("create the occupant");
     assert_eq!(
-        vfs.link_via(&admin, &p("/file"), &p("/taken"), &mut fs, FinalLink::Keep),
+        vfs.link_via(
+            &admin,
+            &vfs.cover_pair(&p("/file"), &p("/taken")),
+            &mut fs,
+            FinalLink::Keep
+        ),
         Err(VfsError::AlreadyExists)
     );
     assert_eq!(
         vfs.link_via(
             &admin,
-            &p("/absent"),
-            &p("/alias"),
+            &vfs.cover_pair(&p("/absent"), &p("/alias")),
             &mut fs,
             FinalLink::Keep
         ),
@@ -989,7 +1109,7 @@ fn delegated_link_refuses_a_taken_name_and_a_missing_source() {
     );
     // Neither refusal raised the count or left a name behind.
     assert_eq!(
-        vfs.stat_via(&admin, &p("/file"), &mut fs, FinalLink::Keep)
+        vfs.stat_via(&admin, &vfs.cover(&p("/file")), &mut fs, FinalLink::Keep)
             .expect("stat")
             .nlink,
         1
@@ -1006,10 +1126,15 @@ fn delegated_link_reports_a_format_that_holds_one_name_per_node() {
     let mut fs = NoLinksFs::new();
     // The fixture's one creatable child, so the existing name resolves and
     // the refusal is the driver's own rather than a missing source.
-    vfs.create_via(&admin, &p("/file"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/file")), &mut fs)
         .expect("the format creates ordinary files perfectly well");
     assert_eq!(
-        vfs.link_via(&admin, &p("/file"), &p("/alias"), &mut fs, FinalLink::Keep),
+        vfs.link_via(
+            &admin,
+            &vfs.cover_pair(&p("/file"), &p("/alias")),
+            &mut fs,
+            FinalLink::Keep
+        ),
         Err(VfsError::NotSupported)
     );
 }
@@ -1023,17 +1148,22 @@ fn delegated_link_at_the_formats_name_ceiling_fails_closed() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
-    vfs.create_via(&admin, &p("/file"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/file")), &mut fs)
         .expect("create the node");
     let node = fs.lookup(NodeId::from_raw(1), b"file").expect("the node");
     fs.set_link_count(node, u32::MAX);
 
     assert_eq!(
-        vfs.link_via(&admin, &p("/file"), &p("/alias"), &mut fs, FinalLink::Keep),
+        vfs.link_via(
+            &admin,
+            &vfs.cover_pair(&p("/file"), &p("/alias")),
+            &mut fs,
+            FinalLink::Keep
+        ),
         Err(VfsError::TooManyLinks)
     );
     assert_eq!(
-        vfs.stat_via(&admin, &p("/alias"), &mut fs, FinalLink::Keep)
+        vfs.stat_via(&admin, &vfs.cover(&p("/alias")), &mut fs, FinalLink::Keep)
             .map(|i| i.size),
         Err(VfsError::NotFound),
         "nothing was created"
@@ -1050,17 +1180,17 @@ fn delegated_link_across_two_backed_mounts_is_cross_volume() {
     let caps = CapabilitySet::empty();
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let flags = MountFlags::from_bits(0).expect("empty flags");
+    let second = attached(&vfs, 11, flags);
     vfs.mounts_write()
-        .mount(p("/Storage/usb0"), flags, Some(backing_of(11)))
+        .mount(p("/Storage/usb0"), flags, Some(second))
         .expect("mount a second backed volume");
     let mut fs = RwMockFs::new();
-    vfs.create_via(&admin, &p("/file"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/file")), &mut fs)
         .expect("create a linkable node on the root volume");
     assert_eq!(
         vfs.link_via(
             &admin,
-            &p("/file"),
-            &p("/Storage/usb0/alias"),
+            &vfs.cover_pair(&p("/file"), &p("/Storage/usb0/alias")),
             &mut fs,
             FinalLink::Keep,
         ),
@@ -1197,7 +1327,7 @@ fn secured_read_honours_per_inode_owner_and_capability_gate() {
     // Uniform delegation judges against the admin-owned 0o755 template, so
     // admin can read the file.
     let n = vfs
-        .read_via(&admin, &path, &mut fs, 0, &mut buf)
+        .read_via(&admin, &vfs.cover(&path), &mut fs, 0, &mut buf)
         .expect("uniform read allowed");
     assert_eq!(&buf[..n], SECRET_BODY);
 
@@ -1205,7 +1335,7 @@ fn secured_read_honours_per_inode_owner_and_capability_gate() {
     // gated on CAP_AUDIT_READ): admin holds neither the ownership nor the
     // capability, so it is denied.
     assert_eq!(
-        vfs.read_via_secured(&admin, &path, &mut fs, 0, &mut buf),
+        vfs.read_via_secured(&admin, &vfs.cover(&path), &mut fs, 0, &mut buf),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -1219,7 +1349,13 @@ fn secured_read_allows_owner_holding_the_capability() {
     let mut fs = SecMockFs;
     let mut buf = [0u8; 32];
     let n = vfs
-        .read_via_secured(&owner, &p("/Storage/usb0/secret.txt"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&p("/Storage/usb0/secret.txt")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("secured read allowed");
     assert_eq!(&buf[..n], SECRET_BODY);
 }
@@ -1234,7 +1370,7 @@ fn secured_stat_reports_per_inode_metadata() {
     let info = vfs
         .stat_via_secured(
             &owner,
-            &p("/Storage/usb0/secret.txt"),
+            &vfs.cover(&p("/Storage/usb0/secret.txt")),
             &mut fs,
             FinalLink::Follow,
         )
@@ -1256,7 +1392,7 @@ fn secured_list_of_mount_root_lists_driver_root() {
     let names = vfs
         .list_all_via_secured(
             &admin,
-            &p("/Storage/usb0"),
+            &vfs.cover(&p("/Storage/usb0")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX,
@@ -1281,12 +1417,12 @@ fn secured_write_honours_per_inode_parent_permission() {
 
     // Uniform delegation still uses the admin-owned mount template → allowed.
     let path = p("/Storage/usb0/a.txt");
-    vfs.create_via(&admin, &path, &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&path), &mut fs)
         .expect("uniform create");
 
     // Secured delegation consults the (uid-7-owned) parent → admin denied.
     assert_eq!(
-        vfs.create_via_secured(&admin, &p("/Storage/usb0/b.txt"), &mut fs),
+        vfs.create_via_secured(&admin, &vfs.cover(&p("/Storage/usb0/b.txt")), &mut fs),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -1298,15 +1434,15 @@ fn secured_set_mode_by_owner_rewrites_only_the_mode() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/a.txt");
-    vfs.create_via_secured(&admin, &path, &mut fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&path), &mut fs)
         .expect("create");
 
-    vfs.set_mode_via_secured(&admin, &path, &mut fs, 0o640)
+    vfs.set_mode_via_secured(&admin, &vfs.cover(&path), &mut fs, 0o640)
         .expect("owner chmod");
 
     // The mode changed; ownership and the (absent) capability gate did not.
     let info = vfs
-        .stat_via_secured(&admin, &path, &mut fs, FinalLink::Follow)
+        .stat_via_secured(&admin, &vfs.cover(&path), &mut fs, FinalLink::Follow)
         .expect("secured stat");
     assert_eq!(info.meta.mode, Mode::from_bits(0o640));
     assert_eq!(info.meta.owner, UserId(ADMIN_UID));
@@ -1321,20 +1457,20 @@ fn secured_set_mode_by_non_owner_is_denied_even_with_write_access() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/a.txt");
-    vfs.create_via_secured(&admin, &path, &mut fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&path), &mut fs)
         .expect("create");
     // World-writable: write access must still not grant chmod.
-    vfs.set_mode_via_secured(&admin, &path, &mut fs, 0o777)
+    vfs.set_mode_via_secured(&admin, &vfs.cover(&path), &mut fs, 0o777)
         .expect("owner opens the file up");
 
     let other = cred(9, 9, &caps);
     assert_eq!(
-        vfs.set_mode_via_secured(&other, &path, &mut fs, 0o600),
+        vfs.set_mode_via_secured(&other, &vfs.cover(&path), &mut fs, 0o600),
         Err(VfsError::PermissionDenied)
     );
     // The refused change did not land.
     let info = vfs
-        .stat_via_secured(&admin, &path, &mut fs, FinalLink::Follow)
+        .stat_via_secured(&admin, &vfs.cover(&path), &mut fs, FinalLink::Follow)
         .expect("secured stat");
     assert_eq!(info.meta.mode, Mode::from_bits(0o777));
 }
@@ -1346,7 +1482,7 @@ fn secured_set_mode_honours_the_nodes_capability_gate() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/a.txt");
-    vfs.create_via_secured(&admin, &path, &mut fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&path), &mut fs)
         .expect("create");
     // Gate the node on CAP_AUDIT_READ through the driver's own surface.
     let node = fs
@@ -1358,13 +1494,13 @@ fn secured_set_mode_honours_the_nodes_capability_gate() {
 
     // The owner without the capability is refused; with it, allowed.
     assert_eq!(
-        vfs.set_mode_via_secured(&admin, &path, &mut fs, 0o600),
+        vfs.set_mode_via_secured(&admin, &vfs.cover(&path), &mut fs, 0o600),
         Err(VfsError::PermissionDenied)
     );
     let mut holding = CapabilitySet::empty();
     holding.insert(CapabilityId::AUDIT_READ);
     let admin_holding = cred(ADMIN_UID, ADMIN_GID, &holding);
-    vfs.set_mode_via_secured(&admin_holding, &path, &mut fs, 0o600)
+    vfs.set_mode_via_secured(&admin_holding, &vfs.cover(&path), &mut fs, 0o600)
         .expect("gated owner chmod");
     // The gate itself survived the mode change.
     let after = fs.security(node).expect("record exists");
@@ -1380,7 +1516,12 @@ fn secured_set_mode_on_read_only_mount_is_read_only() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     assert_eq!(
-        vfs.set_mode_via_secured(&admin, &p("/Storage/usb0/a.txt"), &mut fs, 0o640),
+        vfs.set_mode_via_secured(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/a.txt")),
+            &mut fs,
+            0o640
+        ),
         Err(VfsError::ReadOnly)
     );
 }
@@ -1392,7 +1533,12 @@ fn secured_set_mode_of_missing_path_is_not_found() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     assert_eq!(
-        vfs.set_mode_via_secured(&admin, &p("/Storage/usb0/absent"), &mut fs, 0o640),
+        vfs.set_mode_via_secured(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/absent")),
+            &mut fs,
+            0o640
+        ),
         Err(VfsError::NotFound)
     );
 }
@@ -1415,7 +1561,7 @@ fn secured_create_stamps_the_creator_as_owner() {
     fs.set_root_security(NodeSecurity::new(0o777, ADMIN_UID, ADMIN_GID));
     let path = p("/Storage/usb0/mine.txt");
 
-    vfs.create_via_secured(&user, &path, &mut fs)
+    vfs.create_via_secured(&user, &vfs.cover(&path), &mut fs)
         .expect("create");
 
     // The stored record names the creator, mode untouched.
@@ -1426,7 +1572,7 @@ fn secured_create_stamps_the_creator_as_owner() {
     // The behavioural proof: the creator reads its own private file.
     let mut buf = [0u8; 4];
     assert_eq!(
-        vfs.read_via_secured(&user, &path, &mut fs, 0, &mut buf),
+        vfs.read_via_secured(&user, &vfs.cover(&path), &mut fs, 0, &mut buf),
         Ok(0)
     );
 }
@@ -1442,12 +1588,16 @@ fn secured_mkdir_stamps_the_creator_as_owner() {
     let mut fs = RwMockFs::new().with_create_owner(ADMIN_UID, ADMIN_GID, 0o700);
     fs.set_root_security(NodeSecurity::new(0o777, ADMIN_UID, ADMIN_GID));
 
-    vfs.mkdir_via_secured(&user, &p("/Storage/usb0/scratch"), &mut fs)
+    vfs.mkdir_via_secured(&user, &vfs.cover(&p("/Storage/usb0/scratch")), &mut fs)
         .expect("mkdir");
     // Creating inside needs search + write on the new directory: only
     // its stamped owner passes a 0o700 mode.
-    vfs.create_via_secured(&user, &p("/Storage/usb0/scratch/unit.bin"), &mut fs)
-        .expect("create inside own private directory");
+    vfs.create_via_secured(
+        &user,
+        &vfs.cover(&p("/Storage/usb0/scratch/unit.bin")),
+        &mut fs,
+    )
+    .expect("create inside own private directory");
 }
 
 /// A driver whose directory cursor never advances, exercising the delegated
@@ -1528,7 +1678,7 @@ fn a_listing_whose_cursor_never_advances_fails_closed() {
     assert_eq!(
         vfs.list_all_via(
             &admin,
-            &p("/Storage/usb0"),
+            &vfs.cover(&p("/Storage/usb0")),
             &mut fs,
             FinalLink::Follow,
             usize::MAX
@@ -1565,7 +1715,7 @@ fn mk_link(fs: &mut RwMockFs, parent: NodeId, name: &str, target: &str) {
 fn read_to_string(vfs: &Vfs, admin: &Credentials<'_>, fs: &mut RwMockFs, path: &str) -> String {
     let mut buf = [0u8; 64];
     let n = vfs
-        .read_via(admin, &p(path), fs, 0, &mut buf)
+        .read_via(admin, &vfs.cover(&p(path)), fs, 0, &mut buf)
         .expect("read through the link");
     String::from_utf8(buf[..n].to_vec()).expect("utf-8 body")
 }
@@ -1617,7 +1767,13 @@ fn a_link_cycle_is_refused_rather_than_walked() {
 
     let mut buf = [0u8; 8];
     assert_eq!(
-        vfs.read_via(&admin, &p("/Storage/usb0/a"), &mut fs, 0, &mut buf),
+        vfs.read_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/a")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::LinkLoop)
     );
 }
@@ -1633,7 +1789,13 @@ fn a_self_referential_link_is_refused() {
 
     let mut buf = [0u8; 8];
     assert_eq!(
-        vfs.read_via(&admin, &p("/Storage/usb0/loop"), &mut fs, 0, &mut buf),
+        vfs.read_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/loop")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::LinkLoop)
     );
 }
@@ -1673,7 +1835,10 @@ fn a_chain_longer_than_the_hop_budget_is_refused_and_a_shorter_one_resolves() {
     assert_eq!(
         vfs.read_via(
             &admin,
-            &p(&alloc::format!("/Storage/usb0/hop{}", SYMLINK_HOP_MAX + 1)),
+            &vfs.cover(&p(&alloc::format!(
+                "/Storage/usb0/hop{}",
+                SYMLINK_HOP_MAX + 1
+            ))),
             &mut over,
             0,
             &mut buf
@@ -1693,7 +1858,13 @@ fn a_dangling_link_reports_not_found_not_a_loop() {
 
     let mut buf = [0u8; 8];
     assert_eq!(
-        vfs.read_via(&admin, &p("/Storage/usb0/nowhere"), &mut fs, 0, &mut buf),
+        vfs.read_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/nowhere")),
+            &mut fs,
+            0,
+            &mut buf
+        ),
         Err(VfsError::NotFound)
     );
 }
@@ -1764,14 +1935,26 @@ fn search_permission_is_required_on_a_directory_a_link_leads_through() {
     // The owner still reads it through the link...
     let mut buf = [0u8; 16];
     let n = vfs
-        .read_via_secured(&admin, &p("/Storage/usb0/peek"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/peek")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("owner reads through the link");
     assert_eq!(&buf[..n], b"classified");
     // ...and a stranger is refused at the traversed directory, not handed
     // the target because a link named it.
     let mut other_buf = [0u8; 16];
     assert_eq!(
-        vfs.read_via_secured(&other, &p("/Storage/usb0/peek"), &mut fs, 0, &mut other_buf),
+        vfs.read_via_secured(
+            &other,
+            &vfs.cover(&p("/Storage/usb0/peek")),
+            &mut fs,
+            0,
+            &mut other_buf
+        ),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -1917,14 +2100,14 @@ fn keeping_the_final_link_stats_the_link_and_following_stats_its_target() {
     let path = p("/Storage/usb0/alias");
 
     let kept = vfs
-        .stat_via(&admin, &path, &mut fs, FinalLink::Keep)
+        .stat_via(&admin, &vfs.cover(&path), &mut fs, FinalLink::Keep)
         .expect("stat the link itself");
     assert_eq!(kept.kind, NodeKind::Symlink);
     // A link's size is its target's length, which is how `ls -l` renders it.
     assert_eq!(kept.size, "/real.txt".len() as u64);
 
     let followed = vfs
-        .stat_via(&admin, &path, &mut fs, FinalLink::Follow)
+        .stat_via(&admin, &vfs.cover(&path), &mut fs, FinalLink::Follow)
         .expect("stat through the link");
     assert_eq!(followed.kind, NodeKind::RegularFile);
     assert_eq!(followed.size, "payload".len() as u64);
@@ -1945,11 +2128,11 @@ fn a_dangling_link_is_statable_when_the_final_link_is_kept() {
     let path = p("/Storage/usb0/nowhere");
 
     let kept = vfs
-        .stat_via(&admin, &path, &mut fs, FinalLink::Keep)
+        .stat_via(&admin, &vfs.cover(&path), &mut fs, FinalLink::Keep)
         .expect("the link itself exists");
     assert_eq!(kept.kind, NodeKind::Symlink);
     assert_eq!(
-        vfs.stat_via(&admin, &path, &mut fs, FinalLink::Follow),
+        vfs.stat_via(&admin, &vfs.cover(&path), &mut fs, FinalLink::Follow),
         Err(VfsError::NotFound)
     );
 }
@@ -1969,11 +2152,23 @@ fn keeping_the_final_link_refuses_to_list_it_as_a_directory() {
     // A `NO_FOLLOW` descriptor names the link, and a link is not a
     // directory — so its target's entries are never listed in its place.
     assert_eq!(
-        vfs.list_all_via(&admin, &path, &mut fs, FinalLink::Keep, usize::MAX),
+        vfs.list_all_via(
+            &admin,
+            &vfs.cover(&path),
+            &mut fs,
+            FinalLink::Keep,
+            usize::MAX
+        ),
         Err(VfsError::NotADirectory)
     );
     let entries = vfs
-        .list_all_via(&admin, &path, &mut fs, FinalLink::Follow, usize::MAX)
+        .list_all_via(
+            &admin,
+            &vfs.cover(&path),
+            &mut fs,
+            FinalLink::Follow,
+            usize::MAX,
+        )
         .expect("following lists the target");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "leaf");
@@ -1994,11 +2189,11 @@ fn readlink_returns_the_stored_target_verbatim() {
     mk_link(&mut fs, root, "abs", "/real.txt");
 
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/sub/up"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/sub/up")), &mut fs),
         Ok(String::from("../real.txt"))
     );
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/abs"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/abs")), &mut fs),
         Ok(String::from("/real.txt"))
     );
 }
@@ -2016,21 +2211,21 @@ fn readlink_reads_a_dangling_link_and_refuses_a_non_link() {
 
     // The target is readable even though nothing is there to reach.
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/nowhere"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/nowhere")), &mut fs),
         Ok(String::from("/absent"))
     );
     // Neither a file nor a directory has a target; both fail closed rather
     // than handing back their own bytes or name.
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/plain.txt"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/plain.txt")), &mut fs),
         Err(VfsError::InvalidPath)
     );
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/dir"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/dir")), &mut fs),
         Err(VfsError::InvalidPath)
     );
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/absent"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/absent")), &mut fs),
         Err(VfsError::NotFound)
     );
 }
@@ -2050,11 +2245,11 @@ fn readlink_needs_search_permission_on_the_way_to_the_link() {
     let path = p("/Storage/usb0/closed/alias");
 
     assert_eq!(
-        vfs.readlink_via_secured(&admin, &path, &mut fs),
+        vfs.readlink_via_secured(&admin, &vfs.cover(&path), &mut fs),
         Ok(String::from("/elsewhere"))
     );
     assert_eq!(
-        vfs.readlink_via_secured(&other, &path, &mut fs),
+        vfs.readlink_via_secured(&other, &vfs.cover(&path), &mut fs),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -2069,10 +2264,10 @@ fn a_created_link_resolves_and_reads_back_its_target() {
     mk_file(&mut fs, root, "real.txt", b"payload");
     let link = p("/Storage/usb0/alias");
 
-    vfs.symlink_via(&admin, &link, &mut fs, "/real.txt")
+    vfs.symlink_via(&admin, &vfs.cover(&link), &mut fs, "/real.txt")
         .expect("create the link");
     assert_eq!(
-        vfs.readlink_via(&admin, &link, &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&link), &mut fs),
         Ok(String::from("/real.txt"))
     );
     // The whole round trip through the VFS: created here, then followed.
@@ -2095,10 +2290,10 @@ fn a_created_link_is_owned_by_its_creator() {
     fs.set_root_security(NodeSecurity::new(0o777, ADMIN_UID, ADMIN_GID));
     let link = p("/Storage/usb0/mine");
 
-    vfs.symlink_via_secured(&creator, &link, &mut fs, "/target")
+    vfs.symlink_via_secured(&creator, &vfs.cover(&link), &mut fs, "/target")
         .expect("create the link");
     let info = vfs
-        .stat_via_secured(&creator, &link, &mut fs, FinalLink::Keep)
+        .stat_via_secured(&creator, &vfs.cover(&link), &mut fs, FinalLink::Keep)
         .expect("stat the new link");
     assert_eq!(info.meta.owner, UserId(owner_id));
     assert_eq!(info.meta.group, GroupId(group_id));
@@ -2114,7 +2309,12 @@ fn creating_a_link_refuses_an_existing_name_and_an_unwalkable_target() {
     mk_file(&mut fs, root, "taken", b"x");
 
     assert_eq!(
-        vfs.symlink_via(&admin, &p("/Storage/usb0/taken"), &mut fs, "/elsewhere"),
+        vfs.symlink_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/taken")),
+            &mut fs,
+            "/elsewhere"
+        ),
         Err(VfsError::AlreadyExists)
     );
     // The grammar is checked before anything is written, so a target this
@@ -2122,22 +2322,22 @@ fn creating_a_link_refuses_an_existing_name_and_an_unwalkable_target() {
     // that can only ever fail.
     let fresh = p("/Storage/usb0/fresh");
     assert_eq!(
-        vfs.symlink_via(&admin, &fresh, &mut fs, ""),
+        vfs.symlink_via(&admin, &vfs.cover(&fresh), &mut fs, ""),
         Err(VfsError::InvalidPath)
     );
     let over_long_component = alloc::format!("/{}", "n".repeat(MAX_COMPONENT_LEN + 1));
     assert_eq!(
-        vfs.symlink_via(&admin, &fresh, &mut fs, &over_long_component),
+        vfs.symlink_via(&admin, &vfs.cover(&fresh), &mut fs, &over_long_component),
         Err(VfsError::InvalidPath)
     );
     let too_many_steps = "/a".repeat(MAX_PATH_COMPONENTS + 1);
     assert_eq!(
-        vfs.symlink_via(&admin, &fresh, &mut fs, &too_many_steps),
+        vfs.symlink_via(&admin, &vfs.cover(&fresh), &mut fs, &too_many_steps),
         Err(VfsError::InvalidPath)
     );
     // A refused create leaves no name behind.
     assert_eq!(
-        vfs.stat_via(&admin, &fresh, &mut fs, FinalLink::Keep),
+        vfs.stat_via(&admin, &vfs.cover(&fresh), &mut fs, FinalLink::Keep),
         Err(VfsError::NotFound)
     );
 }
@@ -2152,23 +2352,14 @@ fn creating_a_link_needs_write_permission_on_the_parent_and_a_writable_mount() {
     let vfs = backed_vfs_rw(0o755);
     let mut fs = RwMockFs::new();
     assert_eq!(
-        vfs.symlink_via(&other, &p("/Storage/usb0/alias"), &mut fs, "/t"),
+        vfs.symlink_via(&other, &vfs.cover(&p("/Storage/usb0/alias")), &mut fs, "/t"),
         Err(VfsError::PermissionDenied)
     );
 
     // A read-only mount refuses before the driver is reached at all.
-    let mut ro = Vfs::with_default_layout(UserId(ADMIN_UID), GroupId(ADMIN_GID));
-    ro.mkdir(&admin, &p("/Storage/usb0"), Mode::from_bits(0o755))
-        .expect("create mount point");
-    ro.mounts_write()
-        .mount(
-            p("/Storage/usb0"),
-            MountFlags::READ_ONLY,
-            Some(backing_of(8)),
-        )
-        .expect("mount read-only");
+    let ro = attached_vfs(0o755, MountFlags::READ_ONLY, 8);
     assert_eq!(
-        ro.symlink_via(&admin, &p("/Storage/usb0/alias"), &mut fs, "/t"),
+        ro.symlink_via(&admin, &ro.cover(&p("/Storage/usb0/alias")), &mut fs, "/t"),
         Err(VfsError::ReadOnly)
     );
 }
@@ -2183,17 +2374,27 @@ fn a_format_without_links_refuses_rather_than_approximating_one() {
     // The refusal is the permanent format limit, not "you used a file as a
     // directory": a caller must be able to tell the two apart.
     assert_eq!(
-        vfs.symlink_via(&admin, &p("/Storage/usb0/alias"), &mut fs, "/target"),
+        vfs.symlink_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/alias")),
+            &mut fs,
+            "/target"
+        ),
         Err(VfsError::NotSupported)
     );
     // And nothing was created in its place — no regular file holding a path.
     assert_eq!(
-        vfs.stat_via(&admin, &p("/Storage/usb0/alias"), &mut fs, FinalLink::Keep),
+        vfs.stat_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/alias")),
+            &mut fs,
+            FinalLink::Keep
+        ),
         Err(VfsError::NotFound)
     );
     // A plain create on the same driver still works, so the refusal is
     // about links and not about the mount.
-    vfs.create_via(&admin, &p("/Storage/usb0/plain"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/Storage/usb0/plain")), &mut fs)
         .expect("a regular file is fine");
 }
 
@@ -2225,7 +2426,13 @@ fn writing_through_a_final_link_writes_the_target_not_the_link() {
     mk_link(&mut fs, root, "alias", "/sub/real.txt");
 
     assert_eq!(
-        vfs.write_via(&admin, &p("/Storage/usb0/alias"), &mut fs, 0, b"new"),
+        vfs.write_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/alias")),
+            &mut fs,
+            0,
+            b"new"
+        ),
         Ok(3)
     );
     // The target changed...
@@ -2236,7 +2443,7 @@ fn writing_through_a_final_link_writes_the_target_not_the_link() {
     // ...and the link still names it, rather than having been overwritten
     // with the bytes.
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/alias"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/alias")), &mut fs),
         Ok(String::from("/sub/real.txt"))
     );
 }
@@ -2251,14 +2458,14 @@ fn truncating_through_a_final_link_truncates_the_target() {
     mk_file(&mut fs, root, "real.txt", b"payload");
     mk_link(&mut fs, root, "alias", "real.txt");
 
-    vfs.truncate_via(&admin, &p("/Storage/usb0/alias"), &mut fs, 3)
+    vfs.truncate_via(&admin, &vfs.cover(&p("/Storage/usb0/alias")), &mut fs, 3)
         .expect("truncate through the link");
     assert_eq!(
         read_to_string(&vfs, &admin, &mut fs, "/Storage/usb0/real.txt"),
         "pay"
     );
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/alias"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/alias")), &mut fs),
         Ok(String::from("real.txt"))
     );
 }
@@ -2282,7 +2489,13 @@ fn a_write_through_a_link_needs_write_permission_on_the_targets_parent() {
         .expect("tighten the target's parent");
 
     assert_eq!(
-        vfs.write_via_secured(&other, &p("/Storage/usb0/alias"), &mut fs, 0, b"new"),
+        vfs.write_via_secured(
+            &other,
+            &vfs.cover(&p("/Storage/usb0/alias")),
+            &mut fs,
+            0,
+            b"new"
+        ),
         Err(VfsError::PermissionDenied)
     );
 }
@@ -2297,18 +2510,24 @@ fn a_write_through_a_dangling_link_reports_not_found() {
     mk_link(&mut fs, root, "alias", "/nowhere");
 
     assert_eq!(
-        vfs.write_via(&admin, &p("/Storage/usb0/alias"), &mut fs, 0, b"new"),
+        vfs.write_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/alias")),
+            &mut fs,
+            0,
+            b"new"
+        ),
         Err(VfsError::NotFound)
     );
     assert_eq!(
-        vfs.truncate_via(&admin, &p("/Storage/usb0/alias"), &mut fs, 0),
+        vfs.truncate_via(&admin, &vfs.cover(&p("/Storage/usb0/alias")), &mut fs, 0),
         Err(VfsError::NotFound)
     );
     // Nothing was created in the attempt.
     assert_eq!(
         vfs.stat_via(
             &admin,
-            &p("/Storage/usb0/nowhere"),
+            &vfs.cover(&p("/Storage/usb0/nowhere")),
             &mut fs,
             FinalLink::Keep
         ),
@@ -2328,13 +2547,13 @@ fn creating_through_a_dangling_link_creates_the_target() {
     let root = fs.root();
     mk_link(&mut fs, root, "alias", "/made-later");
 
-    vfs.create_via(&admin, &p("/Storage/usb0/alias"), &mut fs)
+    vfs.create_via(&admin, &vfs.cover(&p("/Storage/usb0/alias")), &mut fs)
         .expect("create through the dangling link");
     // The target now exists as a regular file...
     let target = vfs
         .stat_via(
             &admin,
-            &p("/Storage/usb0/made-later"),
+            &vfs.cover(&p("/Storage/usb0/made-later")),
             &mut fs,
             FinalLink::Keep,
         )
@@ -2342,13 +2561,18 @@ fn creating_through_a_dangling_link_creates_the_target() {
     assert_eq!(target.kind, NodeKind::RegularFile);
     // ...and the link is still a link, now resolving.
     let link = vfs
-        .stat_via(&admin, &p("/Storage/usb0/alias"), &mut fs, FinalLink::Keep)
+        .stat_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/alias")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("the link survived");
     assert_eq!(link.kind, NodeKind::Symlink);
     assert_eq!(
         vfs.stat_via(
             &admin,
-            &p("/Storage/usb0/alias"),
+            &vfs.cover(&p("/Storage/usb0/alias")),
             &mut fs,
             FinalLink::Follow
         )
@@ -2372,15 +2596,20 @@ fn mkdir_over_a_link_is_refused_rather_than_following_it() {
     mk_link(&mut fs, root, "dead", "/absent");
 
     assert_eq!(
-        vfs.mkdir_via(&admin, &p("/Storage/usb0/live"), &mut fs),
+        vfs.mkdir_via(&admin, &vfs.cover(&p("/Storage/usb0/live")), &mut fs),
         Err(VfsError::AlreadyExists)
     );
     assert_eq!(
-        vfs.mkdir_via(&admin, &p("/Storage/usb0/dead"), &mut fs),
+        vfs.mkdir_via(&admin, &vfs.cover(&p("/Storage/usb0/dead")), &mut fs),
         Err(VfsError::AlreadyExists)
     );
     assert_eq!(
-        vfs.stat_via(&admin, &p("/Storage/usb0/absent"), &mut fs, FinalLink::Keep),
+        vfs.stat_via(
+            &admin,
+            &vfs.cover(&p("/Storage/usb0/absent")),
+            &mut fs,
+            FinalLink::Keep
+        ),
         Err(VfsError::NotFound)
     );
 }
@@ -2400,19 +2629,23 @@ fn unlink_and_rename_still_act_on_the_link_itself() {
 
     vfs.rename_via(
         &admin,
-        &p("/Storage/usb0/moved"),
-        &p("/Storage/usb0/renamed"),
+        &vfs.cover_pair(&p("/Storage/usb0/moved"), &p("/Storage/usb0/renamed")),
         &mut fs,
         tairix_abi::RenameFlags::empty(),
     )
     .expect("rename the link");
     assert_eq!(
-        vfs.readlink_via(&admin, &p("/Storage/usb0/renamed"), &mut fs),
+        vfs.readlink_via(&admin, &vfs.cover(&p("/Storage/usb0/renamed")), &mut fs),
         Ok(String::from("/real.txt"))
     );
 
-    vfs.remove_via(&admin, &p("/Storage/usb0/alias"), &mut fs, false)
-        .expect("unlink the link");
+    vfs.remove_via(
+        &admin,
+        &vfs.cover(&p("/Storage/usb0/alias")),
+        &mut fs,
+        false,
+    )
+    .expect("unlink the link");
     // The target is untouched by either.
     assert_eq!(
         read_to_string(&vfs, &admin, &mut fs, "/Storage/usb0/real.txt"),
@@ -2441,19 +2674,19 @@ fn secured_remove_of_a_gated_node_needs_the_capability() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let path = p("/Storage/usb0/gated.txt");
-    vfs.create_via_secured(&admin, &path, &mut fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&path), &mut fs)
         .expect("create");
     gate_child(&mut fs, b"gated.txt");
 
     assert_eq!(
-        vfs.remove_via_secured(&admin, &path, &mut fs, false),
+        vfs.remove_via_secured(&admin, &vfs.cover(&path), &mut fs, false),
         Err(VfsError::PermissionDenied)
     );
 
     let mut holding = CapabilitySet::empty();
     holding.insert(CapabilityId::AUDIT_READ);
     let admin_holding = cred(ADMIN_UID, ADMIN_GID, &holding);
-    vfs.remove_via_secured(&admin_holding, &path, &mut fs, false)
+    vfs.remove_via_secured(&admin_holding, &vfs.cover(&path), &mut fs, false)
         .expect("the capability holder may remove it");
 }
 
@@ -2467,15 +2700,15 @@ fn secured_rename_of_a_gated_node_needs_the_capability() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = RwMockFs::new();
     let src = p("/Storage/usb0/gated");
-    vfs.mkdir_via_secured(&admin, &src, &mut fs).expect("mkdir");
+    vfs.mkdir_via_secured(&admin, &vfs.cover(&src), &mut fs)
+        .expect("mkdir");
     gate_child(&mut fs, b"gated");
 
     let aside = p("/Storage/usb0/stolen");
     assert_eq!(
         vfs.rename_via_secured(
             &admin,
-            &src,
-            &aside,
+            &vfs.cover_pair(&src, &aside),
             &mut fs,
             tairix_abi::RenameFlags::empty()
         ),
@@ -2487,8 +2720,7 @@ fn secured_rename_of_a_gated_node_needs_the_capability() {
     let admin_holding = cred(ADMIN_UID, ADMIN_GID, &holding);
     vfs.rename_via_secured(
         &admin_holding,
-        &src,
-        &aside,
+        &vfs.cover_pair(&src, &aside),
         &mut fs,
         tairix_abi::RenameFlags::empty(),
     )
@@ -2505,17 +2737,16 @@ fn secured_rename_over_a_gated_destination_needs_the_capability() {
     let mut fs = RwMockFs::new();
     let src = p("/Storage/usb0/plain.txt");
     let dst = p("/Storage/usb0/gated.txt");
-    vfs.create_via_secured(&admin, &src, &mut fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&src), &mut fs)
         .expect("create source");
-    vfs.create_via_secured(&admin, &dst, &mut fs)
+    vfs.create_via_secured(&admin, &vfs.cover(&dst), &mut fs)
         .expect("create destination");
     gate_child(&mut fs, b"gated.txt");
 
     assert_eq!(
         vfs.rename_via_secured(
             &admin,
-            &src,
-            &dst,
+            &vfs.cover_pair(&src, &dst),
             &mut fs,
             tairix_abi::RenameFlags::empty()
         ),
@@ -2653,15 +2884,15 @@ fn a_driver_reported_taken_name_is_already_exists_on_every_surface() {
     };
 
     assert_eq!(
-        vfs.create_via(&admin, &p("/appears"), &mut fs),
+        vfs.create_via(&admin, &vfs.cover(&p("/appears")), &mut fs),
         Err(VfsError::AlreadyExists)
     );
     assert_eq!(
-        vfs.mkdir_via(&admin, &p("/appears"), &mut fs),
+        vfs.mkdir_via(&admin, &vfs.cover(&p("/appears")), &mut fs),
         Err(VfsError::AlreadyExists)
     );
     assert_eq!(
-        vfs.symlink_via(&admin, &p("/appears"), &mut fs, "/target"),
+        vfs.symlink_via(&admin, &vfs.cover(&p("/appears")), &mut fs, "/target"),
         Err(VfsError::AlreadyExists)
     );
 }
@@ -2679,21 +2910,20 @@ fn a_driver_reported_structural_refusal_keeps_its_own_class() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
 
     let mut populated = RwMockFs::new();
-    vfs.mkdir_via(&admin, &p("/dir"), &mut populated)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/dir")), &mut populated)
         .expect("mkdir");
-    vfs.mkdir_via(&admin, &p("/dir/inner"), &mut populated)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/dir/inner")), &mut populated)
         .expect("mkdir inner");
-    vfs.mkdir_via(&admin, &p("/spare"), &mut populated)
+    vfs.mkdir_via(&admin, &vfs.cover(&p("/spare")), &mut populated)
         .expect("mkdir spare");
     assert_eq!(
-        vfs.remove_via(&admin, &p("/dir"), &mut populated, true),
+        vfs.remove_via(&admin, &vfs.cover(&p("/dir")), &mut populated, true),
         Err(VfsError::NotEmpty)
     );
     assert_eq!(
         vfs.rename_via(
             &admin,
-            &p("/spare"),
-            &p("/dir"),
+            &vfs.cover_pair(&p("/spare"), &p("/dir")),
             &mut populated,
             tairix_abi::RenameFlags::empty()
         ),
@@ -2705,8 +2935,7 @@ fn a_driver_reported_structural_refusal_keeps_its_own_class() {
     assert_eq!(
         vfs.rename_via(
             &admin,
-            &p("/dir"),
-            &p("/dir/inner/self"),
+            &vfs.cover_pair(&p("/dir"), &p("/dir/inner/self")),
             &mut populated,
             tairix_abi::RenameFlags::empty()
         ),
@@ -2732,9 +2961,9 @@ fn a_full_volume_and_exhausted_memory_are_reported_as_themselves() {
     ] {
         let mut fs = RefusingFs { refusal };
         for outcome in [
-            vfs.create_via(&admin, &p("/x"), &mut fs),
-            vfs.mkdir_via(&admin, &p("/x"), &mut fs),
-            vfs.symlink_via(&admin, &p("/x"), &mut fs, "/target"),
+            vfs.create_via(&admin, &vfs.cover(&p("/x")), &mut fs),
+            vfs.mkdir_via(&admin, &vfs.cover(&p("/x")), &mut fs),
+            vfs.symlink_via(&admin, &vfs.cover(&p("/x")), &mut fs, "/target"),
         ] {
             assert_eq!(outcome, Err(reported));
         }
@@ -2754,9 +2983,9 @@ fn a_driver_reported_transient_is_never_read_as_a_name_conflict() {
     };
 
     for outcome in [
-        vfs.create_via(&admin, &p("/x"), &mut fs),
-        vfs.mkdir_via(&admin, &p("/x"), &mut fs),
-        vfs.symlink_via(&admin, &p("/x"), &mut fs, "/target"),
+        vfs.create_via(&admin, &vfs.cover(&p("/x")), &mut fs),
+        vfs.mkdir_via(&admin, &vfs.cover(&p("/x")), &mut fs),
+        vfs.symlink_via(&admin, &vfs.cover(&p("/x")), &mut fs, "/target"),
     ] {
         assert_eq!(outcome, Err(VfsError::Io));
     }

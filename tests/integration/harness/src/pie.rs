@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 /// The one PIE link script every pure-Rust `Run` program links against,
 /// as a path relative to the workspace root.
 ///
-/// Every `Run` program — PID 1, the system services, and every `/Apps` /
-/// `/System/Drivers` bundle — shares this single layout (it names only
+/// Every `Run` program — PID 1, the system services, and every application
+/// and `/System/Drivers` bundle — shares this single layout (it names only
 /// architecture-neutral section classes), so it lives in exactly one file
 /// rather than being copied beside each program crate. Both PIE build
 /// recipes — the kernel `build.rs` embedded-program build and the

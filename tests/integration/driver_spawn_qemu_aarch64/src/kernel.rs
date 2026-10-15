@@ -29,7 +29,7 @@ use tairix_devmgr::{DeviceManager, DriverCandidate};
 use tairix_drvhost::ImageSource;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
-use tairix_kalloc::FreeListAllocator;
+use tairix_kalloc::{FreeListAllocator, Heap};
 use tairix_kernel::aarch64::arch_wrapper::{Aarch64BinArch, UART_ONLY_CONSOLES};
 use tairix_kernel::aarch64::spawn_producer::{AARCH64_PROCESS_SPAWN, USER_IMAGE_BIAS};
 use tairix_kernel::dispatch_core::{dispatch_via_slot, read_raw_args};
@@ -127,16 +127,11 @@ const FAIL_DEADLOCK: NonZeroU16 = fail_point!(15);
 /// The direct physical map could not be installed over the board's RAM.
 const FAIL_PHYSMAP: NonZeroU16 = fail_point!(16);
 
-/// Size of the test's bump heap (4 MiB): the frame-allocator bitmap + buddy
-/// lists, the leaked scheduler/hook/registries, and the spawn staging
-/// buffers. Lives in `.bss` (zeroed by the boot trampoline).
+/// The test's heap, in bytes.
 const HEAP_SIZE: usize = 4 * 1024 * 1024;
 
-/// Page-aligned backing store for the bump heap.
-#[repr(C, align(4096))]
-struct HeapStore([u8; HEAP_SIZE]);
-
-static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
+/// The global allocator's arena.
+static HEAP: Heap<HEAP_SIZE> = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -144,7 +139,7 @@ static mut HEAP: HeapStore = HeapStore([0; HEAP_SIZE]);
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_SIZE) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_SIZE) };
 
 /// Page-table pool backing the boot identity space the test switches to so
 /// the MMU is on before any atomic read-modify-write runs (the allocator,

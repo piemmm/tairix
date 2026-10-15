@@ -99,6 +99,7 @@ mod program {
     use tairix_curses::{Screen, Size, StreamTty};
     use tairix_login::elevate::ElevateLauncher;
 
+    use tairix_abi::DESKTOP_RUN_PATH;
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_login::{
         audit_launch_ended_abnormally, configured_session_kind, drain_bounded,
@@ -108,7 +109,7 @@ mod program {
         ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad, InputWait,
         InputWake, LiveSessions, Login, LoginConfig, LoginError, LoginStatus, LoginView,
         SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker, StatusSource,
-        DESKTOP_SESSION_PATH, GREETER_SERVICE_PATH,
+        GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -1559,7 +1560,7 @@ mod program {
     ///   unbound endpoint fails the call itself with `NotFound`. The probe
     ///   learns nothing about the seat and gains no authority.
     fn graphical_availability() -> Graphical {
-        if !bundle_present(DESKTOP_SESSION_PATH) {
+        if !bundle_present(DESKTOP_RUN_PATH) {
             return Graphical::NoDesktop;
         }
         if !bundle_present(GREETER_SERVICE_PATH) {

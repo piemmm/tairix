@@ -19,9 +19,10 @@ The on-screen wording is fixed and byte-exact:
    `ARXFS passphrase: ` prompt uses, so the screen is laid out identically
    whether or not the operator enters the console. It appears once a key can
    reach the console: at once over a serial line, and on a framebuffer console
-   once the driver of an input device has loaded. Until then the line reads
-   `[Waiting for a keyboard]`; if none has loaded within 30 seconds the line
-   is cleared and boot goes on. While it waits, the files the root mount
+   once a keyboard's driver says its keys reach the seat — a mouse, or an
+   interface its driver declines, does not count. Until then the line reads
+   `[Waiting for a keyboard]`; if none comes within 30 seconds the line is
+   cleared and boot goes on. While it waits, the files the root mount
    reads are read ahead, without writing anything. A display engine taking
    the screen over from the firmware waits until boot has handed the console
    to login, so its mode set never blanks the screen under this line or the

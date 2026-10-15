@@ -485,8 +485,17 @@ the helper inspects the cargo target and enables custom cfgs:
 
 - `freestanding` — a bare-metal (`os = "none"`) target; compile the
   kernel body.
-- `itest_x86_64` / `itest_riscv64` — the freestanding x86_64 / riscv64
-  ports.
+- `itest_x86_64` / `itest_aarch64` / `itest_riscv64` — the freestanding
+  x86_64 / aarch64 / riscv64 ports.
+- `itest_wasm32` — the browser target, a `cdylib` the host loads rather than
+  a bare-metal kernel, so it enables no `freestanding`.
+
+The `freestanding` rule itself has one definition, `lib/buildcfg`
+(`tairix-buildcfg`), which the harness refines with its per-port names.
+Every program crate outside the harness — a driver's `Run`, a command or
+application bundle, a fixture program — enables the same cfg by calling
+`tairix_buildcfg::emit_freestanding()` from its build script, a crate with
+no dependencies of its own, so a nested fixture build pays nothing for it.
 
 Every binary and the shared `virtio_qemu_support` library gate on those
 names (`#[cfg(itest_x86_64)]`, `#[cfg(not(itest_x86_64))]`, …) rather

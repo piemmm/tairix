@@ -29,7 +29,7 @@ use tairix_sysconfig::{CacheClass, SystemConfig, CONFIG_PATH, MAX_CONFIG_LEN};
 
 use crate::audit::{emit, AuditEvent};
 use crate::cache_control::CacheControl;
-use crate::fs::{read_bootstrap_file, BootstrapFile, BootstrapReadError, VfsError};
+use crate::fs::{read_bootstrap_file, BootstrapFile, BoundedReadError, VfsError};
 
 /// `system.conf` as the boot reads it.
 pub const SYSTEM_CONFIG: BootstrapFile = BootstrapFile {
@@ -72,7 +72,7 @@ where
             }
         },
         // A missing store is the normal default case, not a rejection.
-        Err(BootstrapReadError::Vfs(VfsError::NotFound)) => (SystemConfig::default(), "default"),
+        Err(BoundedReadError::Vfs(VfsError::NotFound)) => (SystemConfig::default(), "default"),
         Err(err) => {
             audit_rejected(audit, read_error_cause(err));
             (SystemConfig::default(), "default")
@@ -88,13 +88,13 @@ where
 
 /// The stable `cause` string for a bootstrap-read refusal other than a
 /// missing file (which is the normal default case, never a rejection).
-const fn read_error_cause(err: BootstrapReadError) -> &'static str {
+const fn read_error_cause(err: BoundedReadError) -> &'static str {
     match err {
-        BootstrapReadError::Vfs(_) => "read_error",
-        BootstrapReadError::NotAFile => "not_a_file",
-        BootstrapReadError::TooLarge => "too_large",
-        BootstrapReadError::ShortRead => "short_read",
-        BootstrapReadError::OutOfMemory => "out_of_memory",
+        BoundedReadError::Vfs(_) => "read_error",
+        BoundedReadError::NotAFile => "not_a_file",
+        BoundedReadError::TooLarge => "too_large",
+        BoundedReadError::ShortRead => "short_read",
+        BoundedReadError::OutOfMemory => "out_of_memory",
     }
 }
 

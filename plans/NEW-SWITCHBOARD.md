@@ -562,19 +562,16 @@ again inside itself.
     the board's "one pane per volume", which the readings do not support).
     `VOLUME_IO_STATS` reports the *device's* counters — every volume on one
     disk reads the same fold, which is why the record names the serving block
-    endpoint beside the volume id — and the boot namespace projects one
-    writable volume at `/` and at each flag-bearing subtree beneath it. So
-    the mount table is grouped by serving endpoint before anything is folded:
-    per mount, a disk's throughput is reported once per projection *and* once
-    per partition, and its cumulative counters are deltaed against
-    themselves — the second fold of one sample reads the first fold's own
-    value as the interval's earlier end, derives nought and plots it, so the
-    volume the machine runs from draws a flat trace and an idle rate. A
-    volume the kernel publishes no serving device for has no shared counters
-    to collapse and stands as its own entry with its capacity alone; a mount
-    with no backing volume (the in-RAM layout directories) is view plumbing
-    and no storage device. The volumes on a device, and the paths each is
-    reachable at with its own mount flags, are the pane's own
+    endpoint beside the volume id. So the attached volumes are grouped by
+    serving endpoint before anything is folded: per volume, a disk's
+    throughput is reported once per partition, and its cumulative counters
+    are deltaed against themselves — the second fold of one sample reads the
+    first fold's own value as the interval's earlier end, derives nought and
+    plots it, so the disk the machine runs from draws a flat trace and an
+    idle rate. A volume the kernel publishes no serving device for has no
+    shared counters to collapse and stands as its own entry with its
+    capacity alone. The volumes on a device, each with the view path showing
+    its root and the flags it was attached with, are the pane's own
     volumes-and-mounts block, so collapsing the rail loses nothing.
   - **An interface** (`05-network.png`) — link and addresses, counters and
     offloads, and the stack block (sockets, resolver, time servers, defence).

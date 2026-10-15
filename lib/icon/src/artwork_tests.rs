@@ -393,6 +393,7 @@ fn manifest(icon: &str) -> Vec<u8> {
         capability_count: 0,
         mime_count: 0,
         browse_count: 0,
+        kind: tairix_abi::ProgramKind::Application.to_wire(),
         reserved: 0,
         id_len,
         name_len,
@@ -424,13 +425,13 @@ fn manifest(icon: &str) -> Vec<u8> {
 fn a_bundle_draws_the_icon_its_own_manifest_names() {
     let mut c = cache();
     let mut reader = CountingReader::new()
-        .with("/Apps/x.app/AppInfo", manifest("x.png"))
-        .with("/Apps/x.app/Resources/x.png", vec![0u8; 10]);
+        .with("/System/Applications/x.app/AppInfo", manifest("x.png"))
+        .with("/System/Applications/x.app/Resources/x.png", vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     let surface = c
         .artwork(
             &mut InlineArtwork::new(&mut reader, &mut ras),
-            IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
+            IconRequest::bundle(IconKind::AppBundle, "/System/Applications/x.app"),
             8,
         )
         .expect("the bundle's own icon")
@@ -521,7 +522,11 @@ fn a_service_name_resolves_through_the_service_store() {
 fn a_users_own_store_resolves_their_own_programs_but_shadows_no_system_one() {
     let home = "/Users/ian";
     let dirs = super::program_bundles("foo", Some(home)).expect("room for the paths");
-    assert_eq!(dirs.len(), 6, "{dirs:?}");
+    assert_eq!(
+        dirs.len(),
+        tairix_appstore::IDENTITY_MACHINE_ROOTS.len() + 2,
+        "{dirs:?}"
+    );
     let own: Vec<&String> = dirs.iter().filter(|d| d.starts_with(home)).collect();
     assert_eq!(own.len(), 2, "the user's two stores: {dirs:?}");
     let first_own = dirs
@@ -530,7 +535,7 @@ fn a_users_own_store_resolves_their_own_programs_but_shadows_no_system_one() {
         .expect("the user's stores are searched");
     let last_system = dirs
         .iter()
-        .rposition(|d| d.starts_with("/System") || d.starts_with("/Apps"))
+        .rposition(|d| d.starts_with("/System"))
         .expect("the system stores are searched");
     assert!(
         last_system < first_own,
@@ -591,7 +596,7 @@ fn a_home_that_is_not_an_absolute_path_contributes_no_store() {
             super::program_bundles("foo", Some(home))
                 .expect("room for the paths")
                 .len(),
-            4,
+            tairix_appstore::IDENTITY_MACHINE_ROOTS.len(),
             "{home:?} was treated as a home"
         );
     }
@@ -611,7 +616,7 @@ fn a_program_name_with_a_path_separator_names_no_bundle() {
         super::program_bundles("ls", None)
             .expect("room for the paths")
             .len(),
-        4
+        tairix_appstore::IDENTITY_MACHINE_ROOTS.len()
     );
 }
 
@@ -620,13 +625,13 @@ fn a_bundle_with_no_icon_of_its_own_falls_back_to_its_kind() {
     let mut c = cache();
     let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new()
-        .with("/Apps/x.app/AppInfo", manifest(""))
+        .with("/System/Applications/x.app/AppInfo", manifest(""))
         .with(&kind_path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
             &mut InlineArtwork::new(&mut reader, &mut ras),
-            IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
+            IconRequest::bundle(IconKind::AppBundle, "/System/Applications/x.app"),
             8,
         )
         .is_some());
@@ -638,13 +643,13 @@ fn a_bundle_whose_icon_will_not_serve_falls_back_and_never_blanks() {
     let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     // The manifest names an icon, but the asset is absent from the bundle.
     let mut reader = CountingReader::new()
-        .with("/Apps/x.app/AppInfo", manifest("gone.png"))
+        .with("/System/Applications/x.app/AppInfo", manifest("gone.png"))
         .with(&kind_path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
             &mut InlineArtwork::new(&mut reader, &mut ras),
-            IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
+            IconRequest::bundle(IconKind::AppBundle, "/System/Applications/x.app"),
             8,
         )
         .is_some());
@@ -654,7 +659,7 @@ fn a_bundle_whose_icon_will_not_serve_falls_back_and_never_blanks() {
     assert!(c
         .artwork(
             &mut InlineArtwork::new(&mut bare, &mut ras),
-            IconRequest::bundle(IconKind::AppBundle, "/Apps/bare.app"),
+            IconRequest::bundle(IconKind::AppBundle, "/System/Applications/bare.app"),
             8,
         )
         .is_some());
@@ -665,7 +670,7 @@ fn a_bundle_icon_escaping_its_own_resources_is_refused() {
     let mut c = cache();
     let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new()
-        .with("/Apps/x.app/AppInfo", manifest("../../../System/secret"))
+        .with("/System/Applications/x.app/AppInfo", manifest("../../../System/secret"))
         // The file the hostile name aims at, reachable if the name were ever
         // joined as a path rather than validated as a leaf.
         .with("/System/secret", vec![0u8; 10])
@@ -674,7 +679,7 @@ fn a_bundle_icon_escaping_its_own_resources_is_refused() {
     let surface = c
         .artwork(
             &mut InlineArtwork::new(&mut reader, &mut ras),
-            IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app"),
+            IconRequest::bundle(IconKind::AppBundle, "/System/Applications/x.app"),
             8,
         )
         .expect("the class artwork still resolves")
@@ -696,10 +701,10 @@ fn a_bundle_with_no_icon_re_reads_neither_its_manifest_nor_the_kind_asset() {
     let mut c = cache();
     let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new()
-        .with("/Apps/x.app/AppInfo", manifest(""))
+        .with("/System/Applications/x.app/AppInfo", manifest(""))
         .with(&kind_path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
-    let request = IconRequest::bundle(IconKind::AppBundle, "/Apps/x.app");
+    let request = IconRequest::bundle(IconKind::AppBundle, "/System/Applications/x.app");
     assert!(c
         .artwork(&mut InlineArtwork::new(&mut reader, &mut ras), request, 8)
         .is_some());
@@ -718,13 +723,16 @@ fn an_asset_request_prefers_the_named_asset_over_the_kind() {
     let mut c = cache();
     let kind_path = icon_artwork_path(IconKind::AppBundle).expect("room for a path");
     let mut reader = CountingReader::new()
-        .with("/Apps/x.app/Resources/x.png", vec![0u8; 10])
+        .with("/System/Applications/x.app/Resources/x.png", vec![0u8; 10])
         .with(&kind_path, vec![0u8; 10]);
     let mut ras = SquareRasteriser;
     assert!(c
         .artwork(
             &mut InlineArtwork::new(&mut reader, &mut ras),
-            IconRequest::asset(IconKind::AppBundle, "/Apps/x.app/Resources/x.png"),
+            IconRequest::asset(
+                IconKind::AppBundle,
+                "/System/Applications/x.app/Resources/x.png"
+            ),
             8,
         )
         .is_some());
@@ -968,7 +976,10 @@ fn a_landed_decode_is_served_and_retained_on_the_next_ask() {
 fn a_pending_tier_stops_the_walk_rather_than_falling_through() {
     let mut c = cache();
     let mut deferring = Deferring::new();
-    let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
+    let request = IconRequest::asset(
+        IconKind::AppBundle,
+        "/System/Applications/One.app/Resources/icon.png",
+    );
     assert!(matches!(
         c.artwork(&mut deferring, request, 8),
         Some(p) if p.is_mask()
@@ -976,7 +987,7 @@ fn a_pending_tier_stops_the_walk_rather_than_falling_through() {
     assert_eq!(
         deferring.asked,
         vec![(
-            ArtworkKey::Asset("/Apps/One.app/Resources/icon.png".to_string()),
+            ArtworkKey::Asset("/System/Applications/One.app/Resources/icon.png".to_string()),
             8
         )],
         "the class tiers were asked for before the thing's own icon resolved"
@@ -989,9 +1000,12 @@ fn a_pending_tier_stops_the_walk_rather_than_falling_through() {
 fn a_landed_refusal_advances_the_walk_one_tier_at_a_time() {
     let mut c = cache();
     let mut deferring = Deferring::new();
-    let own = ArtworkKey::Asset("/Apps/One.app/Resources/icon.png".to_string());
+    let own = ArtworkKey::Asset("/System/Applications/One.app/Resources/icon.png".to_string());
     let raster = ArtworkKey::Raster(IconKind::AppBundle);
-    let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
+    let request = IconRequest::asset(
+        IconKind::AppBundle,
+        "/System/Applications/One.app/Resources/icon.png",
+    );
 
     deferring.land(&own, 8, None);
     assert!(
@@ -1075,8 +1089,11 @@ fn owned_artwork_hands_back_a_picture_the_cache_could_not_retain() {
 fn a_warm_up_asks_for_the_serving_tier_and_retains_nothing() {
     let mut c = cache();
     let mut deferring = Deferring::new();
-    let own = ArtworkKey::Asset("/Apps/One.app/Resources/icon.png".to_string());
-    let request = IconRequest::asset(IconKind::AppBundle, "/Apps/One.app/Resources/icon.png");
+    let own = ArtworkKey::Asset("/System/Applications/One.app/Resources/icon.png".to_string());
+    let request = IconRequest::asset(
+        IconKind::AppBundle,
+        "/System/Applications/One.app/Resources/icon.png",
+    );
 
     c.prefetch(&mut deferring, request, 8);
     assert_eq!(deferring.warmed, vec![(own.clone(), 8)]);
@@ -1531,7 +1548,7 @@ fn a_retained_icon_is_drawn_again_without_allocating() {
         assert!(shadowed.is_some_and(|picture| picture.shadow().is_some()));
     }
 
-    let own = "/Apps/One.app/Resources/icon.png";
+    let own = "/System/Applications/One.app/Resources/icon.png";
     let mut c = cache();
     let mut reader = CountingReader::new().with(own, vec![0u8; 64]).with(
         &icon_artwork_path(IconKind::Folder).expect("room for a path"),

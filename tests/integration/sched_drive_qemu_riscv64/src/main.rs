@@ -111,13 +111,10 @@ mod kernel {
     /// spawned count.
     const FAIL_EXEC_COUNT: NonZeroU16 = fail_point!(7);
 
-    /// Static boot heap, placed in the linker's dedicated `.heap` (NOLOAD)
-    /// section so the boot trampoline does not zero it and it is excluded
-    /// from any usable-memory map. `static mut` because the bump allocator
-    /// hands out disjoint slices via an atomic cursor; the storage is
-    /// otherwise never aliased.
+    /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+    /// trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static mut HEAP: Heap = Heap::ZERO;
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -125,7 +122,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Published `Scheduler<RiscvArch>` raw pointer the trap-path callbacks
     /// consult. The boot hart stores it (from a leaked `Arc`) before any

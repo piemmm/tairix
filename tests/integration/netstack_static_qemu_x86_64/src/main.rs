@@ -92,12 +92,8 @@ mod kernel {
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::{boot, handle_panic_via_kernel_core, FreeListAllocator, SERIAL_SINK};
 
-    /// Static heap for the bump allocator (identical to the production bin's
-    /// declaration; `#[global_allocator]` is per-binary).
-    ///
-    /// `static mut` because the bump allocator hands out disjoint slices via
-    /// an atomic cursor; the storage is otherwise never aliased.
-    static mut HEAP: Heap = Heap::ZERO;
+    /// The global allocator's arena.
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -105,7 +101,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     /// Forward to the shared bridge in `tairix_kernel::x86_64::panic_ctx`.
     /// A panic halts the guest; it never self-exits, so the run times out and

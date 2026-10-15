@@ -758,9 +758,9 @@ The driver implements the versioned `FilesystemStats` extension
 others — never a widening, `AGENTS.md` §2.4 / §9). The report is a pure
 read of the mounted volume's in-memory accounting — the block size, the
 committed `total_blocks`, and the live free count — with
-`avail_blocks` withholding the metadata reserve that keeps a full
-volume repairable (data allocation stops at the reserve, so consumers
-are never promised space the allocator would refuse). Inodes are
+`avail_blocks` withholding the reserve ordinary allocation never takes
+(`arxfs-spec.md` §6), so consumers are never promised space the allocator
+would refuse, and `in_reserve` saying the volume is down to it. Inodes are
 B-tree records allocated on demand, so there is no fixed table to
 count: `files`/`files_free` carry the honest `0`/`0` "untracked" pair,
 exactly as the trait defines. These are the figures the kernel mount

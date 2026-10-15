@@ -15,8 +15,7 @@ fn make_link(vfs: &Vfs, fs: &mut LiveFs, existing: &str, link: &str) -> Result<(
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
     vfs.link_via_secured(
         &owner,
-        &vol_path(existing),
-        &vol_path(link),
+        &vfs.cover_pair(&vol_path(existing), &vol_path(link)),
         fs,
         FinalLink::Keep,
     )
@@ -26,10 +25,10 @@ fn make_link(vfs: &Vfs, fs: &mut LiveFs, existing: &str, link: &str) -> Result<(
 fn make_file(vfs: &Vfs, fs: &mut LiveFs, name: &str, body: &[u8]) {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
-    vfs.create_via_secured(&owner, &vol_path(name), fs)
+    vfs.create_via_secured(&owner, &vfs.cover(&vol_path(name)), fs)
         .unwrap_or_else(|e| panic!("create {name}: {e:?}"));
     if !body.is_empty() {
-        vfs.write_via_secured(&owner, &vol_path(name), fs, 0, body)
+        vfs.write_via_secured(&owner, &vfs.cover(&vol_path(name)), fs, 0, body)
             .unwrap_or_else(|e| panic!("write {name}: {e:?}"));
     }
 }
@@ -46,10 +45,20 @@ fn two_names_reach_one_inode_and_one_stat() {
     make_link(&vfs, &mut fs, "first", "second").expect("add a second name");
 
     let first = vfs
-        .stat_via_secured(&owner, &vol_path("first"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("first")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("stat the first name");
     let second = vfs
-        .stat_via_secured(&owner, &vol_path("second"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("second")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("stat the second name");
     assert_eq!(first.node, second.node, "one node, two names");
     assert_eq!(first.nlink, 2);
@@ -66,11 +75,17 @@ fn a_write_through_one_name_is_visible_through_the_other() {
     make_file(&vfs, &mut fs, "first", b"before");
     make_link(&vfs, &mut fs, "first", "second").expect("add a second name");
 
-    vfs.write_via_secured(&owner, &vol_path("second"), &mut fs, 0, b"after ")
-        .expect("write through the second name");
+    vfs.write_via_secured(
+        &owner,
+        &vfs.cover(&vol_path("second")),
+        &mut fs,
+        0,
+        b"after ",
+    )
+    .expect("write through the second name");
     let mut buf = [0u8; 6];
     let read = vfs
-        .read_via_secured(&owner, &vol_path("first"), &mut fs, 0, &mut buf)
+        .read_via_secured(&owner, &vfs.cover(&vol_path("first")), &mut fs, 0, &mut buf)
         .expect("read through the first name");
     assert_eq!(&buf[..read], b"after ");
 }
@@ -86,21 +101,37 @@ fn unlinking_one_name_leaves_the_other_readable() {
     make_file(&vfs, &mut fs, "first", b"payload");
     make_link(&vfs, &mut fs, "first", "second").expect("add a second name");
 
-    vfs.remove_via_secured(&owner, &vol_path("first"), &mut fs, false)
+    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("first")), &mut fs, false)
         .expect("drop the first name");
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("first"), &mut fs, FinalLink::Keep)
-            .map(|i| i.size),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("first")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|i| i.size),
         Err(VfsError::NotFound)
     );
     let survivor = vfs
-        .stat_via_secured(&owner, &vol_path("second"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("second")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("the other name still resolves");
     assert_eq!(survivor.nlink, 1, "one name went, one remains");
 
     let mut buf = [0u8; 7];
     let read = vfs
-        .read_via_secured(&owner, &vol_path("second"), &mut fs, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("second")),
+            &mut fs,
+            0,
+            &mut buf,
+        )
         .expect("the bytes are still there");
     assert_eq!(&buf[..read], b"payload");
 }
@@ -117,7 +148,7 @@ fn unlinking_the_last_name_frees_the_storage() {
     let with_data = fs.stats().expect("stats").free_blocks;
     assert!(with_data < empty, "the file occupies blocks");
 
-    vfs.remove_via_secured(&owner, &vol_path("first"), &mut fs, false)
+    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("first")), &mut fs, false)
         .expect("drop one name");
     assert_eq!(
         fs.stats().expect("stats").free_blocks,
@@ -125,7 +156,7 @@ fn unlinking_the_last_name_frees_the_storage() {
         "a name went, no storage did"
     );
 
-    vfs.remove_via_secured(&owner, &vol_path("second"), &mut fs, false)
+    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("second")), &mut fs, false)
         .expect("drop the last name");
     assert!(
         fs.stats().expect("stats").free_blocks > with_data,
@@ -139,7 +170,7 @@ fn the_count_changes_with_each_name() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
     let count = |fs: &mut LiveFs, name: &str| {
-        vfs.stat_via_secured(&owner, &vol_path(name), fs, FinalLink::Keep)
+        vfs.stat_via_secured(&owner, &vfs.cover(&vol_path(name)), fs, FinalLink::Keep)
             .expect("stat")
             .nlink
     };
@@ -150,7 +181,7 @@ fn the_count_changes_with_each_name() {
     assert_eq!(count(&mut fs, "one"), 2);
     make_link(&vfs, &mut fs, "two", "three").expect("third name");
     assert_eq!(count(&mut fs, "one"), 3);
-    vfs.remove_via_secured(&owner, &vol_path("two"), &mut fs, false)
+    vfs.remove_via_secured(&owner, &vfs.cover(&vol_path("two")), &mut fs, false)
         .expect("drop one");
     assert_eq!(count(&mut fs, "one"), 2);
 }
@@ -163,15 +194,20 @@ fn a_directory_is_refused_and_nothing_is_created() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.mkdir_via_secured(&owner, &vol_path("dir"), &mut fs)
+    vfs.mkdir_via_secured(&owner, &vfs.cover(&vol_path("dir")), &mut fs)
         .expect("create the directory");
     assert_eq!(
         make_link(&vfs, &mut fs, "dir", "alias"),
         Err(VfsError::IsADirectory)
     );
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("alias"), &mut fs, FinalLink::Keep)
-            .map(|i| i.size),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("alias")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|i| i.size),
         Err(VfsError::NotFound),
         "the refused name was never created"
     );
@@ -193,8 +229,7 @@ fn a_new_name_off_this_volume_has_no_backing_to_land_in() {
     assert_eq!(
         vfs.link_via_secured(
             &owner,
-            &vol_path("here"),
-            &outside,
+            &vfs.cover_pair(&vol_path("here"), &outside),
             &mut fs,
             FinalLink::Keep
         ),
@@ -218,13 +253,18 @@ fn a_taken_name_is_refused_and_replaces_nothing() {
     // The occupant is untouched: same node, same bytes.
     let mut buf = [0u8; 8];
     let read = vfs
-        .read_via_secured(&owner, &vol_path("taken"), &mut fs, 0, &mut buf)
+        .read_via_secured(&owner, &vfs.cover(&vol_path("taken")), &mut fs, 0, &mut buf)
         .expect("read the occupant");
     assert_eq!(&buf[..read], b"occupant");
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("first"), &mut fs, FinalLink::Keep)
-            .expect("stat")
-            .nlink,
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("first")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .expect("stat")
+        .nlink,
         1,
         "a refused link raises no count"
     );
@@ -240,25 +280,35 @@ fn the_default_posture_names_a_symbolic_link_itself() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     make_file(&vfs, &mut fs, "target", b"target body");
-    vfs.symlink_via_secured(&owner, &vol_path("sym"), &mut fs, "target")
+    vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path("sym")), &mut fs, "target")
         .expect("create the symbolic link");
     make_link(&vfs, &mut fs, "sym", "sym2").expect("a second name for the link");
 
     let second = vfs
-        .stat_via_secured(&owner, &vol_path("sym2"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("sym2")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("lstat the second name");
     assert_eq!(second.kind, NodeKind::Symlink, "the link itself gained it");
     assert_eq!(second.nlink, 2);
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("sym2"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("sym2")), &mut fs),
         Ok(String::from("target")),
         "both names read the same stored target"
     );
     // The target itself gained nothing.
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("target"), &mut fs, FinalLink::Keep)
-            .expect("stat")
-            .nlink,
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("target")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .expect("stat")
+        .nlink,
         1
     );
 }
@@ -272,29 +322,43 @@ fn the_follow_posture_names_what_a_symbolic_link_names() {
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
     make_file(&vfs, &mut fs, "target", b"target body");
-    vfs.symlink_via_secured(&owner, &vol_path("sym"), &mut fs, "target")
+    vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path("sym")), &mut fs, "target")
         .expect("create the symbolic link");
     vfs.link_via_secured(
         &owner,
-        &vol_path("sym"),
-        &vol_path("hard"),
+        &vfs.cover_pair(&vol_path("sym"), &vol_path("hard")),
         &mut fs,
         FinalLink::Follow,
     )
     .expect("a second name for the target");
 
     let hard = vfs
-        .stat_via_secured(&owner, &vol_path("hard"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("hard")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("lstat the new name");
     assert_eq!(hard.kind, NodeKind::RegularFile, "the target gained it");
     assert_eq!(hard.nlink, 2);
     let target = vfs
-        .stat_via_secured(&owner, &vol_path("target"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("target")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("stat the target");
     assert_eq!(hard.node, target.node);
     // The symbolic link is untouched and still a link with one name.
     let sym = vfs
-        .stat_via_secured(&owner, &vol_path("sym"), &mut fs, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("sym")),
+            &mut fs,
+            FinalLink::Keep,
+        )
         .expect("lstat the link");
     assert_eq!(sym.kind, NodeKind::Symlink);
     assert_eq!(sym.nlink, 1);
@@ -306,13 +370,12 @@ fn a_dangling_link_has_nothing_to_follow_to() {
     let caps = CapabilitySet::empty();
     let owner = cred(ROOT_UID, ROOT_GID, &caps);
 
-    vfs.symlink_via_secured(&owner, &vol_path("dangling"), &mut fs, "absent")
+    vfs.symlink_via_secured(&owner, &vfs.cover(&vol_path("dangling")), &mut fs, "absent")
         .expect("create the dangling link");
     assert_eq!(
         vfs.link_via_secured(
             &owner,
-            &vol_path("dangling"),
-            &vol_path("hard"),
+            &vfs.cover_pair(&vol_path("dangling"), &vol_path("hard")),
             &mut fs,
             FinalLink::Follow,
         ),
@@ -321,7 +384,7 @@ fn a_dangling_link_has_nothing_to_follow_to() {
     // Kept, the link itself is a perfectly good node to name twice.
     make_link(&vfs, &mut fs, "dangling", "alias").expect("name the link itself");
     assert_eq!(
-        vfs.readlink_via_secured(&owner, &vol_path("alias"), &mut fs),
+        vfs.readlink_via_secured(&owner, &vfs.cover(&vol_path("alias")), &mut fs),
         Ok(String::from("absent"))
     );
 }
@@ -337,8 +400,13 @@ fn a_missing_existing_name_creates_nothing() {
         Err(VfsError::NotFound)
     );
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("alias"), &mut fs, FinalLink::Keep)
-            .map(|i| i.size),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("alias")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|i| i.size),
         Err(VfsError::NotFound)
     );
 }
@@ -353,8 +421,7 @@ fn a_read_only_mount_refuses_and_an_unauthorised_parent_refuses() {
     assert_eq!(
         read_only.link_via_secured(
             &owner,
-            &vol_path("anything"),
-            &vol_path("alias"),
+            &read_only.cover_pair(&vol_path("anything"), &vol_path("alias")),
             &mut fs,
             FinalLink::Keep,
         ),
@@ -367,16 +434,20 @@ fn a_read_only_mount_refuses_and_an_unauthorised_parent_refuses() {
     assert_eq!(
         vfs.link_via_secured(
             &stranger,
-            &vol_path("first"),
-            &vol_path("alias"),
+            &vfs.cover_pair(&vol_path("first"), &vol_path("alias")),
             &mut fs,
             FinalLink::Keep,
         ),
         Err(VfsError::PermissionDenied)
     );
     assert_eq!(
-        vfs.stat_via_secured(&owner, &vol_path("alias"), &mut fs, FinalLink::Keep)
-            .map(|i| i.size),
+        vfs.stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("alias")),
+            &mut fs,
+            FinalLink::Keep
+        )
+        .map(|i| i.size),
         Err(VfsError::NotFound),
         "a refused link leaves no name behind"
     );
@@ -394,12 +465,23 @@ fn a_second_name_survives_a_remount_with_its_count() {
 
     let mut remounted = remount(fs);
     let stat = vfs
-        .stat_via_secured(&owner, &vol_path("second"), &mut remounted, FinalLink::Keep)
+        .stat_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("second")),
+            &mut remounted,
+            FinalLink::Keep,
+        )
         .expect("stat after the remount");
     assert_eq!(stat.nlink, 2);
     let mut buf = [0u8; 7];
     let read = vfs
-        .read_via_secured(&owner, &vol_path("second"), &mut remounted, 0, &mut buf)
+        .read_via_secured(
+            &owner,
+            &vfs.cover(&vol_path("second")),
+            &mut remounted,
+            0,
+            &mut buf,
+        )
         .expect("read after the remount");
     assert_eq!(&buf[..read], b"payload");
 }

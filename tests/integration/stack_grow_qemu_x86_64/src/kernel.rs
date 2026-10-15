@@ -136,10 +136,8 @@ const TEST_PASS: EventId = EventId(4368);
 /// x86_64 `isa-debug-exit` device carries no per-site exit code).
 const TEST_FAIL: EventId = EventId(4369);
 
-/// Static heap for the free-list allocator (per the production bin); the
-/// chassis subsystems, the spawn producer's boxed state, and the demand-
-/// grown bookkeeping allocate from it.
-static mut HEAP: Heap = Heap::ZERO;
+/// The global allocator's arena.
+static HEAP: Heap = Heap::ZERO;
 
 /// Global allocator backed by [`HEAP`].
 ///
@@ -147,7 +145,7 @@ static mut HEAP: Heap = Heap::ZERO;
 /// allocator is its only consumer.
 #[global_allocator]
 static ALLOCATOR: FreeListAllocator =
-    unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+    unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
 /// Physical-frame backing store the live [`FrameAllocator`] serves the
 /// spawn producer and the stack-growth fault path from. `align(4096)` so

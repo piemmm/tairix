@@ -4,7 +4,7 @@
 //! Targets are **policies over discovered hardware, never frozen scalars**:
 //! the memory target is sized from the boot-attested installed RAM
 //! (`boot_facts`) and the disk target from the scratch volume's live free
-//! space (the unprivileged `MOUNT_LIST` query), so the same command loads a
+//! space (the unprivileged namespace queries), so the same command loads a
 //! 1 GiB board and a 128 GiB server proportionally. An explicit
 //! `--vm-bytes`/`--hdd-bytes` always wins; `--overcommit P` rescales the
 //! *discovered* targets to `P` percent of the resource (over 100 pushes

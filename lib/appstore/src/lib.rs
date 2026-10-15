@@ -45,9 +45,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::{
-    AppInfoHeader, BundleEntry, Errno, APPINFO_WIRE_MAX, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR,
-    HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
-    SYSTEM_SERVICE_STORE,
+    AppInfoHeader, BundleEntry, Errno, ProgramKind, APPINFO_WIRE_MAX, BUNDLE_SUFFIX,
+    HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, SYSTEM_APPLICATION_STORE,
+    SYSTEM_COMMAND_STORE,
 };
 
 #[cfg(test)]
@@ -64,35 +64,34 @@ pub const MAX_WALK_DEPTH: usize = 8;
 ///
 /// A **containment bound** on an untrusted directory tree, not a capacity: an
 /// installed program is one `.app` entry the walk never descends into, so a
-/// real set of stores — the system stores, the machine-wide installed store,
-/// and a user's own pair — is hundreds of entries. A tree presenting
+/// real set of stores — the system stores and a user's own pair — is hundreds
+/// of entries. A tree presenting
 /// thousands is not a believable program store, and exhausting this fails the
 /// whole scan closed rather than walking on.
 pub const MAX_WALK_ENTRIES: usize = 4096;
 
 /// The machine-wide store roots, in the precedence a program name resolves
-/// against them: the system command store, the system application store, then
-/// the machine-wide installed store.
-pub const MACHINE_ROOTS: [&str; 3] = [
-    SYSTEM_COMMAND_STORE,
-    SYSTEM_APPLICATION_STORE,
-    INSTALLED_APP_STORE,
-];
+/// against them: the system command store, then the system application store.
+pub const MACHINE_ROOTS: [&str; 2] = [SYSTEM_COMMAND_STORE, SYSTEM_APPLICATION_STORE];
 
 /// The machine-wide store roots a running process's attested identity may
-/// name a bundle in: [`MACHINE_ROOTS`] and the system service store.
+/// name a bundle in: every kind's system store, [`MACHINE_ROOTS`] first.
 ///
-/// No program word resolves against a service, but a running service is a
-/// process like any other — the Switchboard owns a desktop window. The service
-/// store ranks with the other read-only, system-signed stores, ahead of every
-/// writable one, so no bundle planted in a writable store can claim a shipped
-/// service's identity.
-pub const IDENTITY_MACHINE_ROOTS: [&str; 4] = [
-    SYSTEM_COMMAND_STORE,
-    SYSTEM_APPLICATION_STORE,
-    SYSTEM_SERVICE_STORE,
-    INSTALLED_APP_STORE,
-];
+/// No program word resolves against a service or a component, but each runs
+/// as a process like any other — the Switchboard and the file manager own
+/// desktop windows. These stores rank with the other read-only, system-signed
+/// stores, ahead of every writable one, so no bundle planted in a writable
+/// store can claim a shipped program's identity. Derived from the closed kind
+/// set, so a new kind's store cannot be left out.
+pub const IDENTITY_MACHINE_ROOTS: [&str; ProgramKind::ALL.len()] = {
+    let mut roots = [""; ProgramKind::ALL.len()];
+    let mut at = 0;
+    while at < roots.len() {
+        roots[at] = ProgramKind::ALL[at].store();
+        at += 1;
+    }
+    roots
+};
 
 /// One entry of a listed directory, as [`StoreReader`] reports it.
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -54,9 +54,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
-    FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeInfo, NodeKind, NodeTimes, VolumeStats, WritebackHost,
+    AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
+    FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
+    NameMatching, NodeId, NodeInfo, NodeKind, NodeTimes, VolumeHost, VolumeStats,
 };
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -82,6 +82,7 @@ mod health;
 mod integrity;
 mod pagecache;
 mod reconcile;
+mod reserve;
 mod scratch;
 mod scrub;
 mod superblock;
@@ -103,6 +104,7 @@ use integrity::{
     physical_checksum, read_stored_form, write_stored_form, DataFault, StoredForm,
     COMPRESSION_DESCRIPTOR_LEN, DATA_INTEGRITY_TRAILER, LOGICAL_HASH_LEN, PHYS_CHECKSUM_LEN,
 };
+pub use reserve::{release_share_blocks, system_reserve_blocks};
 pub use scrub::{PassVerdict, ScrubBudget, ScrubReport};
 pub use unlock::{
     UnlockDescriptor, ROOT_UNLOCK_NAME, UNLOCK_DEFAULT_ITERATIONS, UNLOCK_DESCRIPTOR_LEN,
@@ -117,6 +119,7 @@ use dedupe::{
     chunk_spec, dedupe_key, reverse_ref_spec, ChunkRecord, DedupeCandidate, REVERSE_REF_CAP,
 };
 use header::{BlockHeader, BlockType, ReservedOwner, HEADER_LEN};
+use reserve::Draw;
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
 use transaction::TxnRoot;
 use wcache::{CommitScheduler, DirtySet, WritePhase, WritebackBound, WritebackReading};
@@ -901,6 +904,22 @@ pub struct ARXFS<B: Block> {
     /// Bad mirror copies the read paths met since the last stored health
     /// baseline, which the next [`ARXFS::health`] pass makes durable.
     observed: ObservedFaults,
+    /// The class the kernel set for the operations that follow.
+    class: AllocationClass,
+    /// What the running operation may take from the reserve (`reserve`
+    /// module).
+    draw: Draw,
+    /// Blocks the system's bounded write set costs, on a volume holding the
+    /// system reserve ([`ARXFS::with_system_reserve`]); `None` holds only the
+    /// release share.
+    system_write_cost: Option<u64>,
+    /// Whether the host was last told the volume has no space outside its
+    /// reserve.
+    reported_in_reserve: bool,
+    /// Transactions given up unpublished — abandoned whole, or frozen with
+    /// their publication unknown — so an operation can tell whether the one
+    /// carrying its work survived a later failure.
+    aborts: u64,
 }
 
 /// Where a mount stands with its stride past the committed content-generation
@@ -1036,12 +1055,6 @@ const EXTENT_VALUE_LEN: usize = 24;
 /// random access O(log n) regardless of file size.
 const COMPRESS_CLUSTER_BLOCKS: u64 = 16;
 
-/// Free blocks held back from file *data* allocation so a shrinking
-/// transaction (delete, truncate) can always copy-on-write its metadata and
-/// commit a new root even on an otherwise-full volume. Metadata allocation may
-/// draw on this reserve; data allocation stops above it (`alloc_block`).
-const METADATA_RESERVE: u64 = 16;
-
 /// The inode tree's record shape: a 256-byte inode keyed by its number.
 fn inode_spec() -> btree::TreeSpec {
     btree::TreeSpec {
@@ -1068,6 +1081,11 @@ fn extent_spec(ino: u32) -> btree::TreeSpec {
     }
 }
 
+/// [`ARXFS::data_capacity`] for a volume of `block_size`-byte blocks.
+const fn data_capacity_of(block_size: usize) -> u64 {
+    (block_size - CRYPTO_TRAILER - COMPRESSION_DESCRIPTOR_LEN - DATA_INTEGRITY_TRAILER) as u64
+}
+
 impl<B: Block> ARXFS<B> {
     /// Directory slots per block. The block's tail holds the per-block seal
     /// trailer of the entry names, so the slots occupy
@@ -1090,8 +1108,7 @@ impl<B: Block> ARXFS<B> {
     /// when compression stores fewer bytes at rest
     /// (`docs/src/filesystem/arxfs-spec.md` §10).
     fn data_capacity(&self) -> u64 {
-        (self.block_size - CRYPTO_TRAILER - COMPRESSION_DESCRIPTOR_LEN - DATA_INTEGRITY_TRAILER)
-            as u64
+        data_capacity_of(self.block_size)
     }
 
     /// Replace the wall clock used to stamp the timestamps. Used by tests
@@ -1102,21 +1119,15 @@ impl<B: Block> ARXFS<B> {
         self
     }
 
-    /// Install the host's write-back timer for the mount registered as
-    /// `volume`, which is what lets a transaction stay open across operations
-    /// (`wcache` module).
+    /// Install the host for the mount registered as `volume`: its write-back
+    /// timer, which is what lets a transaction stay open across operations
+    /// (`wcache` module), and the listener for the volume's reserve.
     ///
-    /// The builder form of [`FilesystemWrite::set_writeback_host`], for a
-    /// caller holding the driver before it is boxed behind the trait. Both
-    /// reach the one setter, so a volume can never be given a clock without
-    /// the timer that publishes what it defers.
+    /// The builder form of [`FilesystemWrite::set_volume_host`], for a
+    /// caller holding the driver before it is boxed behind the trait.
     #[must_use]
-    pub fn with_writeback_host(
-        mut self,
-        volume: DriverHandle,
-        host: &'static dyn WritebackHost,
-    ) -> Self {
-        self.schedule.set_host(volume, host);
+    pub fn with_volume_host(mut self, volume: DriverHandle, host: &'static dyn VolumeHost) -> Self {
+        FilesystemWrite::set_volume_host(&mut self, volume, host);
         self
     }
 
@@ -1490,6 +1501,7 @@ impl<B: Block> ARXFS<B> {
         // of this transaction staged comes back if this one is undone.
         self.dirty.discard_run(start, len);
         self.mark_run_free(start, len);
+        self.return_reserved(start, len);
         let end = start.saturating_add(len);
         let Ok(alloc) = self.allocator_mut() else {
             return;
@@ -1675,11 +1687,7 @@ impl<B: Block> ARXFS<B> {
             self.schedule.opened();
         }
         self.saved_op = self.roots();
-        if let Ok(alloc) = self.allocator_mut() {
-            alloc.op_claimed.clear();
-            alloc.op_released.clear();
-            alloc.op_deferred.clear();
-        }
+        self.clear_op_state();
         self.dirty.begin_operation();
         Ok(())
     }
@@ -1699,6 +1707,7 @@ impl<B: Block> ARXFS<B> {
     /// as this operation's, which is honest: this operation did not happen
     /// either.
     fn end_operation(&mut self) -> Result<(), DriverError> {
+        self.admit_release()?;
         self.dirty.end_operation();
         if self.writeback_full() {
             // Back-pressure: the set is pinned memory, so the only way to
@@ -1710,6 +1719,7 @@ impl<B: Block> ARXFS<B> {
         if self.schedule.expired()
             || self.incompat != self.saved_txn.incompat
             || self.content_gens == ContentGens::Pending
+            || self.reserve_commit_due()
         {
             return self.commit();
         }
@@ -1893,6 +1903,7 @@ impl<B: Block> ARXFS<B> {
             return;
         }
         let acknowledged = self.schedule.acknowledged() > 0;
+        self.aborts = self.aborts.wrapping_add(1);
         self.release_txn_state();
         self.dirty.clear_phase(WritePhase::BeforeBarrier);
         self.restore_roots(self.saved_txn);
@@ -1939,6 +1950,9 @@ impl<B: Block> ARXFS<B> {
         };
         for run in &released {
             self.reclaim_released(run.start, run.end - run.start);
+        }
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.undo_reserve_operation();
         }
     }
 
@@ -1997,11 +2011,15 @@ impl<B: Block> ARXFS<B> {
             if let Ok(alloc) = self.allocator_mut() {
                 alloc.txn_freed.clear();
                 alloc.txn_private.clear();
+                alloc.abandon_reserve_draws();
             }
             return;
         }
         self.reserve_deferred_frees();
         self.clear_op_state();
+        if let Ok(alloc) = self.allocator_mut() {
+            alloc.abandon_reserve_draws();
+        }
         let private = match self.allocator_mut() {
             Ok(alloc) => core::mem::take(&mut alloc.txn_private),
             Err(_) => return,
@@ -2017,6 +2035,8 @@ impl<B: Block> ARXFS<B> {
             alloc.op_claimed.clear();
             alloc.op_released.clear();
             alloc.op_deferred.clear();
+            alloc.op_reserve_taken.clear();
+            alloc.op_reserve_returned.clear();
         }
     }
 
@@ -2067,6 +2087,7 @@ impl<B: Block> ARXFS<B> {
     /// what a remount reads rather than something a later allocation could
     /// erode.
     fn freeze_unknown_publication(&mut self) {
+        self.aborts = self.aborts.wrapping_add(1);
         self.reserve_deferred_frees();
         self.restore_roots(self.saved_txn);
         // No allocation will fold a deferred mark on a frozen handle, so state
@@ -2097,6 +2118,7 @@ impl<B: Block> ARXFS<B> {
         // allocations, so clearing the set releases exactly the markers those
         // allocations recorded.
         alloc.txn_private.clear();
+        alloc.txn_reserve.clear();
         let freed = core::mem::take(&mut alloc.txn_freed);
         self.lift_embargo();
         for run in &freed {
@@ -2106,6 +2128,7 @@ impl<B: Block> ARXFS<B> {
             alloc.embargo = freed;
         }
         self.sample_pinned();
+        self.report_reserve();
     }
 
     /// The free count of the committed volume: the map's, with the embargo it
@@ -2125,6 +2148,7 @@ impl<B: Block> ARXFS<B> {
         for run in &released {
             self.mark_run_free(run.start, run.end - run.start);
             self.enqueue_discard_run(run.start, run.end - run.start);
+            self.refill_reserve(run);
         }
         released
     }
@@ -2145,6 +2169,7 @@ impl<B: Block> ARXFS<B> {
             if let Ok(alloc) = self.allocator_mut() {
                 for run in &released {
                     alloc.pending_discard.remove(run.clone());
+                    alloc.reserve.remove(run.clone());
                 }
                 alloc.embargo = released;
             }
@@ -2163,31 +2188,53 @@ impl<B: Block> ARXFS<B> {
         Ok(true)
     }
 
-    /// Run one mutating operation: open it, and undo it if it fails. One that
-    /// ran out of space while recent commits' frees are embargoed is run once
-    /// more after they are put on the medium and released, so a delete makes
-    /// room for the very next write.
+    /// Run one mutating operation under the class the kernel set: open it,
+    /// and undo it if it fails. One that ran out of space while recent
+    /// commits' frees are embargoed is run once more after they are put on the
+    /// medium and released, so a delete makes room for the very next write.
     fn mutation<T>(
         &mut self,
+        op: impl FnMut(&mut Self) -> Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        self.mutation_drawing(Draw::of(self.class), op)
+    }
+
+    /// [`Self::mutation`] for an operation that frees space, which may draw on
+    /// the reserve if it frees at least what it holds.
+    fn release<T>(
+        &mut self,
+        op: impl FnMut(&mut Self) -> Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        self.mutation_drawing(Draw::of(self.class).releasing(), op)
+    }
+
+    fn mutation_drawing<T>(
+        &mut self,
+        draw: Draw,
         mut op: impl FnMut(&mut Self) -> Result<T, DriverError>,
     ) -> Result<T, DriverError> {
         self.deny_if_read_only()?;
-        let first = self.attempt(&mut op);
+        let first = self.attempt(draw, &mut op);
         if matches!(first, Err(DriverError::NoSpace)) && self.release_embargo_durably()? {
-            return self.attempt(&mut op);
+            return self.attempt(draw, &mut op);
         }
         first
     }
 
     fn attempt<T>(
         &mut self,
+        draw: Draw,
         op: &mut impl FnMut(&mut Self) -> Result<T, DriverError>,
     ) -> Result<T, DriverError> {
-        self.begin()?;
-        let result = op(self);
-        if result.is_err() {
-            self.rollback();
-        }
+        self.draw = draw;
+        let result = self.begin().and_then(|()| {
+            let result = op(self);
+            if result.is_err() {
+                self.rollback();
+            }
+            result
+        });
+        self.draw = Draw::Ordinary;
         result
     }
 
@@ -2293,7 +2340,7 @@ impl<B: Block> ARXFS<B> {
         let bs = self.block_size;
         let next_gen = self.generation.wrapping_add(1);
         let old_root = self.root_phys;
-        let root_phys = self.alloc_block(true)?;
+        let root_phys = self.alloc_commit_root()?;
         // Release the superseded root into the deferred-free set *before* the
         // new root is sealed, so the free count the root records is the one
         // the committed volume will actually have. The blocks stay reserved
@@ -2351,6 +2398,24 @@ impl<B: Block> ARXFS<B> {
             root_phys,
             slot,
         })
+    }
+
+    /// Allocate the root a commit publishes. Whatever joined the transaction
+    /// is acknowledged work, so the root may draw on the reserve, and on a
+    /// volume out of space the previous commit's embargoed frees are put on
+    /// the medium for it rather than the work abandoned.
+    fn alloc_commit_root(&mut self) -> Result<u64, DriverError> {
+        let draw = core::mem::replace(&mut self.draw, Draw::System);
+        let mut root = self.alloc_block(true);
+        if matches!(root, Err(DriverError::NoSpace)) {
+            root = match self.release_embargo_durably() {
+                Ok(true) => self.alloc_block(true),
+                Ok(false) => root,
+                Err(err) => Err(err),
+            };
+        }
+        self.draw = draw;
+        root
     }
 
     /// Zero every superblock copy, so no slot of a volume formatted here before
@@ -2445,6 +2510,11 @@ impl<B: Block> ARXFS<B> {
             bound: None,
             reading: None,
             observed: ObservedFaults::default(),
+            class: AllocationClass::Ordinary,
+            draw: Draw::Ordinary,
+            system_write_cost: None,
+            reported_in_reserve: false,
+            aborts: 0,
         }
     }
 
@@ -2540,6 +2610,7 @@ impl<B: Block> ARXFS<B> {
         // first mount of a freshly built image adopts it instead of walking
         // the volume.
         fs.persist_map_released()?;
+        fs.retarget_reserve()?;
         Ok(fs)
     }
 
@@ -2757,6 +2828,9 @@ impl<B: Block> ARXFS<B> {
         // what makes mounting a read-only volume a handful of block reads.
         if !read_only {
             fs.adopt_or_rebuild_alloc_map(root.alloc_map_start, root.alloc_map_covered)?;
+            // Held before the drain below, which may need it to finish a delete
+            // on a full volume.
+            fs.retarget_reserve()?;
         }
         // Finish any delete a previous mount published and did not complete,
         // before the volume serves a request. A read-only handle has nothing to
@@ -2884,7 +2958,10 @@ impl<B: Block> ARXFS<B> {
         self.extend_alloc_map(new_start, new_total)?;
         self.begin()?;
         match self.commit() {
-            Ok(()) => Ok(added),
+            Ok(()) => {
+                self.retarget_reserve()?;
+                Ok(added)
+            }
             Err(err) => {
                 // The commit did not publish: undo this transaction's
                 // allocations and restore the previous in-memory geometry so
@@ -2928,7 +3005,7 @@ impl<B: Block> ARXFS<B> {
         if new_total - old_total >= needed {
             return Ok(old_total);
         }
-        self.map_find_free_run(needed, RING_BLOCKS, old_total)?
+        self.find_ordinary_run(needed, RING_BLOCKS, old_total)?
             .ok_or(DriverError::NoSpace)
     }
 
@@ -4150,17 +4227,11 @@ impl<B: Block> ARXFS<B> {
                 Some((start, ext)) if ext.compressed => {
                     let cluster_off = as_usize(bi - start) * as_usize(cap) + within;
                     let want = as_usize(end - pos);
-                    let mut chunk = None;
-                    if let Some(cache) = self.cluster_cache.as_mut() {
-                        if let Some(plain) = cache.get(ext.phys) {
-                            chunk = Some(xform::copy_from_cluster(
-                                plain,
-                                cluster_off,
-                                &mut out[done..],
-                                want,
-                            ));
-                        }
-                    }
+                    let chunk = self.cluster_cache.as_mut().and_then(|cache| {
+                        cache.lend(ext.phys, &mut |plain| {
+                            xform::copy_from_cluster(plain, cluster_off, &mut out[done..], want)
+                        })
+                    });
                     let chunk = if let Some(chunk) = chunk {
                         chunk
                     } else {
@@ -4701,14 +4772,28 @@ impl<B: Block> ARXFS<B> {
     /// One transaction of reclaiming pending inode `ino`. Returns `true` once
     /// the inode is gone from the volume.
     fn reclaim_step(&mut self, ino: u32) -> Result<bool, DriverError> {
-        self.begin()?;
-        let result = self
-            .reclaim_pending_step(ino)
-            .and_then(|done| self.end_operation().map(|()| done));
-        if result.is_err() {
-            self.rollback();
+        self.release(|fs| {
+            fs.reclaim_pending_step(ino)
+                .and_then(|done| fs.end_operation().map(|()| done))
+        })
+    }
+
+    /// Finish the reclaim an unlink or a replacing rename published, after the
+    /// name change itself succeeded.
+    ///
+    /// A failure here undoes the name change only when the name change joined
+    /// a batch that was then given up before any commit published it, so only
+    /// then is it the caller's failure; the node otherwise stays named by the
+    /// pending-delete set and the next unlink or mount finishes it.
+    fn finish_reclaim(&mut self) -> Result<(), DriverError> {
+        let joined = self.schedule.is_open();
+        let (generation, aborts) = (self.generation, self.aborts);
+        match self.drain_pending_deletes() {
+            Err(err) if joined && self.generation == generation && self.aborts != aborts => {
+                Err(err)
+            }
+            Ok(()) | Err(_) => Ok(()),
         }
-        result
     }
 
     /// One bounded step of reclaiming pending inode `ino`, inside the caller's
@@ -4916,6 +5001,11 @@ impl<B: Block> ARXFS<B> {
     fn truncate_step(&mut self, ino: u32, size: u64) -> Result<bool, DriverError> {
         let mut child = self.read_inode(ino)?;
         let before = child.size;
+        // Only a truncate that drops data frees space; one that extends a file
+        // must not lean on the reserve to do it.
+        if size >= before {
+            self.draw = Draw::of(self.class);
+        }
         let done = self.truncate_file(&mut child, ino, size)?;
         let now = (self.clock)();
         child.times.modified = now;
@@ -4940,6 +5030,11 @@ impl<B: Block> ARXFS<B> {
         let mut child = self.read_inode(child_ino)?;
         if child.is_dir() && !self.dir_is_empty(&child)? {
             return Err(DriverError::DirectoryNotEmpty);
+        }
+        // Only the last name's removal frees the node: dropping one of several
+        // names must not lean on the reserve.
+        if !child.is_dir() && child.nlink > 1 {
+            self.draw = Draw::of(self.class);
         }
         let now = (self.clock)();
         // An empty directory loses both its name and its own `.`; every other
@@ -5438,7 +5533,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
     /// it. That is the honest outcome: the bytes below that boundary were never
     /// touched, and the caller may simply ask again.
     fn truncate(&mut self, dir: NodeId, name: &[u8], size: u64) -> Result<(), DriverError> {
-        while !self.mutation(|fs| {
+        while !self.release(|fs| {
             let (ino, _) = fs.resolve_file(dir, name)?;
             fs.truncate_step(ino, size)
         })? {}
@@ -5450,13 +5545,13 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
     /// exactly one transaction. A node whose tail outruns that transaction is
     /// finished in further ones, behind the pending-delete set.
     ///
-    /// A failure once the name has gone is reported, and the name stays gone:
-    /// what it says is that the space was not all reclaimed. The node is named
-    /// by the pending-delete set, so the next unlink or the next mount finishes
-    /// it — nothing is leaked and nothing is unreachable-and-forgotten.
+    /// Once the name has gone the remove has happened, so a failure to finish
+    /// reclaiming the node is not reported as the remove's own: the node is
+    /// named by the pending-delete set, and the next unlink or the next mount
+    /// finishes it — nothing is leaked and nothing is unreachable-and-forgotten.
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
-        self.mutation(|fs| fs.remove_inner(dir, name))?;
-        self.drain_pending_deletes()
+        self.release(|fs| fs.remove_inner(dir, name))?;
+        self.finish_reclaim()
     }
 
     /// A rename that replaces an existing destination drops that node's last
@@ -5470,7 +5565,7 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
         self.mutation(|fs| fs.rename_inner(src_dir, src_name, dst_dir, dst_name))?;
-        self.drain_pending_deletes()
+        self.finish_reclaim()
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
@@ -5492,8 +5587,15 @@ impl<B: Block> FilesystemWrite for ARXFS<B> {
         self.persist_map_released()
     }
 
-    fn set_writeback_host(&mut self, volume: DriverHandle, host: &'static dyn WritebackHost) {
+    fn set_volume_host(&mut self, volume: DriverHandle, host: &'static dyn VolumeHost) {
         self.schedule.set_host(volume, host);
+        if self.reported_in_reserve {
+            host.reserve_crossed(volume, true);
+        }
+    }
+
+    fn set_allocation_class(&mut self, class: AllocationClass) {
+        self.class = class;
     }
 }
 
@@ -5510,17 +5612,18 @@ impl<B: Block> FilesystemSecurity for ARXFS<B> {
 
 impl<B: Block> FilesystemStats for ARXFS<B> {
     fn stats(&mut self) -> Result<VolumeStats, DriverError> {
-        // A pure read of the mounted volume's in-memory accounting — no
-        // device I/O, so it cannot fault. Data allocation stops at the
-        // metadata reserve, so the blocks an ordinary write may still
-        // consume exclude it. Inodes are B-tree records allocated on
-        // demand: there is no fixed table, and the zero pair reports that
-        // honestly rather than fabricating a capacity.
+        // A pure read of the mounted volume's in-memory accounting, so it
+        // cannot fault. Inodes are B-tree records allocated on demand: there
+        // is no fixed table, and the zero pair reports that honestly rather
+        // than fabricating a capacity.
         Ok(VolumeStats {
             block_size: as_u32(self.block_size),
+            in_reserve: self.in_reserve(),
             total_blocks: self.total_blocks,
             free_blocks: self.committed_free_count(),
-            avail_blocks: self.committed_free_count().saturating_sub(METADATA_RESERVE),
+            avail_blocks: self
+                .committed_free_count()
+                .saturating_sub(self.reserve_blocks()),
             files: 0,
             files_free: 0,
         })

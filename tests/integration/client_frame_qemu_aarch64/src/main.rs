@@ -49,13 +49,10 @@ mod kernel {
     /// Failure finisher code: the digest differed from the reference.
     const FAIL_DIGEST: NonZeroU16 = fail_point!(2);
 
-    /// Static boot heap in the linker's dedicated `.heap` (NOLOAD)
-    /// section. The realm field, the generated chunks, the synthesised
-    /// material tiles and the two frame buffers all live here.
-    /// `static mut` because the allocator hands out disjoint slices via
-    /// an atomic cursor; the storage is otherwise never aliased.
+    /// The global allocator's arena, in the NOLOAD `.heap` section so the boot
+    /// trampoline does not spend time zeroing it.
     #[link_section = ".heap"]
-    static mut HEAP: Heap = Heap::ZERO;
+    static HEAP: Heap = Heap::ZERO;
 
     /// Global allocator backed by [`HEAP`].
     ///
@@ -63,7 +60,7 @@ mod kernel {
     /// allocator is its only consumer.
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
-        unsafe { FreeListAllocator::new(core::ptr::addr_of!(HEAP) as *mut u8, HEAP_BYTES) };
+        unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
     fn note(id: EventId, message: &'static str) {
         log(

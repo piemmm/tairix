@@ -66,7 +66,7 @@ não são lidas — a escala é escolhida apenas pelas opções.
 - `du` — a árvore do diretório atual, uma linha por diretório.
 - `du -sh /Users/jo` — um total legível para `/Users/jo`.
 - `du -a docs` — cada ficheiro e diretório sob `docs`.
-- `du -d1 -c /Apps /Users` — o primeiro nível de cada armazém e
+- `du -d1 -c /System/Applications /Users` — o primeiro nível de cada armazém e
   depois um total geral.
 
 ## EXIT STATUS

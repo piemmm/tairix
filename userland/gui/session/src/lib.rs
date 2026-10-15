@@ -250,8 +250,7 @@ pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
 pub use clock::{spell as spell_clock, SessionClock};
 pub use config::{
-    DATETIME_LABEL, DATETIME_RUN_PATH, FILES_LABEL, FILES_RUN_PATH, SETTINGS_LABEL,
-    SETTINGS_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
+    DATETIME_LABEL, FILES_LABEL, SETTINGS_LABEL, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
 };
 pub use confirm::{Answer, ConfirmPrompt};
 pub use depart::{serve_park_ns, Departure};

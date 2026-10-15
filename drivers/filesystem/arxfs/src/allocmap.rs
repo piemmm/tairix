@@ -401,6 +401,36 @@ pub(crate) fn find_free_bit_rev(payload: &[u8], from: u64, floor: u64) -> Option
     }
 }
 
+/// The highest set bit in `floor..=from`, skipping wholly-clear bytes.
+///
+/// The dual of [`find_free_bit_rev`], which is what lets the reserve measure a
+/// free run downward from its top in time proportional to bytes, not bits.
+pub(crate) fn find_used_bit_rev(payload: &[u8], from: u64, floor: u64) -> Option<u64> {
+    let mut bit = from;
+    loop {
+        if bit < floor {
+            return None;
+        }
+        let byte = (bit / 8) as usize;
+        let value = *payload.get(byte)?;
+        if value == 0 {
+            let byte_first = (bit / 8) * 8;
+            if byte_first == 0 {
+                return None;
+            }
+            bit = byte_first - 1;
+            continue;
+        }
+        if value & (1u8 << (bit % 8)) != 0 {
+            return Some(bit);
+        }
+        if bit == 0 {
+            return None;
+        }
+        bit -= 1;
+    }
+}
+
 /// The free-block count a summary block records for one bitmap page.
 pub(crate) fn summary_get(payload: &[u8], offset: usize) -> u64 {
     match (payload.get(offset), payload.get(offset + 1)) {

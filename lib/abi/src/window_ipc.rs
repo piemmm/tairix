@@ -10164,7 +10164,7 @@ mod tests {
         let mut out = [0u8; WINDOW_DROP_TARGET_REPLY_MAX];
         for (path, writes) in [
             ("/System/Applications/textedit.app/Run", true),
-            ("/Apps/view.app/Run", false),
+            ("/System/Applications/view.app/Run", false),
         ] {
             let target = DropTarget {
                 run_path: BundleRunPath::new(path).expect("a valid path"),
@@ -10177,7 +10177,8 @@ mod tests {
         assert_eq!(decode_drop_target_reply(&out[..len]), Err(Errno::NotFound));
 
         let target = DropTarget {
-            run_path: BundleRunPath::new("/Apps/view.app/Run").expect("a valid path"),
+            run_path: BundleRunPath::new("/System/Applications/view.app/Run")
+                .expect("a valid path"),
             writes_documents: false,
         };
         let len = encode_drop_target_reply(&mut out, Ok(&target));

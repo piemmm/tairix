@@ -49,7 +49,7 @@ tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 # display-service witness keys on — the shared definition, never a magic
 # number.
 tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }
-# The appmgr audit vocabulary: the `APP_LOADED` event id whose `bundle`
+# The load gate's audit vocabulary: the `APP_LOADED` event id whose `bundle`
 # field names the loaded bundle — the terminal round-trip / Ctrl-C recovery
 # witnesses attribute the shell's `sleep`/`true` loads by that exact path
 # (the shared definition, never a magic id).

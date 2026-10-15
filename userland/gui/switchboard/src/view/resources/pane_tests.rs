@@ -243,7 +243,9 @@ fn a_consumer_row_asks_the_cache_for_the_launching_applications_picture() {
         BlockBody::Consumers(alloc::vec![
             super::ConsumerRow {
                 name: alloc::string::String::from("terminal"),
-                bundle: Some(alloc::string::String::from("/Apps/Terminal.app")),
+                bundle: Some(alloc::string::String::from(
+                    "/System/Applications/Terminal.app"
+                )),
                 amount: alloc::string::String::from("9.7%"),
                 share: 970,
             },

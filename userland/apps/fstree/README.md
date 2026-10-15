@@ -27,7 +27,7 @@ Stability tier: **experimental**.
   change goes out on the Standard Information Stream (fd 3),
   best-effort and ignorable.
 - **Header/status/command lines**: a top disk-statistics header (path,
-  volume free space via the System Information API's `MOUNT_LIST` query,
+  volume free space via the System Information API's namespace queries,
   item and tagged counts), a status band (active window, sort order,
   hidden/filter state), and a context command menu with errors and key
   hints.

@@ -30,8 +30,8 @@ conta comum pode ler as opções mas não alterá-las.
   `graphical` (a omissão) inicia diretamente a sessão de ambiente de
   trabalho após a autenticação, recuando para o início de sessão em
   texto numa máquina que não consegue executar uma; `text` inicia a
-  shell da conta — o ambiente de trabalho pode ainda ser iniciado a
-  pedido com o comando `desktop`.
+  shell da conta — o ambiente de trabalho só é executado a partir de um
+  início de sessão gráfico.
 - `cache.all` — `on` ou `off`: o comutador principal da cache. `on` (a
   omissão) deixa cada classe de cache abaixo seguir a sua própria
   opção; `off` é um teto que desativa toda a cache em memória

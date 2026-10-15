@@ -254,7 +254,7 @@ A share found by multicast from an unauthenticated peer is the least trusted
 volume the system can hold, so it is mounted **more** strictly than a local
 disk:
 
-- `nosuid,nodev,noexec` with **no relaxation path**: `CAP_FS_MOUNT_RELAX` does
+- `noexec` with **no relaxation path**: `CAP_FS_MOUNT_RELAX` does
   not apply. Letting a stranger on the segment place executable content in the
   user's namespace is not a setting.
 - `CAP_FS_MOUNT` as any mount, with the endpoint and its resolved address in
