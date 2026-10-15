@@ -1,9 +1,12 @@
 use alloc::vec::Vec;
 
 use super::*;
-use crate::compose::{Composition, Setting};
-use crate::detail::Detail;
 use crate::prototype::Part;
+#[cfg(feature = "scene-tests")]
+use crate::{
+    compose::{Composition, Setting},
+    detail::Detail,
+};
 
 const MATERIALS: Materials = Materials {
     leaf: 1,
@@ -123,6 +126,7 @@ fn a_ripe_plants_leaves_have_dried() {
 
 /// Summer maize about the eye stands as plants, and the eye is never put
 /// among them, nor among a vineyard's vines.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn summer_maize_stands_about_the_eye_never_among_it() {
     let mut stood = 0;

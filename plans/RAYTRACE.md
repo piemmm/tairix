@@ -108,6 +108,12 @@ These bind every item, done or planned.
   covers.
 - **Deterministic.** A setting, a seed and a picture size compose one scene,
   and a pixel's samples are hashed from its index and the scene's key.
+- **Long whole-scene tests are their own tier.** A test that composes or
+  prepares a whole scene, here or in the screensaver, and takes more than a few
+  seconds builds only under its package's `scene-tests` feature: `ci-long` and
+  `cargo xtask test --scenes` run it, and `ci` lints it without running it, so
+  its cost may grow with the scenes. A quick one, and a test of one part built
+  by hand, stays in `ci`.
 
 ## RT1 — Smooth reveal
 

@@ -11,6 +11,12 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The long host tests that compose or prepare a whole scene. Their cost grows
+# with every detail a scene gains, so `ci-long` and `cargo xtask test --scenes`
+# run them and `ci` only lints them.
+scene-tests = []
+
 [dependencies]
 # `mathf`, the one first-party float maths every target rounds identically,
 # `space`, the vectors, frames and poses a scene is traced in, and the

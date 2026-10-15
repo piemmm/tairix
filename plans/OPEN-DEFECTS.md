@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 373 open, 672 closed, 1045 total.
+**closed**, and a partial fix stays **open**. 373 open, 674 closed, 1047 total.
 
 ### Open (373)
 
@@ -403,7 +403,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1051 | `docs/src/contributing.md`'s warm-run `miri` figure (1470 s) predates `kernel/core`'s enrolment, which adds about 12,800 CPU-seconds of interpreted tests dealt across the cores | **low, docs**; noticed closing D123. The gate that verified D123 and D1043 ran cold (its 1672 s miri stage includes the interpreter's builds), so it cannot stand in for the warm figure the table records; the next warm run re-measures it. `docs/src/contributing.md` |
 
 
-### Closed (672)
+### Closed (674)
 
 | ID | Subject |
 |---|---|
@@ -1079,6 +1079,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1047 | the ext4 formatter laid 128-byte inodes, so a volume TAIRiX made kept whole-second stamps that end in 2038 and no birth time, where the format's enlarged inode holds nanoseconds to 2446 |
 | D1049 | `lib/sync`'s `SeqLock` writer made its sequence odd with a `Release` increment, which orders only what precedes it, so a reader could copy a write's new words while sampling the same even sequence on both sides and return a payload two writes contributed to; every existing test and loom model used a one-word payload, which cannot tear, and the UB oracle found it in the wall clock's three-word state |
 | D1050 | an ext4 `mkdir` whose parent's link-count update failed reported the failure but left the new directory named |
+| D1052 | the debug image's kernel-diagnostics host lane was wired into `test` alone: no host clippy pass built its gated code, `lib/sync`'s `lockwatch` tests among it, and `ci-long`'s flake hunt, which claims `ci`'s checks, never ran it |
+| D1053 | `cargo xtask test --shuffle-seed N` started its first pass in a seed derived from `N`, not `N` itself, so the seed a step's label logs — the replay `docs/src/contributing.md` documents — never reproduced the order it named |
 
 ## Scope
 

@@ -2399,7 +2399,10 @@ impl Composition {
         }
         land
     }
+}
 
+#[cfg(all(test, feature = "scene-tests"))]
+impl Composition {
     /// Each structure laid unit by unit, in the order their prototypes were
     /// planned: the stage's, or the grow's once it has taken them.
     fn buildings(&self) -> impl Iterator<Item = &Building> {

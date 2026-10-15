@@ -136,7 +136,7 @@ impl Footprints {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "scene-tests"))]
 impl Footprints {
     /// How many circles are taken.
     pub(super) const fn len(&self) -> usize {

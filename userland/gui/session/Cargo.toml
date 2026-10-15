@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# The long host tests that prepare or trace a whole ray-traced scene, run by
+# `ci-long` and `cargo xtask test --scenes` rather than `ci`, as the ray
+# tracer's are.
+scene-tests = []
+
 [dependencies]
 # The shared latest-wins job desk (`tairix_util::defer`) the settings publisher
 # and the program-catalogue scan hand their work to, the restart pacer a

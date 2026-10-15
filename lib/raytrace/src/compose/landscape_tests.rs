@@ -4,12 +4,16 @@ use tairix_parallel::Threaded;
 use tairix_rng::NonCryptoRng;
 
 use super::*;
-use crate::compose::{Composed, Composition, Job, Progress, Setting, Stage};
+use crate::compose::{Composed, Stage};
 use crate::detail::Detail;
 use crate::heightfield::Heightfield;
 use crate::land::{Build, Fields, Plan, Wear};
-use crate::shape::{Aabb, Shape};
 use crate::terrain::{Landform, Terrain};
+#[cfg(feature = "scene-tests")]
+use crate::{
+    compose::{Composition, Job, Progress, Setting},
+    shape::{Aabb, Shape},
+};
 
 /// Every landscape's eye stands above the land and clear of the water, with
 /// somewhere to look.
@@ -394,6 +398,7 @@ fn an_eye_stands_on_the_lowest_ground_in_sight() {
 /// A sculpture stands on dry ground, in the frame, and nothing set out after
 /// it — trees, shrubs, stones, the grounds' own pieces — stands within the
 /// ground it claims.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_sculpture_stands_on_dry_ground_clear_of_every_other_piece() {
     let runner = Threaded::new(8);
@@ -526,6 +531,7 @@ fn a_valleys_eye_stands_on_dry_level_ground_off_its_road() {
 /// A sea of dunes from `seed`, built and sited as a composition builds it
 /// but kept once its scene would be set out: its stage, its land, where its
 /// eye stands, and the draws that would set its scene out.
+#[cfg(feature = "scene-tests")]
 fn dunes(seed: u64) -> Option<(Stage, Land, Vantage, Dice)> {
     let mut stage = Stage::new(Detail::Simple.densities())?;
     let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
@@ -554,6 +560,7 @@ fn dunes(seed: u64) -> Option<(Stage, Land, Vantage, Dice)> {
 
 /// A pyramid out on the dunes stands clear of the desert's road, as every
 /// piece stands off a way.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_deserts_pyramids_stand_clear_of_its_road() {
     let mut roads = 0;

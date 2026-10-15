@@ -1,10 +1,14 @@
 use super::*;
-use crate::compose::{Composition, Setting};
-use crate::detail::Detail;
+#[cfg(feature = "scene-tests")]
+use crate::{
+    compose::{Composition, Setting},
+    detail::Detail,
+};
 
 /// A meadow made for hay lies with its round bales: each in the cut field,
 /// resting on its ground or on the bale it is stacked on, a round bale on
 /// its side with its axis across the baler's way.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_cut_fields_bales_rest_on_its_cut_ground() {
     let mut composition =

@@ -38,6 +38,7 @@ fn a_frame_laid_along_a_way_runs_its_x_along_it() {
 /// A farmland's walls are built stone by stone of broken field stones where
 /// they run near the eye, and none is built beyond where a wall is only
 /// painted on the ground.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_farmlands_walls_are_built_of_field_stones_only_near_the_eye() {
     use crate::compose::{Composition, Setting};
@@ -175,6 +176,7 @@ fn a_snapped_rail_ends_torn_across_its_grain() {
 
 /// What a farmland lets go is laid in timber older than what it keeps:
 /// silvered further, and damper, so mossier.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_farmlands_neglected_timber_is_older_than_its_kept() {
     use crate::compose::{Composition, Setting};
@@ -209,6 +211,7 @@ fn a_farmlands_neglected_timber_is_older_than_its_kept() {
 /// A farmed land under snow banks it deep against one face of the walls and
 /// hedges standing across the wind and scours it from the other, where the
 /// open fields about them lie far shallower.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn snow_banks_against_a_farmlands_walls_and_hedges() {
     use crate::compose::{Composition, Setting};

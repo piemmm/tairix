@@ -2899,6 +2899,10 @@ while the session was still coming up, because the kernel reports *changes*.
 
 ## Tests
 
+The ray-traced screensaver's long tests, those that prepare or trace a whole
+scene, build only with the `scene-tests` feature, as the ray tracer's own do:
+`ci-long` and `cargo xtask test --scenes` run them, and `ci` only lints them.
+
 `cargo test -p tairix-desktop-session` covers: the default light start with an
 empty library and a closed popup; `set_theme` relaying the new metrics to the
 taskbar (observed through a custom theme with a distinctive corner radius);

@@ -577,50 +577,88 @@ struct TestOptions {
     run_qemu: bool,
     /// Run the wasm32 browser-headless vertical (`--wasm`).
     run_wasm: bool,
+    /// Run the scene tier as well (`--scenes`): the long host tests of whole
+    /// ray-traced scenes, compiled only under [`SCENE_TESTS_FEATURE`].
+    run_scenes: bool,
     /// Restrict the QEMU matrix to enrolments whose package name contains
     /// this substring (`--only`, requires `--qemu`) — the debugging filter
     /// for iterating on one vertical. The host `cargo test` stage is
     /// skipped so a `--only` run exercises exactly the named guests; it is
     /// never a substitute for the whole matrix.
     only: Option<String>,
-    /// Randomise each host pass's test start order (`--shuffle`), so a suite
-    /// that passes only in the harness's default alphabetical order fails the
-    /// gate instead of hiding until an unrelated change reshuffles it
-    /// (`plans/OPEN-DEFECTS.md` D90).
-    shuffle: bool,
-    /// Base seed the per-pass order is derived from (`--shuffle-seed N`,
-    /// which implies `--shuffle`). `None` draws a fresh entropy seed per
-    /// pass; the seed is always logged, so a reported failure replays.
-    shuffle_seed: Option<u64>,
+    /// The order each host pass starts its tests in.
+    order: PassOrder,
     /// Remaining arguments forwarded verbatim to `cargo test`.
     forward: Vec<OsString>,
 }
 
+/// The order a host pass starts its tests in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassOrder {
+    /// The harness's own, alphabetical.
+    Alphabetical,
+    /// Randomised (`--shuffle`), so a suite that passes only in the harness's
+    /// alphabetical order fails the gate instead of hiding until an unrelated
+    /// change reshuffles it (`plans/OPEN-DEFECTS.md` D90): from a pinned seed
+    /// (`--shuffle-seed N`) or, with none, a fresh one each pass.
+    Shuffled(Option<u64>),
+}
+
+impl PassOrder {
+    /// The order seed of pass `pass`, counted from one, which its label logs;
+    /// `None` keeps the harness's order. A pinned seed is the first pass's own,
+    /// so any pass a label names replays from its seed alone, and each later
+    /// pass derives its own from it.
+    fn seed(self, pass: u64) -> Option<u64> {
+        match self {
+            Self::Alphabetical => None,
+            Self::Shuffled(Some(pinned)) if pass <= 1 => Some(pinned),
+            Self::Shuffled(base) => Some(seed::job_seed(
+                base,
+                usize::try_from(pass).unwrap_or(usize::MAX),
+            )),
+        }
+    }
+}
+
+impl TestOptions {
+    /// The host lanes a pass runs after the workspace's: every one, less the
+    /// scene tier unless it was asked for.
+    fn host_lanes(&self) -> impl Iterator<Item = HostLane> + '_ {
+        HostLane::ALL
+            .into_iter()
+            .filter(|lane| self.run_scenes || *lane != HostLane::Scenes)
+    }
+}
+
 /// Parse the `test` subcommand arguments.
 ///
-/// Recognises `--qemu`, `--wasm`, `--count N` (alias `--iterations N`),
-/// `--soak`, `--secs N`, `--shuffle`, and `--shuffle-seed N`; everything else
-/// is forwarded verbatim to `cargo test`. `--count` rejects a missing,
-/// non-numeric, or zero value rather than silently defaulting, so a typo can
-/// never quietly collapse the matrix to a single run. A fixed count and a wall-clock budget are
-/// mutually exclusive: combining `--count` with `--soak`/`--secs` is an
-/// error rather than a silent precedence rule.
+/// Recognises `--qemu`, `--wasm`, `--scenes`, `--count N` (alias
+/// `--iterations N`), `--soak`, `--secs N`, `--shuffle`, and
+/// `--shuffle-seed N`; everything else is forwarded verbatim to `cargo test`.
+/// `--count` rejects a missing, non-numeric, or zero value rather than
+/// silently defaulting, so a typo can never quietly collapse the matrix to a
+/// single run. A fixed count and a wall-clock budget are mutually exclusive:
+/// combining `--count` with `--soak`/`--secs` is an error rather than a silent
+/// precedence rule.
 fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
     let mut forward = Vec::with_capacity(args.len());
     let mut run_qemu = false;
     let mut run_wasm = false;
+    let mut run_scenes = false;
     let mut count: Option<u32> = None;
     let mut soak = false;
     let mut secs: Option<u64> = None;
     let mut only: Option<String> = None;
-    let mut shuffle = false;
-    let mut shuffle_seed: Option<u64> = None;
+    let mut order = PassOrder::Alphabetical;
     let mut iter = args.iter();
     while let Some(a) = iter.next() {
         if a == "--qemu" {
             run_qemu = true;
         } else if a == "--wasm" {
             run_wasm = true;
+        } else if a == "--scenes" {
+            run_scenes = true;
         } else if a == "--soak" {
             soak = true;
         } else if a == "--only" {
@@ -648,13 +686,14 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
                 .ok_or_else(|| "test: `--secs` requires an integer argument".to_string())?;
             secs = Some(parse_secs(value)?);
         } else if a == "--shuffle" {
-            shuffle = true;
+            if order == PassOrder::Alphabetical {
+                order = PassOrder::Shuffled(None);
+            }
         } else if a == "--shuffle-seed" {
             let value = iter
                 .next()
                 .ok_or_else(|| "test: `--shuffle-seed` requires a u64 argument".to_string())?;
-            shuffle_seed = Some(parse_shuffle_seed(value)?);
-            shuffle = true;
+            order = PassOrder::Shuffled(Some(parse_shuffle_seed(value)?));
         } else {
             forward.push(a.clone());
         }
@@ -680,6 +719,12 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
     if only.is_some() && !run_qemu {
         return Err("test: `--only` requires `--qemu`".to_string());
     }
+    if only.is_some() && run_scenes {
+        return Err(
+            "test: `--scenes` cannot be combined with `--only`, which skips the host stage"
+                .to_string(),
+        );
+    }
     let budget = match duration {
         Some(d) => RunBudget::Duration(d),
         None => RunBudget::Count(count.unwrap_or(1)),
@@ -689,9 +734,9 @@ fn parse_test_options(args: &[OsString]) -> Result<TestOptions, String> {
         budget,
         run_qemu,
         run_wasm,
+        run_scenes,
         only,
-        shuffle,
-        shuffle_seed,
+        order,
         forward,
     })
 }
@@ -747,6 +792,9 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     //
     // `--shuffle` randomises each host pass's start order; see
     // [`host_order_args`] for why the gate wants it.
+    //
+    // `--scenes` adds the scene tier, which `ci` leaves to `ci-long`: the long
+    // tests of whole ray-traced scenes cost more with every detail they gain.
     let opts = parse_test_options(args)?;
 
     // Build the opt-in matrices once, before any repeated passes, so a soak
@@ -777,12 +825,7 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             let mut cmd = ctx.cargo();
             cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
             cmd.args(&opts.forward);
-            let order = opts.shuffle.then(|| {
-                seed::job_seed(
-                    opts.shuffle_seed,
-                    usize::try_from(pass).unwrap_or(usize::MAX),
-                )
-            });
+            let order = opts.order.seed(pass);
             if let Some(order) = order {
                 cmd.args(host_order_args(&opts.forward, order));
             }
@@ -793,10 +836,14 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
                 (false, None) => "test".to_string(),
             };
             ctx.run(&label, cmd)?;
-            ctx.run(
-                &format!("{label} (debug-image kernel diagnostics)"),
-                diagnostics_test(ctx, &opts.forward, order)?,
-            )?;
+            for lane in opts.host_lanes() {
+                let mut cmd = lane.cargo(ctx, "test")?;
+                cmd.args(&opts.forward);
+                if let Some(order) = order {
+                    cmd.args(host_order_args(&opts.forward, order));
+                }
+                ctx.run_with_timeout(&format!("{label} ({})", lane.label()), cmd, lane.budget())?;
+            }
         }
 
         if opts.run_qemu {
@@ -809,35 +856,94 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     })
 }
 
-/// The host tests of every package the debug image's kernel diagnostics turn
-/// a feature on in, built with exactly those features: the workspace pass
-/// builds none of them, so without this lane their gated tests never run.
-fn diagnostics_test(
-    ctx: &Context,
-    forward: &[OsString],
-    order: Option<u64>,
-) -> Result<std::process::Command, String> {
-    let features: Vec<&str> = KERNEL_DIAGNOSTICS_FEATURES.split(',').collect();
-    let reach = feature_lane::reach(&ctx.workspace_root, KERNEL_PACKAGE, &features)?;
-    let mut cmd = ctx.cargo();
-    cmd.args(["test", "--all-targets", "--locked"]);
-    for package in reach.keys() {
-        cmd.args(["-p", package]);
+/// A host configuration the workspace pass builds none of: packages whose
+/// gated code compiles only with the features the lane turns on in them, so
+/// without the lane their gated tests would never run and never be linted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostLane {
+    /// Every package the debug image's kernel diagnostics turn a feature on in.
+    Diagnostics,
+    /// Every package declaring [`SCENE_TESTS_FEATURE`]. `ci` lints it but
+    /// does not run it; `ci-long` and `cargo xtask test --scenes` do.
+    Scenes,
+}
+
+impl HostLane {
+    const ALL: [Self; 2] = [Self::Diagnostics, Self::Scenes];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Diagnostics => "debug-image kernel diagnostics",
+            Self::Scenes => "scene tier",
+        }
     }
-    let enabled: Vec<String> = reach
-        .iter()
-        .flat_map(|(package, features)| {
-            features
-                .iter()
-                .map(move |feature| format!("{package}/{feature}"))
-        })
-        .collect();
-    cmd.arg("--features").arg(enabled.join(","));
-    cmd.args(forward);
-    if let Some(order) = order {
-        cmd.args(host_order_args(forward, order));
+
+    /// Whether one run of the lane fills the machine on its own, every core
+    /// and at the scene tier's peak some twenty gigabytes: such a run gets the
+    /// long budget, and its replicas run one at a time.
+    const fn fills_the_machine(self) -> bool {
+        matches!(self, Self::Scenes)
     }
-    Ok(cmd)
+
+    /// The wall-clock budget one run of the lane gets.
+    const fn budget(self) -> Duration {
+        if self.fills_the_machine() {
+            crate::LONG_BUILD_COMMAND_TIMEOUT
+        } else {
+            crate::DEFAULT_COMMAND_TIMEOUT
+        }
+    }
+
+    /// The lane's packages, each with the features the lane turns on there.
+    fn reach(self, ctx: &Context) -> Result<feature_lane::Reach, String> {
+        let reach = match self {
+            Self::Diagnostics => {
+                let features: Vec<&str> = KERNEL_DIAGNOSTICS_FEATURES.split(',').collect();
+                feature_lane::reach(&ctx.workspace_root, KERNEL_PACKAGE, &features)?
+            }
+            Self::Scenes => feature_lane::declared(&ctx.workspace_root, SCENE_TESTS_FEATURE)?,
+        };
+        // An empty selection would read as the whole workspace to cargo.
+        if reach.is_empty() {
+            return Err(format!("the {} lane selects no package", self.label()));
+        }
+        Ok(reach)
+    }
+
+    /// The `-p` and `--features` arguments selecting the lane's packages with
+    /// its features on.
+    fn selection(self, ctx: &Context) -> Result<Vec<OsString>, String> {
+        let reach = self.reach(ctx)?;
+        let mut args = Vec::with_capacity(2 * reach.len() + 2);
+        for package in reach.keys() {
+            args.push(OsString::from("-p"));
+            args.push(OsString::from(package));
+        }
+        let enabled: Vec<String> = reach
+            .iter()
+            .flat_map(|(package, features)| {
+                features
+                    .iter()
+                    .map(move |feature| format!("{package}/{feature}"))
+            })
+            .collect();
+        args.push(OsString::from("--features"));
+        args.push(OsString::from(enabled.join(",")));
+        Ok(args)
+    }
+
+    /// `cargo <subcommand> --all-targets --locked` over a lane's `selection`.
+    fn command(ctx: &Context, subcommand: &str, selection: &[OsString]) -> std::process::Command {
+        let mut cmd = ctx.cargo();
+        cmd.args([subcommand, "--all-targets", "--locked"]);
+        cmd.args(selection);
+        cmd
+    }
+
+    /// [`Self::command`] over this lane's own selection.
+    fn cargo(self, ctx: &Context, subcommand: &str) -> Result<std::process::Command, String> {
+        Ok(Self::command(ctx, subcommand, &self.selection(ctx)?))
+    }
 }
 
 /// The libtest arguments that start a host pass in `seed`'s order.
@@ -864,26 +970,40 @@ pub(super) fn host_order_args(forward: &[OsString], seed: u64) -> Vec<OsString> 
     args
 }
 
-/// Lint the workspace for the host, then once per freestanding Tier-1 target.
+/// Lint the workspace for the host, then each [`HostLane`], then once per
+/// freestanding Tier-1 target.
 ///
 /// The host pass alone lints almost none of the shipped code: a kernel,
 /// driver, service or application body is compiled only when its crate is
 /// built for a bare-metal triple, so the target passes are what make this gate
-/// cover the system rather than its host stubs (see [`target_clippy`]).
+/// cover the system rather than its host stubs (see [`target_clippy`]). A
+/// lane's gated code is built in no other host configuration.
 fn run_clippy(ctx: &Context, args: &[OsString]) -> Result<(), String> {
-    let mut cmd = ctx.cargo();
-    cmd.args([
-        "clippy",
-        "--workspace",
-        "--all-targets",
-        "--locked",
-        "--",
-        "-D",
-        "warnings",
-    ]);
-    cmd.args(args);
-    ctx.run("clippy (host)", cmd)?;
+    for (label, cmd) in host_clippy(ctx, args)? {
+        ctx.run(&label, cmd)?;
+    }
     target_clippy::run(ctx, args)
+}
+
+/// The host clippy passes, labelled: the workspace, then each [`HostLane`].
+fn host_clippy(
+    ctx: &Context,
+    args: &[OsString],
+) -> Result<Vec<(String, std::process::Command)>, String> {
+    let mut workspace = ctx.cargo();
+    workspace.args(["clippy", "--workspace", "--all-targets", "--locked"]);
+    let mut passes = vec![("clippy (host)".to_string(), workspace)];
+    for lane in HostLane::ALL {
+        passes.push((
+            format!("clippy (host, {})", lane.label()),
+            lane.cargo(ctx, "clippy")?,
+        ));
+    }
+    for (_, cmd) in &mut passes {
+        cmd.args(["--", "-D", "warnings"]);
+        cmd.args(args);
+    }
+    Ok(passes)
 }
 
 fn run_fmt(ctx: &Context, args: &[OsString]) -> Result<(), String> {
@@ -1270,6 +1390,10 @@ const CI_STAGES: &[&str] = &[
     "miri",
 ];
 
+/// The `test` arguments `ci` passes: the QEMU matrix, in a fresh order, and
+/// no scene tier.
+const CI_TEST_ARGS: [&str; 2] = ["--qemu", "--shuffle"];
+
 fn run_ci(ctx: &Context) -> Result<(), String> {
     // The pipeline order is deliberate and evidence-based: every stage is
     // cheaper than the one after it, so a failing PR fails as early as its
@@ -1343,10 +1467,7 @@ fn run_ci(ctx: &Context) -> Result<(), String> {
         // order-dependent suite fails the gate rather than passing on the
         // harness's alphabetical accident; the seed is in the step's label.
         ("test --qemu", &|| {
-            run_test(
-                ctx,
-                &[OsString::from("--qemu"), OsString::from("--shuffle")],
-            )
+            run_test(ctx, &CI_TEST_ARGS.map(OsString::from))
         }),
         // The undefined-behaviour oracle over the crates with a hand-written
         // `unsafe` core. A green test suite says what the code computes; only an
@@ -1474,8 +1595,7 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         ));
     }
     if args.iter().any(|a| a == "--dry-run") {
-        ci_long::print_plan(ctx);
-        return Ok(());
+        return ci_long::print_plan(ctx);
     }
 
     // Deterministic gates first, once, so a non-conforming tree fails fast
@@ -1501,7 +1621,7 @@ fn run_ci_long(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // proptest models, each run REPS× sequentially then REPS× concurrently.
     // This subsumes `ci`'s single-pass test, crypto-constant-time, fuzz, and
     // proptest stages.
-    ci_long::flake_hunt(ci_long::all_units(ctx, ci_long::REPS), ci_long::REPS)?;
+    ci_long::flake_hunt(ci_long::all_units(ctx, ci_long::REPS)?, ci_long::REPS)?;
 
     // The undefined-behaviour oracle is a deterministic gate, not a flake
     // candidate, so it runs once here exactly as in `ci`.
@@ -1743,6 +1863,10 @@ pub(crate) const KERNEL_DIAGNOSTICS_FEATURES: &str = "watchdog-diagnostics";
 /// The package the kernel image is built from, where its diagnostics are
 /// switched on.
 pub(crate) const KERNEL_PACKAGE: &str = "tairix-kernel";
+
+/// The feature compiling a package's long host tests of whole ray-traced
+/// scenes, whose cost grows with every detail the scenes gain.
+pub(crate) const SCENE_TESTS_FEATURE: &str = "scene-tests";
 
 /// The extra `cargo` arguments that turn [`KERNEL_DIAGNOSTICS_FEATURES`] on
 /// for the **non-shippable** `debug` image and leave them fully compiled out
@@ -2303,10 +2427,11 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, dir_size, host_order_args, image_drivers, kernel_build_profile,
-        kernel_diag_feature_args, parse_image_args, parse_run_args, parse_test_options,
-        run_session_spec, Command, Path, RunBudget, CI_STAGES, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
-        PLATFORM_IMAGE_DRIVER_STORE, TEST_SOAK_SECS,
+        cargo_subcommand_available, dir_size, host_clippy, host_order_args, image_drivers,
+        kernel_build_profile, kernel_diag_feature_args, parse_image_args, parse_run_args,
+        parse_test_options, run_session_spec, Command, HostLane, PassOrder, Path, RunBudget,
+        CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, PLATFORM_IMAGE_DRIVER_STORE,
+        TEST_SOAK_SECS,
     };
     use crate::Context;
     use std::ffi::OsString;
@@ -2612,9 +2737,96 @@ mod tests {
         assert_eq!(opts.budget, RunBudget::Count(1));
         assert!(!opts.run_qemu);
         assert!(!opts.run_wasm);
-        assert!(!opts.shuffle);
-        assert_eq!(opts.shuffle_seed, None);
+        assert!(!opts.run_scenes);
+        assert_eq!(opts.order, PassOrder::Alphabetical);
         assert!(opts.forward.is_empty());
+    }
+
+    #[test]
+    fn scenes_flag_adds_the_scene_tier() {
+        let opts = parse_test_options(&argv(&["--scenes", "--shuffle"])).expect("parse");
+        assert!(opts.run_scenes);
+        assert!(opts.forward.is_empty(), "the flag is not forwarded");
+    }
+
+    /// `--only` skips the host stage, so a scene tier asked for beside it
+    /// would silently not run.
+    #[test]
+    fn scenes_are_refused_beside_only() {
+        let err = parse_test_options(&argv(&["--qemu", "--only", "audio", "--scenes"]))
+            .expect_err("conflict rejected");
+        assert!(err.contains("`--scenes`"), "unexpected error: {err}");
+    }
+
+    /// `ci` runs every host lane but the scene tier, which `--scenes` adds.
+    #[test]
+    fn ci_runs_every_host_lane_but_the_scene_tier() {
+        let ci = parse_test_options(&argv(&CI_TEST_ARGS)).expect("ci's arguments parse");
+        assert!(ci.run_qemu);
+        assert_eq!(ci.order, PassOrder::Shuffled(None));
+        assert_eq!(ci.host_lanes().collect::<Vec<_>>(), [HostLane::Diagnostics]);
+        let scenes = parse_test_options(&argv(&["--scenes"])).expect("parse");
+        assert_eq!(scenes.host_lanes().collect::<Vec<_>>(), HostLane::ALL);
+    }
+
+    /// Host clippy lints the workspace and then every lane, the scene tier
+    /// included: a lane's gated code builds in no other host configuration.
+    #[test]
+    fn host_clippy_lints_the_workspace_then_every_lane() {
+        let ctx = Context::discover().expect("workspace context");
+        let passes = host_clippy(&ctx, &[]).expect("the passes");
+        assert_eq!(passes.len(), 1 + HostLane::ALL.len());
+        for lane in HostLane::ALL {
+            assert!(
+                passes.iter().any(|(label, _)| label.contains(lane.label())),
+                "{lane:?} is not linted"
+            );
+        }
+        for (label, cmd) in &passes {
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                args.ends_with(&["--", "-D", "warnings"].map(String::from)),
+                "{label}"
+            );
+        }
+    }
+
+    /// Every host lane selects workspace packages, each with a feature it
+    /// turns on, so neither its test pass nor its clippy pass can widen into
+    /// the whole workspace or build nothing gated.
+    #[test]
+    fn every_host_lane_selects_its_packages_with_their_features() {
+        let ctx = Context::discover().expect("workspace context");
+        for lane in HostLane::ALL {
+            let cmd = lane.cargo(&ctx, "clippy").expect("the lane's packages");
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args[..3], ["clippy", "--all-targets", "--locked"]);
+            let features = args
+                .iter()
+                .skip_while(|arg| *arg != "--features")
+                .nth(1)
+                .expect("the lane's features");
+            let packages: Vec<&String> = args
+                .windows(2)
+                .filter(|pair| pair[0] == "-p")
+                .map(|pair| &pair[1])
+                .collect();
+            assert!(!packages.is_empty(), "{lane:?} selects no package");
+            for package in packages {
+                assert!(
+                    features
+                        .split(',')
+                        .any(|feature| feature.starts_with(&format!("{package}/"))),
+                    "{lane:?}: {package} is selected with no feature of its own"
+                );
+            }
+        }
     }
 
     /// A pinned order seed selects shuffling too, so `--shuffle-seed N` alone
@@ -2622,16 +2834,37 @@ mod tests {
     #[test]
     fn a_pinned_order_seed_implies_shuffling() {
         let opts = parse_test_options(&argv(&["--shuffle-seed", "1234"])).expect("parse");
-        assert!(opts.shuffle);
-        assert_eq!(opts.shuffle_seed, Some(1234));
+        assert_eq!(opts.order, PassOrder::Shuffled(Some(1234)));
         assert!(opts.forward.is_empty(), "the flags are not forwarded");
+        let after =
+            parse_test_options(&argv(&["--shuffle-seed", "1234", "--shuffle"])).expect("parse");
+        assert_eq!(after.order, opts.order, "a later `--shuffle` keeps the pin");
     }
 
     #[test]
     fn shuffle_alone_leaves_the_seed_fresh_per_pass() {
         let opts = parse_test_options(&argv(&["--shuffle"])).expect("parse");
-        assert!(opts.shuffle);
-        assert_eq!(opts.shuffle_seed, None);
+        assert_eq!(opts.order, PassOrder::Shuffled(None));
+    }
+
+    /// A seed read from a pass's label, pinned, starts the first pass in that
+    /// very order, and each later pass in one of its own derived from it.
+    #[test]
+    fn a_logged_order_seed_replays_the_pass_it_names() {
+        let logged = 1_788_601_047_185_464_875;
+        let order = parse_test_options(&argv(&["--shuffle-seed", "1788601047185464875"]))
+            .expect("parse")
+            .order;
+        assert_eq!(order.seed(1), Some(logged));
+        let second = order.seed(2).expect("a shuffled pass");
+        assert_ne!(second, logged);
+        assert_eq!(
+            order.seed(2),
+            Some(second),
+            "a derived seed is reproducible"
+        );
+        assert_eq!(PassOrder::Alphabetical.seed(1), None);
+        assert!(PassOrder::Shuffled(None).seed(1).is_some());
     }
 
     #[test]

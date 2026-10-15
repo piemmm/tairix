@@ -3,9 +3,10 @@ extern crate std;
 use alloc::vec::Vec;
 
 use super::*;
-use crate::compose::{planted_at, Composition, Job, Progress, Recipe, Setting, Stage};
+use crate::compose::{planted_at, Composition, Job, Progress, Setting, Stage};
 use crate::detail::Detail;
-use crate::shape::Shape;
+#[cfg(feature = "scene-tests")]
+use crate::{compose::Recipe, shape::Shape};
 
 const EYE: Vantage = Vantage {
     eye: Vec3::new(0.0, 1.7, 0.0),
@@ -162,10 +163,12 @@ fn places_are_sown_all_about_the_eye_near_it_and_across_the_view_beyond() {
 
 /// A composition of `setting` under `seed` for a picture `size`, its jobs run
 /// until its woods stand and it is seen.
+#[cfg(feature = "scene-tests")]
 fn planted(setting: Setting, seed: u64, size: (u32, u32)) -> Composition {
     planted_at(setting, seed, size, Detail::Maximum)
 }
 
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_forest_stands_thousands_of_trees_none_in_the_way_of_another() {
     let composition = planted(Setting::Forest, 1, (640, 360));
@@ -289,6 +292,7 @@ fn a_ranking_takes_its_places_tallest_first_as_one_sort_would() {
 }
 
 /// The trees a composition stands: where each trunk stands.
+#[cfg(feature = "scene-tests")]
 fn trunks(composition: &Composition) -> Vec<Vec3> {
     let stage = &composition.stage;
     stage
@@ -309,6 +313,7 @@ fn trunks(composition: &Composition) -> Vec<Vec3> {
         .collect()
 }
 
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_seed_shows_the_same_place_at_either_detail() {
     let mut laid = 0;
@@ -392,6 +397,7 @@ fn a_seed_shows_the_same_place_at_either_detail() {
     assert!(laid > 0, "a sward was laid to compare");
 }
 
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_simple_wood_stands_fewer_trees_nearer_the_eye_and_keeps_to_its_room() {
     let [simple, maximum] =
@@ -446,8 +452,10 @@ fn a_strip_claimed_along_a_line_leaves_no_gap_at_its_edges() {
 }
 
 /// A bridge's deck: its ends, and the road's width across it.
+#[cfg(feature = "scene-tests")]
 type Deck = ((f64, f64), (f64, f64), f64);
 
+#[cfg(feature = "scene-tests")]
 #[test]
 fn no_tree_stands_on_a_bridges_deck() {
     let mut crossed = 0;
@@ -542,6 +550,7 @@ fn a_streams_growing_never_reports_less_done() {
     assert!(steps > 10, "grown in {steps} steps");
 }
 
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_wood_far_off_stands_as_thickly_as_the_trees_stood_one_by_one_before_it() {
     let mut composition = planted(Setting::Forest, 1, (640, 360));

@@ -351,6 +351,7 @@ fn traced_alone(seed: u64, scenes: usize) -> Vec<Vec<Pixel>> {
 /// on the production loop across `runner` while a loop collects on its own
 /// time: each scene's picture, and the spacing of every step it showed, in
 /// the order the loop collected them.
+#[cfg(feature = "scene-tests")]
 fn passed_through_the_desk(
     seed: u64,
     runner: &'static dyn tairix_parallel::JobRunner,
@@ -406,6 +407,7 @@ fn passed_through_the_desk(
 /// once as each is readied — every step arriving once, a pass's steps never
 /// before every step of the passes before it, and the thread leaves once the
 /// link is dropped; on one core or across several, the same pictures.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
     static ACROSS: tairix_parallel::Threaded = tairix_parallel::Threaded::new(4);

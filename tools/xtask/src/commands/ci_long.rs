@@ -12,8 +12,9 @@
 //! # What is repeated, and what is not
 //!
 //! Only stages that actually *execute test cases* are flake-hunted: the host
-//! `cargo test` matrix, the release-profile crypto constant-time tests, the
-//! QEMU integration tests, the fuzz harnesses, and the proptest models. The
+//! `cargo test` matrix, the scene tier `ci` leaves out, the release-profile
+//! crypto constant-time tests, the QEMU integration tests, the fuzz harnesses,
+//! and the proptest models. The
 //! deterministic gates `ci` also runs — `fmt`, `clippy`, `deps-check`,
 //! `cfg-check`, `help-lint`, `docs-check`, `cargo deny`, `supply-chain`,
 //! `model-check`
@@ -36,6 +37,9 @@
 //! * host / crypto / fuzz / proptest replicas are deadline-free host
 //!   processes — a slow run merely finishes later, it does not fail — so all
 //!   [`REPS`] replicas run at once (budget = `reps`).
+//! * a host lane one run of which fills the machine, the scene tier, runs its
+//!   replicas one at a time: twenty at once would only exhaust the host's
+//!   memory.
 //! * QEMU replicas are weighted exactly as [`super::qemu_tests::run_once`]
 //!   does — a uniprocessor guest charges two units, an SMP guest the whole
 //!   budget (so it runs alone) — against a budget of one third of the host's
@@ -123,46 +127,65 @@ pub(crate) fn flake_hunt(units: Vec<FlakeUnit<'_>>, reps: u32) -> Result<(), Str
 /// The ordered set of tests the flake hunt drives: the host test matrix, the
 /// QEMU integration tests, the fuzz harnesses, and the proptest models. The
 /// QEMU binaries must already be built ([`super::qemu_tests::build_all`]).
-pub(crate) fn all_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
-    let mut units = host_units(ctx, reps);
+///
+/// # Errors
+///
+/// A host lane `ci` runs whose packages cannot be read from the manifests.
+pub(crate) fn all_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, String> {
+    let mut units = host_units(ctx, reps)?;
     units.extend(qemu_units(ctx));
     units.extend(fuzz_units(ctx, reps));
     units.extend(proptest_units(ctx, reps));
-    units
+    Ok(units)
 }
 
-/// The host `cargo test` matrix and the release-profile crypto constant-time
-/// tests — two distinct build profiles, so two units. Deadline-free, so every
-/// replica runs at once.
-fn host_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
+/// The host `cargo test` matrix — the workspace pass and every host lane, the
+/// scene tier `ci` leaves out among them — and the release-profile crypto
+/// constant-time tests. Deadline-free, so every replica runs at once, but for
+/// a lane that fills the machine.
+fn host_units(ctx: &Context, reps: u32) -> Result<Vec<FlakeUnit<'_>>, String> {
     let budget = reps as usize;
-    vec![
-        FlakeUnit::new("host cargo test", budget, move |replica| {
-            let mut cmd = ctx.cargo();
-            cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
-            // Each replica starts in an order of its own, so the hunt covers
-            // test *ordering* as well as timing: a suite that only passes in
-            // the harness's alphabetical order is a flake like any other. The
-            // seed is in the replica's label, so a hit replays.
+    let mut units = vec![FlakeUnit::new("host cargo test", budget, move |replica| {
+        let mut cmd = ctx.cargo();
+        cmd.args(["test", "--workspace", "--all-targets", "--locked"]);
+        // Each replica starts in an order of its own, so the hunt covers
+        // test *ordering* as well as timing: a suite that only passes in
+        // the harness's alphabetical order is a flake like any other. The
+        // seed is in the replica's label, so a hit replays.
+        let order = seed::job_seed(None, replica);
+        cmd.args(super::host_order_args(&[], order));
+        // This one job compiles *and* runs every host-testable crate in
+        // the workspace, so from a cold `target/` it legitimately runs far
+        // longer than an ordinary step. It gets the long budget so a slow
+        // machine is never mistaken for a hung one, while a genuine hang
+        // is still stopped rather than left for an operator to notice.
+        Job::new(format!("host cargo test (order seed {order})"), cmd)
+            .with_budget(crate::LONG_BUILD_COMMAND_TIMEOUT)
+    })];
+    for lane in super::HostLane::ALL {
+        let selection = lane.selection(ctx)?;
+        let label = format!("host cargo test ({})", lane.label());
+        let concurrency = if lane.fills_the_machine() { 1 } else { budget };
+        units.push(FlakeUnit::new(label.clone(), concurrency, move |replica| {
+            let mut cmd = super::HostLane::command(ctx, "test", &selection);
             let order = seed::job_seed(None, replica);
             cmd.args(super::host_order_args(&[], order));
-            // This one job compiles *and* runs every host-testable crate in
-            // the workspace, so from a cold `target/` it legitimately runs far
-            // longer than an ordinary step. It gets the long budget so a slow
-            // machine is never mistaken for a hung one, while a genuine hang
-            // is still stopped rather than left for an operator to notice.
-            Job::new(format!("host cargo test (order seed {order})"), cmd)
-                .with_budget(crate::LONG_BUILD_COMMAND_TIMEOUT)
-        }),
-        // The constant-time comparison guarantee can be broken by the
-        // optimiser, so this runs the secret-handling tests at `-C
-        // opt-level=3`, mirroring `ci`'s crypto-constant-time gate.
-        FlakeUnit::new("crypto constant-time (release)", budget, move |_| {
+            Job::new(format!("{label} (order seed {order})"), cmd).with_budget(lane.budget())
+        }));
+    }
+    // The constant-time comparison guarantee can be broken by the
+    // optimiser, so this runs the secret-handling tests at `-C
+    // opt-level=3`, mirroring `ci`'s crypto-constant-time gate.
+    units.push(FlakeUnit::new(
+        "crypto constant-time (release)",
+        budget,
+        move |_| {
             let mut cmd = ctx.cargo();
             cmd.args(["test", "--release", "--locked", "-p", "tairix-crypto"]);
             Job::new("crypto constant-time (release)", cmd)
-        }),
-    ]
+        },
+    ));
+    Ok(units)
 }
 
 /// One unit per QEMU integration test, using the same host-capacity admission
@@ -234,16 +257,26 @@ fn proptest_units(ctx: &Context, reps: u32) -> Vec<FlakeUnit<'_>> {
 /// Print the planned hunt without running anything (`ci-long --dry-run`): the
 /// test set and the per-test repetition counts, so an operator can see the
 /// shape and cost of a run before committing a long-runner to it.
-pub(crate) fn print_plan(ctx: &Context) {
-    let units = all_units(ctx, REPS);
+///
+/// # Errors
+///
+/// As [`all_units`].
+pub(crate) fn print_plan(ctx: &Context) -> Result<(), String> {
+    let units = all_units(ctx, REPS)?;
     eprintln!(
         "ci-long plan: {} test(s), each run {REPS}x sequential then {REPS}x concurrent \
          (deterministic gates run once):",
         units.len()
     );
     for unit in &units {
-        eprintln!("  - {}", unit.label);
+        let alone = if unit.concurrency_budget == 1 {
+            " (its concurrent replicas one at a time)"
+        } else {
+            ""
+        };
+        eprintln!("  - {}{alone}", unit.label);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -251,17 +284,8 @@ mod tests {
     use super::{all_units, flake_hunt, FlakeUnit, REPS};
     use crate::commands::parallel::Job;
     use crate::Context;
-    use std::ffi::OsString;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-
-    fn test_ctx() -> Context {
-        Context {
-            workspace_root: PathBuf::from("/nonexistent-workspace"),
-            cargo: OsString::from("cargo"),
-        }
-    }
 
     /// A counting unit whose factory records how many jobs it built and, via
     /// each job's own closure, how many actually ran.
@@ -325,12 +349,27 @@ mod tests {
         assert_eq!(ran.load(Ordering::SeqCst), 2);
     }
 
+    /// Every test source is hunted: each host lane, the scene tier `ci` leaves
+    /// out among them, its replicas one at a time because one run fills the
+    /// machine.
     #[test]
     fn all_units_covers_every_test_source() {
-        let ctx = test_ctx();
-        let units = all_units(&ctx, 2);
+        let ctx = Context::discover().expect("workspace context");
+        let units = all_units(&ctx, 2).expect("the units");
         let labels: Vec<&str> = units.iter().map(|u| u.label.as_str()).collect();
         assert!(labels.contains(&"host cargo test"));
+        assert!(labels.contains(&"host cargo test (debug-image kernel diagnostics)"));
+        let budget = |label: &str| {
+            units
+                .iter()
+                .find(|u| u.label == label)
+                .map(|u| u.concurrency_budget)
+        };
+        assert_eq!(budget("host cargo test (scene tier)"), Some(1));
+        assert_eq!(
+            budget("host cargo test (debug-image kernel diagnostics)"),
+            Some(2)
+        );
         assert!(labels.contains(&"crypto constant-time (release)"));
         // Every fuzz harness and proptest model is its own unit.
         assert_eq!(

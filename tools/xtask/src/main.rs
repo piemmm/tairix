@@ -32,9 +32,12 @@
 //!   `--shuffle` starts each host pass in a randomised order (the seed is in
 //!   the step's label; `--shuffle-seed N` pins it) so a suite that passes
 //!   only in the harness's alphabetical order fails instead of hiding — `ci`
-//!   and `ci-long` both run the host tests this way
+//!   and `ci-long` both run the host tests this way. `--scenes` adds the
+//!   scene tier, the long whole-scene ray-tracing tests built only under the
+//!   `scene-tests` feature, which `ci` leaves out and `ci-long` runs
 //! - `clippy`       — `-D warnings` for the host
-//!   (`--workspace --all-targets`) **and once per Tier-1 target**: the three
+//!   (`--workspace --all-targets`), each host feature lane (the debug image's
+//!   kernel diagnostics, the scene tier) **and once per Tier-1 target**: the three
 //!   freestanding triples over the cross-compiled product tree, each QEMU
 //!   triple over its guests (which lints the payload programs they embed), and
 //!   `wasm32` over the browser verticals. A host-only pass lints none of the
@@ -113,12 +116,14 @@
 //!   `cargo deny check`, `fuzz --quick`, `proptest --quick`, `miri`,
 //!   the release crypto constant-time tests, and the image gate
 //! - `ci-long`      — the same checks as `ci`, but for a dedicated long-lived
-//!   runner: every test-executing stage (the host test matrix, the release
-//!   crypto constant-time tests, the QEMU integration tests, the fuzz
-//!   harnesses, and the proptest models) is run 20× sequentially and then 20×
-//!   concurrently, per test, to force out timing- and contention-dependent
-//!   flakes; the deterministic gates run once. `--dry-run` prints the plan
-//!   without running anything
+//!   runner: every test-executing stage (the host test matrix, the scene tier
+//!   `ci` leaves out, the release crypto constant-time tests, the QEMU
+//!   integration tests, the fuzz harnesses, and the proptest models) is run
+//!   20× sequentially and then 20× concurrently, per test, to force out
+//!   timing- and contention-dependent flakes — the scene tier's concurrent
+//!   replicas one at a time, since one run fills the machine; the
+//!   deterministic gates run once. `--dry-run` prints the plan without running
+//!   anything
 //! - `image`        — build platform images via `tools/mkimage`
 //!   (`--target aarch64-rpi`: the Raspberry Pi 4 SD image; the pinned
 //!   firmware blobs are staged build inputs, see

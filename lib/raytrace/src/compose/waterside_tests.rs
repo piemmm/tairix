@@ -332,6 +332,7 @@ fn a_patch_is_planned_once_when_first_set_out_and_left_out_past_the_most() {
 
 /// A still lake's edge plans no crowfoot, which only grows where water
 /// runs, and every plant's patch it does plan stands somewhere.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_water_plans_only_the_patches_it_sets_out() {
     for seed in 0..2 {
@@ -360,6 +361,7 @@ fn a_water_plans_only_the_patches_it_sets_out() {
     }
 }
 
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
     let mut set = [0usize; KINDS.len()];
@@ -425,6 +427,7 @@ fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
 
 /// A stream's floating plants float on its water as its flow has shaped
 /// it: each about the eye stands on the finer water grid's own surface.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_streams_floating_plants_float_on_its_shaped_water() {
     let mut floating = 0;
@@ -534,6 +537,7 @@ fn a_patch_is_never_set_through_a_piece_though_open_ground_is_no_bar() {
 /// Every plant a scene's water's edge sets out stands clear of the pieces
 /// already standing there: the boulders and drift along a stream's banks,
 /// the trees, the eye's own ground aside.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn no_scene_sets_its_waters_edge_through_a_piece() {
     let mut checked = 0;

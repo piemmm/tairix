@@ -17,10 +17,14 @@ use crate::detail::Detail;
 use crate::light::Light;
 use crate::material::{Finish, Material};
 use crate::pigment::Pigment;
-use crate::sample::{mix32, unit};
 use crate::shape::Shape;
 use crate::sky::{Dome, Gradient, Seeing, Sky};
-use crate::vector::{Frame, Pose, Ray, Vec3, PACKET};
+use crate::vector::{Frame, Pose, Ray, Vec3};
+#[cfg(feature = "scene-tests")]
+use crate::{
+    sample::{mix32, unit},
+    vector::PACKET,
+};
 
 fn object(shape: Shape, material: usize, filter: Option<Vec3>) -> Object {
     Object {
@@ -243,10 +247,12 @@ fn light_starting_in_a_medium_is_absorbed_until_it_leaves() {
 }
 
 /// The picture a draft is prepared for.
+#[cfg(feature = "scene-tests")]
 const SIZE: (u32, u32) = (96, 54);
 
 /// What a finished scene shows, sampled: its grids' heights, a ray over its
 /// land, its sky, and its exposure.
+#[cfg(feature = "scene-tests")]
 fn fingerprint(scene: &Scene) -> Vec<u64> {
     let mut marks = Vec::new();
     for field in &scene.fields {
@@ -293,6 +299,7 @@ fn fingerprint(scene: &Scene) -> Vec<u64> {
 /// A packet of eye rays through one part of the picture finds, ray for ray,
 /// what each finds alone: each walks the hierarchy in its own order, and the
 /// lawns they come to are crossed together.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_packet_of_eye_rays_finds_what_each_finds_alone() {
     let scene = Draft::new(Setting::Meadow, 3, SIZE, Detail::Maximum)
@@ -337,6 +344,7 @@ fn a_packet_of_eye_rays_finds_what_each_finds_alone() {
 /// A draft does its work a unit at a time, however soon its caller's time is
 /// spent, and the scene it finishes is the one a draft prepared at once
 /// finishes.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_draft_prepared_a_unit_at_a_time_finishes_the_scene_prepared_at_once() {
     let mut stepped = Draft::new(Setting::Meadow, 3, SIZE, Detail::Maximum).expect("a draft");
@@ -358,6 +366,7 @@ fn a_draft_prepared_a_unit_at_a_time_finishes_the_scene_prepared_at_once() {
 
 /// Prepared across a pool of workers, a draft's scene comes out as it does
 /// prepared on the one thread.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_draft_prepared_across_workers_matches_one_prepared_alone() {
     let pool = tairix_parallel::Threaded::new(3);
@@ -378,6 +387,7 @@ fn a_draft_prepared_across_workers_matches_one_prepared_alone() {
 /// A draft's progress never falls back, climbs through the work rather than
 /// leaping to its end, and reaches its whole only once the scene is ready:
 /// on a land, and for a still life with no land at all, at either detail.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_drafts_progress_climbs_steadily_to_its_whole_once_ready() {
     for (setting, detail) in [Setting::Meadow, Setting::Studio]

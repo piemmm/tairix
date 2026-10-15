@@ -3,7 +3,8 @@
 //! The debug image switches its kernel diagnostics on at one package, and what
 //! that switches on elsewhere is whatever the manifests say, so the host lane
 //! testing those features is read from the manifests rather than kept beside
-//! them, where it would rot (`plans/OPEN-DEFECTS.md` D556).
+//! them, where it would rot (`plans/OPEN-DEFECTS.md` D556). The scene tier is
+//! read the same way: whichever packages declare its feature.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -25,6 +26,20 @@ type Manifests = BTreeMap<String, (String, String)>;
 /// does not declare or a dependency it does not have: a lane that lost a
 /// package would test less than the image ships.
 pub(super) fn reach(root: &Path, package: &str, features: &[&str]) -> Result<Reach, String> {
+    reach_in(&workspace_manifests(root)?, package, features)
+}
+
+/// Every workspace package declaring `feature`, with what turning it on there
+/// reaches.
+///
+/// # Errors
+///
+/// As [`reach`].
+pub(super) fn declared(root: &Path, feature: &str) -> Result<Reach, String> {
+    declared_in(&workspace_manifests(root)?, feature)
+}
+
+fn workspace_manifests(root: &Path) -> Result<Manifests, String> {
     let mut manifests = Manifests::new();
     for dir in deps_check::workspace_members(root)? {
         let path = root.join(&dir).join("Cargo.toml");
@@ -34,7 +49,20 @@ pub(super) fn reach(root: &Path, package: &str, features: &[&str]) -> Result<Rea
             manifests.insert(name, (dir, text));
         }
     }
-    reach_in(&manifests, package, features)
+    Ok(manifests)
+}
+
+fn declared_in(manifests: &Manifests, feature: &str) -> Result<Reach, String> {
+    let mut reached = Reach::new();
+    for (package, (_, manifest)) in manifests {
+        if feature_entries(manifest, feature).is_none() {
+            continue;
+        }
+        for (name, features) in reach_in(manifests, package, &[feature])? {
+            reached.entry(name).or_default().extend(features);
+        }
+    }
+    Ok(reached)
 }
 
 fn reach_in(manifests: &Manifests, package: &str, features: &[&str]) -> Result<Reach, String> {
@@ -217,20 +245,44 @@ external = "1"
         ])
     }
 
+    fn listed(reach: &Reach) -> Vec<(&str, Vec<&str>)> {
+        reach
+            .iter()
+            .map(|(name, features)| (name.as_str(), features.iter().map(String::as_str).collect()))
+            .collect()
+    }
+
+    /// What the kernel's `diagnostics` turns on in the synthetic workspace.
+    const KERNEL_DIAGNOSTICS: [(&str, &[&str]); 4] = [
+        ("arch", &["diagnostics"]),
+        ("core", &["diagnostics"]),
+        ("kernel", &["diagnostics", "trace"]),
+        ("sync", &["locks"]),
+    ];
+
     #[test]
     fn a_feature_reaches_every_package_its_entries_name() {
         let reach = reach_in(&workspace(), "kernel", &["diagnostics"]).expect("reach");
-        let expected: Vec<(&str, Vec<&str>)> = vec![
-            ("arch", vec!["diagnostics"]),
-            ("core", vec!["diagnostics"]),
-            ("kernel", vec!["diagnostics", "trace"]),
-            ("sync", vec!["locks"]),
-        ];
-        let got: Vec<(&str, Vec<&str>)> = reach
-            .iter()
-            .map(|(name, features)| (name.as_str(), features.iter().map(String::as_str).collect()))
-            .collect();
-        assert_eq!(got, expected);
+        assert_eq!(
+            listed(&reach),
+            KERNEL_DIAGNOSTICS.map(|(n, f)| (n, f.to_vec()))
+        );
+    }
+
+    /// Every package declaring a feature joins its lane, with what it turns
+    /// on elsewhere; a feature no package declares makes an empty lane.
+    #[test]
+    fn a_declared_feature_gathers_every_package_declaring_it() {
+        let declared = declared_in(&workspace(), "diagnostics").expect("declared");
+        assert_eq!(
+            listed(&declared),
+            KERNEL_DIAGNOSTICS.map(|(n, f)| (n, f.to_vec()))
+        );
+        let locks = declared_in(&workspace(), "locks").expect("declared");
+        assert_eq!(listed(&locks), [("sync", vec!["locks"])]);
+        assert!(declared_in(&workspace(), "absent")
+            .expect("declared")
+            .is_empty());
     }
 
     #[test]
@@ -287,6 +339,22 @@ external = "1"
                     .get(package)
                     .is_some_and(|features| features.contains(feature)),
                 "{package}/{feature} missing from {reach:?}"
+            );
+        }
+    }
+
+    /// The scene tier `--scenes` runs: the ray tracer's whole-scene tests and
+    /// its screensaver's.
+    #[test]
+    fn the_scene_tier_holds_the_ray_tracer_and_its_screensaver() {
+        let ctx = crate::Context::discover().expect("workspace context");
+        let feature = super::super::SCENE_TESTS_FEATURE;
+        let tier = declared(&ctx.workspace_root, feature).expect("declared");
+        for package in ["tairix-raytrace", "tairix-desktop-session"] {
+            assert!(
+                tier.get(package)
+                    .is_some_and(|features| features.contains(feature)),
+                "{package}/{feature} missing from {tier:?}"
             );
         }
     }

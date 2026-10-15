@@ -1219,7 +1219,7 @@ impl Meeting<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "scene-tests"))]
 impl FarWood {
     /// How far off it begins.
     pub(crate) const fn begins(&self) -> f64 {

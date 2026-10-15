@@ -27,6 +27,7 @@ use super::{
     paint_wait, Engine, Laying, Memory, Phase, Raytrace, Status, TraceHost, TraceLink, Traced,
     DETAIL_WAIT_NS, FADE_MS, FIRST_WAIT_NS, HOLD_NS, MOST_WAIT_NS, PLAIN, READOUT_WAIT_NS,
 };
+#[cfg(feature = "scene-tests")]
 use crate::saver::seed_from;
 use crate::tests::compositor;
 use tairix_theme::motion::SceneClock;
@@ -1009,6 +1010,7 @@ fn a_refused_scene_leaves_nothing_of_itself_to_the_next() {
 /// On the loop with no thread granted, a slice is traced each scene frame
 /// while the paints keep the reveal's cadence, so steps traced between paints
 /// wait for the next.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn on_the_loop_a_slice_is_traced_each_frame_and_painted_on_the_cadence() {
     let mut comp = compositor();
@@ -1058,6 +1060,7 @@ fn a_screen_with_no_pixels_has_no_reveal() {
 }
 
 /// Run `saver`, traced on the loop, until its picture is whole.
+#[cfg(feature = "scene-tests")]
 fn reveal_whole(saver: &mut Raytrace, wm: WindowId, comp: &mut Compositor) {
     let mut clock = ticking(MS);
     let mut now = 0;
@@ -1073,6 +1076,7 @@ fn reveal_whole(saver: &mut Raytrace, wm: WindowId, comp: &mut Compositor) {
 
 /// Traced on the loop with no thread granted, the reveal ends showing exactly
 /// what the same scene's reveal, traced alone and painted step by step, shows.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_reveal_on_the_loop_ends_as_the_reveal_traced_alone() {
     let mut comp = compositor();

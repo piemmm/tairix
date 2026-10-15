@@ -76,8 +76,15 @@ random from a seed, and a tracer that answers what one pixel of one shows.
 
 ## Tests
 
-`cargo test -p tairix-raytrace`: every shape and grid met where it lies and
-nearest first; trees of every kind grown sound however they stood, their
+The long tests that compose or prepare a whole scene build only with the
+`scene-tests` feature, because their cost grows with every detail a scene
+gains: `ci-long` and `cargo xtask test --scenes` run them, and `ci` lints them
+but does not run them. Without the feature, `cargo test -p tairix-raytrace`
+runs the rest, a few quick whole-scene tests among them.
+
+`cargo test -p tairix-raytrace --features scene-tests`: every shape and grid
+met where it lies and nearest first; trees of every kind grown sound however
+they stood, their
 crowns as wide as reckoned, and a frame kept rigid through thousands of
 turns; a trunk holding its girth, its foot swelling further toward each
 root than between them, each root leaving from within its lobe with its back

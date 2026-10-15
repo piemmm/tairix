@@ -12,15 +12,19 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_raster::Pixel;
-use tairix_raytrace::{Detail, Quality, Reveal, Setting, Tracer};
+use tairix_raytrace::{Detail, Quality, Setting, Tracer};
 use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 
 use super::{
-    draw_setting, pace, Detailing, Engine, Handing, Memory, Stage, Traced, MIN_BATCH, PLAIN,
-    QUALITY, SLICE_NS, STEPS_PER_READING,
+    draw_setting, pace, Detailing, Engine, Memory, Stage, Traced, MIN_BATCH, PLAIN, SLICE_NS,
 };
-use crate::saver::raytrace::album::Unkept;
 use crate::saver::raytrace::crew::{Status, TraceDesk, Turn};
+#[cfg(feature = "scene-tests")]
+use {
+    super::{Handing, QUALITY, STEPS_PER_READING},
+    crate::saver::raytrace::album::Unkept,
+    tairix_raytrace::Reveal,
+};
 
 const SIZE: (u32, u32) = (48, 27);
 
@@ -37,6 +41,7 @@ fn tracing(engine: &Engine) -> bool {
     matches!(engine.stage, Stage::Tracing(_))
 }
 
+#[cfg(feature = "scene-tests")]
 fn whole(engine: &Engine) -> bool {
     matches!(engine.stage, Stage::Whole)
 }
@@ -87,6 +92,7 @@ fn a_screen_with_no_pixels_has_no_reveal() {
 
 /// A scene with grids to fill is prepared over several slices, tracing
 /// nothing meanwhile, and only then traced.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_scene_is_prepared_over_slices_before_any_pixel_is_traced() {
     let mut engine = Engine::new(SIZE, 5, PLAIN).expect("an engine");
@@ -118,6 +124,7 @@ fn a_scene_is_prepared_over_slices_before_any_pixel_is_traced() {
 
 /// Tracing tells its progress as the share of its steps traced, rising to
 /// the whole only once every pixel is.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn tracing_tells_its_progress_until_the_picture_is_whole() {
     let mut engine = Engine::new(SIZE, 21, PLAIN).expect("an engine");
@@ -142,6 +149,7 @@ fn tracing_tells_its_progress_until_the_picture_is_whole() {
 /// The reveal takes its steps in the order's own sequence, each showing
 /// exactly what tracing that pixel on its own shows, and once it is painted
 /// whole every pixel shows its own trace.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn the_reveal_traces_every_pixel_as_tracing_it_alone_shows() {
     let mut engine = Engine::new(SIZE, 11, PLAIN).expect("an engine");
@@ -168,6 +176,7 @@ fn the_reveal_traces_every_pixel_as_tracing_it_alone_shows() {
 
 /// The first pass, the grid every later pass refines, is traced within a
 /// small share of the steps, and nothing else comes first.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn the_first_pass_spans_the_picture_in_a_few_steps() {
     let mut engine = Engine::new(SIZE, 23, PLAIN).expect("an engine");
@@ -283,6 +292,7 @@ fn a_new_setting_is_never_the_last_and_every_other_comes_up() {
 
 /// The next scene is set elsewhere, and its reveal starts from its first
 /// step.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn the_next_scene_is_set_elsewhere_and_revealed_from_its_start() {
     let mut engine = Engine::new(SIZE, 17, PLAIN).expect("an engine");
@@ -298,11 +308,13 @@ fn the_next_scene_is_set_elsewhere_and_revealed_from_its_start() {
 
 /// A hand-over keeping every step in the order taken, answering to trace on
 /// until it has taken `limit` steps.
+#[cfg(feature = "scene-tests")]
 struct Taking {
     taken: std::sync::Mutex<Vec<Traced>>,
     limit: usize,
 }
 
+#[cfg(feature = "scene-tests")]
 impl Taking {
     fn upto(limit: usize) -> Self {
         Self {
@@ -316,6 +328,7 @@ impl Taking {
     }
 }
 
+#[cfg(feature = "scene-tests")]
 impl Handing for Taking {
     fn take(&self, steps: &[Traced], _: Status) -> bool {
         let mut taken = self.taken.lock().expect("an unpoisoned record");
@@ -325,12 +338,14 @@ impl Handing for Taking {
 }
 
 /// A clock that never reaches a stretch's end.
+#[cfg(feature = "scene-tests")]
 fn timeless() -> u64 {
     0
 }
 
 /// Trace `engine`'s stretches across `runner` until it is whole, answering
 /// what each stretch handed over.
+#[cfg(feature = "scene-tests")]
 fn stretched(engine: &mut Engine, runner: &dyn tairix_parallel::JobRunner) -> Vec<Vec<Traced>> {
     let mut stretches = Vec::new();
     while tracing(engine) {
@@ -344,6 +359,7 @@ fn stretched(engine: &mut Engine, runner: &dyn tairix_parallel::JobRunner) -> Ve
 /// A stretch runs to the end of its pass, every core taking steps as it
 /// goes, and the stretches of a reveal show every pixel once, pass by pass,
 /// exactly as tracing it alone shows it, and keep the picture they traced.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn each_stretch_traces_its_pass_across_every_core_and_the_reveal_whole() {
     let mut engine = Engine::new(SIZE, 17, PLAIN).expect("an engine");
@@ -385,6 +401,7 @@ fn each_stretch_traces_its_pass_across_every_core_and_the_reveal_whole() {
 /// However costly its pixels, each pass of a reveal is handed out once, a
 /// piece to each core, so no core waits on another's slowest pixel but at the
 /// pass's end.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_pass_is_handed_out_once_however_costly_its_pixels() {
     let mut engine = Engine::new(SIZE, 37, PLAIN).expect("an engine");
@@ -405,6 +422,7 @@ fn a_pass_is_handed_out_once_however_costly_its_pixels() {
 
 /// A stretch told to stop stops there with every step it claimed handed
 /// over, and the next takes up after them, nothing lost or traced twice.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_stretch_told_to_stop_leaves_nothing_lost_or_traced_twice() {
     let mut engine = Engine::new(SIZE, 19, PLAIN).expect("an engine");
@@ -429,6 +447,7 @@ fn a_stretch_told_to_stop_leaves_nothing_lost_or_traced_twice() {
 }
 
 /// A stretch whose time is up stops at the next reading of the clock.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_stretch_ends_once_its_time_is_up() {
     let mut engine = Engine::new(SIZE, 23, PLAIN).expect("an engine");
@@ -467,6 +486,7 @@ fn an_order_begins_the_scene_asked_for_before_its_slice() {
 /// An engine keeping pictures hands each whole one over once, as traced,
 /// however long it is stepped after, and the next scene's is kept in its
 /// turn. One not keeping them hands nothing over.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_whole_picture_is_handed_over_once_as_traced() {
     let mut engine = Engine::new(SIZE, 31, PLAIN).expect("an engine");
@@ -506,6 +526,7 @@ fn a_whole_picture_is_handed_over_once_as_traced() {
 }
 
 /// A picture the heap would not hold a copy of is reported, not kept.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_picture_too_large_to_hold_is_reported_unheld() {
     let mut engine = Engine::new(SIZE, 41, PLAIN).expect("an engine");

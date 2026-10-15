@@ -1,10 +1,13 @@
 use core::f64::consts::PI;
 
 use super::*;
-use crate::compose::woodland::ACROSS;
-use crate::compose::{Composition, Setting};
-use crate::detail::Detail;
-use crate::vector::wrapped;
+#[cfg(feature = "scene-tests")]
+use crate::{
+    compose::woodland::ACROSS,
+    compose::{Composition, Setting},
+    detail::Detail,
+    vector::wrapped,
+};
 
 /// A mesh too large to index in thirty-two bits is refused before any of
 /// its triangles are counted out, never wrapped.
@@ -87,6 +90,7 @@ fn a_mesh_is_wound_to_face_out_and_closed_at_both_ends() {
 /// stop being built to where they shrink to about a pixel, across the view:
 /// none nearer than they are built, a wall's mesh taking up where its stones
 /// stop, and none further than it still spans a pixel.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn far_hedges_and_walls_stand_on_where_they_are_not_built() {
     let size = (1280, 720);

@@ -41,7 +41,7 @@ turns it into a kill. A measured warm run:
 | `loom` (the interleaving oracle over the sync primitives) | 10 s | one process per crate, concurrent |
 | `docs-check` (rustdoc + mdBook + link check) | 68 s | sequential |
 | `image` gate | 193 s over 319 spawns | sequential |
-| `clippy` host + 17 target passes | 330 s | sequential |
+| `clippy` host + 2 feature-lane + 17 target passes | 330 s | sequential |
 | `test --qemu` (host matrix + 226 guests + 3 fixture cross-compiles) | 681 s | guests concurrent, `nproc/3` weighted budget |
 | `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1470 s | one process per crate, concurrent; `kernel/mem`, `kernel/core`'s library, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores |
 
@@ -167,7 +167,7 @@ ask — never wave the failure through as transient, load, or environment.
 | `driver-exits`| Rejects an exit code or `exit` module declared by a crate built on the driver runtime: every driver ends through `tairix_drvrt::exit` |
 | `charter-cite`| Rejects a comment or package description citing a charter section instead of the reason ([§2.11][cite]) |
 | `source-text` | Rejects a control byte other than tab and newline in source and documents, outside the planning and charter files |
-| `test`        | `cargo test --workspace --all-targets`, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below) |
+| `test`        | `cargo test --workspace --all-targets`, then the packages the debug image's kernel diagnostics turn a feature on in, with those features (read from the manifests), then the QEMU matrix, run once ([§7][test]); each host pass starts in a randomised order, seed logged (see below); the scene tier is left to `ci-long` (see below) |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `deny`        | `cargo deny --all-features check` (license + advisory)      |
 | `supply-chain`| Source-hash allow-list + RUSTSEC advisory SLA ([§19.3][sc]) |
@@ -205,6 +205,24 @@ own too, so ordering is hunted alongside timing.
 A test that depends on start order is a defect, not a configuration: fix the
 test so it owns what it reads, exercise the whole lifecycle in one test, or
 sequence the dependency explicitly — never by hoping for an order.
+
+## The scene tier runs in `ci-long`, not `ci`
+
+The ray tracer's long tests that compose or prepare a whole scene, and the
+screensaver's that prepare or trace one, cost more with every detail the
+scenes gain. They build only with their package's `scene-tests` feature, so
+neither the workspace pass nor `ci` runs them. `ci-long` does, its concurrent
+replicas one at a time since one run fills the machine, and so does:
+
+```sh
+cargo xtask test --scenes                             # the host matrix, then the tier
+cargo test -p tairix-raytrace --features scene-tests  # one package's tier
+```
+
+The tier's packages are whichever declare the feature. `ci` still lints them
+with it on, so the tier keeps compiling. A whole-scene test taking more than a
+few seconds carries `#[cfg(feature = "scene-tests")]`, as do the helpers only
+it uses; a quick one, and a test of one piece built by hand, stays in `ci`.
 
 ## A test owns the ids it keys process-global state on
 
@@ -248,16 +266,17 @@ lint them, so a lint in shipped code could not fail CI.
 | Pass | What it covers |
 | ---- | -------------- |
 | host | `--workspace --all-targets`, including every unit-test target |
+| host, **each feature lane** | `--all-targets` over the packages the debug image's kernel diagnostics reach, then over the scene tier, each with its lane's features on: configurations no other host pass builds |
 | each of the three freestanding Tier-1 triples, **once per stratum** | `kernel/*`, then `lib/*`, then `drivers/*` + `userland/*` — every workspace member the image pipeline cross-compiles, less host-only `tools/*`, less `tests/*`, and less a foreign `kernel/arch/<other>` |
 | each freestanding triple, **the kernel with the debug image's diagnostics** | the kernel stratum again with `KERNEL_DIAGNOSTICS_FEATURES` on, the only configuration those bodies are built in |
 | each freestanding triple, **its backend alone** | `kernel/arch/<target>` with its default features, as a QEMU guest built by itself links it — without the `sched-arch` the kernel pass unifies in, so its always-compiled core must stand on its own |
 | `wasm32-unknown-unknown` | `kernel/arch/wasm32` + `kernel/arch/api` (the only product code the browser target builds), and the browser verticals |
 
-Every selection is *derived* — from the workspace member list and the wasm
-vertical table — so a new crate or vertical is linted without being added to a
-second list. `--all-targets` is absent from the target passes because a
-bare-metal target has no test harness to link one against; the host pass covers
-those.
+Every selection is *derived* — from the workspace member list, the manifests'
+features and the wasm vertical table — so a new crate or vertical is linted
+without being added to a second list. `--all-targets` is absent from the target
+passes because a bare-metal target has no test harness to link one against; the
+host passes cover those.
 
 The enrolled **QEMU guests** under `tests/integration/` are test support rather
 than product and are deliberately *not* in this gate; that gap is staged in

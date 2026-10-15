@@ -10,36 +10,45 @@
 
 extern crate std;
 
-use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
-use std::sync::OnceLock;
 
 use tairix_parallel::Threaded;
 use tairix_util::mathf;
 
 use super::*;
 use crate::deadwood::{Fungus, Habit};
-use crate::sample::{mix32, unit};
-use crate::scene::{Draft, Object, Scene, Sight};
-use crate::tone::Encoder;
-use crate::trace::{Quality, Tracer};
-use crate::vector::Ray;
+
+#[cfg(feature = "scene-tests")]
+use {
+    crate::sample::{mix32, unit},
+    crate::scene::{Draft, Object, Scene, Sight},
+    crate::tone::Encoder,
+    crate::trace::{Quality, Tracer},
+    crate::vector::Ray,
+    alloc::format,
+    alloc::string::String,
+    std::sync::OnceLock,
+};
 
 /// The picture a scene's tests are composed for.
+#[cfg(feature = "scene-tests")]
 const SIZE: (u32, u32) = (64, 36);
 
 /// Seeds every setting is composed under, for what a composed scene shows.
+#[cfg(feature = "scene-tests")]
 const COMPOSED_SEEDS: u64 = 24;
 
 /// Seeds every setting is built under.
+#[cfg(feature = "scene-tests")]
 const SEEDS: u64 = 3;
 
 /// Seeds a setting that stands on no land is also built under, being cheap.
+#[cfg(feature = "scene-tests")]
 const STILL_SEEDS: u64 = 12;
 
 /// Whether `setting` may stand on a land, which is the most a scene costs to
 /// build.
+#[cfg(feature = "scene-tests")]
 fn landed(setting: Setting) -> bool {
     !matches!(
         setting,
@@ -48,6 +57,7 @@ fn landed(setting: Setting) -> bool {
 }
 
 /// The seeds `setting` is built under.
+#[cfg(feature = "scene-tests")]
 fn seeds(setting: Setting) -> u64 {
     if landed(setting) {
         SEEDS
@@ -57,6 +67,7 @@ fn seeds(setting: Setting) -> u64 {
 }
 
 /// A scene built, with the setting and seed it was built from.
+#[cfg(feature = "scene-tests")]
 struct Built {
     setting: Setting,
     seed: u64,
@@ -65,6 +76,7 @@ struct Built {
 
 /// Prepare a draft of `setting` under `seed` across `runner` to the end;
 /// which step refused it otherwise.
+#[cfg(feature = "scene-tests")]
 fn build(setting: Setting, seed: u64, runner: Threaded) -> Result<Scene, String> {
     let refused = |step: &str| format!("{setting:?} under seed {seed} {step}");
     let mut draft = Draft::new(setting, seed, SIZE, Detail::Maximum)
@@ -78,6 +90,7 @@ fn build(setting: Setting, seed: u64, runner: Threaded) -> Result<Scene, String>
 
 /// Every setting's scenes, built once for every test: a scene that will not
 /// build fails every test at once rather than each building them again.
+#[cfg(feature = "scene-tests")]
 fn corpus() -> &'static [Built] {
     static CORPUS: OnceLock<Result<Vec<Built>, String>> = OnceLock::new();
     let built = CORPUS.get_or_init(|| {
@@ -128,14 +141,17 @@ fn corpus() -> &'static [Built] {
     }
 }
 
+#[cfg(feature = "scene-tests")]
 fn unit_range(value: f64) -> bool {
     (0.0..=1.0).contains(&value)
 }
 
+#[cfg(feature = "scene-tests")]
 fn nonnegative(colour: Vec3) -> bool {
     colour.is_finite() && colour.min(Vec3::ZERO) == Vec3::ZERO
 }
 
+#[cfg(feature = "scene-tests")]
 fn sound(finish: &Finish) -> bool {
     match *finish {
         Finish::Coated { roughness } | Finish::Metal { roughness } => unit_range(roughness),
@@ -179,6 +195,7 @@ fn every_setting_has_a_name_of_its_own() {
 }
 
 /// What a scene is made of, as its tests read it, whether composed or built.
+#[cfg(feature = "scene-tests")]
 struct Made<'a> {
     objects: &'a [Object],
     faces: &'a [Face],
@@ -194,6 +211,7 @@ struct Made<'a> {
     structures: Vec<(u32, Aabb)>,
 }
 
+#[cfg(feature = "scene-tests")]
 impl<'a> Made<'a> {
     /// A scene composed until it is seen, its prototypes, grids and sky still
     /// to make.
@@ -278,6 +296,7 @@ impl<'a> Made<'a> {
 
 /// How far below the horizon a sun still lights the sky: astronomical
 /// twilight's end, the sine of 18 degrees down.
+#[cfg(feature = "scene-tests")]
 const TWILIGHT: f64 = -0.309;
 
 /// A scene is lit — by a sun or a moon no further below its horizon than
@@ -285,6 +304,7 @@ const TWILIGHT: f64 = -0.309;
 /// within its bounds, every object made in one the scene holds, clear exactly
 /// where light passes it, glowing only by a lamp with a surface, and every
 /// shape drawn from grids and prototypes the scene holds.
+#[cfg(feature = "scene-tests")]
 fn lit_and_sound(made: &Made<'_>, what: &str) {
     let shining = made.lights.iter().any(|light| match *light {
         Light::Sun {
@@ -344,6 +364,7 @@ fn lit_and_sound(made: &Made<'_>, what: &str) {
 
 /// Every hull, however it was cut, lies within the extent it is bounded by,
 /// so the hierarchy never culls a ray that would have met it.
+#[cfg(feature = "scene-tests")]
 fn hulls_lie_within_their_extents(made: &Made<'_>, what: &str) {
     let geometry = made.geometry();
     for object in made.objects {
@@ -370,6 +391,7 @@ fn hulls_lie_within_their_extents(made: &Made<'_>, what: &str) {
 
 /// The eye is above every level quad beneath it: water is looked down on,
 /// never up at from beneath.
+#[cfg(feature = "scene-tests")]
 fn above_the_water(made: &Made<'_>, what: &str) {
     let eye = made.camera.eye();
     for object in made.objects {
@@ -396,6 +418,7 @@ fn above_the_water(made: &Made<'_>, what: &str) {
 
 /// The pieces a still life is about are in the picture, and so is the
 /// structure a building's scene is about.
+#[cfg(feature = "scene-tests")]
 fn pieces_in_frame(made: &Made<'_>, setting: Setting, what: &str) {
     use Setting::{
         Arcade, Bubbles, Classic, Colonnade, Crystals, Lagoon, Nocturne, Rotunda, Ruins, Studio,
@@ -436,6 +459,7 @@ fn pieces_in_frame(made: &Made<'_>, setting: Setting, what: &str) {
 /// the frame. Each scene is checked once it is seen, before the prototypes,
 /// grids and sky it then makes, and let go; a few at once, each across a few
 /// threads.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn every_composed_scene_keeps_its_invariants() {
     let wanted: Vec<(Setting, u64)> = Setting::ALL
@@ -467,6 +491,7 @@ fn every_composed_scene_keeps_its_invariants() {
 
 /// A built scene is lit, sound — what it grew after it was seen included —
 /// and exposed to read.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn every_built_scene_is_sound_and_exposed() {
     for Built {
@@ -487,6 +512,7 @@ fn every_built_scene_is_sound_and_exposed() {
 /// whose grids are whole: every land grid holds real heights, and the ground
 /// the eye sees is shaded by what the land is like there. Every landscape
 /// stands on one.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_landscape_stands_on_a_built_land() {
     let landscapes = [
@@ -575,6 +601,7 @@ fn a_hulls_extent_is_found_from_its_corners() {
 
 /// What a scene is made of and how it is seen, as text to compare: each of
 /// its fields as a digest of every height and attribute it holds.
+#[cfg(feature = "scene-tests")]
 fn describe(scene: &Scene) -> alloc::string::String {
     let fields: Vec<(usize, u32)> = scene
         .fields
@@ -604,6 +631,7 @@ fn describe(scene: &Scene) -> alloc::string::String {
     )
 }
 
+#[cfg(feature = "scene-tests")]
 #[test]
 fn a_seed_composes_the_same_scene_every_time_and_another_seed_another() {
     let runner = Threaded::new(8);
@@ -637,6 +665,7 @@ fn a_seed_composes_the_same_scene_every_time_and_another_seed_another() {
 /// The camera stands in the open: above every plane and every stretch of
 /// land beneath it, and outside every solid, which each way it looks meets
 /// from without.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn the_camera_stands_in_the_open() {
     for Built {
@@ -684,6 +713,7 @@ fn the_camera_stands_in_the_open() {
 
 /// On a land the eye stands clear of what lies beneath it — the finest land
 /// laid there, or the water over it — never in it or skimming it.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn the_eye_stands_clear_of_the_ground_beneath_it() {
     for Built {
@@ -778,6 +808,7 @@ fn a_druses_crystals_grow_out_of_its_rock() {
 
 /// A coarse render of each setting is neither black, nor blown out, nor
 /// flat: the exposure and lighting each setting chooses read on screen.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn each_setting_renders_a_picture_worth_looking_at() {
     let size = (24u32, 14u32);
@@ -1050,6 +1081,7 @@ fn describe_box(bounds: Aabb) -> [u64; 6] {
 
 /// At the plainer detail every setting still composes and prepares: a
 /// plainer scene, never a missing one.
+#[cfg(feature = "scene-tests")]
 #[test]
 fn every_setting_prepares_at_the_plainer_detail() {
     std::thread::scope(|scope| {
