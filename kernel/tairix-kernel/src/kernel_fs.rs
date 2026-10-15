@@ -22,7 +22,7 @@ use alloc::boxed::Box;
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId,
-    NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
+    NodeIdentity, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -60,6 +60,10 @@ impl FilesystemRead for Box<dyn KernelFs> {
 
     fn name_matching(&self) -> NameMatching {
         (**self).name_matching()
+    }
+
+    fn node_identity(&self) -> NodeIdentity {
+        (**self).node_identity()
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -153,8 +157,8 @@ impl FilesystemSecurity for Box<dyn KernelFs> {
         (**self).set_security(node, security)
     }
 
-    fn stamp_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
-        (**self).stamp_security(node, security)
+    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
+        (**self).stamp_owner(node, uid, gid)
     }
 }
 

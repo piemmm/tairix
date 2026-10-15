@@ -5981,7 +5981,7 @@ mod program {
                 .stat()
                 .map_err(|_| "a source file could not be read")?;
             let writer = tairix_rt::create_new(dest_spelled.as_bytes())
-                .map_err(|_| "a destination of that name already exists")?;
+                .map_err(|ret| crate::operation::create_refusal(Errno::from_syscall(ret)))?;
             Ok(Self {
                 reader,
                 writer,

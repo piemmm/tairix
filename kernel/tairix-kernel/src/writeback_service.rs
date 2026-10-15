@@ -35,15 +35,15 @@ use crate::system_mount::LATE_FILESYSTEM;
 /// eagerly.
 const WRITEBACK_FLUSHER_UNAVAILABLE: tairix_log::EventId = tairix_log::EventId(4187);
 
-/// Install the mount registry as every driver's write-back timer and admit
-/// the flusher kthread.
+/// Install the mount registry as every driver's write-back timer and wall
+/// clock, and admit the flusher kthread.
 ///
 /// Installing the host is harmless before the flusher runs — a hostless or
 /// unarmed driver reports nothing and defers nothing — so the two are wired
 /// here and the *arming* is left to the flusher's own first step.
 pub fn start(ctx: &'static (dyn InitSpawnCtx + Sync), audit: &'static (dyn Sink + Sync)) {
     if LATE_FILESYSTEM
-        .install_volume_host(&LATE_FILESYSTEM, audit)
+        .install_volume_host(&LATE_FILESYSTEM, audit, ctx.wall_clock())
         .is_err()
     {
         // A flusher is already wired for this boot; a second would publish

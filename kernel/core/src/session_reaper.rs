@@ -63,7 +63,7 @@ pub fn start(
     if matches!(REAPER.get(), Ok(Some(_))) {
         return Err(ReaperNotStarted::AlreadyStarted);
     }
-    let reaper: &'static SessionReaper = Box::leak(Box::new(SessionReaper {
+    let reaper: &'static SessionReaper = crate::forever(Box::new(SessionReaper {
         caps,
         audit,
         ending: SpinLock::new(VecDeque::new()),

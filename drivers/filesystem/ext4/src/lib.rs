@@ -34,7 +34,8 @@
 //! inode table.
 //!
 //! Writing (`create`/`write_at`/`truncate`/`remove`) allocates from the
-//! block and inode bitmaps, maintains the group-descriptor and
+//! block and inode bitmaps, records a created node's owner and group
+//! ([`FilesystemSecurity::stamp_owner`]), maintains the group-descriptor and
 //! superblock free counts, and creates new objects with the classic
 //! block map. The write path maintains every on-disk checksum a volume
 //! carries — the `metadata_csum` crc32c, through `lib/crc32c`
@@ -73,8 +74,8 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    NodeTimes, SecurityAcl, SecuritySubject, VolumeStats,
+    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind,
+    NodeSecurity, NodeTimes, SecurityAcl, SecuritySubject, VolumeHost, VolumeStats,
 };
 use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
@@ -187,16 +188,22 @@ const INODE_GENERATION: usize = 0x64;
 const INODE_DTIME: usize = 0x14;
 /// `i_links_count` byte offset within an inode.
 const INODE_LINKS: usize = 0x1A;
+/// `i_uid` byte offset within an inode: the owner's low half.
+const INODE_UID_LO: usize = 0x02;
+/// `l_i_uid_high` byte offset within an inode (in the Linux `osd2`).
+const INODE_UID_HI: usize = 0x78;
+/// `i_gid` byte offset within an inode: the group's low half.
+const INODE_GID_LO: usize = 0x18;
+/// `l_i_gid_high` byte offset within an inode (in the Linux `osd2`).
+const INODE_GID_HI: usize = 0x7A;
 /// Byte offset of `i_flags` within an inode.
 const INODE_FLAGS: usize = 0x20;
 /// `i_blocks_lo` byte offset within an inode.
 const INODE_BLOCKS_LO: usize = 0x1C;
-/// Sentinel `i_dtime` stamped on a removed inode. The driver has no
-/// clock source, but a non-zero `i_dtime` is what marks an inode deleted.
-/// It must exceed `s_inodes_count` so a checker does not mistake it for
-/// an orphan-list next-inode pointer (ext4 reuses `i_dtime` for that
-/// chain); a fixed plausible Unix timestamp satisfies that for any real
-/// volume. The exact instant is not load-bearing.
+/// `i_dtime` for a removed inode when the time it went is unknown: a
+/// non-zero `i_dtime` is what marks an inode deleted, and it must exceed
+/// `s_inodes_count` so a checker does not mistake it for an orphan-list
+/// next-inode pointer (ext4 reuses `i_dtime` for that chain).
 const DELETED_DTIME: u32 = 1_700_000_000;
 
 /// Byte length of an `ext4_dir_entry_tail` / `ext4_extent_tail`: the
@@ -359,34 +366,92 @@ fn le32(buf: &[u8], off: usize) -> u32 {
     }
 }
 
+/// One of the four instants an inode records: a classic seconds field and,
+/// in an enlarged record, the `_extra` field that extends it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Stamp {
+    Access,
+    Change,
+    Modify,
+    /// Birth time, which only an enlarged record has room for.
+    Create,
+}
+
+impl Stamp {
+    /// Every stamp, as a new inode takes them.
+    const ALL: [Self; 4] = [Self::Access, Self::Change, Self::Modify, Self::Create];
+
+    /// The byte offsets of the stamp's seconds field and its `_extra` field.
+    const fn fields(self) -> (usize, usize) {
+        match self {
+            Self::Access => (0x08, 0x8C),
+            Self::Change => (0x0C, 0x84),
+            Self::Modify => (0x10, 0x88),
+            Self::Create => (0x90, 0x94),
+        }
+    }
+}
+
+/// Whether raw inode `raw` holds the 4-byte enlarged-record field at `off`:
+/// the record is long enough and its `i_extra_isize` reaches past it.
+fn has_extra(raw: &[u8], off: usize) -> bool {
+    raw.len() >= off + 4
+        && I_EXTRA_ISIZE_OFFSET + usize::from(le16(raw, I_EXTRA_ISIZE_OFFSET)) >= off + 4
+}
+
 /// Decode an on-disk inode timestamp into a [`Time64`].
 ///
-/// `secs` is the classic 32-bit seconds field, signed when no extra field
-/// extends it. `extra`, when the enlarged inode record carries it, packs
-/// two epoch-extension bits (bits 0..2, prepended above bit 31 of the
-/// seconds — the ext4 disk-layout extended-timestamp encoding) and a
-/// 30-bit nanosecond count (bits 2..32). A nanosecond count at or above
-/// one second is on-disk corruption and fails closed rather than being
-/// clamped or wrapped.
+/// `secs` is the classic field: signed 32-bit seconds. `extra`, when the
+/// enlarged record carries it, packs two epoch bits (bits 0..2), each epoch
+/// adding 2³² seconds to the signed value, and a 30-bit nanosecond count
+/// (bits 2..32) — the ext4 disk layout's extended timestamp, reaching
+/// 1901-12-13 to 2446-05-10. A nanosecond count of a second or more is
+/// corruption and fails closed rather than being clamped or wrapped.
 fn decode_inode_time(secs: u32, extra: Option<u32>) -> Result<Time64, DriverError> {
-    // The classic field is signed on disk; reinterpret the bits, never a
-    // value-changing conversion.
-    let signed_secs = i32::from_le_bytes(secs.to_le_bytes());
+    let signed_secs = i64::from(i32::from_le_bytes(secs.to_le_bytes()));
     let Some(extra) = extra else {
-        return Ok(Time64::from_secs(i64::from(signed_secs)));
+        return Ok(Time64::from_secs(signed_secs));
     };
-    let epoch = u64::from(extra & 0x3);
-    let seconds = if epoch == 0 {
-        i64::from(signed_secs)
-    } else {
-        // The epoch bits extend the seconds above bit 31; the low 32 bits
-        // are then unsigned. At most 2 + 32 significant bits, so the wide
-        // conversion is total; a failure can only mean a broken invariant
-        // and is treated as corruption.
-        i64::try_from((epoch << 32) | u64::from(secs)).map_err(|_| DriverError::DeviceFault)?
-    };
-    let nanos = extra >> 2;
-    Time64::new(seconds, nanos).map_err(|_| DriverError::DeviceFault)
+    let seconds = signed_secs + (i64::from(extra & 0x3) << 32);
+    Time64::new(seconds, extra >> 2).map_err(|_| DriverError::DeviceFault)
+}
+
+/// Encode `time` as the seconds field and the `_extra` field
+/// [`decode_inode_time`] reads back as it.
+///
+/// `None` for an instant the fields cannot hold — outside the signed 32-bit
+/// seconds when the record has no extra field, outside 1901-12-13 to
+/// 2446-05-10 when it has one — so the caller records no stamp rather than a
+/// wrapped one. Without an extra field the nanoseconds go: whole seconds are
+/// that record's declared precision.
+fn encode_inode_time(time: Time64, extended: bool) -> Option<(u32, u32)> {
+    let secs = time.secs();
+    let base = u32::try_from(secs.rem_euclid(1 << 32)).ok()?;
+    let epoch = secs.checked_sub(i64::from(i32::from_le_bytes(base.to_le_bytes())))? >> 32;
+    let epoch = u32::try_from(epoch)
+        .ok()
+        .filter(|&epoch| epoch <= if extended { 3 } else { 0 })?;
+    Some((base, epoch | (time.subsec_nanos() << 2)))
+}
+
+/// Record `now` as each of `stamps` in raw inode `raw`, or no stamp — the
+/// all-zero fields — while the time is unknown or beyond what the record
+/// holds. A record too short to have a birth time sets none.
+fn put_stamps(raw: &mut [u8], now: Option<Time64>, stamps: &[Stamp]) {
+    for &stamp in stamps {
+        let (secs_at, extra_at) = stamp.fields();
+        if stamp == Stamp::Create && !has_extra(raw, secs_at) {
+            continue;
+        }
+        let extended = has_extra(raw, extra_at);
+        let (secs, extra) = now
+            .and_then(|time| encode_inode_time(time, extended))
+            .unwrap_or((0, 0));
+        put_le32(raw, secs_at, secs);
+        if extended {
+            put_le32(raw, extra_at, extra);
+        }
+    }
 }
 
 /// Write a little-endian `u16` at `off`; a no-op if out of bounds.
@@ -440,6 +505,30 @@ fn u32_le_truncate(value: u64) -> [u8; 4] {
 /// Narrow a `usize` to `u16`, mapping overflow to [`DriverError::DeviceFault`].
 fn u16_of(value: usize) -> Result<u16, DriverError> {
     u16::try_from(value).map_err(|_| DriverError::DeviceFault)
+}
+
+/// The node kind an `i_mode` names, or `None` for an unsupported special
+/// file.
+fn kind_of(mode: u16) -> Option<NodeKind> {
+    match mode & S_IFMT {
+        S_IFDIR => Some(NodeKind::Directory),
+        S_IFREG => Some(NodeKind::RegularFile),
+        S_IFLNK => Some(NodeKind::Symlink),
+        _ => None,
+    }
+}
+
+/// A 32-bit owner or group id, which an inode stores as a low and a high
+/// half at `lo` and `hi`.
+fn split_id(raw: &[u8], lo: usize, hi: usize) -> u32 {
+    u32::from(le16(raw, lo)) | (u32::from(le16(raw, hi)) << 16)
+}
+
+/// Store `id` as the low and high halves [`split_id`] reads.
+fn put_split_id(raw: &mut [u8], lo: usize, hi: usize, id: u32) {
+    let [a, b, c, d] = id.to_le_bytes();
+    put_le16(raw, lo, u16::from_le_bytes([a, b]));
+    put_le16(raw, hi, u16::from_le_bytes([c, d]));
 }
 
 /// Narrow a `u64` to `usize`, mapping overflow to [`DriverError::DeviceFault`].
@@ -559,12 +648,7 @@ struct Inode {
 impl Inode {
     /// The node kind, or `None` for an unsupported special file.
     fn kind(&self) -> Option<NodeKind> {
-        match self.mode & S_IFMT {
-            S_IFDIR => Some(NodeKind::Directory),
-            S_IFREG => Some(NodeKind::RegularFile),
-            S_IFLNK => Some(NodeKind::Symlink),
-            _ => None,
-        }
+        kind_of(self.mode)
     }
 
     /// Whether the inode is extent-mapped rather than block-mapped.
@@ -585,12 +669,14 @@ impl Inode {
     }
 }
 
-/// Read-only ext4 driver over a [`Block`] device.
+/// ext4 driver over a [`Block`] device.
 pub struct Ext4<B: Block> {
     block: B,
     block_size: u32,
     block_count: u64,
     layout: Layout,
+    /// The host the mount's stamps take their time from, once it has one.
+    host: Option<&'static dyn VolumeHost>,
 }
 
 /// Read `buf.len()` bytes starting at device byte `offset`, staging
@@ -831,6 +917,7 @@ impl<B: Block> Ext4<B> {
                 hash_signed,
                 largedir,
             },
+            host: None,
         })
     }
 
@@ -846,9 +933,11 @@ impl<B: Block> Ext4<B> {
     ///
     /// The formatter writes a deliberately conservative on-disk feature
     /// set the read/write path fully supports: `filetype` + `extent`
-    /// (`s_feature_incompat`), no read-only-compat features, 128-byte
-    /// inodes and 32-byte group descriptors, and **no** checksum
-    /// (`metadata_csum`/`gdt_csum`) or `64bit` feature. Every block group
+    /// (`s_feature_incompat`), `extra_isize` alone of the read-only-compat
+    /// features, 256-byte inodes, whose enlarged region holds every stamp
+    /// to the nanosecond until 2446, and 32-byte group descriptors, and
+    /// **no** checksum (`metadata_csum`/`gdt_csum`) or `64bit` feature.
+    /// Every block group
     /// is fully materialised (no lazy/`UNINIT` groups), so the volume can
     /// be filled to exhaustion. The block size is 4096 bytes for volumes
     /// of at least 128 MiB and 1024 bytes otherwise; `blocks_per_group`
@@ -999,8 +1088,8 @@ impl<B: Block> Ext4<B> {
         let raw = &raw[..want];
 
         let mode = le16(raw, 0);
-        let uid = u32::from(le16(raw, 0x02)) | (u32::from(le16(raw, 0x78)) << 16);
-        let gid = u32::from(le16(raw, 0x18)) | (u32::from(le16(raw, 0x7A)) << 16);
+        let uid = split_id(raw, INODE_UID_LO, INODE_UID_HI);
+        let gid = split_id(raw, INODE_GID_LO, INODE_GID_HI);
         let size_lo = u64::from(le32(raw, 0x04));
         // A directory's size is the low word alone unless `largedir` widens
         // it; the high word is then not a size at all.
@@ -1016,27 +1105,20 @@ impl<B: Block> Ext4<B> {
         let file_acl = u64::from(le32(raw, 0x68)) | (u64::from(le16(raw, INODE_FILE_ACL_HI)) << 32);
         let mut block = [0u8; I_BLOCK_LEN];
         block.copy_from_slice(&raw[I_BLOCK_OFFSET..I_BLOCK_OFFSET + I_BLOCK_LEN]);
-        // The nanosecond+epoch `_extra` timestamp fields live in the
-        // enlarged inode record beyond the classic 128 bytes, present only
-        // when `i_extra_isize` (0x80) covers them: ctime_extra 0x84,
-        // mtime_extra 0x88, atime_extra 0x8C, crtime 0x90, crtime_extra
-        // 0x94 (ext4 disk layout).
-        let raw_len = raw.len();
-        let extra_isize = usize::from(le16(raw, 0x80));
-        let extra_at = |off: usize| -> Option<u32> {
-            if raw_len >= off + 4 && 128 + extra_isize >= off + 4 {
-                Some(le32(raw, off))
-            } else {
-                None
-            }
+        let stamp = |stamp: Stamp| {
+            let (secs, extra) = stamp.fields();
+            decode_inode_time(
+                le32(raw, secs),
+                has_extra(raw, extra).then(|| le32(raw, extra)),
+            )
         };
-        let accessed = decode_inode_time(le32(raw, 0x08), extra_at(0x8C))?;
-        let changed = decode_inode_time(le32(raw, 0x0C), extra_at(0x84))?;
-        let modified = decode_inode_time(le32(raw, 0x10), extra_at(0x88))?;
-        // `i_crtime` (birth time) exists only in an enlarged record; absent,
-        // the node reports the epoch rather than a fabricated instant.
-        let created = if raw_len >= 0x94 && 128 + extra_isize >= 0x90 + 4 {
-            decode_inode_time(le32(raw, 0x90), extra_at(0x94))?
+        let accessed = stamp(Stamp::Access)?;
+        let changed = stamp(Stamp::Change)?;
+        let modified = stamp(Stamp::Modify)?;
+        // A record with no room for a birth time reports the epoch rather
+        // than a fabricated instant.
+        let created = if has_extra(raw, Stamp::Create.fields().0) {
+            stamp(Stamp::Create)?
         } else {
             Time64::UNIX_EPOCH
         };
@@ -1374,6 +1456,12 @@ impl<B: Block> Ext4<B> {
 }
 
 impl<B: Block> Ext4<B> {
+    /// The instant an operation stamps, or `None` while the host has no time
+    /// to give.
+    fn now(&self) -> Option<Time64> {
+        self.host.and_then(VolumeHost::wall_time)
+    }
+
     /// Refuse mutation of a volume whose feature set this driver cannot
     /// maintain (fail closed).
     fn ensure_writable(&self) -> Result<(), DriverError> {
@@ -2683,21 +2771,28 @@ impl<B: Block> Ext4<B> {
             .ok_or(DriverError::NotFound)
     }
 
-    /// Add `delta` to inode `ino`'s `i_links_count`, saturating at the
-    /// `u16` bounds. Used to maintain a directory's link count as child
-    /// directories (each contributing a `..` back-link) move in and out.
-    fn adjust_links(&mut self, ino: u32, delta: i16) -> Result<(), DriverError> {
+    /// Record that directory `dir_ino`'s entries changed at `now`, adding
+    /// `link_delta` to its `i_links_count` (saturating at the `u16` bounds)
+    /// for the child directories, each a `..` back-link, that moved in or
+    /// out. One inode write carries both.
+    fn update_dir(
+        &mut self,
+        dir_ino: u32,
+        link_delta: i16,
+        now: Option<Time64>,
+    ) -> Result<(), DriverError> {
         let mut raw = self.inode_scratch()?;
-        self.read_inode_raw(ino, &mut raw)?;
+        self.read_inode_raw(dir_ino, &mut raw)?;
         let links = le16(&raw, INODE_LINKS);
-        let magnitude = delta.unsigned_abs();
-        let new = if delta < 0 {
+        let magnitude = link_delta.unsigned_abs();
+        let new = if link_delta < 0 {
             links.saturating_sub(magnitude)
         } else {
             links.saturating_add(magnitude)
         };
         put_le16(&mut raw, INODE_LINKS, new);
-        self.write_inode_raw(ino, &mut raw)
+        put_stamps(&mut raw, now, &[Stamp::Modify, Stamp::Change]);
+        self.write_inode_raw(dir_ino, &mut raw)
     }
 
     /// Drop one name from inode `ino`, whose raw record is `raw`, freeing
@@ -2710,11 +2805,18 @@ impl<B: Block> Ext4<B> {
     /// A directory cannot carry a second name in ext4 either, so it is
     /// cleared outright (its own `.` goes with its name), matching what
     /// Linux's `ext4_rmdir` does.
-    fn drop_one_name(&mut self, ino: u32, raw: &mut [u8], is_dir: bool) -> Result<(), DriverError> {
+    fn drop_one_name(
+        &mut self,
+        ino: u32,
+        raw: &mut [u8],
+        is_dir: bool,
+        now: Option<Time64>,
+    ) -> Result<(), DriverError> {
         let links = le16(raw, INODE_LINKS);
         let remaining = if is_dir { 0 } else { links.saturating_sub(1) };
         if remaining > 0 {
             put_le16(raw, INODE_LINKS, remaining);
+            put_stamps(raw, now, &[Stamp::Change]);
             return self.write_inode_raw(ino, raw);
         }
         self.truncate_blocks(ino, raw, 0)?;
@@ -2725,9 +2827,21 @@ impl<B: Block> Ext4<B> {
         put_le32(raw, 0x04, 0);
         put_le32(raw, 0x6C, 0);
         put_le32(raw, INODE_BLOCKS_LO, 0);
-        put_le32(raw, INODE_DTIME, DELETED_DTIME);
+        put_le32(raw, INODE_DTIME, self.deletion_time(now));
         self.write_inode_raw(ino, raw)?;
         self.free_inode(ino, is_dir)
+    }
+
+    /// The `i_dtime` a freed inode is stamped with: the time it went, where
+    /// the unsigned 32-bit field holds it and it cannot be read as the
+    /// orphan-list inode number ext4 also keeps there, else
+    /// [`DELETED_DTIME`].
+    fn deletion_time(&self, now: Option<Time64>) -> u32 {
+        let inodes =
+            u64::from(self.layout.inodes_per_group).saturating_mul(self.layout.group_count);
+        now.and_then(|time| u32::try_from(time.secs()).ok())
+            .filter(|&secs| u64::from(secs) > inodes)
+            .unwrap_or(DELETED_DTIME)
     }
 
     /// Directory `dir_ino`'s block 0, read into `block` and checked as what it
@@ -2871,6 +2985,7 @@ impl<B: Block> Ext4<B> {
             Err(DriverError::NotFound) => None,
             Err(e) => return Err(e),
         };
+        let now = self.now();
         if let Some(dst_ino) = dst_existing {
             if dst_ino == src_ino {
                 return Ok(());
@@ -2887,12 +3002,15 @@ impl<B: Block> Ext4<B> {
             // The name goes before the inode it names, so nothing is ever
             // left naming a freed inode a later create could reuse.
             self.remove_dirent(dst_dir_ino, dst_name)?;
-            self.drop_one_name(dst_ino, &mut dst_raw, dst_is_dir)?;
+            self.drop_one_name(dst_ino, &mut dst_raw, dst_is_dir, now)?;
             if dst_is_dir {
-                self.adjust_links(dst_dir_ino, -1)?;
+                self.update_dir(dst_dir_ino, -1, now)?;
             }
         }
 
+        // A rename changes the moved node's name, never its contents.
+        put_stamps(&mut src_raw, now, &[Stamp::Change]);
+        self.write_inode_raw(src_ino, &mut src_raw)?;
         self.insert_child(
             dst_dir_ino,
             Child {
@@ -2905,8 +3023,11 @@ impl<B: Block> Ext4<B> {
 
         if reparenting {
             self.set_parent(src_ino, dst_dir_ino)?;
-            self.adjust_links(src_dir_ino, -1)?;
-            self.adjust_links(dst_dir_ino, 1)?;
+        }
+        let moved_link = i16::from(reparenting);
+        self.update_dir(src_dir_ino, -moved_link, now)?;
+        if dst_dir_ino != src_dir_ino {
+            self.update_dir(dst_dir_ino, moved_link, now)?;
         }
         Ok(())
     }
@@ -2980,6 +3101,10 @@ impl<B: Block> FilesystemRead for Ext4<B> {
 
     fn name_matching(&self) -> NameMatching {
         NameMatching::Exact
+    }
+
+    fn node_identity(&self) -> NodeIdentity {
+        NodeIdentity::Stable
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -3145,6 +3270,19 @@ impl<B: Block> FilesystemSecurity for Ext4<B> {
         // refused whole (fail closed); the record a node was created
         // with stands.
         Err(DriverError::Unsupported)
+    }
+
+    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
+        self.ensure_writable()?;
+        let ino = node_inode(node)?;
+        let mut raw = self.inode_scratch()?;
+        self.read_inode_raw(ino, &mut raw)?;
+        if kind_of(le16(&raw, 0)).is_none() {
+            return Err(DriverError::NotFound);
+        }
+        put_split_id(&mut raw, INODE_UID_LO, INODE_UID_HI, uid);
+        put_split_id(&mut raw, INODE_GID_LO, INODE_GID_HI, gid);
+        self.write_inode_raw(ino, &mut raw)
     }
 }
 
@@ -3435,24 +3573,27 @@ impl<B: Block> Ext4<B> {
 }
 
 impl<B: Block> Ext4<B> {
-    /// Lay down new inode `ino` of `mode` in `raw` and write it: a directory
-    /// gets its first block, holding `.` and `..` (naming `parent`), recorded
-    /// in `raw` before it is written so a failure can give it back.
+    /// Lay down new inode `ino` of `mode`, born at `now`, in `raw` and write
+    /// it: a directory gets its first block, holding `.` and `..` (naming
+    /// `parent`), recorded in `raw` before it is written so a failure can
+    /// give it back.
     fn lay_new_inode(
         &mut self,
         parent: u32,
         ino: u32,
         mode: u16,
         raw: &mut [u8],
+        now: Option<Time64>,
     ) -> Result<(), DriverError> {
         let is_dir = mode & S_IFMT == S_IFDIR;
         put_le16(raw, 0, mode);
         put_le16(raw, INODE_LINKS, if is_dir { 2 } else { 1 });
-        // Match the mke2fs default so the inode checksum's high half is
-        // covered on an enlarged-inode volume.
+        // Match the mke2fs default so the inode checksum's high half and
+        // every extended timestamp are covered on an enlarged-inode volume.
         if self.layout.inode_size > 128 {
             put_le16(raw, I_EXTRA_ISIZE_OFFSET, NEW_EXTRA_ISIZE);
         }
+        put_stamps(raw, now, &Stamp::ALL);
         if is_dir {
             let bs = self.layout.block_size as usize;
             let block = self.alloc_block()?;
@@ -3495,9 +3636,10 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
 
         let is_dir = kind == NodeKind::Directory;
         let mode = if is_dir { NEW_DIR_MODE } else { NEW_FILE_MODE };
+        let now = self.now();
         let new_ino = self.alloc_inode(is_dir)?;
         let mut raw = self.inode_scratch()?;
-        if let Err(err) = self.lay_new_inode(dir_ino, new_ino, mode, &mut raw) {
+        if let Err(err) = self.lay_new_inode(dir_ino, new_ino, mode, &mut raw, now) {
             // Nothing names the inode yet, so it and any block it took go
             // back.
             if is_dir {
@@ -3515,11 +3657,14 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
             file_type: dirent_file_type(mode),
         };
         if let Err(err) = self.insert_child(dir_ino, child) {
-            let _ = self.drop_one_name(new_ino, &mut raw, is_dir);
+            let _ = self.drop_one_name(new_ino, &mut raw, is_dir, now);
             return Err(err);
         }
-        if is_dir {
-            self.adjust_links(dir_ino, 1)?;
+        if let Err(err) = self.update_dir(dir_ino, i16::from(is_dir), now) {
+            // A create the caller is told failed leaves no name behind.
+            let _ = self.remove_dirent(dir_ino, name);
+            let _ = self.drop_one_name(new_ino, &mut raw, is_dir, now);
+            return Err(err);
         }
         Ok(NodeId::from_raw(u64::from(new_ino)))
     }
@@ -3566,6 +3711,7 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
             0x1C,
             blocks + u32_of(allocated)? * self.sectors_per_block(),
         );
+        put_stamps(&mut raw, self.now(), &[Stamp::Modify, Stamp::Change]);
         self.write_inode_raw(child, &mut raw)?;
         Ok(written)
     }
@@ -3586,6 +3732,7 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
         }
         put_le32(&mut raw, 0x04, u32_of(size)?);
         put_le32(&mut raw, 0x6C, u32_of(size >> 32)?);
+        put_stamps(&mut raw, self.now(), &[Stamp::Modify, Stamp::Change]);
         self.write_inode_raw(child, &mut raw)?;
 
         // Zero the tail of a retained partial block so a later extension
@@ -3622,12 +3769,10 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
         }
         // The name goes before the inode it names, so nothing is ever left
         // naming a freed inode a later create could reuse.
+        let now = self.now();
         self.remove_dirent(dir_ino, name)?;
-        self.drop_one_name(child, &mut raw, is_dir)?;
-        if is_dir {
-            self.adjust_links(dir_ino, -1)?;
-        }
-        Ok(())
+        self.drop_one_name(child, &mut raw, is_dir, now)?;
+        self.update_dir(dir_ino, -i16::from(is_dir), now)
     }
 
     fn rename(
@@ -3643,6 +3788,10 @@ impl<B: Block> FilesystemWrite for Ext4<B> {
 
     fn flush(&mut self) -> Result<(), DriverError> {
         Ok(())
+    }
+
+    fn set_volume_host(&mut self, _volume: DriverHandle, host: &'static dyn VolumeHost) {
+        self.host = Some(host);
     }
 }
 

@@ -44,7 +44,7 @@ pub const ATTR_LOCKED: u16 = 1 << 2;
 pub const ATTR_DIRECTORY: u16 = 1 << 3;
 
 /// One directory object, format-independent.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub struct Object {
     /// Object name bytes (case-preserved, high bits stripped).
     pub name: [u8; MAX_NAME_LEN],

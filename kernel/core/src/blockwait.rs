@@ -361,12 +361,10 @@ mod tests {
         &'static TestSink,
     ) {
         let _ = test_boot::claim_scheduler();
-        let table: &'static IrqTable =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
+        let table: &'static IrqTable = crate::forever(alloc::boxed::Box::new(IrqTable::new(31)));
         table.set_clock(&WAIT_CLOCK).expect("a fresh table");
         let out = table.bind(LINE, OWNER).expect("binds");
-        let sink: &'static TestSink =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(alloc::boxed::Box::new(TestSink::new()));
         let waiter =
             IrqParkWaiter::new(table, out.handle, OWNER, &CONTROLLER, Some(fallback), sink);
         (table, out.handle, waiter, sink)
@@ -401,8 +399,7 @@ mod tests {
     #[test]
     fn a_waiter_with_no_fallback_ends_a_wait_it_cannot_park() {
         let _ = test_boot::claim_scheduler();
-        let table: &'static IrqTable =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
+        let table: &'static IrqTable = crate::forever(alloc::boxed::Box::new(IrqTable::new(31)));
         let out = table.bind(LINE, OWNER).expect("binds");
         let waiter = IrqParkWaiter::new(
             table,
@@ -410,7 +407,7 @@ mod tests {
             OWNER,
             &CONTROLLER,
             None,
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(TestSink::new())),
+            crate::forever(alloc::boxed::Box::new(TestSink::new())),
         );
         assert_eq!(
             waiter.park_wait(u64::MAX),

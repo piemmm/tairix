@@ -1,5 +1,6 @@
 extern crate std;
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -237,7 +238,7 @@ type MasterCall = (Named, bool, Option<DomainId>, u64);
 
 impl Port {
     fn new(model: &'static ModelUnit<'static>, mastering_at_take_over: Vec<u32>) -> &'static Self {
-        Box::leak(Box::new(Self {
+        crate::forever(Box::new(Self {
             model,
             calls: SpinLock::new(Vec::new()),
             epochs: core::sync::atomic::AtomicU64::new(1),
@@ -901,7 +902,7 @@ impl IommuUnit for Watching {
 #[test]
 fn an_end_is_published_only_once_its_streams_are_back_with_firmware() {
     let (model, tree) = rig!(Behaviour::Correct);
-    let watching: &'static Watching = Box::leak(Box::new(Watching {
+    let watching: &'static Watching = crate::forever(Box::new(Watching {
         model,
         owner: SpinLock::new(None),
         attaches: SpinLock::new(Vec::new()),
@@ -1159,13 +1160,13 @@ fn an_amd_vi_unit_is_taken_over_by_its_own_family() {
     #[repr(C, align(4096))]
     struct Registers([u64; 0x800]);
     // Leaked: a unit taken over keeps reaching its registers.
-    let registers = Box::leak(Box::new(Registers([0; 0x800])));
+    let registers = crate::forever(Box::new(Registers([0; 0x800])));
     let window = NonNull::from(&mut registers.0).cast::<u8>();
     let mut amdvi = snooping_unit(tairix_kernel_iommu_amdvi::COMPATIBLE);
     amdvi
         .push_resource(HwResource::mmio(0xFED8_0000, LEN))
         .unwrap();
-    let starved: &'static tairix_kernel_iommu_api::hostmem::HostFrames = Box::leak(Box::new(
+    let starved: &'static tairix_kernel_iommu_api::hostmem::HostFrames = crate::forever(Box::new(
         tairix_kernel_iommu_api::hostmem::HostFrames::new(0x3_0000_0000),
     ));
     starved.limit(0);
@@ -1209,7 +1210,7 @@ static NO_FRAMES: tairix_kernel_iommu_api::hostmem::HostFrames =
     tairix_kernel_iommu_api::hostmem::HostFrames::new(0x2_0000_0000);
 
 fn audit_sink() -> &'static TestSink {
-    Box::leak(Box::new(TestSink::new()))
+    crate::forever(Box::new(TestSink::new()))
 }
 
 fn recorded(sink: &TestSink, event: AuditEvent) -> Vec<CapturedEvent> {
@@ -1350,9 +1351,9 @@ fn a_unit_is_listed_by_how_its_faults_are_heard() {
     ] {
         let (model, tree) = rig!(Behaviour::Correct);
         let translation: &'static Translation =
-            Box::leak(Box::new(started(model, tree, Vec::new())));
+            crate::forever(Box::new(started(model, tree, Vec::new())));
         let env = FaultEnv {
-            table: Box::leak(Box::new(IrqTable::new(31))),
+            table: crate::forever(Box::new(IrqTable::new(31))),
             controller: &OK_CONTROLLER,
             msi,
             audit: audit_sink(),
@@ -1614,7 +1615,7 @@ const LINE: u32 = 9;
 
 /// A vector of the test's own, so the releases counted are its alone.
 fn vector() -> &'static OneVector {
-    Box::leak(Box::new(OneVector {
+    crate::forever(Box::new(OneVector {
         vector: MsiAllocation::new(0xFEE0_0000, 0x41, LINE),
         released: core::sync::atomic::AtomicUsize::new(0),
     }))
@@ -1632,8 +1633,8 @@ fn serving_through(
     msi: Option<&'static dyn KernelMsiFacility>,
     controller: &'static (dyn IrqController + Sync),
 ) -> (&'static IrqTable, &'static TestSink, usize) {
-    let translation: &'static Translation = Box::leak(Box::new(translation));
-    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
+    let translation: &'static Translation = crate::forever(Box::new(translation));
+    let table: &'static IrqTable = crate::forever(Box::new(IrqTable::new(31)));
     let sink = audit_sink();
     let env = FaultEnv {
         table,
@@ -1679,9 +1680,10 @@ impl crate::kthread::YieldHandle for Spins {
 #[test]
 fn a_window_whose_drains_are_spent_is_slept_out_with_the_line_masked() {
     let (model, tree) = rig!(Behaviour::EndlessFaults);
-    let translation: &'static Translation = Box::leak(Box::new(started(model, tree, Vec::new())));
-    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
-    let controller: &'static Rearms = Box::leak(Box::new(Rearms::default()));
+    let translation: &'static Translation =
+        crate::forever(Box::new(started(model, tree, Vec::new())));
+    let table: &'static IrqTable = crate::forever(Box::new(IrqTable::new(31)));
+    let controller: &'static Rearms = crate::forever(Box::new(Rearms::default()));
     let sink = audit_sink();
     let env = FaultEnv {
         table,
@@ -1746,8 +1748,8 @@ fn served_once(
     &'static TestSink,
     Vec<crate::kthread::KernelServiceBody>,
 ) {
-    let translation: &'static Translation = Box::leak(Box::new(translation));
-    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
+    let translation: &'static Translation = crate::forever(Box::new(translation));
+    let table: &'static IrqTable = crate::forever(Box::new(IrqTable::new(31)));
     if held {
         table
             .bind_exclusive(LINE, tairix_kernel_sec::ProcessId(0x99))
@@ -1869,7 +1871,7 @@ fn wired(model: &'static ModelUnit<'static>, tree: &'static Tree) -> Translation
 #[test]
 fn a_unit_naming_a_wired_fault_line_is_served_there() {
     let (model, tree) = rig!(Behaviour::Correct);
-    let controller: &'static Triggering = Box::leak(Box::new(Triggering {
+    let controller: &'static Triggering = crate::forever(Box::new(Triggering {
         edge: true,
         asked: SpinLock::new(Vec::new()),
     }));
@@ -1891,7 +1893,7 @@ fn a_unit_naming_a_wired_fault_line_is_served_there() {
 #[test]
 fn a_wired_fault_line_its_controller_cannot_trigger_is_unrouted() {
     let (model, tree) = rig!(Behaviour::Correct);
-    let controller: &'static Triggering = Box::leak(Box::new(Triggering {
+    let controller: &'static Triggering = crate::forever(Box::new(Triggering {
         edge: false,
         asked: SpinLock::new(Vec::new()),
     }));
@@ -1979,7 +1981,7 @@ fn a_slot_naming_no_line_is_unheard_where_other_units_send_messages() {
 #[test]
 fn a_unit_nothing_hears_has_its_faults_unrouted() {
     let (model, tree) = rig!(Behaviour::Correct);
-    let controller: &'static Triggering = Box::leak(Box::new(Triggering {
+    let controller: &'static Triggering = crate::forever(Box::new(Triggering {
         edge: true,
         asked: SpinLock::new(Vec::new()),
     }));
@@ -2011,12 +2013,12 @@ fn a_unit_nothing_hears_has_its_faults_unrouted() {
 #[test]
 fn a_wired_fault_line_another_owner_holds_keeps_its_trigger() {
     let (model, tree) = rig!(Behaviour::Correct);
-    let controller: &'static Triggering = Box::leak(Box::new(Triggering {
+    let controller: &'static Triggering = crate::forever(Box::new(Triggering {
         edge: true,
         asked: SpinLock::new(Vec::new()),
     }));
-    let translation: &'static Translation = Box::leak(Box::new(wired(model, tree)));
-    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
+    let translation: &'static Translation = crate::forever(Box::new(wired(model, tree)));
+    let table: &'static IrqTable = crate::forever(Box::new(IrqTable::new(31)));
     let holder = tairix_kernel_sec::ProcessId(0x99);
     table.bind_exclusive(WIRED.line, holder).unwrap();
     let sink = audit_sink();
@@ -2707,7 +2709,7 @@ impl Sink for HeldWitness {
 #[test]
 fn a_refused_group_is_audited_with_its_holder_let_go() {
     let (model, tree) = rig!(Behaviour::Correct);
-    let witness: &'static HeldWitness = Box::leak(Box::new(HeldWitness {
+    let witness: &'static HeldWitness = crate::forever(Box::new(HeldWitness {
         holder: SpinLock::new(None),
         held: SpinLock::new(Vec::new()),
     }));
@@ -2901,12 +2903,12 @@ impl Released {
 
 /// A rig of its own on every call, for a test that loops over several.
 fn fresh_rig() -> (&'static ModelUnit<'static>, &'static Tree) {
-    let frames: &'static tairix_kernel_iommu_api::hostmem::HostFrames = Box::leak(Box::new(
+    let frames: &'static tairix_kernel_iommu_api::hostmem::HostFrames = crate::forever(Box::new(
         tairix_kernel_iommu_api::hostmem::HostFrames::new(0x1_0000_0000),
     ));
     (
-        Box::leak(Box::new(ModelUnit::new(frames, Behaviour::Correct))),
-        Box::leak(Box::new(Tree::new())),
+        crate::forever(Box::new(ModelUnit::new(frames, Behaviour::Correct))),
+        crate::forever(Box::new(Tree::new())),
     )
 }
 
@@ -3112,10 +3114,11 @@ impl crate::kthread::YieldHandle for Script<'_> {
 fn the_flusher_parks_until_a_batch_is_due_and_confirms_it() {
     let (_, task) = crate::test_boot::claim_scheduler();
     let (model, tree) = rig!(Behaviour::Correct);
-    let translation: &'static Translation = Box::leak(Box::new(started(model, tree, Vec::new())));
+    let translation: &'static Translation =
+        crate::forever(Box::new(started(model, tree, Vec::new())));
     tree.add(&device_node(DEVICE, STREAM));
-    let released: &'static Released = Box::leak(Box::new(Released::new()));
-    let release: &'static Release<'static> = Box::leak(Box::new(released.release()));
+    let released: &'static Released = crate::forever(Box::new(Released::new()));
+    let release: &'static Release<'static> = crate::forever(Box::new(released.release()));
     let mut bodies = Vec::new();
     translation.serve_frees(u64::MAX, release, |body| {
         bodies.push(body);
@@ -3176,7 +3179,7 @@ fn serving_frees(
     let (model, tree) = fresh_rig();
     let sink = audit_sink();
     let translation: &'static Translation =
-        Box::leak(Box::new(started_with(model, tree, Vec::new(), None, sink)));
+        crate::forever(Box::new(started_with(model, tree, Vec::new(), None, sink)));
     tree.add(&device_node(DEVICE, STREAM));
     let release: &'static Release<'static> = &|_: &[FrameBlock]| {};
     let mut bodies = Vec::new();

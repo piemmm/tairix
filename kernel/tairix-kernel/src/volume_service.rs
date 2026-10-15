@@ -83,7 +83,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider,
     FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NameMatching,
-    NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
+    NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
@@ -245,6 +245,10 @@ impl FilesystemRead for UnavailableFs {
 
     fn name_matching(&self) -> NameMatching {
         NameMatching::Exact
+    }
+
+    fn node_identity(&self) -> NodeIdentity {
+        NodeIdentity::Stable
     }
 
     fn node_info(&mut self, _node: NodeId) -> Result<NodeInfo, DriverError> {

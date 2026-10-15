@@ -1637,13 +1637,13 @@ mod tests {
     }
 
     fn leaked_arch() -> &'static TestArch {
-        std::boxed::Box::leak(std::boxed::Box::new(TestArch::with_cpus(1)))
+        crate::forever(std::boxed::Box::new(TestArch::with_cpus(1)))
     }
 
     /// As [`leaked_arch`], reporting `cpu` as the current CPU, so a park
     /// driven through it lands on the CPU the caller claimed.
     fn leaked_arch_on(cpu: tairix_kernel_sched_api::CpuId) -> &'static TestArch {
-        std::boxed::Box::leak(std::boxed::Box::new(TestArch::on_cpu(cpu)))
+        crate::forever(std::boxed::Box::new(TestArch::on_cpu(cpu)))
     }
 
     /// A device whose pending bytes deplete as they are read, standing in for
@@ -2613,8 +2613,8 @@ mod tests {
     /// for the line-discipline tests, returning the device and its queue.
     fn filter_device() -> (&'static ConsoleDevice, &'static ConsoleInputQueue) {
         let queue: &'static ConsoleInputQueue =
-            std::boxed::Box::leak(std::boxed::Box::new(ConsoleInputQueue::new()));
-        let device: &'static ConsoleDevice = std::boxed::Box::leak(std::boxed::Box::new(
+            crate::forever(std::boxed::Box::new(ConsoleInputQueue::new()));
+        let device: &'static ConsoleDevice = crate::forever(std::boxed::Box::new(
             ConsoleDevice::with_input(&NULL_CONSOLE, queue, queue),
         ));
         (device, queue)

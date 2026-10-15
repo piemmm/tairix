@@ -10,7 +10,10 @@
 //! It reports creation, modification, and metadata-change timestamps through
 //! [`NodeInfo::times`](tairix_abi::driver::filesystem::NodeInfo::times); it
 //! deliberately does **not** track access time (atime), reporting
-//! [`Time64::UNIX_EPOCH`] for it.
+//! [`Time64::UNIX_EPOCH`] for it. Stamps come from the host's
+//! [`VolumeHost::wall_time`]; while it has no time to give — or with no host,
+//! as when an image is formatted — a stamp is [`Time64::UNIX_EPOCH`], the
+//! "no stamp" value.
 //!
 //! # Crash consistency (copy-on-write + superblock ring)
 //!
@@ -56,7 +59,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeInfo, NodeKind, NodeTimes, VolumeHost, VolumeStats,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeTimes, VolumeHost, VolumeStats,
 };
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -770,11 +773,6 @@ fn put_dirent(buf: &mut [u8], slot: usize, ino: u32, name: &[u8]) {
     buf[base + 8..base + 8 + name.len()].copy_from_slice(name);
 }
 
-/// A best-effort wall clock; the host overrides it with [`ARXFS::with_clock`].
-fn epoch_clock() -> Time64 {
-    Time64::UNIX_EPOCH
-}
-
 /// A mounted copy-on-write arxfs volume.
 ///
 /// The on-disk state is the committed transaction root selected from the
@@ -865,7 +863,6 @@ pub struct ARXFS<B: Block> {
     saved_txn: Roots,
     /// When the open transaction must be published (`wcache` module).
     schedule: CommitScheduler,
-    clock: fn() -> Time64,
     /// When `true`, the handle never mutates the backing device: the
     /// repair-on-read paths (`read_meta`, and the mount's repair of the slot
     /// and root it chose) skip writing a good companion back over a bad
@@ -1111,12 +1108,13 @@ impl<B: Block> ARXFS<B> {
         data_capacity_of(self.block_size)
     }
 
-    /// Replace the wall clock used to stamp the timestamps. Used by tests
-    /// to inject a deterministic clock; the default returns the Unix epoch.
-    #[must_use]
-    pub fn with_clock(mut self, clock: fn() -> Time64) -> Self {
-        self.clock = clock;
-        self
+    /// The instant an operation stamps: the host's wall clock, or no stamp
+    /// while there is no host or it has no time to give.
+    fn now(&self) -> Time64 {
+        self.schedule
+            .host()
+            .and_then(|(_, host)| host.wall_time())
+            .unwrap_or(Time64::UNIX_EPOCH)
     }
 
     /// Install the host for the mount registered as `volume`: its write-back
@@ -2502,7 +2500,6 @@ impl<B: Block> ARXFS<B> {
             saved_op: Roots::default(),
             saved_txn: Roots::default(),
             schedule: CommitScheduler::new(class),
-            clock: epoch_clock,
             read_only: false,
             cluster_cache: None,
             tree_edit: None,
@@ -2587,7 +2584,7 @@ impl<B: Block> ARXFS<B> {
         fs.rebuild_free_space_at(RING_BLOCKS, fs.total_blocks)?;
 
         fs.begin()?;
-        let now = (fs.clock)();
+        let now = fs.now();
         let mut root = Inode::empty(InodeKind::Dir, Security::new(0o755, 0, 0), now);
         root.nlink = 2;
         // Insert "." and ".." through the normal directory-insertion path so
@@ -4506,7 +4503,7 @@ impl<B: Block> ARXFS<B> {
         let ino = self.ino_of(node)?;
         let mut inode = self.read_inode(ino)?;
         inode.sec = sec;
-        inode.times.changed = (self.clock)();
+        inode.times.changed = self.now();
         self.write_inode(ino, &inode)?;
         self.end_operation()
     }
@@ -4518,7 +4515,7 @@ impl<B: Block> ARXFS<B> {
         kind: NodeKind,
     ) -> Result<NodeId, DriverError> {
         Self::check_name(name)?;
-        let now = (self.clock)();
+        let now = self.now();
         let dir_ino = self.ino_of(dir)?;
         let mut dir_inode = self.read_inode(dir_ino)?;
         if !dir_inode.is_dir() {
@@ -4594,7 +4591,7 @@ impl<B: Block> ARXFS<B> {
         if target.is_empty() || target.len() > FS_SYMLINK_MAX {
             return Err(DriverError::LengthOutOfRange);
         }
-        let now = (self.clock)();
+        let now = self.now();
         let dir_ino = self.ino_of(dir)?;
         let mut dir_inode = self.read_inode(dir_ino)?;
         if !dir_inode.is_dir() {
@@ -4652,7 +4649,7 @@ impl<B: Block> ARXFS<B> {
         if target.nlink == 0 {
             return Err(DriverError::NotFound);
         }
-        let now = (self.clock)();
+        let now = self.now();
         let dir_ino = self.ino_of(dir)?;
         let mut dir_inode = self.read_inode(dir_ino)?;
         if !dir_inode.is_dir() {
@@ -4866,7 +4863,7 @@ impl<B: Block> ARXFS<B> {
         dst_name: &[u8],
     ) -> Result<NodeId, DriverError> {
         Self::check_name(dst_name)?;
-        let now = (self.clock)();
+        let now = self.now();
         let dir_ino = self.ino_of(dir)?;
         let mut dir_inode = self.read_inode(dir_ino)?;
         if !dir_inode.is_dir() {
@@ -4964,7 +4961,7 @@ impl<B: Block> ARXFS<B> {
         let (child_ino, mut child) = self.resolve_file(dir, name)?;
         let written =
             self.write_file(&mut child, child_ino, offset, data, WriteLength::MayBeShort)?;
-        let now = (self.clock)();
+        let now = self.now();
         child.times.modified = now;
         child.times.changed = now;
         if written > 0 {
@@ -5007,7 +5004,7 @@ impl<B: Block> ARXFS<B> {
             self.draw = Draw::of(self.class);
         }
         let done = self.truncate_file(&mut child, ino, size)?;
-        let now = (self.clock)();
+        let now = self.now();
         child.times.modified = now;
         child.times.changed = now;
         if child.size != before {
@@ -5036,7 +5033,7 @@ impl<B: Block> ARXFS<B> {
         if !child.is_dir() && child.nlink > 1 {
             self.draw = Draw::of(self.class);
         }
-        let now = (self.clock)();
+        let now = self.now();
         // An empty directory loses both its name and its own `.`; every other
         // kind loses the one name being removed.
         if child.is_dir() {
@@ -5085,7 +5082,7 @@ impl<B: Block> ARXFS<B> {
         dst_name: &[u8],
     ) -> Result<(), DriverError> {
         Self::check_name(dst_name)?;
-        let now = (self.clock)();
+        let now = self.now();
         let src_dir_ino = self.ino_of(src_dir)?;
         let dst_dir_ino = self.ino_of(dst_dir)?;
         let same_dir = src_dir_ino == dst_dir_ino;
@@ -5283,7 +5280,7 @@ impl<B: Block> ARXFS<B> {
         set.set(key, AttrFlags::empty(), value)
             .map_err(DriverError::from)?;
         self.write_attrs(&mut inode, ino, &set)?;
-        inode.times.changed = (self.clock)();
+        inode.times.changed = self.now();
         self.write_inode(ino, &inode)?;
         self.end_operation()
     }
@@ -5299,7 +5296,7 @@ impl<B: Block> ARXFS<B> {
             return Err(DriverError::NotFound);
         }
         self.write_attrs(&mut inode, ino, &set)?;
-        inode.times.changed = (self.clock)();
+        inode.times.changed = self.now();
         self.write_inode(ino, &inode)?;
         self.end_operation()
     }
@@ -5399,6 +5396,10 @@ impl<B: Block> FilesystemRead for ARXFS<B> {
 
     fn name_matching(&self) -> NameMatching {
         NameMatching::Exact
+    }
+
+    fn node_identity(&self) -> NodeIdentity {
+        NodeIdentity::Stable
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

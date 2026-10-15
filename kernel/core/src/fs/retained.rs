@@ -651,7 +651,7 @@ mod tests {
     static TIGHTENING: TighteningSource = TighteningSource;
 
     fn ample_pressure() -> &'static MemoryPressure {
-        Box::leak(Box::new(MemoryPressure::over(&AMPLE)))
+        crate::forever(Box::new(MemoryPressure::over(&AMPLE)))
     }
 
     /// A RAM device with a flush counter and scriptable write failure.
@@ -853,7 +853,7 @@ mod tests {
             small_budget(),
         )));
         let pressure: &'static MemoryPressure =
-            Box::leak(Box::new(MemoryPressure::over(&TIGHTENING)));
+            crate::forever(Box::new(MemoryPressure::over(&TIGHTENING)));
         let mut device = JournaledBlock::new(RamFlushBlock::new(8), Arc::clone(&journal), pressure);
         device.device.fail_flush = true;
         device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]).unwrap();
@@ -868,7 +868,8 @@ mod tests {
             BLOCK_SIZE,
             small_budget(),
         )));
-        let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(&STARVED)));
+        let pressure: &'static MemoryPressure =
+            crate::forever(Box::new(MemoryPressure::over(&STARVED)));
         let mut device = JournaledBlock::new(RamFlushBlock::new(8), Arc::clone(&journal), pressure);
         device.device.fail_flush = true;
         device.write_blocks(0, &[1u8; BLOCK_SIZE as usize]).unwrap();
@@ -888,7 +889,7 @@ mod tests {
             small_budget(),
         )));
         let pressure: &'static MemoryPressure =
-            Box::leak(Box::new(MemoryPressure::over(&COUNTING)));
+            crate::forever(Box::new(MemoryPressure::over(&COUNTING)));
         let mut device =
             JournaledBlock::new(RamFlushBlock::new(64), Arc::clone(&journal), pressure);
         // The device refuses the opportunistic watermark flush, so the

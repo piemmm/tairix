@@ -55,7 +55,7 @@ fn without_config() -> RwMockFs {
 }
 
 fn sink() -> &'static TestSink {
-    alloc::boxed::Box::leak(alloc::boxed::Box::new(TestSink::new()))
+    crate::forever(alloc::boxed::Box::new(TestSink::new()))
 }
 
 fn control() -> CacheControl {

@@ -22,7 +22,7 @@ const FILE: NodeId = NodeId::from_raw(13);
 
 /// A claimed table of the calling test's own, and the table it claims.
 fn claimed() -> (Claim, Arc<VolumeWatch>) {
-    let registry: &'static WatchRegistry = Box::leak(Box::new(WatchRegistry::new()));
+    let registry: &'static WatchRegistry = crate::forever(Box::new(WatchRegistry::new()));
     let claim = registry
         .claim([0x5C; 16], NameMatching::Exact, unpressured())
         .expect("claims");
@@ -138,7 +138,7 @@ fn the_trail_keeps_only_the_most_recent_bindings() {
 /// A cached exact-name volume with a watch on its root.
 fn watched_volume() -> (CachedFs<RwMockFs>, Arc<VolumeWatch>, NodeId, u64) {
     let (claim, table) = claimed();
-    let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+    let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
     let fs = CachedFs::new(
         RwMockFs::new().with_exact_names(),
         CacheBudget::from_backing(16 << 20),
@@ -272,8 +272,7 @@ fn a_new_directorys_owner_stamp_moves_no_epoch() {
     let made = fs
         .create(root, b"made", NodeKind::Directory)
         .expect("mkdir");
-    let sec = fs.security(made).expect("security");
-    fs.stamp_security(made, sec).expect("stamp");
+    fs.stamp_owner(made, 1000, 1000).expect("stamp");
     assert_eq!(table.epochs(0), before);
 }
 

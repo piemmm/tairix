@@ -104,6 +104,10 @@ a raw register:
 marks the freed inode deleted (`i_links_count = 0`, `i_dtime`, zeroed
 size/blocks) so a consistency check sees a freed — not orphaned — inode.
 
+Every write stamps what it changed with the host's wall clock, and records
+no stamp while the clock is unset or for a time the inode cannot hold
+(`docs/src/filesystem/ext4.md`, Timestamps).
+
 Mutation still **fails closed** (`DriverError::Unsupported`) on a
 volume whose feature set the write path cannot maintain — anything
 outside the supported `incompat`/`ro_compat` allow-list, e.g.
@@ -127,10 +131,11 @@ which stays the single source of truth for the on-disk layout: after
 The formatter writes a deliberately conservative on-disk shape the
 read/write path fully supports:
 
-- `filetype` + `extent` (`s_feature_incompat`); no read-only-compat
-  features, **no** checksum (`metadata_csum`/`gdt_csum`), and **no**
-  `64bit` feature, so no checksum maintenance is needed;
-- 128-byte inodes, 32-byte group descriptors;
+- `filetype` + `extent` (`s_feature_incompat`) and `extra_isize`, the
+  one read-only-compat feature; **no** checksum (`metadata_csum`/`gdt_csum`),
+  and **no** `64bit` feature, so no checksum maintenance is needed;
+- 256-byte inodes, whose enlarged region holds every timestamp to the
+  nanosecond until 2446, and 32-byte group descriptors;
 - block size 4096 bytes for volumes ≥ 128 MiB, else 1024 bytes;
   `blocks_per_group = 8 * block_size` (bitmap-maximal). Only whole
   groups are used, so the reader's group count is exact and no

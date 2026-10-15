@@ -27,28 +27,47 @@
 //! Like every other mutable kernel subsystem, the wall clock is reached
 //! through a borrowed seam ([`WallClockSource`]) with a fail-closed default
 //! ([`NULL_WALL_CLOCK`]): there is no global mutable static. The boot path
-//! leaks one [`KernelWallClock`] and installs it; a trusted time source then
-//! drives it through the `wall_time_set` syscall.
+//! keeps one [`KernelWallClock`] in the kernel's state and threads it to every
+//! consumer; a trusted time source then drives it through the
+//! `wall_time_set` syscall.
 
 use tairix_abi::{Duration64, Errno, Time64, WallClockReading, WallTimeState};
-use tairix_sync::SpinLock;
+use tairix_sync::{SeqLock, SpinLock};
 
 /// The mutable wall-clock state: the provenance state plus the
 /// (wall, monotonic) pair captured the last time it was set.
+///
+/// Whole words with no padding between them: a sequence lock copies its
+/// payload byte for byte, and a padding byte has no value to copy.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(C)]
 struct WallClockState {
-    state: WallTimeState,
-    wall_at_set: Time64,
+    wall_secs: i64,
     monotonic_at_set_ns: u64,
+    wall_nanos: u32,
+    /// The [`WallTimeState`] discriminant.
+    state: u32,
 }
 
+const _: () = assert!(
+    size_of::<WallClockState>() == 2 * size_of::<u64>() + 2 * size_of::<u32>(),
+    "the wall-clock state must hold no padding"
+);
+
 impl WallClockState {
-    const fn unset() -> Self {
-        Self {
-            state: WallTimeState::Unset,
-            wall_at_set: Time64::UNIX_EPOCH,
-            monotonic_at_set_ns: 0,
-        }
+    const UNSET: Self = Self {
+        wall_secs: 0,
+        monotonic_at_set_ns: 0,
+        wall_nanos: 0,
+        state: WallTimeState::Unset as u32,
+    };
+
+    /// The stored provenance; a discriminant no state has reads as unset.
+    fn state(&self) -> WallTimeState {
+        u8::try_from(self.state)
+            .ok()
+            .and_then(|raw| WallTimeState::from_u8(raw).ok())
+            .unwrap_or(WallTimeState::Unset)
     }
 
     /// Project the stored wall instant forward by the monotonic time elapsed
@@ -59,14 +78,16 @@ impl WallClockState {
     /// that has not advanced (or an out-of-order cross-CPU read) never yields
     /// a wall time *before* the set point.
     fn read(&self, monotonic_now_ns: u64) -> WallClockReading {
-        if !self.state.is_set() {
+        let state = self.state();
+        let Ok(wall_at_set) = Time64::new(self.wall_secs, self.wall_nanos) else {
+            return WallClockReading::UNSET;
+        };
+        if !state.is_set() {
             return WallClockReading::UNSET;
         }
         let elapsed_ns = monotonic_now_ns.saturating_sub(self.monotonic_at_set_ns);
-        let now = self
-            .wall_at_set
-            .saturating_add(Duration64::from_nanos(elapsed_ns));
-        WallClockReading::new(now, self.state)
+        let now = wall_at_set.saturating_add(Duration64::from_nanos(elapsed_ns));
+        WallClockReading::new(now, state)
     }
 
     /// Record a new wall instant and provenance state captured at
@@ -87,12 +108,15 @@ impl WallClockState {
         if !state.is_set() {
             return Err(Errno::OutOfRange);
         }
-        if !state.supersedes(self.state) {
+        if !state.supersedes(self.state()) {
             return Err(Errno::AlreadyExists);
         }
-        self.wall_at_set = wall;
-        self.monotonic_at_set_ns = monotonic_now_ns;
-        self.state = state;
+        *self = Self {
+            wall_secs: wall.secs(),
+            monotonic_at_set_ns: monotonic_now_ns,
+            wall_nanos: wall.subsec_nanos(),
+            state: u32::from(state.as_u8()),
+        };
         Ok(())
     }
 }
@@ -117,14 +141,17 @@ pub trait WallClockSource: Sync {
     fn set(&self, wall: Time64, monotonic_now_ns: u64, state: WallTimeState) -> Result<(), Errno>;
 }
 
-/// The production wall clock: a lock-guarded wall-clock state (the provenance
-/// state plus the wall/monotonic pair captured at the last set).
+/// The production wall clock: the provenance state plus the wall/monotonic
+/// pair captured at the last set.
 ///
-/// The critical section is a handful of field reads/writes, so a plain
-/// spinlock is the right primitive (the clock is never read or written from
-/// an interrupt handler, and a read is not on a scheduler hot path).
+/// Every filesystem write on every CPU reads it to stamp what it changed, and
+/// a time source sets it a few times a day, so the state is behind a sequence
+/// lock, which a reader reads without taking a lock and retries only across a
+/// write in flight; the one writer that lock admits at a time is serialised by
+/// `setting`.
 pub struct KernelWallClock {
-    inner: SpinLock<WallClockState>,
+    current: SeqLock<WallClockState>,
+    setting: SpinLock<()>,
 }
 
 impl KernelWallClock {
@@ -133,7 +160,8 @@ impl KernelWallClock {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            inner: SpinLock::new(WallClockState::unset()),
+            current: SeqLock::new(WallClockState::UNSET),
+            setting: SpinLock::new(()),
         }
     }
 }
@@ -146,11 +174,17 @@ impl Default for KernelWallClock {
 
 impl WallClockSource for KernelWallClock {
     fn read(&self, monotonic_now_ns: u64) -> WallClockReading {
-        self.inner.lock().read(monotonic_now_ns)
+        self.current.read().read(monotonic_now_ns)
     }
 
     fn set(&self, wall: Time64, monotonic_now_ns: u64, state: WallTimeState) -> Result<(), Errno> {
-        self.inner.lock().set(wall, monotonic_now_ns, state)
+        let _setting = self.setting.lock();
+        let mut next = self.current.read();
+        next.set(wall, monotonic_now_ns, state)?;
+        // SAFETY: `setting` is held across the read and the write, so no
+        // other write is in flight and none can interleave with this one.
+        unsafe { self.current.write(next) };
+        Ok(())
     }
 }
 
@@ -305,6 +339,30 @@ mod tests {
             .set(secs(4_294_967_296), 0, WallTimeState::Trusted)
             .unwrap();
         assert_eq!(clock.read(0).time().secs(), 4_294_967_296);
+    }
+
+    #[test]
+    fn a_read_racing_a_set_sees_one_whole_reading() {
+        let clock = KernelWallClock::new();
+        let first = Time64::new(1_000, 1).expect("canonical");
+        let second = Time64::new(-2_000, 999_999_999).expect("canonical");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for round in 0..200 {
+                    let wall = if round % 2 == 0 { first } else { second };
+                    clock.set(wall, 0, WallTimeState::Trusted).expect("sets");
+                }
+            });
+            for _ in 0..200 {
+                let reading = clock.read(0);
+                assert!(
+                    reading == tairix_abi::WallClockReading::UNSET
+                        || (reading.state() == WallTimeState::Trusted
+                            && (reading.time() == first || reading.time() == second)),
+                    "a torn reading: {reading:?}"
+                );
+            }
+        });
     }
 
     #[test]

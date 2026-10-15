@@ -201,6 +201,22 @@ impl NameMatching {
     }
 }
 
+/// How long a node keeps the [`NodeId`] a lookup answered for it.
+///
+/// A consumer that keeps a name's node across operations — a lookup cache —
+/// looks the name up again after writing through it on a format whose ids
+/// follow its files' contents.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NodeIdentity {
+    /// For as long as the node keeps its name: the format numbers its nodes.
+    Stable,
+    /// Possibly only until the next write or truncate through its name: the
+    /// format names a file by facts those rewrite (FAT32 packs a file's first
+    /// cluster and size into its id, and ADFS names an object with no
+    /// allocation by its name).
+    ContentDerived,
+}
+
 /// Structural metadata about a node, returned by
 /// [`FilesystemRead::node_info`].
 ///
@@ -343,6 +359,10 @@ pub trait FilesystemRead {
     /// [`NameMatching::Exact`] would be wrong silently.
     fn name_matching(&self) -> NameMatching;
 
+    /// How long a node keeps its id. Required for the same reason as
+    /// [`name_matching`](Self::name_matching): only the format knows.
+    fn node_identity(&self) -> NodeIdentity;
+
     /// Report the structural metadata of `node`.
     ///
     /// # Errors
@@ -442,7 +462,8 @@ pub trait FilesystemRead {
 
 /// What the host does for a mounted volume that the driver, which owns no
 /// thread and runs only inside a caller's operation, cannot: run its
-/// write-back timer, and pass on the news that its space ran into its reserve.
+/// write-back timer, tell it the time, and pass on the news that its space ran
+/// into its reserve.
 ///
 /// A filesystem may keep one transaction open across several operations, so
 /// that the commit — its barrier, its root, and the metadata blocks every
@@ -456,6 +477,16 @@ pub trait VolumeHost: Send + Sync {
     /// clock. A driver that cannot measure elapsed time publishes every
     /// operation instead of deferring against a clock it does not have.
     fn now_ns(&self) -> Option<u64>;
+
+    /// The instant to stamp an operation with: the wall clock's reading, once
+    /// a time source has set it and while that reading is plausible
+    /// ([`crate::time::is_plausible_wall_time`]).
+    ///
+    /// [`None`] means the time is unknown. The driver then records its
+    /// format's own "no stamp" spelling, so nothing a later reader would take
+    /// for a real date reaches the medium. Called on the same terms as
+    /// [`Self::writeback_due`].
+    fn wall_time(&self) -> Option<Time64>;
 
     /// The volume registered as `volume` holds an open transaction due at
     /// absolute monotonic `deadline_ns`, or holds none (`None`).
@@ -915,12 +946,13 @@ impl NodeSecurity {
 ///
 /// This is a **versioned `abi-v1` extension** — a *separate* trait from
 /// [`FilesystemRead`] / [`FilesystemWrite`], never a widening of either
-/// nor of the frozen [`Filesystem`]; new behaviour ships as a new trait. A driver that stores full POSIX metadata per
-/// inode — owner, mode, ACL, and an optional capability gate —
-/// implements it so the VFS can use that **stored** record as the policy
-/// input instead of a uniform mount-point template. A driver such as FAT
-/// that keeps no per-file owner does not implement it, and the VFS keeps
-/// applying the mount-point template.
+/// nor of the frozen [`Filesystem`]; new behaviour ships as a new trait.
+/// Every mounted driver implements it, and the VFS judges each node against
+/// the record it reports. A format that stores the whole record per node
+/// (ARXFS) reports and stores it; one that stores part of it (ext4's owner,
+/// group, and mode) reports what it holds and refuses to store what it
+/// cannot; one that stores none (FAT32) reports one fixed record for every
+/// node.
 ///
 /// The driver only *stores and reports* the record; it makes no
 /// permission decision (the VFS is the policy point, and every caller of
@@ -952,9 +984,12 @@ pub trait FilesystemSecurity {
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError>;
 
-    /// Give `node`, which the operation in progress just created, its first
-    /// security record, before anything could have resolved a path through
-    /// it.
+    /// Record `(uid, gid)` as the owner of `node`, which the operation in
+    /// progress just created, before anything could have resolved a path
+    /// through it.
+    ///
+    /// A format that records no owner keeps none: the node is owned as every
+    /// node of the volume reports, and nothing is stored.
     ///
     /// No one's authority over anything already there changes, which a layer
     /// that reports security changes relies on to leave it out.
@@ -962,7 +997,10 @@ pub trait FilesystemSecurity {
     /// # Errors
     ///
     /// As [`set_security`](Self::set_security).
-    fn stamp_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
+        let mut security = self.security(node)?;
+        security.uid = uid;
+        security.gid = gid;
         self.set_security(node, security)
     }
 }
@@ -1211,6 +1249,53 @@ pub trait FilesystemStats {
     fn stats(&mut self) -> Result<VolumeStats, DriverError>;
 }
 
+/// A wall clock for a filesystem driver's tests, so no driver's suite carries
+/// its own [`VolumeHost`].
+#[cfg(feature = "test-util")]
+pub mod clock {
+    extern crate alloc;
+
+    use alloc::boxed::Box;
+
+    use super::VolumeHost;
+    use crate::time::Time64;
+    use crate::DriverHandle;
+
+    /// A host whose wall clock reads one fixed instant, or no time, and which
+    /// has no monotonic clock — so a driver under it publishes every
+    /// operation, exactly as with no host, and differs only in what it
+    /// stamps. A test moves time on by installing another.
+    pub struct TestClock(Option<Time64>);
+
+    impl TestClock {
+        /// A clock reading `wall`, leaked to the `'static` a driver keeps.
+        #[must_use]
+        pub fn at(wall: Option<Time64>) -> &'static Self {
+            Box::leak(Box::new(Self(wall)))
+        }
+
+        /// The handle a test installs its one volume's host under.
+        #[must_use]
+        pub fn volume() -> DriverHandle {
+            DriverHandle::from_raw(1).expect("a non-zero test handle")
+        }
+    }
+
+    impl VolumeHost for TestClock {
+        fn now_ns(&self) -> Option<u64> {
+            None
+        }
+
+        fn wall_time(&self) -> Option<Time64> {
+            self.0
+        }
+
+        fn writeback_due(&self, _volume: DriverHandle, _deadline_ns: Option<u64>) {}
+
+        fn reserve_crossed(&self, _volume: DriverHandle, _in_reserve: bool) {}
+    }
+}
+
 /// Listing fixtures for a filesystem driver's tests, so no driver's suite
 /// carries its own walk of the [`FilesystemRead::read_dir`] visitor.
 #[cfg(feature = "test-util")]
@@ -1371,6 +1456,10 @@ mod tests {
 
         fn name_matching(&self) -> super::NameMatching {
             super::NameMatching::Exact
+        }
+
+        fn node_identity(&self) -> super::NodeIdentity {
+            super::NodeIdentity::Stable
         }
 
         fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -1889,6 +1978,28 @@ mod tests {
         assert_eq!(fs.security(NodeId::from_raw(1)), Ok(sec));
         assert_eq!(fs.set_security(NodeId::from_raw(1), replacement), Ok(()));
         assert_eq!(fs.security(NodeId::from_raw(1)), Ok(replacement));
+    }
+
+    #[test]
+    fn stamping_an_owner_changes_the_owner_alone() {
+        let mut sec = NodeSecurity::new(0o640, 0, 0);
+        sec.required_cap = Some(CapabilityId::AUDIT_READ);
+        sec.push_acl(SecurityAcl {
+            subject: SecuritySubject::Group(11),
+            perms: 0b100,
+        })
+        .expect("acl");
+        let mut fs = MockSecurityFs { sec };
+        assert_eq!(
+            fs.stamp_owner(NodeId::NONE, 7, 9),
+            Err(DriverError::NotFound)
+        );
+        assert_eq!(fs.stamp_owner(NodeId::from_raw(1), 7, 9), Ok(()));
+        let stamped = fs.security(NodeId::from_raw(1)).expect("record");
+        assert_eq!((stamped.uid, stamped.gid), (7, 9));
+        assert_eq!(stamped.mode, sec.mode);
+        assert_eq!(stamped.required_cap, sec.required_cap);
+        assert_eq!(stamped.acl(), sec.acl());
     }
 
     /// A node holding a single extended attribute in fixed buffers, enough to

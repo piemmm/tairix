@@ -215,7 +215,7 @@ pub fn install_kernel_stacks(
     let Ok(slots) = SlotWindow::new(stack_pages, frames, physmap) else {
         return window_pages;
     };
-    let tier: &'static StackTier = Box::leak(Box::new(StackTier {
+    let tier: &'static StackTier = crate::forever(Box::new(StackTier {
         frames,
         kvmap,
         base_slot: heap_pages,

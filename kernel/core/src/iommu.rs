@@ -31,7 +31,6 @@
 //! its own owner's state alone, which it holds from before anyone else can
 //! reach the owner, so carves for other groups go on meanwhile.
 
-use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -490,7 +489,7 @@ fn kept<U: IommuUnit + 'static>(unit: U) -> Result<&'static dyn IommuUnit, Iommu
     slot.try_reserve_exact(1)
         .map_err(|_| IommuError::Exhausted)?;
     slot.push(unit);
-    let kept: &'static [U] = Box::leak(slot.into_boxed_slice());
+    let kept: &'static [U] = crate::forever(slot.into_boxed_slice());
     kept.first()
         .map(|unit| unit as &dyn IommuUnit)
         .ok_or(IommuError::Exhausted)

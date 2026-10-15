@@ -46,7 +46,19 @@ The RISC OS load/exec words are surfaced through the canonical
 the native fields byte-for-byte. A typed object's 40-bit centisecond
 stamp is reported (widened to `Time64`) as all four node timestamps;
 ADFS stores exactly one instant, and an untyped object honestly reports
-the epoch rather than a fabricated time.
+the epoch rather than a fabricated time. So does RISC OS's own epoch, the
+zero stamp: it is the reading of a clock that was never set.
+
+A new file or directory is typed Data (`&FFD`), as RISC OS types a file
+created without one, since an untyped object's load and exec words would
+name addresses to load and run it at. It is stamped with the host's wall
+clock (`VolumeHost::wall_time`, [driver traits](../abi/driver_traits.md)),
+to the centisecond. A write or truncate restamps a typed object, and an
+untyped one keeps its addresses. The entry is an object's only metadata,
+so the stamp rides with the write's own entry update where the write needs
+one; an overwrite in place pays one directory write for it. A rename keeps
+the stamp. While the clock is unset, or for a time outside the 1900–2248
+the stamp holds, the stamp is zero, which reads back as no time.
 
 ADFS has no per-inode owner, mode, ACL, or capability gate: the §5.3
 security metadata lives in the VFS layer, and the driver makes no

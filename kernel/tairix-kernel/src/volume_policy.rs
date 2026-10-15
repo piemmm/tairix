@@ -28,7 +28,7 @@
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -121,6 +121,10 @@ impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
 
     fn name_matching(&self) -> NameMatching {
         self.inner.name_matching()
+    }
+
+    fn node_identity(&self) -> NodeIdentity {
+        self.inner.node_identity()
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -229,6 +233,11 @@ impl<F: FilesystemRead> FilesystemSecurity for GroupMappedFs<F> {
         // a silently-lossy one is forbidden, so the write is refused
         // whole (fail closed).
         Err(DriverError::Unsupported)
+    }
+
+    fn stamp_owner(&mut self, node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
+        // Ownership here is the mapping's, so a new node has it already.
+        self.inner.node_info(node).map(|_| ())
     }
 }
 

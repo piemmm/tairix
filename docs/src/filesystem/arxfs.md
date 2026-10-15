@@ -785,21 +785,30 @@ both fill `NodeInfo::times`), read in the same structural read as the
 node's kind and size — there is no separate `FilesystemTimestamps` trait
 and no separate `DirEntry.modified` stamp (`AGENTS.md` §2.2).
 
-The driver stamps them from a clock seam installed with
-`ARXFS::with_clock(clock: fn() -> Time64)`; without it every stamp is
-the Unix epoch, so a board with no wall clock yet keeps deterministic,
-in-range timestamps rather than panicking or inventing a time
-(`AGENTS.md` §2.9). The stamping follows the POSIX model:
+The driver stamps them with the host's wall clock,
+`VolumeHost::wall_time` ([driver traits](../abi/driver_traits.md)). While
+that gives no time, because no source has set the clock or a volume has no
+host, as when `tools/mkimage` formats an image, a stamp is
+`Time64::UNIX_EPOCH`, the "no stamp" value. An image therefore stays
+bit-reproducible, and nothing records a time the system cannot vouch
+for. The stamping follows the POSIX model:
 
 - **create** sets `created`/`modified`/`changed` to the creation instant
   and bumps the parent directory's `modified`/`changed`;
 - **write** advances `modified`/`changed`;
 - **truncate** advances `modified`/`changed`;
-- **set_security** advances only `changed` (a metadata change);
-- **remove** bumps the parent directory's `modified`/`changed`.
+- **rename** advances the moved node's `changed` and both directories'
+  `modified`/`changed`;
+- **link** advances the node's `changed` and its new directory's
+  `modified`/`changed`;
+- **set_security** and an attribute change advance only `changed` (a
+  metadata change);
+- **remove** bumps the parent directory's `modified`/`changed`, and the
+  `changed` of a node that keeps another name.
 
-`created` is set once and never changed. Installing a different clock
-never rewrites timestamps already on disk.
+`created` is set once and never changed. A stamp taken while the time is
+unknown stays unknown: the next operation that stamps it records a real
+time, and nothing rewrites stamps already on disk.
 
 ## Copy-on-write metadata trees
 

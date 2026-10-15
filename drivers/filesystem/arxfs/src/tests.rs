@@ -11,6 +11,7 @@ use super::*;
 use crate::pagecache::MAX_CACHED_PAGES;
 use crate::wcache::TestVolumeHost;
 use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
+use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::driver::filesystem::{
     FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, NodeKind,
@@ -439,11 +440,34 @@ fn fmt_huge() -> ARXFS<SparseBlock> {
         &mut TestEntropy::new(),
     )
     .expect("format a 100 TiB sparse device")
-    .with_clock(fixed_clock)
+    .stamped()
 }
 
 fn fixed_clock() -> Time64 {
     Time64::from_secs(1_700_000_000)
+}
+
+/// A test volume stamping every operation at [`fixed_clock`], under a host
+/// that defers nothing.
+trait Stamped {
+    fn stamped(self) -> Self;
+}
+
+impl<B: Block> Stamped for ARXFS<B> {
+    fn stamped(self) -> Self {
+        self.at(Some(fixed_clock()))
+    }
+}
+
+/// A test volume stamping `wall` from now on, or no time.
+trait At {
+    fn at(self, wall: Option<Time64>) -> Self;
+}
+
+impl<B: Block> At for ARXFS<B> {
+    fn at(self, wall: Option<Time64>) -> Self {
+        self.with_volume_host(TestClock::volume(), TestClock::at(wall))
+    }
 }
 
 /// The volume key the encrypted test volumes are formatted and reopened
@@ -497,7 +521,7 @@ fn fmt(block_size: u32, block_count: u64, inodes: u32) -> ARXFS<MemBlock> {
         &mut TestEntropy::new(),
     )
     .expect("format a blank device")
-    .with_clock(fixed_clock)
+    .stamped()
 }
 
 #[test]
@@ -784,13 +808,102 @@ fn remove_reclaims_space_so_allocation_resumes() {
 }
 
 #[test]
+fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
+    let at = Time64::from_secs;
+    let mut fs = fmt(512, 256, 32).at(Some(at(1_800_000_000)));
+    let root = fs.root();
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let made = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        (made.created, made.modified, made.changed),
+        (at(1_800_000_000), at(1_800_000_000), at(1_800_000_000))
+    );
+    let parent = fs.node_info(root).expect("info").times;
+    assert_eq!(
+        (parent.modified, parent.changed),
+        (at(1_800_000_000), at(1_800_000_000)),
+        "a new name changes its directory"
+    );
+
+    fs = fs.at(Some(at(1_800_000_100)));
+    fs.write_at(root, b"f", 0, b"data").expect("write");
+    let written = fs.node_info(file).expect("info").times;
+    assert_eq!(written.created, at(1_800_000_000));
+    assert_eq!(
+        (written.modified, written.changed),
+        (at(1_800_000_100), at(1_800_000_100))
+    );
+
+    fs = fs.at(Some(at(1_800_000_200)));
+    fs.rename(root, b"f", root, b"g").expect("rename");
+    let moved = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        moved.modified,
+        at(1_800_000_100),
+        "a rename leaves the contents' stamp alone"
+    );
+    assert_eq!(moved.changed, at(1_800_000_200));
+}
+
+#[test]
+fn with_no_time_to_give_a_stamp_is_the_no_stamp_value() {
+    let mut fs = fmt(512, 256, 32);
+    let root = fs.root();
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+
+    // The clock is lost: what is changed now has no known time, so the stamp
+    // says so rather than keeping the last time it was known.
+    fs = fs.at(None);
+    fs.write_at(root, b"f", 0, b"data").expect("write");
+    let times = fs.node_info(file).expect("info").times;
+    assert_eq!(times.created, fixed_clock());
+    assert_eq!(
+        (times.modified, times.changed),
+        (Time64::UNIX_EPOCH, Time64::UNIX_EPOCH)
+    );
+    let made_unknown = fs
+        .create(root, b"g", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(
+        fs.node_info(made_unknown).expect("info").times.created,
+        Time64::UNIX_EPOCH
+    );
+}
+
+#[test]
+fn a_volume_with_no_host_stamps_nothing() {
+    publish_boot_hash_key();
+    let mut fs = ARXFS::format(
+        MemBlock::new(512, 256),
+        32,
+        TEST_KEYING,
+        &mut TestEntropy::new(),
+    )
+    .expect("format");
+    let root = fs.root();
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let times = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        (times.created, times.modified, times.changed),
+        (Time64::UNIX_EPOCH, Time64::UNIX_EPOCH, Time64::UNIX_EPOCH)
+    );
+    assert_eq!(
+        fs.node_info(root).expect("info").times.created,
+        Time64::UNIX_EPOCH,
+        "an image formatted with no host carries no build time"
+    );
+}
+
+#[test]
 fn timestamps_round_trip_extreme_values() {
-    fn old() -> Time64 {
-        Time64::from_secs(-2_000_000_000)
-    }
-    fn future() -> Time64 {
-        Time64::from_secs(4_200_000_000)
-    }
+    let old = Time64::from_secs(-2_000_000_000);
+    let future = Time64::from_secs(4_200_000_000);
     let mut fs = ARXFS::format(
         MemBlock::new(512, 256),
         32,
@@ -798,20 +911,20 @@ fn timestamps_round_trip_extreme_values() {
         &mut TestEntropy::new(),
     )
     .expect("format")
-    .with_clock(old);
+    .at(Some(old));
     let root = fs.root();
     fs.create(root, b"t", NodeKind::RegularFile)
         .expect("create");
     let node = fs.lookup(root, b"t").unwrap();
     let times = fs.node_info(node).unwrap().times;
-    assert_eq!(times.created, old());
+    assert_eq!(times.created, old);
     // ARXFS does not track access time: it is always the epoch.
     assert_eq!(times.accessed, Time64::UNIX_EPOCH);
 
     // A far-future value survives a remount.
     let mut sec = Security::new(0o600, 1, 2);
     sec.required_cap = Some(CapabilityId::AUDIT_READ);
-    fs = fs.with_clock(future);
+    fs = fs.at(Some(future));
     fs.set_security(node, sec).expect("set_security");
     let bytes = fs.into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open(MemBlock::from_bytes(bytes, 512, 256), TEST_KEYING).expect("reopen");
@@ -820,7 +933,7 @@ fn timestamps_round_trip_extreme_values() {
     // `changed` was stamped by `set_security` under the future clock, and the
     // access time stays the epoch across the remount.
     let times = fs.node_info(node).unwrap().times;
-    assert_eq!(times.changed, future());
+    assert_eq!(times.changed, future);
     assert_eq!(times.accessed, Time64::UNIX_EPOCH);
 }
 
@@ -1450,7 +1563,7 @@ fn data_block_integrity_layers_are_distinct_and_fail_closed() {
         publish_boot_hash_key();
         let mut fs = ARXFS::format(MemBlock::new(512, 256), 32, keying, &mut TestEntropy::new())
             .expect("format")
-            .with_clock(fixed_clock);
+            .stamped();
         let root = fs.root();
         for name in [b"f".as_slice(), b"g"] {
             fs.create(root, name, NodeKind::RegularFile)
@@ -4396,7 +4509,7 @@ fn fmt_discard(
         MemBlock::new(512, block_count).with_discard(granularity_blocks, max_blocks_per_request);
     let mut fs = ARXFS::format(block, 32, TEST_KEYING, &mut TestEntropy::new())
         .expect("format a discard-capable device")
-        .with_clock(fixed_clock);
+        .stamped();
     fs.block.discarded.clear();
     fs
 }
@@ -4714,7 +4827,7 @@ fn fmt_health(block_count: u64, health: DeviceHealth) -> ARXFS<MemBlock> {
         &mut TestEntropy::new(),
     )
     .expect("format with health")
-    .with_clock(fixed_clock)
+    .stamped()
 }
 
 /// Reopen a 4096-byte volume from `bytes`, reporting `health`.
@@ -5024,7 +5137,7 @@ fn crash_baseline() -> alloc::vec::Vec<u8> {
         &mut TestEntropy::new(),
     )
     .expect("format crash baseline")
-    .with_clock(fixed_clock);
+    .stamped();
     let root = fs.root();
     fs.create(root, b"keep", NodeKind::RegularFile)
         .expect("create keep");
@@ -5102,7 +5215,7 @@ fn crash_replay_each_step<Op, Check>(
         let mut fs = publish.apply(
             ARXFS::open(dev, TEST_KEYING)
                 .expect("baseline opens")
-                .with_clock(fixed_clock),
+                .stamped(),
         );
         op(&mut fs);
         // The close is inside the crash window too: a batch is published by
@@ -5114,7 +5227,7 @@ fn crash_replay_each_step<Op, Check>(
 
         let mut fs = ARXFS::open(device(bytes), TEST_KEYING)
             .expect("post-crash mount always succeeds on a whole-txn boundary")
-            .with_clock(fixed_clock);
+            .stamped();
         let keep = fs.lookup(fs.root(), b"keep").expect("keep always survives");
         assert_eq!(
             read_all(&mut fs, keep, CRASH_KEEP.len()),
@@ -5430,7 +5543,7 @@ fn corruption_baseline() -> (alloc::vec::Vec<u8>, CorruptionTargets, alloc::vec:
         &mut TestEntropy::new(),
     )
     .expect("format corruption baseline")
-    .with_clock(fixed_clock);
+    .stamped();
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
 
@@ -5504,8 +5617,7 @@ fn wound_copy(bytes: &mut [u8], block: u64) {
 }
 
 fn open_corruption(bytes: alloc::vec::Vec<u8>) -> Result<ARXFS<MemBlock>, DriverError> {
-    ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), TEST_KEYING)
-        .map(|fs| fs.with_clock(fixed_clock))
+    ARXFS::open(MemBlock::from_bytes(bytes, 4096, 512), TEST_KEYING).map(Stamped::stamped)
 }
 
 #[test]
@@ -5727,7 +5839,7 @@ fn volatile_volume(publish: Publish) -> (ARXFS<MemBlock>, u64) {
             &mut TestEntropy::new(),
         )
         .expect("format")
-        .with_clock(fixed_clock),
+        .stamped(),
     );
     let root = fs.root();
     fs.create(root, b"keep", NodeKind::RegularFile)
@@ -10289,7 +10401,7 @@ fn every_barrier_requiring_operation_publishes_the_open_transaction_first() {
         &mut TestEntropy::new(),
     )
     .expect("format")
-    .with_clock(fixed_clock)
+    .stamped()
     .with_volume_host(TestVolumeHost::volume(), TestVolumeHost::leaked(0));
     let root = fs.root();
 
@@ -10847,7 +10959,7 @@ fn an_interrupted_delete_is_finished_by_the_next_mount() {
     let mut fs = floor_bounded(
         ARXFS::open(MemBlock::from_bytes(bytes, 512, 1 << 14), TEST_KEYING)
             .expect("the interrupted volume mounts")
-            .with_clock(fixed_clock),
+            .stamped(),
     );
     assert!(
         pending_deletes(&mut fs).is_empty(),
@@ -11198,9 +11310,7 @@ fn a_mounts_stride_survives_a_power_cut_after_its_first_change() {
     let image = fs.into_block().expect("the volume closes").bytes();
 
     let device = MemBlock::from_bytes(image, 4096, 512).with_volatile_cache();
-    let mut fs = ARXFS::open(device, TEST_KEYING)
-        .expect("mount")
-        .with_clock(fixed_clock);
+    let mut fs = ARXFS::open(device, TEST_KEYING).expect("mount").stamped();
     fs.write_at(root, b"x", 0, b"seen").expect("first write");
     let seen = content_gen(&mut fs, b"x");
     fs.block_mut().power_loss(|_| false);
@@ -11208,7 +11318,7 @@ fn a_mounts_stride_survives_a_power_cut_after_its_first_change() {
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(crashed, 4096, 512), TEST_KEYING)
         .expect("remount")
-        .with_clock(fixed_clock);
+        .stamped();
     fs.write_at(root, b"x", 0, b"after the cut").expect("write");
     let after = content_gen(&mut fs, b"x");
     assert!(
@@ -11232,7 +11342,7 @@ fn a_generation_lost_in_a_crash_is_never_handed_out_again() {
     let host = TestVolumeHost::leaked(0);
     let mut fs = ARXFS::open(MemBlock::from_bytes(image, 4096, 512), TEST_KEYING)
         .expect("mount")
-        .with_clock(fixed_clock)
+        .stamped()
         .with_volume_host(TestVolumeHost::volume(), host);
     fs.write_at(root, b"x", 0, b"durable").expect("first write");
     let durable = content_gen(&mut fs, b"x");
@@ -11248,7 +11358,7 @@ fn a_generation_lost_in_a_crash_is_never_handed_out_again() {
 
     let mut fs = ARXFS::open(MemBlock::from_bytes(crashed, 4096, 512), TEST_KEYING)
         .expect("remount")
-        .with_clock(fixed_clock);
+        .stamped();
     assert_eq!(
         content_gen(&mut fs, b"x"),
         durable,

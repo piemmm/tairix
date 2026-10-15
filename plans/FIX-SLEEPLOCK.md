@@ -257,9 +257,8 @@ bookkeeping, not the defect. The bucket half is covered by that function's own
 
 - **miri.** No `unsafe` is added or changed: the sleeplock's `unsafe` is its
   `Send`/`Sync` impls and the guard's `Deref`, and every edit here is safe
-  code over `BTreeMap`/`BTreeSet` and atomics. `kernel/core` is not enrolled
-  (`OPEN-DEFECTS` D123, blocked on D128) and this change neither needs nor
-  alters that.
+  code over `BTreeMap`/`BTreeSet` and atomics. `kernel/core` is enrolled
+  (`OPEN-DEFECTS` D123), so the stage interprets the sleeplock's tests.
 - **loom cannot reach this crate, and the reason is worth recording rather
   than waving at.** `--cfg loom` does not compile `kernel/core` at all: loom's
   atomics and cell have no `const` constructor, and `WaitQueue::new` /

@@ -112,6 +112,20 @@ never make that move lawful. A full volume (`DriverError::NoSpace`) is
 operation, so the answer a caller sees does not depend on which one met the
 conflict.
 
+Kind is the VFS's own question. Every walk refuses a file used as a directory
+(`VfsError::NotADirectory`), every byte operation refuses a directory
+(`VfsError::IsADirectory`), and a rename between kinds is refused before the
+driver is asked — `NotADirectory` when a directory would replace a
+non-directory, `IsADirectory` the other way round. So a driver's
+`DriverError::Unsupported` only ever means what the format cannot do, and is
+`VfsError::NotSupported` wherever it arrives: a link on a format that stores
+none, a mode or owner change on one that stores no record of its own.
+
+A create hands the new node to its creator in the same operation — the
+driver records the creator as owner where its format keeps one — and when
+that fails takes the node back out, so a refused create leaves no half-made
+name for a retry to collide with.
+
 Where that `Metadata` comes from is the one place the two policies differ:
 
 - The `*_via` methods apply the **mount point's** `Metadata` as a uniform

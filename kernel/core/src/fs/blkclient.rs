@@ -561,7 +561,6 @@ mod tests {
 
     extern crate std;
     use core::ptr::NonNull;
-    use std::boxed::Box;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc as StdArc, Mutex};
     use std::thread;
@@ -663,7 +662,7 @@ mod tests {
     }
 
     fn leak_window() -> NonNull<u8> {
-        NonNull::new(Box::leak(vec![0u8; BLK_DATA_LEN].into_boxed_slice()).as_mut_ptr())
+        NonNull::new(crate::forever(vec![0u8; BLK_DATA_LEN].into_boxed_slice()).as_mut_ptr())
             .expect("window")
     }
 

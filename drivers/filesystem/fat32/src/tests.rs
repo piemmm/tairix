@@ -17,6 +17,7 @@ extern crate alloc;
 use super::*;
 use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::DriverKind;
 
@@ -1336,6 +1337,45 @@ mod format {
     }
 
     #[test]
+    fn a_new_node_is_owned_as_every_node_is() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let root = fs.root();
+        let file = fs
+            .create(root, b"made.txt", NodeKind::RegularFile)
+            .expect("create");
+        // The creator's identity has nowhere to go, so a creation stamp
+        // stores nothing and refuses nothing.
+        assert_eq!(fs.stamp_owner(file, 1000, 100), Ok(()));
+        let sec = fs.security(file).expect("security");
+        assert_eq!((sec.mode, sec.uid, sec.gid), (0o644, 0, 0));
+        assert_eq!(
+            fs.stamp_owner(NodeId::NONE, 1000, 100),
+            Err(DriverError::NotFound)
+        );
+        assert_eq!(fs.node_info(NodeId::NONE), Err(DriverError::NotFound));
+        assert_eq!(fs.security(NodeId::NONE), Err(DriverError::NotFound));
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            fs.read_at(NodeId::NONE, 0, &mut buf),
+            Err(DriverError::NotFound)
+        );
+    }
+
+    #[test]
+    fn a_files_id_follows_its_contents() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        assert_eq!(fs.node_identity(), NodeIdentity::ContentDerived);
+        let root = fs.root();
+        let empty = fs
+            .create(root, b"grows.txt", NodeKind::RegularFile)
+            .expect("create");
+        fs.write_at(root, b"grows.txt", 0, b"bytes").expect("write");
+        let written = fs.lookup(root, b"grows.txt").expect("lookup");
+        assert_ne!(written, empty, "the id packs the first cluster and size");
+        assert_eq!(fs.node_info(written).expect("info").size, 5);
+    }
+
+    #[test]
     fn filling_a_formatted_volume_reports_no_space() {
         let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
         let root = fs.root();
@@ -1672,6 +1712,87 @@ mod format {
             "the caller-minted serial distinguishes otherwise identical volumes"
         );
     }
+
+    /// `fs`, stamping `wall` from now on, or no time.
+    fn at<B: Block>(mut fs: Fat32<B>, wall: Option<Time64>) -> Fat32<B> {
+        fs.set_volume_host(TestClock::volume(), TestClock::at(wall));
+        fs
+    }
+
+    #[test]
+    fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
+        // An even second, which the two-second write field holds exactly.
+        let later = Time64::from_secs(stamp_instant().secs() + 101);
+        let mut fs = at(
+            Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format"),
+            Some(stamp_instant()),
+        );
+        let root = fs.root();
+        fs.create(root, b"f.txt", NodeKind::RegularFile)
+            .expect("create");
+        let made = fs
+            .find_child(node_cluster(root), b"f.txt")
+            .expect("read")
+            .expect("found")
+            .times;
+        assert_eq!(
+            made.created,
+            Time64::new(1_792_067_697, 120_000_000).expect("canonical")
+        );
+        assert_eq!(made.modified, Time64::from_secs(1_792_067_696));
+        assert_eq!(
+            made.accessed,
+            Time64::from_secs(1_792_022_400),
+            "the access date, at midnight"
+        );
+
+        let mut fs = at(fs, Some(later));
+        fs.write_at(root, b"f.txt", 0, b"data").expect("write");
+        let written = fs
+            .find_child(node_cluster(root), b"f.txt")
+            .expect("read")
+            .expect("found");
+        assert_eq!(written.times.modified, later);
+        assert_eq!(written.times.created, made.created);
+        assert_eq!(written.size, 4, "the stamp's write carried the size too");
+
+        let dir = fs.create(root, b"sub", NodeKind::Directory).expect("mkdir");
+        let dot = fs
+            .find_child(node_cluster(root), b"sub")
+            .expect("read")
+            .expect("found");
+        let mut raw = [0u8; 32];
+        fs.read_bytes(fs.cluster_byte(node_cluster(dir)), &mut raw)
+            .expect("read");
+        assert_eq!(
+            crate::EntryStamps::of(&raw),
+            dot.stamps,
+            "a new directory's `.` is stamped as its entry is"
+        );
+    }
+
+    #[test]
+    fn with_no_time_to_give_fat32_records_no_date() {
+        let mut fs = Fat32::format(VecBlock::new(SECTORS_64MIB), TEST_SERIAL).expect("format");
+        let root = fs.root();
+        fs.create(root, b"f.txt", NodeKind::RegularFile)
+            .expect("create");
+        let mut fs = at(fs, Some(Time64::from_secs(4_500_000_000)));
+        fs.write_at(root, b"f.txt", 0, b"data").expect("write");
+        let entry = fs
+            .find_child(node_cluster(root), b"f.txt")
+            .expect("read")
+            .expect("found");
+        assert_eq!(entry.stamps, crate::EntryStamps::NONE);
+        assert_eq!(
+            (
+                entry.times.created,
+                entry.times.modified,
+                entry.times.accessed
+            ),
+            (Time64::UNIX_EPOCH, Time64::UNIX_EPOCH, Time64::UNIX_EPOCH)
+        );
+    }
 }
 
 /// Pack a DOS date word from its calendar fields.
@@ -1736,6 +1857,64 @@ fn dos_datetime_undecodable_fields_report_no_stamp() {
     );
     assert_eq!(
         crate::dos_datetime_to_time64(ok_date, 24 << 11),
+        Time64::UNIX_EPOCH
+    );
+}
+
+/// 2026-10-15T12:34:57.123456789Z.
+fn stamp_instant() -> Time64 {
+    Time64::new(1_792_067_697, 123_456_789).expect("canonical")
+}
+
+#[test]
+fn a_dos_stamp_holds_the_creation_to_the_hundredth_and_the_write_to_two_seconds() {
+    let dos = crate::DosStamp::of(stamp_instant()).expect("in range");
+    assert_eq!(dos.date, dos_date(2026, 10, 15));
+    assert_eq!(dos.time, dos_time(12, 34, 56));
+    assert_eq!(dos.centis, 112);
+    assert_eq!(
+        crate::dos_creation_to_time64(dos.date, dos.time, dos.centis),
+        Time64::new(1_792_067_697, 120_000_000).expect("canonical")
+    );
+    assert_eq!(
+        crate::dos_datetime_to_time64(dos.date, dos.time),
+        Time64::from_secs(1_792_067_696)
+    );
+}
+
+#[test]
+fn a_dos_stamp_covers_1980_to_2107_and_nothing_either_side() {
+    let at = |year, month, day, hour, minute, second| {
+        CivilTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        }
+        .to_time64()
+        .expect("a calendar instant")
+    };
+    assert_eq!(crate::DosStamp::of(at(1979, 12, 31, 23, 59, 59)), None);
+    assert!(crate::DosStamp::of(at(1980, 1, 1, 0, 0, 0)).is_some());
+    assert!(crate::DosStamp::of(at(2107, 12, 31, 23, 59, 59)).is_some());
+    assert_eq!(crate::DosStamp::of(at(2108, 1, 1, 0, 0, 0)), None);
+}
+
+#[test]
+fn creation_hundredths_past_two_seconds_are_no_stamp() {
+    let (date, time) = (dos_date(2024, 6, 15), dos_time(12, 0, 0));
+    assert_eq!(
+        crate::dos_creation_to_time64(date, time, 199),
+        Time64::new(
+            crate::dos_datetime_to_time64(date, time).secs() + 1,
+            990_000_000
+        )
+        .expect("canonical")
+    );
+    assert_eq!(
+        crate::dos_creation_to_time64(date, time, 200),
         Time64::UNIX_EPOCH
     );
 }

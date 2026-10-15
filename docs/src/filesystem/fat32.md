@@ -68,7 +68,11 @@ walked. A listing therefore never costs a file's size.
 
 A `NodeId` is self-describing: it packs the entry's first cluster, a
 directory flag, and (for files) the size, so `node_info` needs no extra
-I/O and no in-memory inode table.
+I/O and no in-memory inode table. A file's id therefore changes when a write
+moves its size or first cluster, which the driver declares
+(`NodeIdentity::ContentDerived`): the cache in front of a mounted volume looks
+the name up again after writing through it. An id carrying no validity bit,
+`NodeId::NONE` among them, names nothing.
 
 ## FAT type detection
 
@@ -100,6 +104,32 @@ read-modified-written so neighbouring bytes are preserved. A rename writes the
 entry afresh under its new name and alias, carrying its attribute byte and its
 stored stamps verbatim, then frees the old slots.
 
+## Timestamps
+
+A create stamps the new entry with the host's wall clock
+(`VolumeHost::wall_time`, [driver traits](../abi/driver_traits.md)): its
+creation date, time and hundredths, its last-write date and time, and its
+access date. A new directory's `.` and `..` take the same stamps. A write or
+truncate moves the last-write stamp in the same write that updates the
+entry's cluster and size, and a rename carries every stamp across. A read
+moves nothing, so the access date stays the creation date. A directory's
+own entry keeps the stamps it was created with: FAT reaches that entry only
+through the parent, so finding it whenever the directory's contents change
+would cost a scan of the parent per name added or removed.
+
+FAT records no zone and TAIRiX stores none (`plans/TIMEZONES.md`), so the
+fields hold UTC civil time and are read back as UTC. A volume another system
+wrote in local time reads shifted by that zone's offset. The fields hold
+1980 to 2107: the last-write time to two seconds, the creation time to the
+hundredth. A time outside that range, or no time while the clock is unset,
+is written as the zero date FAT reads as none, which reads back as
+`Time64::UNIX_EPOCH`. FAT keeps no metadata-change stamp, so `changed` is
+always that.
+
+A listing carries the stamps, but a stat by node reports none: FAT keeps
+them only in the directory entry, which a node id does not reach
+(`plans/OPEN-DEFECTS.md` D802).
+
 ## End-to-end QEMU vertical
 
 `tests/integration/fat32_virtio_blk_pci_x86_64` exercises the driver
@@ -124,7 +154,12 @@ MMIO sibling runs identical code.
 FAT32 stores no owner, mode, ACL, or capability gate. Those live in the
 VFS metadata layer ([Permissions](./permissions.md), `AGENTS.md` §5.3);
 the driver makes no permission decisions (§5.4 — the VFS is the policy
-point, the driver is raw structural I/O). Names match ignoring ASCII case, as
+point, the driver is raw structural I/O). Every node reports one fixed
+record, system-owned with `0755` for a directory and `0644` for a file; a
+volume attached as removable media is mounted under the storage-group
+identity map instead. A creation's owner stamp stores nothing, so a new node
+is owned as every node is, and an explicit mode or owner change is refused
+as one the format cannot hold (`NotSupported`). Names match ignoring ASCII case, as
 the format requires, and the driver declares that rule
 (`NameMatching::AsciiCaseInsensitive`), so the VFS applies it to a no-replace
 rename: `B.TXT` beside `b.txt` is a clash, and a rename to a case variant of an
@@ -148,5 +183,6 @@ attributes or foreign-filesystem preset metadata (`arxfs-spec.md` §21). Under
 the cross-filesystem preservation contract, an exact-preservation copy of a
 file carrying such attributes onto FAT32 reports `MetadataNotRepresentable`; a
 best-effort copy drops them only under an explicit, documented lossy policy.
-Its own timestamp range/precision limits are declared through the filesystem
-capability API (`AGENTS.md` §21).
+Its own timestamp range, precision and zone are those [Timestamps](#timestamps)
+gives; no interface reports a format's timestamp limits to a caller
+(`plans/OPEN-DEFECTS.md` D1048).

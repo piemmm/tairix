@@ -75,6 +75,17 @@ set by hand.
   DHCP-supplied server, which outranks the built-in public-pool fallback. The
   tiers are never merged. A machine that asks nobody has no clock, so the
   default cannot be "no servers".
+- **A file stamp is the clock's only while the clock can vouch for it.**
+  Every mounted volume stamps from the wall clock through its host
+  (`VolumeHost::wall_time`), which gives a time only once a source has set
+  the clock and while the reading is plausible. Otherwise a stamp is the
+  format's "no stamp" (`Time64::UNIX_EPOCH`). A stamp on disk carries no
+  provenance and outlives the boot, so any guessed time would be read later
+  as fact: a persisted floor, the release epoch, or a dead clock battery's
+  year 2000. No time is self-correcting, because the first operation after
+  the clock is set stamps a real one. Neither backfilling the stamps taken
+  while unset nor an "estimated" clock state is in this plan: both put a
+  guess on the medium that a later reader cannot tell from a real time.
 
 ## 1. Target architecture (binding)
 

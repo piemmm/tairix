@@ -25,12 +25,13 @@
 //! registered driver instance behind one `SleepLock`
 //! (`LateFilesystem::register`). There is no second window onto the
 //! device, so precise invalidation here is complete: `write_at` /
-//! `truncate` drop the file's data and stat, `create` / `remove` /
-//! `rename` drop the affected lookups, directory entries, and directory
-//! stats, and `set_security` drops the node's security record. When a
-//! mutation's target cannot be identified (an unexpected driver error
-//! while resolving it), the **whole cache is purged** — fail closed,
-//! never a stale entry. The same completeness is why the volume's
+//! `truncate` drop the file's data and stat — and, on a format whose ids
+//! follow contents (`NodeIdentity::ContentDerived`), the name's lookup —
+//! `create` / `remove` / `rename` drop the affected lookups, directory
+//! entries, and directory stats, and `set_security` drops the node's security
+//! record. When a mutation's target cannot be identified (an unexpected
+//! driver error while resolving it), the **whole cache is purged** — fail
+//! closed, never a stale entry. The same completeness is why the volume's
 //! directory watches are fed from here ([`CachedFs::with_watch`],
 //! `docs/src/filesystem/watch.md`).
 //!
@@ -92,7 +93,7 @@ use core::mem::size_of;
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -746,6 +747,18 @@ impl<F: FilesystemRead> CachedFs<F> {
         }
     }
 
+    /// Drop what a write or truncate of `node`, named `name` in `dir`, staled:
+    /// its contents and size, every listing carrying them, and — on a format
+    /// whose ids follow contents — the name's binding to `node`.
+    fn invalidate_written(&mut self, dir: NodeId, name: &[u8], node: u64) {
+        self.invalidate_dirents_embedding(node);
+        self.invalidate_stat(node);
+        self.invalidate_data(node);
+        if self.inner.node_identity() == NodeIdentity::ContentDerived {
+            self.invalidate_lookup(dir.raw(), name);
+        }
+    }
+
     /// Drop the cached lookup for `dir/name`, if present.
     fn invalidate_lookup(&mut self, dir: u64, name: &[u8]) {
         // The key copy could not be allocated: the entry cannot be
@@ -976,6 +989,10 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
 
     fn name_matching(&self) -> NameMatching {
         self.inner.name_matching()
+    }
+
+    fn node_identity(&self) -> NodeIdentity {
+        self.inner.node_identity()
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -1262,11 +1279,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let target = self.resolve_for_invalidation(dir, name);
         let result = self.inner.write_at(dir, name, offset, data);
         match target {
-            Ok(Some(node)) => {
-                self.invalidate_dirents_embedding(node);
-                self.invalidate_stat(node);
-                self.invalidate_data(node);
-            }
+            Ok(Some(node)) => self.invalidate_written(dir, name, node),
             Ok(None) => {
                 self.invalidate_lookup(dir.raw(), name);
                 self.invalidate_dirents(dir.raw());
@@ -1284,11 +1297,7 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         let target = self.resolve_for_invalidation(dir, name);
         let result = self.inner.truncate(dir, name, size);
         match target {
-            Ok(Some(node)) => {
-                self.invalidate_dirents_embedding(node);
-                self.invalidate_stat(node);
-                self.invalidate_data(node);
-            }
+            Ok(Some(node)) => self.invalidate_written(dir, name, node),
             Ok(None) => {
                 self.invalidate_lookup(dir.raw(), name);
                 self.invalidate_dirents(dir.raw());
@@ -1460,9 +1469,9 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
 
     /// The create that made `node` already reported it, and nothing could
     /// have resolved a path through it, so a watcher has nothing to learn.
-    fn stamp_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+    fn stamp_owner(&mut self, node: NodeId, uid: u32, gid: u32) -> Result<(), DriverError> {
         self.enforce_pressure();
-        let result = self.inner.stamp_security(node, security);
+        let result = self.inner.stamp_owner(node, uid, gid);
         self.invalidate_sec(node.raw());
         result
     }

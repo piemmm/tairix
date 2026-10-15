@@ -1235,7 +1235,7 @@ mod tests {
             map(&fac, ProcessId(0x5_0048), id).err(),
             Some(Errno::PermissionDenied)
         );
-        let hold_fac: &'static FakeFacility = Box::leak(Box::new(FakeFacility::new()));
+        let hold_fac: &'static FakeFacility = crate::forever(Box::new(FakeFacility::new()));
         assert_eq!(
             kernel_hold(hold_fac, id).err(),
             Some(Errno::PermissionDenied)
@@ -1330,7 +1330,7 @@ mod tests {
 
     #[test]
     fn kernel_hold_keeps_the_region_alive_past_the_owner() {
-        let fac: &'static WindowFacility = Box::leak(Box::new(WindowFacility {
+        let fac: &'static WindowFacility = crate::forever(Box::new(WindowFacility {
             inner: FakeFacility::new(),
             window: Mutex::new(Vec::new()),
         }));
@@ -1355,7 +1355,7 @@ mod tests {
 
     #[test]
     fn kernel_hold_fails_closed_for_a_multi_chunk_region() {
-        let fac: &'static WindowFacility = Box::leak(Box::new(WindowFacility {
+        let fac: &'static WindowFacility = crate::forever(Box::new(WindowFacility {
             inner: FakeFacility::new(),
             window: Mutex::new(Vec::new()),
         }));
@@ -1378,7 +1378,7 @@ mod tests {
     #[test]
     fn kernel_hold_fails_closed_when_the_kernel_cannot_reach_the_frames() {
         // `FakeFacility` inherits the fail-closed default `kernel_window`.
-        let fac: &'static FakeFacility = Box::leak(Box::new(FakeFacility::new()));
+        let fac: &'static FakeFacility = crate::forever(Box::new(FakeFacility::new()));
         let owner = ProcessId(0x5_0008);
         let (va, id) = create(fac, owner, 1).expect("create");
         assert_eq!(kernel_hold(fac, id).err(), Some(Errno::NotImplemented));
@@ -1429,7 +1429,7 @@ mod tests {
     }
 
     fn leaked_custody() -> &'static FakeCustody {
-        Box::leak(Box::new(FakeCustody::default()))
+        crate::forever(Box::new(FakeCustody::default()))
     }
 
     #[test]
@@ -1530,7 +1530,7 @@ mod tests {
 
     #[test]
     fn kernel_hold_refuses_a_dma_region() {
-        let fac: &'static WindowFacility = Box::leak(Box::new(WindowFacility {
+        let fac: &'static WindowFacility = crate::forever(Box::new(WindowFacility {
             inner: FakeFacility::new(),
             window: Mutex::new(Vec::new()),
         }));
@@ -1558,7 +1558,7 @@ mod tests {
 
     #[test]
     fn a_failed_dma_create_leaves_nothing_reserved_or_allocated() {
-        let refusing: &'static FakeCustody = Box::leak(Box::new(FakeCustody {
+        let refusing: &'static FakeCustody = crate::forever(Box::new(FakeCustody {
             refuse: true,
             ..FakeCustody::default()
         }));
@@ -1681,7 +1681,7 @@ mod tests {
     #[test]
     fn a_translated_dma_region_hands_out_its_iova_and_frees_once_unmapped() {
         let fac = FakeFacility::new();
-        let translation: &'static FakeTranslation = Box::leak(Box::default());
+        let translation: &'static FakeTranslation = crate::forever(Box::default());
         let custody = &translation.custody;
         let creator = ProcessId(0x5_0111);
         let consumer = ProcessId(0x5_0112);
@@ -1708,7 +1708,7 @@ mod tests {
     #[test]
     fn a_translated_dma_region_is_its_pages_wherever_they_lie_mapped_end_to_end() {
         let fac = FakeFacility::new();
-        let translation: &'static FakeTranslation = Box::leak(Box::default());
+        let translation: &'static FakeTranslation = crate::forever(Box::default());
         let custody = &translation.custody;
         let creator = ProcessId(0x5_0116);
         let made = create_dma(&fac, creator, translated(translation), 3, 0).expect("carves");
@@ -1729,7 +1729,7 @@ mod tests {
     #[test]
     fn a_translated_dma_region_its_unit_cannot_confirm_gone_is_never_freed() {
         let fac = FakeFacility::new();
-        let translation: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
+        let translation: &'static FakeTranslation = crate::forever(Box::new(FakeTranslation {
             unconfirmed: true,
             ..FakeTranslation::default()
         }));
@@ -1748,7 +1748,7 @@ mod tests {
     #[test]
     fn a_translated_region_an_unmap_could_not_take_down_keeps_its_frames_and_reach() {
         let fac = unrecordable(true);
-        let translation: &'static FakeTranslation = Box::leak(Box::default());
+        let translation: &'static FakeTranslation = crate::forever(Box::default());
         let made = create_dma(&fac, ProcessId(0x5_0115), translated(translation), 1, 0);
         assert_eq!(made.err(), Some(Errno::OutOfMemory));
         assert_eq!(translation.maps.lock().unwrap().len(), 1);
@@ -1760,7 +1760,7 @@ mod tests {
 
     #[test]
     fn a_refused_translation_frees_the_block_unless_it_is_unconfirmed() {
-        let refusing: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
+        let refusing: &'static FakeTranslation = crate::forever(Box::new(FakeTranslation {
             refuse: Some(tairix_kernel_mem::DmaError::Translation),
             ..FakeTranslation::default()
         }));
@@ -1772,7 +1772,7 @@ mod tests {
         assert_eq!(fac.frees.lock().unwrap().len(), 1);
         assert_eq!(*refusing.custody.unreserves.lock().unwrap(), [7]);
 
-        let unconfirmed: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
+        let unconfirmed: &'static FakeTranslation = crate::forever(Box::new(FakeTranslation {
             refuse: Some(tairix_kernel_mem::DmaError::Unconfirmed),
             ..FakeTranslation::default()
         }));

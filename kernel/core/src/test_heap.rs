@@ -42,5 +42,5 @@ pub fn leak_heap() -> Option<&'static FreeListAllocator> {
     // two machine words, never freed (the allocation is leaked), and handed
     // to this allocator alone.
     let heap = unsafe { FreeListAllocator::new(arena, ARENA_BYTES) };
-    Some(alloc::boxed::Box::leak(alloc::boxed::Box::new(heap)))
+    Some(crate::forever(alloc::boxed::Box::new(heap)))
 }

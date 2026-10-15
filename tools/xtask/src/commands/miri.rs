@@ -65,18 +65,41 @@ pub enum Scope {
         /// it.
         reason: &'static str,
     },
+    /// The crate's integration test `name` alone (`--test <name>`), for the
+    /// reason carried here: a crate whose library is dealt across cores
+    /// enrols each integration test beside it, since one listing reports one
+    /// test binary.
+    Test {
+        /// The integration test target.
+        name: &'static str,
+        /// Why it is enrolled apart from the library.
+        reason: &'static str,
+    },
 }
 
 impl Scope {
-    /// Whether the run is confined to the crate's `--lib` target.
-    const fn is_lib_only(self) -> bool {
-        matches!(self, Self::LibOnly(_) | Self::LibExcept { .. })
+    /// Whether the run builds a single test binary, which is what sharding
+    /// needs: a listing reports one binary's tests.
+    #[cfg(test)]
+    const fn is_one_binary(self) -> bool {
+        !matches!(self, Self::AllTargets)
+    }
+
+    /// The test binary the run is confined to: the library, a named
+    /// integration test, or `None` for every target the crate builds.
+    #[cfg(test)]
+    const fn binary(self) -> Option<&'static str> {
+        match self {
+            Self::AllTargets => None,
+            Self::LibOnly(_) | Self::LibExcept { .. } => Some("lib"),
+            Self::Test { name, .. } => Some(name),
+        }
     }
 
     /// The libtest `--skip` patterns this scope excludes.
     const fn skip_patterns(self) -> &'static [&'static str] {
         match self {
-            Self::AllTargets | Self::LibOnly(_) => &[],
+            Self::AllTargets | Self::LibOnly(_) | Self::Test { .. } => &[],
             Self::LibExcept { skip, .. } => skip,
         }
     }
@@ -255,6 +278,35 @@ pub const TARGETS: &[Target] = &[
              end — half the pipeline's whole wall clock in one single-core process, against a \
              budget only twice that. The runner overran it",
         ),
+    },
+    Target {
+        package: "tairix-kernel-core",
+        description: "the kernel threads' control blocks a context switch reaches through raw \
+                      pointers, the per-CPU resume and address-space publications, the live \
+                      mapping producers, the kernel stacks and heap source, the panic \
+                      backtrace's stack reader, the block client's shared window, and the \
+                      wall clock's sequence-lock writer",
+        features: &[],
+        scope: Scope::LibOnly(
+            "the library holds all but one test, and naming it is what lets them be dealt \
+             across cores; the integration test is enrolled beside it",
+        ),
+        spread: Spread::PerCore(
+            "over two thousand tests, and interpreted they cost over three and a half hours in \
+             one single-core process",
+        ),
+    },
+    Target {
+        package: "tairix-kernel-core",
+        description: "the boot entry end to end: every phase's publications for the kernel's \
+                      life, and the halt",
+        features: &[],
+        scope: Scope::Test {
+            name: "kernel_main",
+            reason: "it drives `kernel_main` whole, where the library's tests reach its phases \
+                     one at a time",
+        },
+        spread: Spread::OneProcess,
     },
     Target {
         package: "tairix-abi",
@@ -661,8 +713,14 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
 fn base_command(ctx: &Context, target: &Target, seed: u64) -> Command {
     let mut cmd: Command = ctx.cargo();
     cmd.args(["miri", "test", "-p", target.package, "--locked"]);
-    if target.scope.is_lib_only() {
-        cmd.arg("--lib");
+    match target.scope {
+        Scope::AllTargets => {}
+        Scope::LibOnly(_) | Scope::LibExcept { .. } => {
+            cmd.arg("--lib");
+        }
+        Scope::Test { name, .. } => {
+            cmd.args(["--test", name]);
+        }
     }
     if !target.features.is_empty() {
         cmd.args(["--features", &target.features.join(",")]);
@@ -681,9 +739,10 @@ fn base_command(ctx: &Context, target: &Target, seed: u64) -> Command {
 /// How a label names the target's scope.
 fn scope_label(target: &Target) -> String {
     let scope = match target.scope {
-        Scope::AllTargets => "",
-        Scope::LibOnly(_) => " --lib",
-        Scope::LibExcept { .. } => " --lib (part)",
+        Scope::AllTargets => String::new(),
+        Scope::LibOnly(_) => " --lib".to_string(),
+        Scope::LibExcept { .. } => " --lib (part)".to_string(),
+        Scope::Test { name, .. } => format!(" --test {name}"),
     };
     if target.features.is_empty() {
         format!("miri {}{scope}", target.package)
@@ -896,11 +955,6 @@ mod tests {
         assert!(parse(&args(&["--what"])).is_err());
     }
 
-    /// Every target must name a real workspace package, and no *build* twice.
-    ///
-    /// A package may appear more than once — one entry per feature set, where
-    /// its `unsafe` is split across features — so the identity a duplicate
-    /// would waste the interpreter on is the pair, not the name alone.
     /// A narrowed scope must say why, so a future reader can tell a
     /// considered exclusion from one added to make a run go green.
     #[test]
@@ -908,7 +962,9 @@ mod tests {
         for target in TARGETS {
             let reason = match target.scope {
                 Scope::AllTargets => None,
-                Scope::LibOnly(reason) | Scope::LibExcept { reason, .. } => Some(reason),
+                Scope::LibOnly(reason)
+                | Scope::LibExcept { reason, .. }
+                | Scope::Test { reason, .. } => Some(reason),
             };
             if let Some(reason) = reason {
                 assert!(
@@ -958,12 +1014,28 @@ mod tests {
         for target in TARGETS {
             if matches!(target.spread, Spread::PerCore(_)) {
                 assert!(
-                    target.scope.is_lib_only(),
+                    target.scope.is_one_binary(),
                     "{} is sharded but its scope builds more than one test binary",
                     target.package
                 );
             }
         }
+    }
+
+    /// A sharded crate's integration test is a binary of its own, so it never
+    /// shares a listing with the library beside it.
+    #[test]
+    fn an_integration_test_scope_names_its_own_binary() {
+        let test = Scope::Test {
+            name: "kernel_main",
+            reason: "beside the sharded library",
+        };
+        assert!(test.is_one_binary());
+        assert_eq!(test.binary(), Some("kernel_main"));
+        assert!(test.skip_patterns().is_empty());
+        assert_eq!(Scope::LibOnly("library").binary(), Some("lib"));
+        assert_eq!(Scope::AllTargets.binary(), None);
+        assert!(!Scope::AllTargets.is_one_binary());
     }
 
     #[test]
@@ -1040,16 +1112,25 @@ mod tests {
         assert!(deal(Vec::new(), 16).is_empty());
     }
 
+    /// Every target must name a real workspace package, and no *build* twice.
+    ///
+    /// A package may appear more than once — one entry per feature set, where
+    /// its `unsafe` is split across features, or per test binary, where its
+    /// library is sharded — so the identity a duplicate would waste the
+    /// interpreter on is the build and the binary, not the name alone.
     #[test]
     fn the_registry_is_distinct() {
         for (index, target) in TARGETS.iter().enumerate() {
             assert!(target.package.starts_with("tairix-"), "{}", target.package);
             assert!(!target.description.is_empty());
             for other in &TARGETS[index + 1..] {
-                assert_ne!(
-                    (target.package, target.features),
-                    (other.package, other.features),
-                    "{} is registered twice with the same features",
+                let overlaps = target.scope.binary().is_none()
+                    || other.scope.binary().is_none()
+                    || target.scope.binary() == other.scope.binary();
+                assert!(
+                    (target.package, target.features) != (other.package, other.features)
+                        || !overlaps,
+                    "{} is registered twice for the same build and test binary",
                     target.package
                 );
             }

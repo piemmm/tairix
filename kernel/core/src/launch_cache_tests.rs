@@ -25,7 +25,7 @@ fn budget() -> CacheBudget {
 
 /// A leaked capturing sink for the cache's audit records.
 fn sink() -> &'static TestSink {
-    Box::leak(Box::new(TestSink::new()))
+    crate::forever(Box::new(TestSink::new()))
 }
 
 /// The accounted cost of one cached test entry under `key`: learned from
@@ -280,8 +280,8 @@ fn a_zero_backing_fails_closed_and_admits_nothing() {
             0
         }
     }
-    let zero: &'static ZeroSource = Box::leak(Box::new(ZeroSource));
-    let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(zero)));
+    let zero: &'static ZeroSource = crate::forever(Box::new(ZeroSource));
+    let pressure: &'static MemoryPressure = crate::forever(Box::new(MemoryPressure::over(zero)));
     let mut cache = LaunchCache::new(budget(), pressure, sink());
     cache.insert("/System/Commands/a.app", &verified_app());
     assert_eq!(cache.accounting().total_bytes(), 0);
@@ -432,7 +432,7 @@ fn the_cost_model_charges_strings_beside_the_image() {
 /// (`cache.semantic off`), its own instance so it never touches the
 /// process-global control other tests rely on.
 fn launch_disabled_control() -> &'static CacheControl {
-    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let control: &'static CacheControl = crate::forever(Box::new(CacheControl::new()));
     control.set(CacheClass::Semantic, crate::CacheMode::Off);
     control
 }
@@ -452,7 +452,7 @@ fn a_disabled_launch_cache_admits_nothing() {
 
 #[test]
 fn flipping_the_semantic_switch_off_drops_the_cache() {
-    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let control: &'static CacheControl = crate::forever(Box::new(CacheControl::new()));
     let mut cache = LaunchCache::new(budget(), unpressured(), sink()).with_cache_control(control);
     cache.insert("/System/Commands/ps.app", &verified_app());
     assert!(cache.accounting().total_bytes() > 0, "the cache filled");

@@ -13,7 +13,7 @@ fn fmt_plain(block_size: u32, block_count: u64) -> ARXFS<MemBlock> {
         &mut TestEntropy::new(),
     )
     .expect("format a plaintext volume")
-    .with_clock(fixed_clock)
+    .stamped()
 }
 
 /// A distinctive payload no metadata or padding could spell by accident.
@@ -221,7 +221,7 @@ fn a_plaintext_volume_checks_sound_and_is_rescued_with_no_key() {
         &mut TestEntropy::new(),
     )
     .expect("format")
-    .with_clock(fixed_clock);
+    .stamped();
     let root = fs.root();
     let cap = as_usize(fs.data_capacity());
     let body = incompressible(cap + cap / 2);

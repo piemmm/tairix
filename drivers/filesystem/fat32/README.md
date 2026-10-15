@@ -52,7 +52,10 @@ and chains clusters, zero-fills sparse gaps and updates the entry;
 `remove` frees the chain and marks the entry plus its long-name run
 deleted. Free clusters are found by scanning the FAT, directories grow a
 zeroed cluster at a time up to the format's 65,536 entries, and every FAT
-mutation is mirrored across all FAT copies.
+mutation is mirrored across all FAT copies. A create stamps the entry from
+the host's wall clock, and a write or truncate moves its last-write stamp,
+as UTC civil time; with no time to give, the entry gets the zero date FAT
+reads as none (`docs/src/filesystem/fat32.md`, Timestamps).
 
 ## Limitations
 

@@ -46,6 +46,10 @@ impl<F: FilesystemRead> FilesystemRead for Counting<F> {
         self.inner.name_matching()
     }
 
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        self.inner.node_identity()
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         self.calls += 1;
         self.inner.node_info(node)
@@ -181,7 +185,7 @@ fn owner() -> ReclaimOwner {
 
 /// A leaked capturing sink for the cache's audit records.
 fn sink() -> &'static TestSink {
-    Box::leak(Box::new(TestSink::new()))
+    crate::forever(Box::new(TestSink::new()))
 }
 
 /// The wrapped counting driver's call total.
@@ -208,7 +212,7 @@ fn fixture(contents: &[u8]) -> CachedFs<Counting<RwMockFs>> {
 /// (`cache.filesystem off`), its own instance so it never touches the
 /// process-global control other tests rely on.
 fn fs_disabled_control() -> &'static CacheControl {
-    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let control: &'static CacheControl = crate::forever(Box::new(CacheControl::new()));
     control.set(CacheClass::Filesystem, crate::CacheMode::Off);
     control
 }
@@ -1313,7 +1317,7 @@ fn a_disabled_filesystem_cache_serves_correctly_but_caches_nothing() {
 
 #[test]
 fn flipping_the_filesystem_switch_off_purges_the_cache() {
-    let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
+    let control: &'static CacheControl = crate::forever(Box::new(CacheControl::new()));
     let mut cache = fixture_with_control(b"warm me", control);
     let file = file_of(&mut cache);
 

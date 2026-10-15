@@ -378,6 +378,8 @@ impl CommitScheduler {
 
 /// The host, for tests: a settable monotonic clock, a record of the last
 /// deadline the driver reported, and the last reserve crossing it reported.
+/// It has no wall clock: a test of what a volume stamps installs
+/// `tairix_abi::driver::filesystem::clock::TestClock` instead.
 ///
 /// One definition for the whole crate — the scheduler's own tests and the
 /// mounted-volume tests both drive a transaction across its window through
@@ -442,6 +444,10 @@ impl TestVolumeHost {
 impl VolumeHost for TestVolumeHost {
     fn now_ns(&self) -> Option<u64> {
         Some(self.now_ns.load(core::sync::atomic::Ordering::Acquire))
+    }
+
+    fn wall_time(&self) -> Option<tairix_abi::time::Time64> {
+        None
     }
 
     fn writeback_due(&self, _volume: DriverHandle, deadline_ns: Option<u64>) {
@@ -1434,6 +1440,9 @@ mod tests {
         struct Clockless;
         impl VolumeHost for Clockless {
             fn now_ns(&self) -> Option<u64> {
+                None
+            }
+            fn wall_time(&self) -> Option<tairix_abi::time::Time64> {
                 None
             }
             fn writeback_due(&self, _volume: DriverHandle, _deadline_ns: Option<u64>) {}

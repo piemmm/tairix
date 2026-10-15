@@ -3,8 +3,7 @@
 Reads and writes Acorn ADFS / RISC OS `FileCore` volumes behind any
 `tairix_abi::driver::block::Block` device and exposes them through the
 versioned `tairix_abi::driver::filesystem::FilesystemRead`,
-`FilesystemWrite`, `FilesystemTimestamps`, `FilesystemAttrs`, and
-`FilesystemStats` traits. The frozen `Filesystem` trait carries only
+`FilesystemWrite`, `FilesystemAttrs`, and `FilesystemStats` traits. The frozen `Filesystem` trait carries only
 `mount`/`unmount`, so each I/O surface is a versioned trait, never a
 widening of a shipped one.
 
@@ -39,9 +38,11 @@ datestamp, and the `FileCore` attribute bits are surfaced as the
 canonical `acorn.*` attribute keys through the shared `tairix_fsmeta`
 Acorn preset (`acorn.loadaddr`, `acorn.execaddr`, `acorn.attr`,
 `acorn.filetype`, `acorn.datestamp`), so a copy to `ARXFS` and back is
-byte-exact. `FilesystemTimestamps` reports a typed object's stamp as
-all four `Time64` instants (the format stores exactly one); untyped
-objects honestly report the epoch. ADFS stores no general-purpose
+byte-exact. `NodeInfo::times` reports a typed object's stamp as all
+four `Time64` instants (the format stores exactly one); untyped objects,
+and the zero stamp of a clock never set, honestly report the epoch. A
+new object is typed Data (`&FFD`) and stamped from the host's wall clock,
+and a write restamps a typed one. ADFS stores no general-purpose
 attributes: writing any other namespace is refused (`Unsupported`),
 never silently dropped.
 

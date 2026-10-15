@@ -50,7 +50,7 @@ use tairix_abi::sysinfo::{
     MountAvailability, MountRecord, MountVolumeState, ViewBindingRecord, VolumeIoHealthRecord,
     VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
-use tairix_abi::time::Time64;
+use tairix_abi::time::{is_plausible_wall_time, Time64};
 use tairix_abi::{
     CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
     RenameFlags, UnlinkFlags, FS_MODE_MASK,
@@ -65,6 +65,7 @@ use tairix_log::{Field, FieldValue, Level, Sink};
 use crate::audit::{self, AuditEvent};
 use crate::fswatch::ClaimRef;
 use crate::sleeplock::SleepLock;
+use crate::wallclock::WallClockSource;
 
 use super::blkmeter::VolumeIoSource;
 
@@ -214,6 +215,8 @@ pub struct LateFilesystem<F: 'static> {
     /// Where a volume running down to its reserve is recorded, installed with
     /// the host.
     audit: OnceCell<&'static (dyn Sink + Sync)>,
+    /// The clock every volume stamps its times from, installed with the host.
+    wall_clock: OnceCell<&'static (dyn WallClockSource + 'static)>,
     /// Whether the flusher is live and will publish what a driver defers
     /// ([`Self::arm_writeback`]). Until it is, the host declines to read its
     /// clock, so every driver publishes at each operation: the batching window
@@ -243,6 +246,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
             drivers: SpinLock::new(Vec::new()),
             volume_host: OnceCell::new(),
             audit: OnceCell::new(),
+            wall_clock: OnceCell::new(),
             writeback_armed: AtomicBool::new(false),
             listings: ListingRegistry::new(),
         }
@@ -333,13 +337,14 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
 
     /// Publish the host every driver registered from now on is handed, so a
     /// filesystem that batches commits has something above it to publish a
-    /// volume that falls quiet ([`super::writeback`]), and `audit`, where a
-    /// volume running down to its reserve is recorded.
+    /// volume that falls quiet ([`super::writeback`]), with `audit`, where a
+    /// volume running down to its reserve is recorded, and `wall_clock`, which
+    /// every volume stamps its times from.
     ///
     /// Set-once per boot, and installed before any writable volume is
     /// registered: a driver registered without a host publishes at every
     /// operation, which is slower but never defers durability with no timer
-    /// to fire it (fail closed).
+    /// to fire it (fail closed), and stamps no time.
     ///
     /// # Errors
     ///
@@ -349,11 +354,13 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         &self,
         host: &'static dyn VolumeHost,
         audit: &'static (dyn Sink + Sync),
+        wall_clock: &'static (dyn WallClockSource + 'static),
     ) -> Result<(), FilesystemAlreadyInstalled> {
         self.volume_host
             .set(host)
             .map_err(|_| FilesystemAlreadyInstalled)?;
         let _ = self.audit.set(audit);
+        let _ = self.wall_clock.set(wall_clock);
         Ok(())
     }
 
@@ -712,6 +719,15 @@ impl<F: FilesystemWrite + Send + 'static> VolumeHost for LateFilesystem<F> {
             return None;
         }
         crate::waitq::wait_now_ns()
+    }
+
+    /// A stamp outlives the boot and carries no provenance, so only a reading
+    /// the clock can vouch for is handed out: one a source has set and that
+    /// is plausible, which a dead clock battery's year 2000 is not.
+    fn wall_time(&self) -> Option<Time64> {
+        let clock = self.wall_clock.get().ok().flatten()?;
+        let reading = clock.read(crate::waitq::wait_now_ns()?);
+        (reading.state().is_set() && is_plausible_wall_time(reading.time())).then(|| reading.time())
     }
 
     fn writeback_due(&self, volume: DriverHandle, deadline_ns: Option<u64>) {

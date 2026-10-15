@@ -420,8 +420,9 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             None => spawner,
         }
         .with_mastering(state.mastering)
-        .with_watches(&state.fswatch);
-        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(spawner));
+        .with_watches(&state.fswatch)
+        .with_wall_clock(&state.wall_clock);
+        let ctx: &'static (dyn InitSpawnCtx + Sync) = crate::forever(Box::new(spawner));
         start_init(init, ctx, audit_sink);
     }
 
@@ -471,7 +472,7 @@ impl<A: KernelArch + 'static> SchedWaitQueueArch<A> {
     /// hold it for the life of the kernel.
     #[must_use]
     pub fn leak(scheduler: &'static Scheduler<A>, arch: &'static A) -> &'static Self {
-        Box::leak(Box::new(Self { scheduler, arch }))
+        crate::forever(Box::new(Self { scheduler, arch }))
     }
 }
 
@@ -699,7 +700,7 @@ fn init_liveness_and_quiesce_tables(
     boot_cpu: CpuId,
 ) -> Result<&'static [AtomicBool], &'static str> {
     let table = || -> &'static [AtomicBool] {
-        Box::leak(
+        crate::forever(
             (0..cpu_count)
                 .map(|_| AtomicBool::new(false))
                 .collect::<alloc::vec::Vec<_>>()
@@ -785,7 +786,7 @@ fn start_secondaries<A: KernelArch + 'static>(
         }
     };
     let handle: &'static KernelSecondaryDispatch<A> =
-        Box::leak(Box::new(KernelSecondaryDispatch {
+        crate::forever(Box::new(KernelSecondaryDispatch {
             state,
             boot_cpu,
             cpu_count,
@@ -995,7 +996,7 @@ fn seed_entropy_reserve<A: KernelArch + 'static>(state: &'static KernelState<A>)
             // Now that a seeded, reseeding reserve exists, start feeding
             // interrupt-arrival timing into the pool it reseeds from. The
             // observer is set-once and lives for the kernel's lifetime.
-            let observer: &'static IrqEntropyObserver<A> = Box::leak(Box::new(
+            let observer: &'static IrqEntropyObserver<A> = crate::forever(Box::new(
                 IrqEntropyObserver::new(state.arch.clone(), &IRQ_ENTROPY_POOL),
             ));
             let _ = state.irq.set_observer(observer);
@@ -1111,8 +1112,9 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// The scheduler-side process-wait producer a driver spawned through
     /// [`spawn_driver_process`](InitSpawnCtx::spawn_driver_process) is
     /// recorded with, so the supervising task can later reap it
-    /// (`plans/SPAWN.md` SP6). `'static` because it is `Box::leak`'d over
-    /// the leaked `KernelState` like every other boot-installed producer.
+    /// (`plans/SPAWN.md` SP6). `'static` because, like every other
+    /// boot-installed producer, it is kept for the kernel's life over
+    /// `KernelState`.
     /// PID-1 admission (`admit_init`) does not consult it; it exists for the
     /// driver-spawn path. A boot path that wired no real producer passes the
     /// fail-closed [`crate::NULL_PROCESS_WAIT`].
@@ -1150,6 +1152,8 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// The directory-watch registry the volumes the boot path mounts claim
     /// their tables from.
     watches: Option<&'static crate::fswatch::WatchRegistry>,
+    /// The wall clock those volumes stamp their times from.
+    wall_clock: &'static (dyn crate::WallClockSource + 'static),
 }
 
 impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
@@ -1196,6 +1200,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             dma_translation: None,
             mastering: None,
             watches: None,
+            wall_clock: &crate::NULL_WALL_CLOCK,
         }
     }
 
@@ -1204,6 +1209,17 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     #[must_use]
     pub fn with_watches(mut self, watches: &'static crate::fswatch::WatchRegistry) -> Self {
         self.watches = Some(watches);
+        self
+    }
+
+    /// Hand the volumes the boot path mounts `wall_clock` to stamp their
+    /// times from.
+    #[must_use]
+    pub fn with_wall_clock(
+        mut self,
+        wall_clock: &'static (dyn crate::WallClockSource + 'static),
+    ) -> Self {
+        self.wall_clock = wall_clock;
         self
     }
 
@@ -1636,6 +1652,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 
     fn watches(&self) -> Option<&'static crate::fswatch::WatchRegistry> {
         self.watches
+    }
+
+    fn wall_clock(&self) -> &'static (dyn crate::WallClockSource + 'static) {
+        self.wall_clock
     }
 
     fn audit(&self) -> &(dyn Sink + Sync) {
@@ -2205,7 +2225,8 @@ fn run_phases<A: KernelArch>(
     // it here, and the pre-boot Supervisor's `mem map` command lists its
     // usable/reserved regions later (`plans/NEW-SUPERVISOR.md`) — one owner,
     // no second copy.
-    let memory_map: &'static tairix_kernel_mem::BootMemoryMap = Box::leak(Box::new(memory_map));
+    let memory_map: &'static tairix_kernel_mem::BootMemoryMap =
+        crate::forever(Box::new(memory_map));
     crate::memtest::run(
         arch.as_ref(),
         memory_map,
@@ -2222,7 +2243,7 @@ fn run_phases<A: KernelArch>(
         None => FrameAllocator::with_dma_reaches(memory_map, &dma_reaches),
     };
     let frame_allocator: &'static FrameAllocator =
-        Box::leak(Box::new(frames.map_err(InitError::Mem)?));
+        crate::forever(Box::new(frames.map_err(InitError::Mem)?));
     // Growth is installed at the first point every component it needs exists:
     // everything allocated before this has to fit the bootstrap arena.
     let growth = install_heap_growth(&arch, heap, frame_allocator, physmap);
@@ -2309,20 +2330,16 @@ fn run_phases<A: KernelArch>(
         units.audit(audit_sink);
     }
 
-    // Assemble `KernelState` and lift it to `'static` so the
-    // `Phase::Syscall` step can publish a `&'static dyn DispatchHook`
-    // referencing its fields. The `Box::leak` is intentional: the
-    // kernel never returns, so the leak is a one-shot publish into a
-    // `'static` slot, not a global *mutable* static (the per-CPU bootstrap area is the only sanctioned
-    // mutable static; this allocation is immutable after creation
-    // because every interior field carries its own synchronisation
-    // primitive (`Scheduler`'s internal locks, `RwLock<CapTable>`)).
-    let state: &'static KernelState<A> = Box::leak(Box::new(KernelState {
+    // Kept for the kernel's life so `Phase::Syscall` can publish a
+    // `&'static dyn DispatchHook` over its fields. It is no mutable static:
+    // every field carries its own synchronisation.
+    let state: &'static KernelState<A> = crate::forever(Box::new(KernelState {
         frame_allocator,
         scheduler,
         caps: RwLock::new(CapTable::new()),
         peer_watch: PeerWatch::new(),
         fswatch: crate::fswatch::WatchRegistry::new(),
+        wall_clock: crate::wallclock::KernelWallClock::new(),
         ipc: RwLock::new(PortRegistry::new()),
         aspaces: RwLock::new(AddressSpaceRegistry::new()),
         // The kernel random output reserve boots **unseeded** over the
@@ -2423,7 +2440,7 @@ fn run_phases<A: KernelArch>(
     // bookkeeping and parks a waiting parent back on the scheduler until a
     // child is reapable; it needs only the `'static` arch handle (to read the
     // current CPU when parking), so it is built here over the leaked
-    // `KernelState` and `Box::leak`'d for the same one-shot-publish reason as
+    // `KernelState` and kept for the kernel's life for the same one-shot-publish reason as
     // the hook below. Until this stage the handler held the
     // fail-closed `NULL_PROCESS_WAIT`.
     // Keep the concrete `&'static KernelProcessWait` binding: the signal
@@ -2431,7 +2448,7 @@ fn run_phases<A: KernelArch>(
     // exit-status bookkeeping both syscalls read), while the handler consumes
     // it through the `dyn ProcessWait` coercion.
     let process_wait_concrete: &'static KernelProcessWait<A> =
-        Box::leak(Box::new(KernelProcessWait::new(state.arch.as_ref())));
+        crate::forever(Box::new(KernelProcessWait::new(state.arch.as_ref())));
     let process_wait: &'static (dyn crate::procwait::ProcessWait + 'static) = process_wait_concrete;
 
     // Build the scheduler-side process-signal producer the `signal` syscall
@@ -2439,17 +2456,18 @@ fn run_phases<A: KernelArch>(
     // signalled termination through the same `KernelProcessWait` above (one
     // source of truth for the parent/child relationship, never a second copy)
     // and delivers the signal by driving the live scheduler (unpark for
-    // continue, exit for terminate/kill). `Box::leak`'d for the same
-    // one-shot-publish reason as the hook. Until this stage the handler held
+    // continue, exit for terminate/kill). Kept for the kernel's life for the
+    // same one-shot-publish reason as the hook. Until this stage the handler held
     // the fail-closed `NULL_PROCESS_SIGNAL`.
-    let process_signal_concrete = Box::leak(Box::new(crate::procsignal::KernelProcessSignal::new(
-        process_wait_concrete,
-        &state.scheduler,
-        // The thread-group table, so a signal to a PID reaches every thread of
-        // that process rather than its leader alone (`plans/THREADS.md`
-        // decision 10).
-        &state.caps,
-    )));
+    let process_signal_concrete =
+        crate::forever(Box::new(crate::procsignal::KernelProcessSignal::new(
+            process_wait_concrete,
+            &state.scheduler,
+            // The thread-group table, so a signal to a PID reaches every thread of
+            // that process rather than its leader alone (`plans/THREADS.md`
+            // decision 10).
+            &state.caps,
+        )));
     let process_signal: &'static (dyn crate::procsignal::ProcessSignal + 'static) =
         process_signal_concrete;
     // The same producer is the foreground `^C`/`^Z` delivery target the
@@ -2508,7 +2526,7 @@ fn run_phases<A: KernelArch>(
     // reporting a zero-length read user space cannot distinguish from
     // end of input. Each adapter needs the same `'static` arch handle
     // (to read the current CPU when parking) as the process-wait
-    // producer above, so the rebuilt list is `Box::leak`'d the same way
+    // producer above, so the rebuilt list is kept for the kernel's life the same way
     // — a one-shot publish, not a global mutable static. A console whose read half fails closed (a write-only
     // serial port's `NULL_CONSOLE_READ`) keeps failing closed: the
     // inner error propagates straight through without parking.
@@ -2520,9 +2538,9 @@ fn run_phases<A: KernelArch>(
             // blocking reader feeds and animates it, so every text-console
             // password prompt shows the shared `[input active...]` marker.
             let secret: &'static crate::console::SecretFeedback =
-                Box::leak(Box::new(crate::console::SecretFeedback::new(device.write)));
+                crate::forever(Box::new(crate::console::SecretFeedback::new(device.write)));
             let blocking: &'static (dyn crate::console::ConsoleRead + Sync + 'static) =
-                Box::leak(Box::new(crate::console::BlockingConsoleRead::new(
+                crate::forever(Box::new(crate::console::BlockingConsoleRead::new(
                     state.arch.as_ref(),
                     device.read,
                     Some(secret),
@@ -2537,7 +2555,7 @@ fn run_phases<A: KernelArch>(
                     .with_secret(secret),
             );
         }
-        Box::leak(wrapped.into_boxed_slice())
+        crate::forever(wrapped.into_boxed_slice())
     };
 
     // Build the production `mem_map` / `mmio_map` / `dma_alloc` producers over
@@ -2547,7 +2565,7 @@ fn run_phases<A: KernelArch>(
     // the process-wait producer uses, so a task that retains a live space (the
     // aarch64 ports) gets a working producer and one that does not fails closed
     // with `NotImplemented` exactly as the `NULL_*` defaults did. All are
-    // `Box::leak`'d for the same one-shot-publish reason as the hook, arch-
+    // kept for the kernel's life for the same one-shot-publish reason as the hook, arch-
     // generic so this names no concrete port.
     let (mem_map, file_map, mmio_map_facility, dma_alloc_facility, shared_mem_facility) =
         live_producers(state.arch.as_ref(), state.frame_allocator);
@@ -2570,12 +2588,7 @@ fn run_phases<A: KernelArch>(
     // until `install_ramzip_tier` brings one online.
     crate::memstats::install_global_ramzip_stats();
 
-    // The production wall clock, named so it backs *both* the
-    // `wall_time_get`/`wall_time_set` syscalls and the introspection
-    // uptime domain's boot-instant projection — one clock, no second copy.
-    // `Box::leak`'d for the same one-shot-publish reason as the hook.
-    let wall_clock: &'static crate::wallclock::KernelWallClock =
-        Box::leak(Box::new(crate::wallclock::KernelWallClock::new()));
+    let wall_clock: &'static crate::wallclock::KernelWallClock = &state.wall_clock;
 
     // The live introspection source the `sysinfo_introspect` syscall serves
     // (`PREREQUISITES.md` P-C): built over the leaked `KernelState` (its
@@ -2586,7 +2599,7 @@ fn run_phases<A: KernelArch>(
     // filesystem still answers every domain truthfully (an empty mount list,
     // the unprovisioned identity sentinel), so the broker that holds
     // `CAP_SYSINFO_INTROSPECT` can serve every query.
-    let introspect: &'static (dyn crate::introspect::IntrospectSource + 'static) = Box::leak(
+    let introspect: &'static (dyn crate::introspect::IntrospectSource + 'static) = crate::forever(
         Box::new(crate::introspect_source::KernelIntrospectSource::new(
             state, filesystem, wall_clock,
             // The account directory (uid + username, no credential
@@ -2611,7 +2624,7 @@ fn run_phases<A: KernelArch>(
     // fails closed rather than re-pointing the live provider; the boot path
     // installs it exactly once, so the result is discarded.
     let supervisor_system: &'static (dyn crate::supervisor_system::SupervisorSystem + 'static) =
-        Box::leak(Box::new(
+        crate::forever(Box::new(
             crate::supervisor_system::KernelSupervisorSystem::new(
                 state, memory_map, wall_clock, heap,
             ),
@@ -2619,7 +2632,7 @@ fn run_phases<A: KernelArch>(
     let _ = crate::supervisor_system::install_supervisor_system(supervisor_system);
 
     // Phase 6 — Syscall. Publish the production `DispatchHook` into
-    // the bin-crate-owned slot. The hook itself is `Box::leak`'d for
+    // the bin-crate-owned slot. The hook itself is kept for the kernel's life for
     // the same reason as `KernelState`: its borrows reference
     // `KernelState` fields and must therefore be `'static`.
     phase_started(log_sink, Phase::Syscall);
@@ -2689,10 +2702,8 @@ fn run_phases<A: KernelArch>(
         // keeps a switch fail-closed, and the default `spawn` (inherit)
         // never consults it.
         .with_identity(spawn_identity.unwrap_or(&crate::syscalls::NULL_IDENTITY))
-        // Serve `wall_time_get` / `wall_time_set` through the production
-        // wall clock (`PREREQUISITES.md` P-D). It boots `Unset`; a trusted
-        // time source drives it via `wall_time_set` under `CAP_TIME_SET`.
-        // `Box::leak`'d for the same one-shot-publish reason as the hook.
+        // It boots `Unset`; a trusted time source drives it via
+        // `wall_time_set` under `CAP_TIME_SET`.
         .with_wall_clock(wall_clock)
         // Serve `sysinfo_introspect` through the live introspection source
         // built above (`PREREQUISITES.md` P-C); the default `NULL_INTROSPECT`
@@ -2760,7 +2771,7 @@ fn run_phases<A: KernelArch>(
         }),
         _ => hook,
     };
-    let hook = Box::leak(Box::new(hook));
+    let hook = crate::forever(Box::new(hook));
     dispatcher_callback_slot
         .install_dispatcher(hook)
         .map_err(InitError::DispatcherAlreadyInstalled)?;
@@ -2821,12 +2832,12 @@ fn run_phases<A: KernelArch>(
     Ok((state, process_wait))
 }
 
-/// Build and `Box::leak` the production `mem_map` / `mmio_map` / `dma_alloc`
+/// Build, and keep for the kernel's life, the production `mem_map` / `mmio_map` / `dma_alloc`
 /// / `shm_*` producers over the calling process's live address space
 /// (`plans/PI.md` 5d-0-ii (b′)/(c); `plans/USB.md` for shared memory).
 ///
 /// Each is arch-generic (it reads the current CPU from the `'static` `arch`
-/// handle and routes to the calling task's own live space) and `Box::leak`'d for the one-shot-publish reason `KernelState`
+/// handle and routes to the calling task's own live space) and kept for the kernel's life for the one-shot-publish reason `KernelState`
 /// is. The shared-memory producer additionally draws the region backing
 /// from `frames` (the kernel allocator). Factored out of [`run_phases`] so
 /// the four long-typed bindings live in one place.
@@ -2845,15 +2856,15 @@ fn live_producers<A: KernelArch>(
     // routing; the two facilities are distinct leaked instances of the one
     // type (each holds only the shared `'static` arch borrow).
     (
-        Box::leak(Box::new(crate::live_producer::LiveMemMap::new(arch))),
-        Box::leak(Box::new(crate::live_producer::LiveMemMap::new(arch))),
-        Box::leak(Box::new(crate::live_producer::LiveMmioMap::new(arch))),
-        Box::leak(Box::new(crate::live_producer::LiveDmaAlloc::new(arch))),
+        crate::forever(Box::new(crate::live_producer::LiveMemMap::new(arch))),
+        crate::forever(Box::new(crate::live_producer::LiveMemMap::new(arch))),
+        crate::forever(Box::new(crate::live_producer::LiveMmioMap::new(arch))),
+        crate::forever(Box::new(crate::live_producer::LiveDmaAlloc::new(arch))),
         build_shared_mem_facility(arch, frames),
     )
 }
 
-/// Build (and `Box::leak`) the DMA quarantine over the kernel frame allocator,
+/// Build, and keep for the kernel's life, the DMA quarantine over the kernel frame allocator,
 /// the arch direct map it scrubs through and the hardware tree whose devices
 /// it holds memory for, or the fail-closed
 /// [`crate::devres::NULL_DMA_QUARANTINE`] when the port wires no direct map.
@@ -2863,7 +2874,7 @@ fn build_dma_quarantine<A: KernelArch>(
     devices: &'static (dyn crate::hwtree::HwTreeSource + 'static),
 ) -> &'static (dyn crate::devres::DmaQuarantineFacility + 'static) {
     match arch.direct_phys_map() {
-        Some(physmap) => Box::leak(Box::new(crate::dmaquarantine::DmaQuarantine::new(
+        Some(physmap) => crate::forever(Box::new(crate::dmaquarantine::DmaQuarantine::new(
             frames, physmap, devices,
         ))),
         None => &crate::devres::NULL_DMA_QUARANTINE,
@@ -2919,10 +2930,11 @@ fn build_dma_translation<A: KernelArch + 'static>(
     refused.try_reserve(nodes.len()).map_err(unbuilt)?;
     match arch.direct_phys_map() {
         Some(physmap) => {
-            let tables: &'static tairix_kernel_mem::FrameTableSource = Box::leak(Box::new(
+            let tables: &'static tairix_kernel_mem::FrameTableSource = crate::forever(Box::new(
                 tairix_kernel_mem::FrameTableSource::new(frames, physmap),
             ));
-            let clock: &'static ArchClock<A> = Box::leak(Box::new(ArchClock(Arc::clone(arch))));
+            let clock: &'static ArchClock<A> =
+                crate::forever(Box::new(ArchClock(Arc::clone(arch))));
             let env = crate::iommu::UnitEnv {
                 mmio: &|base, len| {
                     let end = base.checked_add(u64::try_from(len).ok()?)?;
@@ -2977,7 +2989,7 @@ fn build_dma_translation<A: KernelArch + 'static>(
         },
     )
     .avoiding(peers);
-    let translation: &'static crate::iommu::Translation = Box::leak(Box::new(translation));
+    let translation: &'static crate::iommu::Translation = crate::forever(Box::new(translation));
     Ok(Some(translation))
 }
 
@@ -3026,7 +3038,7 @@ fn serve_deferred_frees<A: KernelArch + 'static>(state: &'static KernelState<A>)
         return;
     };
     let frames = state.frame_allocator;
-    let release: &'static crate::iommu::Release<'static> = Box::leak(Box::new(
+    let release: &'static crate::iommu::Release<'static> = crate::forever(Box::new(
         move |blocks: &[tairix_kernel_mem::FrameBlock]| {
             // A block that cannot be scrubbed is never reused.
             if tairix_kernel_mem::scrub_blocks(phys, blocks).is_ok() {
@@ -3055,7 +3067,7 @@ fn serve_dma_faults<A: KernelArch + 'static>(
     let Some(translation) = state.dma_translation else {
         return;
     };
-    let clock: &'static ArchClock<A> = Box::leak(Box::new(ArchClock(Arc::clone(&state.arch))));
+    let clock: &'static ArchClock<A> = crate::forever(Box::new(ArchClock(Arc::clone(&state.arch))));
     let env = crate::iommu::FaultEnv {
         table: &state.irq,
         controller: state.irq_controller,
@@ -3206,7 +3218,7 @@ fn audit_unit_translating(
     );
 }
 
-/// Build (and `Box::leak`) the production shared-memory facility over the
+/// Build, and keep for the kernel's life, the production shared-memory facility over the
 /// arch direct physical map and the kernel frame allocator, or the
 /// fail-closed [`crate::devres::NULL_SHARED_MEM_FACILITY`] when the port
 /// wires no direct map (then `shm_*` return `NotImplemented`).
@@ -3225,7 +3237,7 @@ fn build_shared_mem_facility<A: KernelArch>(
     match arch.direct_phys_map() {
         Some(physmap) => {
             let facility: &'static (dyn crate::devres::SharedMemFacility + 'static) =
-                Box::leak(Box::new(crate::live_producer::LiveSharedMem::new(
+                crate::forever(Box::new(crate::live_producer::LiveSharedMem::new(
                     arch, frames, physmap,
                 )));
             // Record the production facility (first-wins) so kernel-side
@@ -3243,8 +3255,8 @@ fn build_shared_mem_facility<A: KernelArch>(
 /// In-memory record of the live kernel subsystems built by
 /// [`run_phases`].
 ///
-/// Lives for the lifetime of the running kernel: `kernel_main`
-/// `Box::leak`s the value so the `Phase::Syscall` step can publish a
+/// Lives for the lifetime of the running kernel: `kernel_main` keeps the
+/// value forever so the `Phase::Syscall` step can publish a
 /// `'static dyn DispatchHook` referencing its fields. The kernel
 /// never returns from `kernel_main`'s halt, so the leak is a
 /// one-shot publish, not a global mutable static.
@@ -3264,6 +3276,9 @@ pub(crate) struct KernelState<A: KernelArch> {
     pub(crate) peer_watch: PeerWatch,
     /// Every volume's directory-watch table and the watches processes hold.
     pub(crate) fswatch: crate::fswatch::WatchRegistry,
+    /// The one wall clock: the `wall_time_*` syscalls, introspection, the
+    /// Supervisor, and every mounted volume's stamps all read it.
+    pub(crate) wall_clock: crate::wallclock::KernelWallClock,
     /// Named-port registry. The `KernelDispatchHook` reads this on
     /// every `ipc_send` / `ipc_recv` to resolve the endpoint carried
     /// in the syscall against the live, kernel-owned [`PortRegistry`];
@@ -3368,7 +3383,7 @@ fn install_heap_growth<A: KernelArch + 'static>(
     let Some(physmap) = physmap else {
         return HeapGrowth::None;
     };
-    let arch_static: &'static A = Box::leak(Box::new(Arc::clone(arch)));
+    let arch_static: &'static A = crate::forever(Box::new(Arc::clone(arch)));
     let Some(kvmap) = A::install_kernel_remap(arch_static, frames, physmap) else {
         return HeapGrowth::Failed;
     };
@@ -3458,9 +3473,8 @@ mod tests {
     }
 
     fn leak_dispatch_slot() -> &'static crate::DispatchCallbackSlot {
-        // Mirrors the bin-crate `static DISPATCH_SLOT` convention but
-        // with `Box::leak` (permitted in tests).
-        Box::leak(Box::new(crate::DispatchCallbackSlot::new()))
+        // Stands in for the bin crate's `static DISPATCH_SLOT`.
+        crate::forever(Box::new(crate::DispatchCallbackSlot::new()))
     }
 
     fn bootinfo_with(
@@ -3495,10 +3509,10 @@ mod tests {
 
     #[test]
     fn the_sec_phase_installs_the_compiled_identity_into_a_wired_cell() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let cell: &'static crate::fs::LateIdentity =
-            Box::leak(Box::new(crate::fs::LateIdentity::new()));
+            crate::forever(Box::new(crate::fs::LateIdentity::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map()).with_spawn_identity(cell);
 
         run_phases(boot, log_sink, audit_sink).expect("phases succeed");
@@ -3522,8 +3536,8 @@ mod tests {
 
     #[test]
     fn run_phases_emits_each_phase_in_documented_order() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
 
         match run_phases(boot, log_sink, audit_sink) {
@@ -3558,8 +3572,8 @@ mod tests {
 
     #[test]
     fn run_phases_fails_under_mem_on_empty_memory_map() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, BootMemoryMap::new());
 
         match run_phases(boot, log_sink, audit_sink) {
@@ -3575,8 +3589,8 @@ mod tests {
         // runs it. Building a live `KernelState` through
         // `run_phases` and a `KernelInitSpawner` over it lets us assert the
         // service is admitted onto the boot CPU's scheduler.
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
@@ -3618,24 +3632,25 @@ mod tests {
         impl InitSpawn for Returns {
             fn spawn_init(&self, _ctx: &'static (dyn InitSpawnCtx + Sync)) {}
         }
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
-        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(KernelInitSpawner::new(
-            state.frame_allocator,
-            audit_sink,
-            &state.scheduler,
-            &state.caps,
-            &state.peer_watch,
-            &state.aspaces,
-            state.arch.as_ref(),
-            process_wait,
-            &state.irq,
-            state.irq_controller,
-            &crate::devres::NULL_SHARED_MEM_FACILITY,
-            None,
-        )));
+        let ctx: &'static (dyn InitSpawnCtx + Sync) =
+            crate::forever(Box::new(KernelInitSpawner::new(
+                state.frame_allocator,
+                audit_sink,
+                &state.scheduler,
+                &state.caps,
+                &state.peer_watch,
+                &state.aspaces,
+                state.arch.as_ref(),
+                process_wait,
+                &state.irq,
+                state.irq_controller,
+                &crate::devres::NULL_SHARED_MEM_FACILITY,
+                None,
+            )));
         audit_sink.clear();
         start_init(&Returns, ctx, audit_sink);
         assert!(audit_sink.snapshot().iter().any(|event| {
@@ -3645,8 +3660,8 @@ mod tests {
 
     #[test]
     fn phase_mem_records_how_the_heap_grows_and_what_boot_needed_first() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let heap = boot.heap;
         // Host kernel code allocates from the test process's own heap, so
@@ -3717,8 +3732,8 @@ mod tests {
         // growing by whole regions, and `0` on the two ports that never
         // threaded it. It is now read from the live heap, so growth and
         // reclaim both show up.
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let heap = boot.heap;
         let (state, _process_wait) =
@@ -3767,8 +3782,8 @@ mod tests {
         use alloc::vec::Vec;
         use tairix_abi::ProcId;
         use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let heap = boot.heap;
         let (state, _process_wait) =
@@ -3825,8 +3840,8 @@ mod tests {
         use alloc::vec::Vec;
         use tairix_abi::ProcId;
         use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let heap = boot.heap;
         let (state, _process_wait) =
@@ -3909,8 +3924,8 @@ mod tests {
         // on real silicon (the transmit-FIFO interrupt does not self-sustain
         // the drain). Before the fix the Ran arm only drained deferred wakes
         // and never pumped, so this count stayed `0`.
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
@@ -3950,8 +3965,8 @@ mod tests {
         // host suite never dispatches it). Synchronously observable: a
         // placeholder capability record is installed under the returned id, so
         // the child's first slice resolves a caller context.
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
@@ -4006,8 +4021,8 @@ mod tests {
         // then named `Run`. The seam derives the child's name from the
         // kernel-resolved driver-store path through the one shared rule, so
         // both shapes name the driver itself.
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
@@ -4084,8 +4099,8 @@ mod tests {
         // capability record (and, on the full path, its scheduler task,
         // grants, served endpoints, and IRQ bindings) and audits the unload.
         // Tearing the same handle down twice is a benign idempotent miss.
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
@@ -4149,8 +4164,8 @@ mod tests {
     #[test]
     fn an_unload_leaves_a_thread_it_did_not_retire_to_the_landing_under_way() {
         let _gate = crate::procsignal::running_kill_test_lock();
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
         let ctx = KernelInitSpawner::new(
@@ -4198,8 +4213,8 @@ mod tests {
     /// an unkillable runaway holding a core.
     #[test]
     fn terminate_driver_process_stops_every_thread_of_the_group() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
@@ -4275,8 +4290,8 @@ mod tests {
     /// successor what is left keyed by it (`plans/OPEN-DEFECTS.md` D271).
     #[test]
     fn an_unloaded_drivers_number_stays_out_of_the_draw() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
         let ctx = KernelInitSpawner::new(
@@ -4334,8 +4349,8 @@ mod tests {
     where
         F: FnOnce(&'static (dyn crate::DispatchHook + 'static)) + Send + 'static,
     {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let slot = leak_dispatch_slot();
         let boot = bootinfo_with_slot(log_sink, audit_sink, make_memory_map(), slot);
         let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
@@ -4391,7 +4406,7 @@ mod tests {
     fn a_syscall_made_while_a_death_is_owed_runs_no_handler() {
         let _gate = crate::procsignal::running_kill_test_lock();
         let outcome: &'static tairix_sync::SpinLock<Option<crate::DispatchOutcome>> =
-            Box::leak(Box::new(tairix_sync::SpinLock::new(None)));
+            crate::forever(Box::new(tairix_sync::SpinLock::new(None)));
         let (state, process_wait, _audit, task) = doomed_task_on_a_booted_kernel(move |hook| {
             let exit = u64::from(tairix_abi::SyscallNumber::EXIT.as_u16());
             *outcome.lock() = Some(hook.dispatch(
@@ -4430,14 +4445,14 @@ mod tests {
     fn a_revocation_reaches_the_next_syscall_of_every_thread_of_the_process() {
         // Its threads publish their gates on CPU 0, as the other dispatch tests' do.
         let _gate = crate::procsignal::running_kill_test_lock();
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let slot = leak_dispatch_slot();
         let boot = bootinfo_with_slot(log_sink, audit_sink, make_memory_map(), slot);
         let (state, _) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
         let hook = slot.get().expect("the syscall phase publishes its hook");
         let answers: &'static tairix_sync::SpinLock<alloc::vec::Vec<(u64, u64)>> =
-            Box::leak(Box::new(tairix_sync::SpinLock::new(alloc::vec::Vec::new())));
+            crate::forever(Box::new(tairix_sync::SpinLock::new(alloc::vec::Vec::new())));
         let query = move |ctx: &mut tairix_kernel_sched_api::TaskContext| {
             let gate = crate::procsignal::gate_of(ctx.task_id).expect("admitted with one");
             let _published = crate::kthread::publish_gate_for_test(ctx.cpu, gate);
@@ -4514,7 +4529,7 @@ mod tests {
     fn a_fault_taken_while_a_death_is_owed_lands_that_death() {
         let _gate = crate::procsignal::running_kill_test_lock();
         let outcome: &'static tairix_sync::SpinLock<Option<crate::UserFaultOutcome>> =
-            Box::leak(Box::new(tairix_sync::SpinLock::new(None)));
+            crate::forever(Box::new(tairix_sync::SpinLock::new(None)));
         let (state, process_wait, audit_sink, task) = doomed_task_on_a_booted_kernel(move |hook| {
             *outcome.lock() = Some(hook.resolve_user_fault(0xdead_0000, false, None));
         });
@@ -4546,8 +4561,8 @@ mod tests {
 
     #[test]
     fn run_phases_fails_validation_when_bootinfo_is_bad() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let mut boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         boot.boot_cpu = 99; // out of range vs cpu_count = 1.
 
@@ -4570,8 +4585,8 @@ mod tests {
     /// `install_dispatcher` having been called.
     #[test]
     fn syscall_phase_installs_dispatcher_between_sched_and_ipc() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let slot = leak_dispatch_slot();
         let boot = bootinfo_with_slot(log_sink, audit_sink, make_memory_map(), slot);
 
@@ -4620,8 +4635,8 @@ mod tests {
     /// IO-APIC controller.
     #[test]
     fn irq_phase_lands_between_sched_and_syscall() {
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
         run_phases(boot, log_sink, audit_sink).expect("phases succeed");
 
@@ -4667,11 +4682,11 @@ mod tests {
             }
         }
 
-        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let log_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let slot = leak_dispatch_slot();
         // Pre-install a hook so `run_phases` collides.
-        let pre: &'static Dummy = Box::leak(Box::new(Dummy));
+        let pre: &'static Dummy = crate::forever(Box::new(Dummy));
         slot.install_dispatcher(pre as &'static dyn DispatchHook)
             .expect("pre-install succeeds");
 
@@ -4764,10 +4779,10 @@ mod tests {
     #[test]
     fn an_unreadable_tree_fails_the_boot_and_an_absent_one_translates_nothing() {
         let arch = Arc::new(TestArch::with_cpus(1));
-        let memory: &'static BootMemoryMap = Box::leak(Box::new(make_memory_map()));
+        let memory: &'static BootMemoryMap = crate::forever(Box::new(make_memory_map()));
         let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(memory).unwrap()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+            crate::forever(Box::new(FrameAllocator::new(memory).unwrap()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let unreadable: &'static Unreadable = &Unreadable;
         assert!(matches!(
             build_dma_translation(&arch, frames, memory, unreadable, audit, None),

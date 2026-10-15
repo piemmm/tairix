@@ -116,13 +116,13 @@ pub(crate) struct Watched {
 /// is reported to its claimed watch table, as production registers one.
 pub(crate) fn watched_service(volume: [u8; 16]) -> Watched {
     let fs = dir_driver().with_exact_names();
-    let registry: &'static WatchRegistry = Box::leak(Box::new(WatchRegistry::new()));
+    let registry: &'static WatchRegistry = crate::forever(Box::new(WatchRegistry::new()));
     let claim = registry
         .claim(volume, fs.name_matching(), unpressured())
         .expect("claims");
     let watch = Arc::clone(claim.table());
     let reference = claim.reference();
-    let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+    let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
     let cached = CachedFs::new(
         fs,
         CacheBudget::from_backing(16 << 20),
@@ -132,7 +132,7 @@ pub(crate) fn watched_service(volume: [u8; 16]) -> Watched {
     )
     .with_watch(claim);
     let cell: &'static LateFilesystem<CachedFs<RwMockFs>> =
-        Box::leak(Box::new(LateFilesystem::new()));
+        crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     cell.register(
         DriverHandle::from_raw(9).expect("handle"),
@@ -143,10 +143,10 @@ pub(crate) fn watched_service(volume: [u8; 16]) -> Watched {
         Some(reference),
     )
     .expect("register");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let service: &'static MountedFilesystemService<CachedFs<RwMockFs>> =
-        Box::leak(Box::new(MountedFilesystemService::new(cell, identity)));
+        crate::forever(Box::new(MountedFilesystemService::new(cell, identity)));
     Watched {
         service,
         watch,

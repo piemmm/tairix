@@ -91,6 +91,10 @@ impl VolumeHost for Fixture {
         Some(self.now_ns.load(Ordering::Acquire))
     }
 
+    fn wall_time(&self) -> Option<tairix_abi::time::Time64> {
+        VolumeHost::wall_time(&self.mounts)
+    }
+
     fn writeback_due(&self, volume: DriverHandle, deadline_ns: Option<u64>) {
         self.reports.fetch_add(1, Ordering::AcqRel);
         self.mounts.note_writeback_due(volume, deadline_ns);
@@ -127,7 +131,7 @@ impl Fixture {
         }));
         fixture
             .mounts
-            .install_volume_host(fixture, fixture.audit)
+            .install_volume_host(fixture, fixture.audit, &tairix_kernel_core::NULL_WALL_CLOCK)
             .expect("the timer installs");
         if armed {
             fixture.mounts.arm_writeback();

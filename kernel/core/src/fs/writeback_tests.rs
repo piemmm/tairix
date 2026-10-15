@@ -1,7 +1,8 @@
-//! Host tests for the write-back expiry timer
-//! (`plans/ARXFS-WRITEBACK.md` §10): the deadline slot's single-shot
+//! Host tests for the volume host: the write-back expiry timer
+//! (`plans/ARXFS-WRITEBACK.md` §10) — the deadline slot's single-shot
 //! consumption, publication in deadline order, the fail-closed clock gate,
-//! and the combined floor of several simultaneously-dirty volumes.
+//! and the combined floor of several simultaneously-dirty volumes — and the
+//! wall clock every volume stamps its times from.
 //!
 //! No monotonic clock is installed in a host build, so the *host* half of
 //! the timer (`LateFilesystem::now_ns`) truthfully answers `None` here and
@@ -18,10 +19,13 @@ use tairix_abi::driver::filesystem::{
     FilesystemStats, NodeId, NodeInfo, NodeKind, NodeSecurity, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverError;
+use tairix_abi::time::Time64;
+use tairix_abi::WallTimeState;
 
 use crate::audit::AuditEvent;
 use crate::fs::memfs::RwMockFs;
 use crate::test_sink::TestSink;
+use crate::wallclock::{KernelWallClock, WallClockSource};
 
 /// A driver that records every `flush` and can be made to refuse one, so a
 /// test can prove which volumes the flusher published and what a refusal
@@ -59,6 +63,10 @@ impl FilesystemRead for FlushSpy {
 
     fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
         self.inner.name_matching()
+    }
+
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        self.inner.node_identity()
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -168,10 +176,16 @@ impl FilesystemAttrsProvider for FlushSpy {}
 /// A leaked registry, so it can be its own `&'static` volume host — the
 /// production shape (`LATE_FILESYSTEM` installs itself).
 fn registry() -> &'static LateFilesystem<FlushSpy> {
-    let cell: &'static LateFilesystem<FlushSpy> = Box::leak(Box::new(LateFilesystem::new()));
-    cell.install_volume_host(cell, sink())
+    registry_with_clock().0
+}
+
+/// [`registry`], with the unset wall clock it stamps from.
+fn registry_with_clock() -> (&'static LateFilesystem<FlushSpy>, &'static KernelWallClock) {
+    let cell: &'static LateFilesystem<FlushSpy> = crate::forever(Box::new(LateFilesystem::new()));
+    let clock: &'static KernelWallClock = crate::forever(Box::new(KernelWallClock::new()));
+    cell.install_volume_host(cell, sink(), clock)
         .expect("host installs");
-    cell
+    (cell, clock)
 }
 
 fn handle(raw: u64) -> DriverHandle {
@@ -179,7 +193,7 @@ fn handle(raw: u64) -> DriverHandle {
 }
 
 fn sink() -> &'static TestSink {
-    Box::leak(Box::new(TestSink::new()))
+    crate::forever(Box::new(TestSink::new()))
 }
 
 /// Register `count` volumes numbered from 1, each holding a deadline
@@ -226,7 +240,7 @@ fn a_registered_driver_is_handed_the_timer_under_its_own_handle() {
 
 #[test]
 fn a_driver_registered_before_a_host_exists_is_handed_none() {
-    let mounts: &'static LateFilesystem<FlushSpy> = Box::leak(Box::new(LateFilesystem::new()));
+    let mounts: &'static LateFilesystem<FlushSpy> = crate::forever(Box::new(LateFilesystem::new()));
     let volume = handle(7);
     mounts
         .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16], None)
@@ -261,6 +275,71 @@ fn the_host_reads_no_clock_until_the_flusher_arms_it() {
         Some(4_242),
         "an armed host defers against the wait clock"
     );
+}
+
+/// An instant inside the plausibility window, in whole seconds.
+const PLAUSIBLE_SECS: i64 = tairix_abi::time::RELEASE_EPOCH_SECS + 86_400;
+
+#[test]
+fn the_host_gives_no_time_until_a_source_sets_the_clock() {
+    let (mounts, clock) = registry_with_clock();
+    let _ = crate::test_boot::claim_scheduler();
+    crate::test_boot::advance_clock(1_000);
+    assert_eq!(
+        VolumeHost::wall_time(mounts),
+        None,
+        "an unset clock stamps nothing"
+    );
+    clock
+        .set(
+            Time64::from_secs(PLAUSIBLE_SECS),
+            1_000,
+            WallTimeState::Firmware,
+        )
+        .expect("the clock sets");
+    assert_eq!(
+        VolumeHost::wall_time(mounts),
+        Some(Time64::from_secs(PLAUSIBLE_SECS))
+    );
+}
+
+#[test]
+fn the_host_projects_the_set_instant_by_the_time_since() {
+    let (mounts, clock) = registry_with_clock();
+    let _ = crate::test_boot::claim_scheduler();
+    crate::test_boot::advance_clock(2_000);
+    clock
+        .set(
+            Time64::from_secs(PLAUSIBLE_SECS),
+            2_000,
+            WallTimeState::Trusted,
+        )
+        .expect("the clock sets");
+    crate::test_boot::advance_clock(5_000_000_250);
+    assert_eq!(
+        VolumeHost::wall_time(mounts),
+        Time64::new(PLAUSIBLE_SECS + 5, 250).ok(),
+        "the stamp is the set instant carried forward on the monotonic clock"
+    );
+}
+
+#[test]
+fn the_host_gives_no_time_the_clock_cannot_vouch_for() {
+    let (mounts, clock) = registry_with_clock();
+    let _ = crate::test_boot::claim_scheduler();
+    // A clock chip whose battery died reads the turn of the century: set, but
+    // before any release this build could be running after.
+    clock
+        .set(Time64::from_secs(946_684_800), 0, WallTimeState::Firmware)
+        .expect("the clock sets");
+    assert_eq!(VolumeHost::wall_time(mounts), None);
+}
+
+#[test]
+fn a_registry_given_no_host_gives_no_time() {
+    let mounts: &'static LateFilesystem<FlushSpy> = crate::forever(Box::new(LateFilesystem::new()));
+    let _ = crate::test_boot::claim_scheduler();
+    assert_eq!(VolumeHost::wall_time(mounts), None);
 }
 
 #[test]

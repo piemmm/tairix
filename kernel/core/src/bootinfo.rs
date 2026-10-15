@@ -687,7 +687,7 @@ pub trait KernelArch: SchedulerArch {
     ///   code path is a defect (one-shot publish);
     ///   real arch ports fail-closed on the second call by halting.
     /// * The `table` reference outlives the running kernel because
-    ///   `kernel_main` `Box::leak`s the crate-internal `KernelState`
+    ///   `kernel_main` keeps the crate-internal `KernelState` forever
     ///   wrapping it.
     /// * The default impl is a no-op so arch ports without an
     ///   external-IRQ trap dispatcher (the `TestArch` mock,
@@ -1728,19 +1728,13 @@ mod tests {
     use tairix_log::Level;
 
     fn empty_sink() -> &'static crate::test_sink::TestSink {
-        // A `Box::leak`'d sink is intentional in tests — the sink
-        // outlives every test, mirroring the `&'static` invariant the
-        // production arch port upholds. `Box::leak` is permitted in
-        // tests by.
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(crate::test_sink::TestSink::new()))
+        // Outlives the test, as the production port's sink does.
+        crate::forever(alloc::boxed::Box::new(crate::test_sink::TestSink::new()))
     }
 
     fn leak_dispatch_slot() -> &'static DispatchCallbackSlot {
-        // `Box::leak` mirrors the bin-crate convention: the slot
-        // outlives every test, matching the `&'static` invariant the
-        // production binary upholds with a `static`.
-        // permits `Box::leak` in tests.
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(DispatchCallbackSlot::new()))
+        // Stands in for the bin crate's `static` slot.
+        crate::forever(alloc::boxed::Box::new(DispatchCallbackSlot::new()))
     }
 
     fn fresh_boot_info() -> BootInfo<'static, TestArch> {
@@ -1791,7 +1785,7 @@ mod tests {
     fn validate_rejects_oversize_command_line() {
         // Use a static, leaked allocation for the oversize command line so
         // the borrow checker is satisfied without unsafe.
-        let buf: &'static str = alloc::boxed::Box::leak(
+        let buf: &'static str = crate::forever(
             alloc::string::String::from_utf8(alloc::vec![b'x'; MAX_COMMAND_LINE_BYTES + 1])
                 .expect("ascii")
                 .into_boxed_str(),
@@ -1821,8 +1815,7 @@ mod tests {
         assert_eq!(b.users_db.text(), Err(Errno::NotImplemented));
 
         // After install the handover serves the holder's bytes.
-        let held: &'static FixedUsersDb =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(FixedUsersDb));
+        let held: &'static FixedUsersDb = crate::forever(alloc::boxed::Box::new(FixedUsersDb));
         let b = fresh_boot_info().with_users_db(held);
         assert_eq!(
             b.users_db.text().expect("served text"),

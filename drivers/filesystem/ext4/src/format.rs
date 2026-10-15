@@ -3,10 +3,11 @@
 //! [`write_volume`] lays a fresh, empty ext4 volume onto a [`Block`]
 //! device that [`crate::Ext4::open`] then mounts. It writes the
 //! conservative feature set the read/write path fully supports
-//! (`filetype` + `extent`, 128-byte inodes, 32-byte group descriptors,
-//! no checksum or `64bit` feature) and **materialises every block
-//! group** — no lazy/`UNINIT` groups — so the volume can be filled to
-//! exhaustion by the soak harness.
+//! (`filetype` + `extent` + `extra_isize`, 256-byte inodes, 32-byte group
+//! descriptors, no checksum or `64bit` feature) and **materialises every
+//! block group** — no lazy/`UNINIT` groups — so the volume can be filled
+//! to exhaustion by the soak harness. The enlarged inode is what gives
+//! every stamp its nanoseconds, its birth time, and the range to 2446.
 //!
 //! The on-disk shape mirrors the hand-built test fixture in
 //! `tests.rs`, generalised to an arbitrary device size and any number
@@ -15,8 +16,8 @@
 
 use super::{
     device_write, put_le16, put_le32, u16_of, u32_of, usize_of, EXT_MAGIC, FT_DIR,
-    INCOMPAT_FILETYPE, INODE_FLAG_EXTENTS, I_BLOCK_OFFSET, MAX_BLOCK_SIZE, ROOT_INODE,
-    SUPERBLOCK_OFFSET, S_IFDIR,
+    INCOMPAT_FILETYPE, INODE_FLAG_EXTENTS, I_BLOCK_OFFSET, I_EXTRA_ISIZE_OFFSET, MAX_BLOCK_SIZE,
+    NEW_EXTRA_ISIZE, ROOT_INODE, SUPERBLOCK_OFFSET, S_IFDIR,
 };
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
@@ -24,9 +25,13 @@ use tairix_abi::DriverError;
 /// `s_feature_incompat`: extents are in use on this volume.
 const INCOMPAT_EXTENTS: u32 = 0x0040;
 
-/// On-disk inode record size the formatter writes (the classic size,
-/// so there is no `i_extra_isize`/inline-xattr region to initialise).
-const INODE_SIZE: u32 = 128;
+/// On-disk inode record size the formatter writes: the classic 128 bytes
+/// and the enlarged region the extended timestamps live in.
+const INODE_SIZE: u32 = 256;
+
+/// `s_feature_ro_compat`: inodes carry `i_extra_isize` bytes past the
+/// classic record.
+const RO_COMPAT_EXTRA_ISIZE: u32 = 0x0040;
 
 /// Group-descriptor record size (the legacy 32-byte descriptor; the
 /// formatter never sets the `64bit` feature).
@@ -387,6 +392,7 @@ fn write_root_inode(
     put_le16(itable, base + 0x1A, 2); // i_links_count ("." + child "..")
     put_le32(itable, base + 0x1C, block_size / 512); // i_blocks_lo (sectors)
     put_le32(itable, base + 0x20, INODE_FLAG_EXTENTS); // i_flags
+    put_le16(itable, base + I_EXTRA_ISIZE_OFFSET, NEW_EXTRA_ISIZE);
 
     // Extent-tree root in i_block: header + one extent covering logical
     // block 0.
@@ -456,6 +462,9 @@ fn write_superblock<B: Block>(
     put_le32(&mut sb, 0x54, FIRST_INODE); // s_first_ino
     put_le16(&mut sb, 0x58, u16_of(usize_of(u64::from(INODE_SIZE))?)?); // s_inode_size
     put_le32(&mut sb, 0x60, INCOMPAT_FILETYPE | INCOMPAT_EXTENTS); // s_feature_incompat
+    put_le32(&mut sb, 0x64, RO_COMPAT_EXTRA_ISIZE); // s_feature_ro_compat
     sb[0x68..0x78].copy_from_slice(&uuid); // s_uuid
+    put_le16(&mut sb, 0x15C, NEW_EXTRA_ISIZE); // s_min_extra_isize
+    put_le16(&mut sb, 0x15E, NEW_EXTRA_ISIZE); // s_want_extra_isize
     writer.write_at(SUPERBLOCK_OFFSET, &sb)
 }

@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn install_then_get_returns_same_hook_ref() {
         let hook: &'static RecordingHook =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(RecordingHook::new()));
+            crate::forever(alloc::boxed::Box::new(RecordingHook::new()));
         let slot = DispatchCallbackSlot::new();
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("first install succeeds");
@@ -480,9 +480,9 @@ mod tests {
     #[test]
     fn install_twice_returns_already_installed_error() {
         let h1: &'static RecordingHook =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(RecordingHook::new()));
+            crate::forever(alloc::boxed::Box::new(RecordingHook::new()));
         let h2: &'static RecordingHook =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(RecordingHook::new()));
+            crate::forever(alloc::boxed::Box::new(RecordingHook::new()));
         let slot = DispatchCallbackSlot::new();
         slot.install_dispatcher(h1 as &'static dyn DispatchHook)
             .expect("first install succeeds");
@@ -510,7 +510,7 @@ mod tests {
         let s = alloc::format!("{slot:?}");
         assert!(s.contains("installed: false"), "got: {s}");
         let hook: &'static RecordingHook =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(RecordingHook::new()));
+            crate::forever(alloc::boxed::Box::new(RecordingHook::new()));
         slot.install_dispatcher(hook as &'static dyn DispatchHook)
             .expect("install");
         let s = alloc::format!("{slot:?}");

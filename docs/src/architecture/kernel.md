@@ -75,7 +75,7 @@ callback the arch-port installed before `syscall` was enabled
    │                                                DispatchCallbackSlot = new();
    ▼                                                   ▲
   KernelDispatchHook::new(&sched,&caps,arch,audit,&irq,ctl,&ipc,&aspaces,&rng,console) │ (from BootInfo)
-  Box::leak(hook)                                       │
+  forever(hook)                                         │
   slot.install_dispatcher(hook)  ──publishes──────────┘ ───> production_dispatch (f5)
    │                                                   reads slot.get(),
    ▼                                                   forwards every syscall.
@@ -101,12 +101,15 @@ The `Phase::Syscall` step:
    booting unseeded so a draw fails closed with `EntropyNotReady` until
    the platform-RNG entropy seam (§17.2) re-seeds it.
 2. Lifts both the `KernelState` and the hook to `'static` lifetimes
-   via `Box::leak` (one-shot publish; the kernel never returns from
-   `kernel_main`'s halt). The leak is immutable after publish — not
-   a global mutable static; every interior field carries its own
-   synchronisation primitive (`Scheduler::tasks`, `RwLock<CapTable>`,
-   `RwLock<PortRegistry>`, `RwLock<AddressSpaceRegistry>`,
-   `RwLock<Box<dyn RandomReserve>>`).
+   through `forever`, the one allocation of state kept for the kernel's
+   life (one-shot publish; the kernel never returns from `kernel_main`'s
+   halt). It is immutable after publish — not a global mutable static;
+   every interior field carries its own synchronisation primitive
+   (`Scheduler::tasks`, `RwLock<CapTable>`, `RwLock<PortRegistry>`,
+   `RwLock<AddressSpaceRegistry>`, `RwLock<Box<dyn RandomReserve>>`). On a
+   host build `forever` also records each allocation in a static, so the UB
+   oracle's leak check accounts for everything the boot path and the tests'
+   fixtures keep on purpose and reports only what nothing roots.
 3. Calls `boot.dispatcher_callback_slot.install_dispatcher(&hook)`.
 4. On `Err(AlreadyInstalledError)` (slot already published; programmer
    error), surfaces `InitError::DispatcherAlreadyInstalled`, which the

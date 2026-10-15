@@ -12,13 +12,13 @@ use super::SessionReaper;
 use crate::test_sink::TestSink;
 
 fn table() -> &'static RwLock<CapTable> {
-    Box::leak(Box::new(RwLock::new(CapTable::new())))
+    crate::forever(Box::new(RwLock::new(CapTable::new())))
 }
 
 fn reaper(caps: &'static RwLock<CapTable>) -> SessionReaper {
     SessionReaper {
         caps,
-        audit: Box::leak(Box::new(TestSink::new())),
+        audit: crate::forever(Box::new(TestSink::new())),
         ending: SpinLock::new(VecDeque::new()),
         serving: AtomicBool::new(false),
     }

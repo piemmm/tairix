@@ -16,7 +16,7 @@
 //!
 //! [`SpawnServices`] is that handle: one read-only, set-once, `'static`
 //! struct carrying every service the loading body touches. Production
-//! backs each field from the boot path's `Box::leak`'d `KernelState`; host
+//! backs each field from the boot path's `KernelState`, kept for the kernel's life; host
 //! tests install a leaked fixture. This mirrors the established
 //! set-once boot-handle idiom ([`crate::dispatch_slot`],
 //! [`crate::devres::install_shared_mem_facility`]): a
@@ -310,7 +310,7 @@ static INSTALLED_SPAWN_SERVICES: OnceCell<&'static SpawnServices> = OnceCell::ne
 /// Publish the boot-built launch-services bundle.
 ///
 /// Called by the boot path exactly once, after every service the bundle
-/// carries is constructed and `Box::leak`'d. The bundle is set-once per
+/// carries is constructed and kept for the kernel's life. The bundle is set-once per
 /// boot; a second publish is a programmer error surfaced as
 /// [`SpawnServicesAlreadyInstalled`] rather than silently overwriting the
 /// live bundle (fail loud, never a silent retry).
@@ -374,9 +374,9 @@ pub fn install_over<A: KernelArch + 'static>(
     image_builder: &'static (dyn ArchImageBuilder + 'static),
 ) -> &'static SpawnServices {
     let runtime: &'static (dyn SpawnRuntime + 'static) =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(ArchSpawnRuntime::new(arch)));
+        crate::forever(alloc::boxed::Box::new(ArchSpawnRuntime::new(arch)));
     let services: &'static SpawnServices =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(SpawnServices::new(
+        crate::forever(alloc::boxed::Box::new(SpawnServices::new(
             frames,
             Some(frames),
             audit,
@@ -468,19 +468,20 @@ mod tests {
             start: PhysAddr::new((PAGE_SIZE * 16) as u64),
             length: (64 * PAGE_SIZE) as u64,
         });
-        Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")))
+        crate::forever(Box::new(FrameAllocator::new(&map).expect("allocator")))
     }
 
     /// Build a complete, real [`SpawnServices`] from leaked fixtures.
     fn leak_services(runtime: &'static (dyn SpawnRuntime + 'static)) -> &'static SpawnServices {
         let frames = leak_frames();
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let peers: &'static PeerWatch = Box::leak(Box::new(PeerWatch::new()));
-        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
-        Box::leak(Box::new(SpawnServices::new(
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let peers: &'static PeerWatch = crate::forever(Box::new(PeerWatch::new()));
+        let builder: &'static StubImageBuilder = crate::forever(Box::new(StubImageBuilder));
+        crate::forever(Box::new(SpawnServices::new(
             frames,
             Some(frames),
             audit,
@@ -497,7 +498,7 @@ mod tests {
 
     #[test]
     fn getters_return_the_handles_the_bundle_was_built_with() {
-        let runtime: &'static FixtureRuntime = Box::leak(Box::new(FixtureRuntime {
+        let runtime: &'static FixtureRuntime = crate::forever(Box::new(FixtureRuntime {
             cpu: 3,
             ticks: 42,
             ns: 9_000,
@@ -524,9 +525,9 @@ mod tests {
 
         // `TestArch::current_cpu` reports the CPU the arch handle was built
         // for; the production runtime must forward to it unchanged.
-        let arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let runtime: &'static ArchSpawnRuntime<TestArch> =
-            Box::leak(Box::new(ArchSpawnRuntime::new(arch)));
+            crate::forever(Box::new(ArchSpawnRuntime::new(arch)));
         assert_eq!(
             runtime.current_cpu(),
             SchedulerArch::current_cpu(arch),
@@ -545,7 +546,7 @@ mod tests {
         // legitimately install the production bundle first, in any order. So
         // this test proves the set-once contract *order-independently*: it
         // never assumes it owns the single install.
-        let first = leak_services(Box::leak(Box::new(FixtureRuntime {
+        let first = leak_services(crate::forever(Box::new(FixtureRuntime {
             cpu: 1,
             ticks: 7,
             ns: 700,
@@ -572,7 +573,7 @@ mod tests {
             .expect("some bundle is installed by now")
             .runtime()
             .ticks_now();
-        let second = leak_services(Box::leak(Box::new(FixtureRuntime {
+        let second = leak_services(crate::forever(Box::new(FixtureRuntime {
             cpu: 2,
             ticks: 99,
             ns: 9_900,

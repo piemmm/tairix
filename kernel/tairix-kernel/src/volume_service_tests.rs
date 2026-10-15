@@ -35,6 +35,7 @@ use tairix_abi::blkio::{
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::NameMatching;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
+use tairix_abi::fs::OpenFlags;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, Errno};
@@ -460,6 +461,52 @@ fn assert_identity_mapped_access() {
     assert!(n >= 1);
 }
 
+/// A member makes a file and a folder of its own on the mapped volume — what
+/// a copy onto removable media is — and an explicit mode change is refused as
+/// one the format cannot store.
+fn assert_a_member_creates_on_the_volume() {
+    let made = "/Storage/usb1/made.txt";
+    let create = OpenFlags::WRITE
+        .union(OpenFlags::CREATE)
+        .union(OpenFlags::EXCLUSIVE);
+    FS_SERVICE
+        .open(MEMBER_UID, &NoCaps, made, create)
+        .expect("a member creates a file on the medium");
+    let wrote = FS_SERVICE
+        .write(MEMBER_UID, &NoCaps, made, 0, false, b"copied")
+        .expect("and fills it");
+    assert_eq!(wrote, 6);
+    let mut buf = [0u8; 16];
+    let n = FS_SERVICE
+        .read(MEMBER_UID, &NoCaps, made, 0, &mut buf)
+        .expect("and reads it back");
+    assert_eq!(&buf[..n], b"copied");
+    let stat = FS_SERVICE
+        .stat(MEMBER_UID, &NoCaps, made, FinalLink::Follow)
+        .expect("stat");
+    assert_eq!(
+        (stat.mode, stat.uid, stat.gid),
+        (0o664, 0, STORAGE_GID),
+        "a new file is owned as every file of the volume is"
+    );
+    FS_SERVICE
+        .mkdir(MEMBER_UID, &NoCaps, "/Storage/usb1/folder")
+        .expect("a member makes a folder");
+    FS_SERVICE
+        .open(
+            MEMBER_UID,
+            &NoCaps,
+            "/Storage/usb1/folder/inner.txt",
+            create,
+        )
+        .expect("and a file inside it");
+    assert_eq!(
+        FS_SERVICE.set_mode(0, &NoCaps, made, 0o600).err(),
+        Some(Errno::NotSupported),
+        "the format stores no mode of its own"
+    );
+}
+
 /// The boot statics the lifecycle test installs, the only test that touches
 /// them: what its scenarios read back of that wiring.
 struct Booted {
@@ -585,6 +632,7 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     );
 
     assert_identity_mapped_access();
+    assert_a_member_creates_on_the_volume();
 
     // --- Detach. ---
     let detach = VolumeDetachRequest {

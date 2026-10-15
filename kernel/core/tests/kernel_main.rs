@@ -25,7 +25,8 @@ use tairix_kernel_core::test_arch::{TestArch, HALT_SENTINEL};
 use tairix_kernel_core::test_heap::leak_heap;
 use tairix_kernel_core::test_sink::TestSink;
 use tairix_kernel_core::{
-    kernel_main, panic_dump, AuditEvent, BootInfo, DispatchCallbackSlot, PanicContext, Phase,
+    forever, kernel_main, panic_dump, AuditEvent, BootInfo, DispatchCallbackSlot, PanicContext,
+    Phase,
 };
 use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE};
 use tairix_kernel_sched_api::SchedulerConfig;
@@ -42,15 +43,12 @@ fn make_usable_map() -> BootMemoryMap {
 }
 
 fn leak_sink() -> &'static TestSink {
-    Box::leak(Box::new(TestSink::new()))
+    forever(Box::new(TestSink::new()))
 }
 
 fn leak_dispatch_slot() -> &'static DispatchCallbackSlot {
-    // Box::leak mirrors the bin-crate `static DISPATCH_SLOT`
-    // convention while satisfying the `&'static` invariant
-    // `BootInfo::new` requires (permitted in
-    // tests).
-    Box::leak(Box::new(DispatchCallbackSlot::new()))
+    // Stands in for the bin crate's `static DISPATCH_SLOT`.
+    forever(Box::new(DispatchCallbackSlot::new()))
 }
 
 fn drive_kernel_main<F>(

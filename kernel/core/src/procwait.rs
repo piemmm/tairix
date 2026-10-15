@@ -1616,10 +1616,10 @@ mod tests {
     /// Build a `'static` [`KernelProcessWait`] over a fresh single-CPU
     /// [`TestArch`] for the producer-level host tests.
     fn producer() -> &'static KernelProcessWait<crate::test_arch::TestArch> {
-        let arch: &'static crate::test_arch::TestArch = std::boxed::Box::leak(
-            std::boxed::Box::new(crate::test_arch::TestArch::with_cpus(1)),
-        );
-        std::boxed::Box::leak(std::boxed::Box::new(KernelProcessWait::new(arch)))
+        let arch: &'static crate::test_arch::TestArch = crate::forever(std::boxed::Box::new(
+            crate::test_arch::TestArch::with_cpus(1),
+        ));
+        crate::forever(std::boxed::Box::new(KernelProcessWait::new(arch)))
     }
 
     /// A child's exit and its stop wake the threads its own parent parked on

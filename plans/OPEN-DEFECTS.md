@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 372 open, 659 closed, 1031 total.
+**closed**, and a partial fix stays **open**. 373 open, 672 closed, 1045 total.
 
-### Open (372)
+### Open (373)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -49,7 +49,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D113 | `netstack-bond-qemu-aarch64` guest exits before its readiness marker | `qemu status -1` mid-scenario with no guest fault in the serial; cause unconfirmed |
 | D118 | host tests that share one low task/process identity against process-global kernel state, and registries whose tests take no guard | partial — the registry guards and every reachable identity collision are closed, the latter as D147. Open: `console::cooked_foreground_maps_ctrl_c_to_a_queued_interrupt` failed once in 500 shuffled runs and is unexplained, its install-once-hook lead untested; and an isolated identity is still not the default — 300 of `syscalls.rs`'s 450 tests spell the literal `2` |
 | D122 | kthread admission aborts the kernel on an allocation failure instead of failing closed | partial — the stack, the allocation that actually fails, is now a `Result`; the control block and the `Box<dyn>` around it still abort through the global allocator's handler |
-| D123 | `kernel/core` is not under the UB oracle | `kernel/mem` is **closed** — enrolled and green (0 leaks) once `DirectPhysMap` gained a provenance root, every leaked fixture became a `Once` cell, `slab`'s proptest stopped wanting a cwd, the sample-sized sweeps were scaled, and the crate was dealt across the host's cores (`Spread::PerCore`) instead of taken serially in one process, which is what overran the runner's per-job budget; two `dma` tests are skipped by name. `kernel/core` is **not** budget-bound as previously recorded: 577 test-side `Box::leak` sites across ~40 fixture types had never been seen, because every whole-crate run aborted on provenance before the leak check ran — see the section |
 | D127 | the tree carries `static mut`, which the charter names as a hack: the kernel ports' boot state (D242) and the test kernels' non-heap arenas and tables — `FRAME_POOL` in 48 of them, `USER_STACK`, `FRAMEBUFFER`, `PROBE_FRAME`, `WORKER_STACK`, `WORKER_CTX`, `MAIN_CTX`, `SECRET_FRAME`, `VICTIM_PAGE`, `DMA_FRAMES`, `ANON_POOL` | noticed while enrolling `lib/kalloc`; not absorbed. Every site is a `.bss` arena or table reached only through `addr_of!`, so none creates a reference and none trips `static_mut_refs` — a spelling, not a known soundness bug. The heap arenas went with D975 (`tairix_kalloc::Heap`, a plain `static`); each remaining site wants the same shape, an `UnsafeCell` wrapper whose raw pointer is the only access |
 | D131 | the interleaving oracle reaches only `lib/sync`, and `kernel/sched/mlfq`'s existing loom models are dead | `--cfg loom` does not compile the kernel crate graph at all: loom's atomics have no `const` constructor, so every `const fn`-built static below is rejected in a static initialiser — `kernel/arch/api`'s `static ACTIVE_FRAMES: Once<_> = Once::new()` is the first, and `WaitQueue::new` / `SleepLock::new` are the same shape. So `kernel/sched/mlfq/tests/loom.rs` has models that **cannot be built and are enrolled nowhere** (its doc claimed `cargo xtask test` ran them; corrected), and `kernel/core` cannot be enrolled, which is why D129's interleavings are driven deterministically instead of searched. Resolving it means removing that `const` construction across the graph, or a loom shim in each crate that owns such a static. Distinct from D123, which is the UB oracle |
 | D132 | no run states whether a *double-click* in a file-manager window reaches `activate` on a guest | coverage gap with an unexplained observation behind it, not a confirmed defect. The `handover_qemu_aarch64` vertical originally injected the pair as one four-edge burst and never passed. The burst **was** delivered: four window events reached the manager's own event mailbox (`0xE117…` tagged with the `files` task) in the 60 ms after that window's first frame, and the manager repainted twice after them — yet no `fd_grant` followed. The aim was verified independently against the run's screendump and round-trips to the intended entry through the production hit-test, and the shared pairing rule accepts two presses 32 ms apart on one subject (neither `Moved` nor `Released` resets the tracker). So either the burst yielded one press rather than two, or the two resolved to different subjects — and **no existing record can tell them apart**: `MessageDelivered` carries a port, a sender and a length, every window event is 40 bytes, and no audit event anywhere names a pointer action. Answering it needs a witness that names the delivered event kind, plus re-adding injection (`PointerAction::DoubleClick` was deleted with its last consumer). The vertical now activates through the item's context-menu *Open* row, which runs the same `activate`, so the delegation chain is covered and only the pairing path is host-tested only |
@@ -90,7 +89,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D273 | a signal intake a non-leader thread opts into is never used: the opt-in, the take and the wait-set readiness are keyed by the calling thread, while delivery and its targeted wake are keyed by the process | noticed fixing D270; not absorbed, because keying the intake by process needs a wake that reaches whichever thread waits, not the leader's task id. `signal_intake` and `WaitSourceKind::Signal` use `caller.task_id`, `try_intake` and `signal_intake_wake` the target `ProcessId`, and `threads::retire` clears the retiring thread's own entry; so only a leader can observe a termination request, and a request aimed at a process whose worker opted in terminates it instead. The docs already describe one intake per process |
 | D284 | riscv64's remote fence has no fail-closed outcome when the firmware refuses the last resort | noticed fixing D281; not absorbed, because either answer changes a contract the charter guards. `fence_remote` answers a refused fence with a whole-space fence of every hart, the most permissive call the SBI has, and drops that call's status: `CrossCpuTlbShootdown` is infallible, so an `SBI_ERR_FAILED` there returns as though every hart had fenced, and the caller frees frames a stale translation may still reach. The fix is either a fallible shootdown whose failure keeps the batch's frames out of the allocator (`Retiring` already withholds a frame it cannot scrub), which widens the Arch HAL on every port for a failure only one can produce, or a stop-the-world fatal report stating the reason, which halts on a production path |
 | D294 | a scheduler's overflow list still grows infallibly on the wake and yield paths | noticed fixing D291; not absorbed. See the section |
-| D299 | the shootdown and doom handshakes merged in `1cffc66b6` and `1925ac852` have no loom model, and `kthread.rs`'s new `unsafe` has had no miri run | noticed reviewing the merge; not absorbed. `ActiveCpus::enter` against `SpaceTlb::shoot_remote` and `doom` against `observe_doom` are store-then-load pairings fenced on both sides, and neither `tairix-kernel-mem` nor `tairix-kernel-sched-api` is in `loom`'s targets; `tairix-kernel-core` is outside `miri`'s |
+| D299 | the shootdown and doom handshakes merged in `1cffc66b6` and `1925ac852` have no loom model | noticed reviewing the merge; not absorbed. `ActiveCpus::enter` against `SpaceTlb::shoot_remote` and `doom` against `observe_doom` are store-then-load pairings fenced on both sides, and no model covers either: `tairix-kernel-mem` is not in `loom`'s targets, and the `tairix-kernel-sched-api` target models the park handshake alone. `kthread.rs`'s `unsafe` is interpreted by the miri stage since D123 enrolled `kernel/core` |
 | D302 | x86_64 serialises every targeted user shootdown through one mailbox | noticed reviewing the merge of `1cffc66b6`; not absorbed and unmeasured. The single `SHOOTDOWN` mailbox now serves every unmap in a multi-CPU process as well as heap teardown and revocation |
 | D307 | the wasm32 preemption clock keeps its frame times in two per-instance atomic statics | blocked on a decision: the two records the merge of `1925ac852` overstated are corrected, and what remains is whether the port may keep them. They are per-context by construction — each Web Worker is its own wasm instance, and the host's frame callback re-enters with no context — exactly as the port's callback, CPU-id and tick statics already are, but the charter bans global mutable statics outright. The static-free shape moves the frame clock into the host glue, which owns the frame loop, or hands every entry a context; either reshapes the port's host interface |
 | D309 | 28 command bundles accept a `--help` their `Help/` never documents, and nothing holds a parser to its documented switch keys | noticed fixing the same drift in `wintersun` (`plans/WINTERSUN.md` WS23); not absorbed, because the fix is the check `plans/APPS.md` §3.1 promises — every switch a parser accepts is in `en-US/`'s `OPTIONS`, and vice versa — where `lib/help`'s lint holds only each translation to `en-US/`. The parsers of `session`, `top`, `tee`, `cat`, `man`, `vim`, `basename`, `servicectl`, `users`, `sysinfo`, `elsh`, `whoami`, `configure`, `sleep`, `seq`, `reset`, `wc`, `applib`, `printf`, `tail`, `head`, `clear`, `edit`, `files`, `dirname`, `yes`, `sysmon` and `ps` take `--help` while every locale documents `-h, -?`. Wants each command app's accepted switches exported for the lint to compare, then each key corrected in every locale |
@@ -328,7 +327,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D791 | the QEMU hang diagnosis now ignores a failure to set its read timeout, so a reconnect after a failed first connect reads with no timeout and can block | **low**; noticed reviewing the 77c389493 merge; logged rather than absorbed, by the user's decision for this merge. `tools/qemu/src/lib.rs` |
 | D800 | the window protocol never tells a client that its pointer capture was taken: when the seat yields the pointer to the lock, a prompt, the picker, a desktop menu or a drag, the window manager drops the client's grab and the window hears no release, so a held control — a slider, a scrollbar, a text selection, a pressed button — keeps following hover until the next press reaches it | **medium**; noticed fixing the file manager's band, which now ends on a press, a lost focus, or any key, but whose hover after a yield still grows it until then. The fix is a capture-lost pointer action (the role of Win32's `WM_CAPTURECHANGED`) delivered to the window that held the grab, mapped to a shared input event every held control ends on. `userland/gui/wm/src/input.rs` `abandon_gesture`, `userland/gui/session/src/input.rs` `yield_pointer`, `lib/abi/src/window_ipc.rs` `PointerAction`, `lib/window/src/client.rs` `pointer_input_events`, `lib/controls` |
 | D801 | the seat drains the pointer and the keyboard as two streams with no common order, every pointer event of a wake before any key, so a modifier change and a pointer event in one wake apply pointer-first: `Shift` pressed just before a click reaches the click after it, and `Shift` released just before a drag's button comes up still drops with the `Shift` answer | **low**; noticed fixing the drag's `Shift` re-ask, which now refuses an answer made before a change it has seen but cannot see one queued behind the release. The fix is one seat event order across devices — a monotonic stamp at each input source, merged in the drain — not a per-path reordering, which would only move the race. `userland/gui/session/src/drain.rs` `SeatDrain::wake`, `drain_drag`, `drain_chain` |
-| D802 | FAT32 has no stable node identity: a regular file's `NodeId` packs its first cluster and its size, so every empty file on a volume is one node and a file's identity changes whenever its length does — a file-change watch keyed by node loses its file at the first write that resizes it and is woken by writes to every other empty file, and an identity check cannot tell two empty files apart | **low**; noticed giving thumbnails a file-identity check, which fails safe on FAT (a resized file reads as replaced; an empty file draws no picture) but shows the identity is not one. The fix is the entry's own location — its directory's first cluster and slot index, the role Linux's `i_pos` plays — kept through moves that rewrite the entry. `drivers/filesystem/fat32/src/lib.rs` `pack_node`, `entry_node` |
+| D802 | FAT32 has no stable node identity: a regular file's `NodeId` packs its first cluster and its size, so every empty file on a volume is one node and a file's identity changes whenever its length does — a file-change watch keyed by node loses its file at the first write that resizes it and is woken by writes to every other empty file, and an identity check cannot tell two empty files apart; with D1043 FAT records stamps, but a stat by node cannot reach the entry holding them, so `stat` and `ls -l` show none where a listing shows them | **low**; noticed giving thumbnails a file-identity check, which fails safe on FAT (a resized file reads as replaced; an empty file draws no picture) but shows the identity is not one. The fix is the entry's own location — its directory's first cluster and slot index, the role Linux's `i_pos` plays — kept through moves that rewrite the entry. `drivers/filesystem/fat32/src/lib.rs` `pack_node`, `entry_node` |
 | D803 | no bit-identity case exercises the lossy decoder's segmentation or loop-filter deltas: every `drawn_keyframe` writes segmentation off and no filter adjustment, so `Segmentation::read`, the per-macroblock segment read and quantiser, `FilterDeltas::read` and the per-macroblock filter level are reached by no pinned frame, though most real lossy WebP files use segments | **medium**; noticed checking the row-at-a-time decode against the whole one, which is built on it, so only the pinned `DRAWN` hashes are an independent oracle. The fix is a fixture that writes the segment map, its quantiser and filter values and the mode and reference deltas in the order the decoder reads them, with hashes pinned from the independent whole-frame decoder at `eaeaa98ae^:lib/image/src/vp8.rs`. `lib/image/src/vp8_fixture.rs` `drawn_keyframe`, `lib/image/src/vp8_tests.rs` `DRAWN` |
 | D804 | ext4 writes only through the first two levels of the classic block map: every file and directory the driver creates is block-mapped even on a volume with `extents`, and growth past the twelve direct blocks and the single indirect block is refused as a device fault, so a file written past 268 KiB on a 1 KiB-block volume, or 4 MiB on a 4 KiB one, fails, as does a directory grown past as many blocks | **medium**; noticed indexing ext4 directories, whose growth tests reached the limit. The fix is to create extent-mapped inodes where the volume carries `extents`, which the extent writer already grows, and to write the double and triple indirect levels for a volume without it; reading already follows both. `drivers/filesystem/ext4/src/lib.rs` `map_or_alloc_classic`, `create`, `lay_new_inode` |
 | D805 | ext4 verifies `metadata_csum` only on directory blocks: the superblock, group descriptors, bitmaps, inodes and extent blocks are sealed on every write and read unchecked, so a block changed under its checksum is used as if sound — a corrupted bitmap hands out an allocated block, a corrupted inode reads a wrong size or map | **medium**; noticed adding directory-block verification. The fix is the same fail-closed check on each read: the superblock and descriptors at mount, a bitmap and an inode table entry as they are read, an extent block's tail as it is walked, each refused as a device fault. `drivers/filesystem/ext4/src/lib.rs` `read_inode_raw`, the bitmap readers, the extent walk, `open` |
@@ -400,9 +399,11 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1032 | `plans/RAYTRACE.md` quotes the numbers of a rejected design beside the chosen one — history the plan file is not to keep | **low, docs**; found reviewing `f2c95bdee`, logged for the user. `plans/RAYTRACE.md` |
 | D1034 | the template-only delegation family — the fourteen `Vfs::*_via` methods, `DelegatedFs::new` and the `Uniform` policy that judges every node against the mount point's template — has no production caller: every mounted driver, FAT32 included, implements `FilesystemSecurity` and is served through `*_via_secured`, so only `delegate_tests` keeps it alive | **low, dead code**; noticed with D1012, raised with the user; the overview's offer of it for FAT was corrected with D1012: the fix deletes the family and the `MetaPolicy` generic with it, and moves the delegation suite onto per-inode mocks, so each template-semantics test is restated against stored records. `kernel/core/src/fs/vfs.rs`; `kernel/core/src/fs/delegate.rs`; `kernel/core/src/fs/delegate_tests.rs` |
 | D1037 | `MountTable::resolve` finds the mount covering a path by testing every mount point (`filter(is_prefix_of).max_by_key(depth)`), so each path-based operation pays a pass over the whole table — the boot layout's handful of mounts plus one per attached volume — where a lookup keyed by path component would pay only the path's depth | **low, scalability**; noticed reviewing D1012, which takes one table read per operation where two were taken but keeps the scan. The fix is a mount tree keyed by path component, walked with the path and stopped at the first component no mount lies beneath, so resolution does not grow with the mount count; listings keep insertion order through a per-mount sequence number. `cover` keeps cloning the winning mount: the root mount clones without allocating, and an `Arc` shared instead would add a reference count every CPU writes on every operation. Raised with the user beside D1034, which reshapes the same surface. `kernel/core/src/fs/mount.rs` |
+| D1048 | no filesystem declares its timestamp range, precision or zone to a caller: the filesystem capability API `AGENTS.md` §21 and `docs/src/filesystem/drives.md` §20 name has no timestamp-limits member, so the limits FAT32, ext4 and ADFS keep are stated only in their docs | **low**; noticed fixing D1043, where FAT32's page claimed such a declaration. Nothing can yet act on one: no call sets a node's times (`cp --preserve=timestamps` is refused honestly), so the declaration lands with the call that needs it, an exact-preservation copy failing `TimestampOutOfRange` against it. `lib/abi/src/driver/filesystem.rs`; `drivers/filesystem/{fat32,ext4,adfs}` |
+| D1051 | `docs/src/contributing.md`'s warm-run `miri` figure (1470 s) predates `kernel/core`'s enrolment, which adds about 12,800 CPU-seconds of interpreted tests dealt across the cores | **low, docs**; noticed closing D123. The gate that verified D123 and D1043 ran cold (its 1672 s miri stage includes the interpreter's builds), so it cannot stand in for the warm figure the table records; the next warm run re-measures it. `docs/src/contributing.md` |
 
 
-### Closed (659)
+### Closed (672)
 
 | ID | Subject |
 |---|---|
@@ -1065,6 +1066,19 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1033 | volume recovery registered the live driver before re-attaching the volume under its recovered posture, so for that interval a conflicted FAT32 or ext4 volume — whose driver opens writable whatever the posture, leaving the mount its only guard — was served under the stale writable mount |
 | D1035 | two in-kernel wait loops parked through a CPU read before an earlier park — `BlkClient::transfer_once` and the `fs_lock` wait — so once a wake resumed the task on another core, the next park suspended the task switched in on the old one from the wrong CPU, corrupting both cores' dispatch state; with several USB disks attaching at once the corrupted core ran user code its scheduler no longer attributed ("syscall has no caller context") and the disks' block servers stopped answering |
 | D1036 | `usb_msd` built its "service could not be stood up" exit record eagerly (`ok_or(end(..))`), so every LUN it published logged that failure three times and made three needless syscalls |
+| D1038 | creating a file or folder through the secured VFS on a volume whose format stores no security record of a node's own — FAT32, bare or under the storage-group identity map, and ext4 — failed: the creation's owner stamp went through `set_security`, which those formats refuse, the refusal surfaced as `NotADirectory` (`fs_open` errno 22), and the node the create had already made was left behind, so every copy onto a USB stick failed and left an empty file of the destination's name |
+| D1039 | the VFS mapped a driver's `Unsupported` to `NotADirectory` on every surface, so what a format cannot do read as a path the caller had wrong — a mode or owner change on FAT32 or ext4, a create on an ext4 volume the driver cannot write safely — and a rename putting a file over a directory answered `NotADirectory` where POSIX says `IsADirectory` |
+| D1040 | the filesystem cache kept a name's lookup across a write through it, but FAT32 names a file by its size and first cluster, so after a write that moved either the cache answered for the id the write replaced: a file copied onto a USB stick read back empty, and stat reported its old size, until the entry was evicted |
+| D1041 | FAT32 took `NodeId::NONE`, and any id without its validity bit, for a live empty file: `node_info`, `security` and `read_at` answered for it instead of `NotFound` |
+| D1042 | `files.app` reported every refused destination create as "a destination of that name already exists", whatever the kernel's reason |
+| D123 | `kernel/core` was not under the UB oracle: its tests passed under the interpreter, but the state the boot path and the fixtures keep for good drew 22,110 leak reports, until it was all kept through `forever`, which roots it for the leak check |
+| D1043 | no mounted filesystem stamped a real time: nothing gave ARXFS a wall clock, ext4 laid a new inode with no times, FAT32 wrote a new entry with no date, and ADFS made every new object untyped and unstamped, so a file made on TAIRiX — one copied onto a USB stick included — carried no date. Every driver now stamps through `VolumeHost::wall_time`, which gives the kernel wall clock once it is set and plausible, and records the format's "no stamp" until then |
+| D1044 | ext4 decoded an extended timestamp whose low word has its top bit set as the epoch bits over the *unsigned* word, so every stamp from 2038-01-19 to 2106-02-07 (and two later ranges) read 2³² seconds — 136 years — late |
+| D1045 | FAT32 ignored a creation stamp's hundredths, reporting the creation time to two seconds where the format keeps it to 10 ms |
+| D1046 | ADFS created every file and directory untyped, with load and exec addresses of zero, so a RISC OS user saw a load-and-run image at address zero rather than a Data file, and no new object could carry a stamp |
+| D1047 | the ext4 formatter laid 128-byte inodes, so a volume TAIRiX made kept whole-second stamps that end in 2038 and no birth time, where the format's enlarged inode holds nanoseconds to 2446 |
+| D1049 | `lib/sync`'s `SeqLock` writer made its sequence odd with a `Release` increment, which orders only what precedes it, so a reader could copy a write's new words while sampling the same even sequence on both sides and return a payload two writes contributed to; every existing test and loom model used a one-word payload, which cannot tear, and the UB oracle found it in the wall clock's three-word state |
+| D1050 | an ext4 `mkdir` whose parent's link-count update failed reported the failure but left the new directory named |
 
 ## Scope
 
@@ -8665,131 +8679,31 @@ the trampoline entry, and the Arch HAL's own
 seeding a runnable frame at the entry it was given. The test says so where the
 assertion used to be, so a reader does not mistake the gap for an oversight.
 
-**Proved by.** The test passes natively *and* under the interpreter (the D124
-run above covers it). Only the D123 enrolment would keep it that way
-automatically; until then it is a developer's obligation.
+**Proved by.** The test passes natively *and* under the interpreter, and the
+D123 enrolment keeps it that way.
 
-## D123 — `kernel/core` is not under the UB oracle (OPEN; `kernel/mem` closed)
+## D123 — `kernel/core` is not under the UB oracle (CLOSED)
 
-**Why it matters.** `cargo xtask ci`'s miri stage interprets only the crates in
-`tools/xtask/src/commands/miri.rs`'s `TARGETS`. A green gate says nothing about
-an unenrolled crate, so every fix to its `unsafe` rests on a developer
-remembering to run the oracle by hand. `lib/kalloc` closed as D126; the window
-address and the stack reader closed as the `kheap`/`kstack` and D128 work.
+**Enrolled.** `kernel/core` is in the miri stage twice: its library, dealt
+across the host's cores (`Spread::PerCore`), and its `kernel_main`
+integration test in one process (`Scope::Test`, since one listing reports one
+test binary). Every test is interpreted under `-Zmiri-strict-provenance` with
+leak checking on, and none is excluded. `kernel/mem` was enrolled first, with
+the two `dma` capacity tests the registry names skipped for their cost.
 
-**`kernel/mem` is enrolled and green.** `Scope::LibExcept`, with one skip, and
-`Spread::PerCore` so the crate's tests are dealt across the host's cores.
+**What it took.** Every `kernel/core` test already passed under the
+interpreter with no undefined behaviour; the leak check was the blocker. The
+kernel holds its collaborators as `&'static`, so the boot path and the tests'
+fixtures alike allocate state that is never freed, and the interpreter could
+not tell any of it from a real leak — 22,110 reports. One function now makes
+that allocation, `forever` (`kernel/core/src/forever.rs`): `Box::leak` on the
+target, and on a host build it also records the allocation in a static, so the
+leak check accounts for what is kept on purpose and still reports anything
+nothing roots. The boot path and every fixture go through it.
 
-```
-cargo xtask miri --package tairix-kernel-mem
-xtask: [miri tairix-kernel-mem --lib (part)] 464 tests dealt across 16 processes
-every shard ok, 0 leaks; longest shard 374 s against the 2700 s per-job budget
-```
-
-Five things had to change before it could be:
-
-* **`DirectPhysMap::translate` minted a pointer per call.** The map now holds
-  the root for the region the MMU established (`NonNull<u8>`), derives every
-  translation from it, and hoists the representability check into the
-  constructor, so a window no pointer could address is refused where it is
-  *declared*. `new`/`identity` are `unsafe` and fallible — the obligation sits
-  where the fact is known — and `from_root` roots a host test in memory it
-  owns. An identity window's alias of physical zero is the null pointer, so
-  such a map addresses from its second page, which is what `translate` already
-  refused and the frame allocator's permanent zero-page reservation defends.
-  ~40 guest-kernel call sites carry the `unsafe` and fail closed.
-* **Every leaked fixture became accountable.** `framepages`, `pagetables`,
-  `kvslots`, `live` and `ramzip::tier` shared one `Once`-cell backing
-  (`kernel/mem/src/test_fixture.rs`, reached through `frame_backing!` so each
-  expansion gets its own pool); `kvmap` rebased onto `KernelWindow::from_root`
-  over real memory, which also retired an `at_address` mint a host test could
-  not interpret. `live::press_to` ended with `core::mem::forget(held)` to "leak
-  the held frames so the band stays" — `Frame` is a plain index with no drop
-  glue, so that held nothing and leaked only the vector.
-* **`slab`'s proptest wanted the working directory.** Filing a counterexample
-  needs a cwd isolation refuses. `lib/sync` had solved this locally, so the
-  rule moved into `tairix_fuzzseed::prop::config(native, interpreted)` and both
-  call sites read it.
-* **Sweeps were scaled where the extent is a sample, not an assertion.**
-  `seal`'s nonce uniqueness (89 s → 3 s); `ramzip::tier`'s three
-  `bench_evidence_*` round trips, whose printed latency is explicitly "not a
-  guarantee"; and `dma`'s reclamation rounds (716 s → 288 s at three of six),
-  where drift shows up comparing any round against the first.
-* **The crate is dealt across the host's cores.** Miri runs one interpreted
-  thread at a time and reports a single CPU, so libtest took all 465 tests
-  back to back in one single-core process — twenty minutes against a
-  forty-five-minute budget, which the CI runner overran while the stage's
-  other ten jobs sat finished and the rest of the machine idled.
-  `Spread::PerCore` enumerates the crate through the test binary's own
-  `--list` and deals the names round-robin across one process per core, so the
-  partition cannot omit a test added later and the makespan falls to the
-  longest single test rather than their sum.
-
-**What must not be scaled, learned the hard way.**
-`ramzip::tier::band_cap_is_enforced_and_escalation_is_deterministic` looked like
-slack at 50 pages. The cap is charged against *compressed* footprint, so
-reaching the two pages it allows takes that many compressible pages: scaled to
-six, the refusal never came and the assertion failed. It passed natively the
-whole time — only the interpreted run could catch it. The count is the
-assertion, as with `driver_store::the_driver_count_is_bounded` and `pty`'s
-`PIPE_CAPACITY`.
-
-**The one skip, and why it is budget rather than a dodge.**
-`dma::…a_full_span_window_serves_a_multi_device_enclosure_lazily` reserves a
-full gigabyte of window and streams thirteen 32-page device regions through it,
-zeroed on carve and volatile-cleared on release. Interpreted, the per-byte
-aliasing bookkeeping over that volume costs **four hours** — 91% of the crate.
-The DMA pool itself is not at fault and no defect was found there: `SlotWindow::new`
-is `const fn` O(1), `DmaWindowMap::new` starts `slot_used: Vec::new()`,
-`ensure_slots` grows only to the chosen run, and `find_free_run` terminates at
-the bookkeeping end because an unrecorded slot reads free — nothing is
-proportional to the 262 144-slot span, so the test's own lazy-bookkeeping claim
-holds. The cost is the byte volume, which is the realistic-enclosure part of the
-scenario rather than the property under test. It passes when run, and all four
-`unsafe` sites in `dma.rs` are on the alloc/free/bytes paths the other 25 tests
-in the module reach.
-
-**What that volume actually costs, measured.** The zero-on-free clear is
-`zeroize`'s volatile byte loop, so a page is 4096 individually interpreted
-writes, and the aliasing model — not the writes — is nearly all of the bill:
-the sibling reclamation test ran 716 s under Stacked Borrows, 208 s under Tree
-Borrows and 44 s with the model off. Stacked Borrows stands regardless (it is
-the stricter of the two and the one intrusive pointer code is likeliest to
-violate); the lever is the number of interpreted bytes, which is why the round
-count scaled and the enclosure test stays skipped.
-
-**Miri's clock is virtual — measure the stage from outside.** The
-`finished in …` line a test binary prints under the interpreter is not wall
-time and can exceed it severalfold (`live` reported 267 s against 79 s real;
-`dma` reported 702 s against 14 584 s). Every per-module figure taken from that
-line is fiction.
-
-**The stage cost** is set by its heaviest job, never by one test alone;
-`docs/src/contributing.md` carries the measured figure.
-
-**Still open: `kernel/core`, and the blocker is not the budget.** The previous
-record said "what is left is the 1097 s-vs-287 s budget alone". That is wrong.
-Every whole-crate run aborted on a fatal provenance error *before* the leak
-check could run, so the leak surface had never been seen:
-
-* **577 test-side `Box::leak` sites** across ~40 fixture types (`TestSink` ×79,
-  `RwLock` ×50, `ProgramRegistry` ×34, `RecordingFs` ×31, `StaticHwTree` ×22, …),
-  plus 70 production ones whose design is "kernel state is never freed".
-  `launch_cache::` alone reports 172 leak errors. Making these accountable is
-  D128's `panic::` campaign (493 leaks, one module) repeated crate-wide; several
-  of the consumers take `&'static` only because production holds them in
-  statics, so relaxing those bounds is part of it.
-* **The budget half is largely done.** Fixture crypto nobody asserted on was the
-  cost: `groups::` ×5 and `introspect_source::` paid a PBKDF2 the identity build
-  never reads (1227 s), `launch_cache::` re-verified the same bundle signature
-  per test (831 s → 121 s, now verified once and shared), and `fs::fscache`'s
-  eviction stream and large-document reads were scaled (291 s).
-  `appspawn::`'s 15 ed25519 tests carry no `unsafe` and are a legitimate
-  `LibExcept` skip when the crate is enrolled.
-
-**Done when:** `kernel/core` is in `TARGETS` and green. An exclusion is
-legitimate only for a module that carries no `unsafe` and passes when run —
-budget, never a dodged finding.
+**Cost.** About three and a half hours of interpretation in all, the heaviest
+shard about 1050 s on a 24-core host; the stage figure is in
+`docs/src/contributing.md`.
 
 ## D126 — the kernel heap allocator threaded its free list and slab pages through integers (FIXED)
 
@@ -8918,8 +8832,8 @@ stack image by indexing its own `Vec` after taking the region also had to
 plant *through* the region instead — reborrowing the slice retires the root,
 which Stacked Borrows caught and which is the discipline under test.
 
-**Still not enrolled.** `kernel/core` remains outside `miri`'s `TARGETS`; its
-remaining blocker is the leak surface D123 now records, not the budget.
+**Enrolled.** `kernel/core` is in `miri`'s `TARGETS` (D123), so the stage
+interprets these tests.
 
 ## D133 — a task could grow another task's pending-delegation table without bound — FIXED
 

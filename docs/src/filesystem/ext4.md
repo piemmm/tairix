@@ -128,13 +128,19 @@ permission decision: the VFS metadata layer that mounts it is the policy
 point (`AGENTS.md` §5.4).
 
 The driver implements the versioned `FilesystemSecurity` trait (as
-[arxfs](./arxfs.md) does), so the VFS can drive authorization from the
-stored per-inode §5.3 record instead of the uniform mount-point
-template. `security(node)` reports a `NodeSecurity` carrying the inode's
-POSIX mode (the low 12 bits, with the type bits stripped) and its owner
-uid/gid; each id recombines its low half (`i_uid`/`i_gid`) with the osd2
-high half (`l_i_uid_high`/`l_i_gid_high`). ext4 has no inline capability
-gate, so the record carries no `required_cap`.
+[arxfs](./arxfs.md) does), so the VFS drives authorization from the
+stored per-inode §5.3 record. `security(node)` reports a `NodeSecurity`
+carrying the inode's POSIX mode (the low 12 bits, with the type bits
+stripped) and its owner uid/gid; each id recombines its low half
+(`i_uid`/`i_gid`) with the osd2 high half (`l_i_uid_high`/`l_i_gid_high`).
+ext4 has no inline capability gate, so the record carries no
+`required_cap`.
+
+`stamp_owner` writes a created node's owner and group into the same two
+halves, so a file or directory made through the VFS belongs to its creator.
+An explicit `set_security` is refused whole (`NotSupported` to the caller):
+the format has no place for a capability gate, and the driver does not
+rewrite ACL attribute blocks.
 
 ### POSIX ACLs
 
@@ -191,6 +197,29 @@ when no leaf survives. A tree that would need a second index level
 (depth ≥ 2) is refused (see below); the driver never builds one, and the
 read path still maps any depth on disk.
 
+### Timestamps
+
+Every stamp a write takes is the host's wall clock,
+`VolumeHost::wall_time` ([driver traits](../abi/driver_traits.md)),
+following the POSIX model: a create gives the new inode all four stamps
+and the parent directory a new `i_mtime`/`i_ctime`; a write or truncate
+moves the file's `i_mtime`/`i_ctime`; a remove moves the directory's and,
+for a node that keeps another name, its `i_ctime`; a rename moves the
+node's `i_ctime` and both directories' `i_mtime`/`i_ctime`. A directory's
+link-count change and its stamps share one inode write. A read moves no
+stamp: the driver keeps no access time, so `i_atime` is the birth instant.
+
+An enlarged record (`i_extra_isize` covering the `_extra` fields) holds a
+stamp to the nanosecond from 1901-12-13 to 2446-05-10, each of the two epoch
+bits adding 2³² seconds to the signed classic field as the ext4 disk layout
+defines it, and holds a birth time. A classic 128-byte record holds whole
+seconds within the signed 32-bit range and no birth time. A time outside
+what the record holds, or no time at all while the clock is unset, is
+written as the all-zero fields, which read back as `Time64::UNIX_EPOCH`, the
+"no stamp" value: never a wrapped or clamped one. A freed inode's `i_dtime`
+records when it went where the unsigned field holds that and cannot be read
+as an orphan-list inode number, and a fixed non-zero marker otherwise.
+
 ### Checksums and wide descriptors
 
 The write path maintains every on-disk checksum a volume carries, so a
@@ -233,9 +262,10 @@ of `open()`, with no `mkfs` shell-out (`AGENTS.md` §12/§2.12). After
 single source of truth for the on-disk layout.
 
 The formatter writes a deliberately conservative shape the read/write
-path fully supports: `filetype` + `extent` only (no `metadata_csum`,
-`gdt_csum`, or `64bit`, so no checksum maintenance is needed), 128-byte
-inodes, 32-byte group descriptors, block size 4096 bytes for volumes
+path fully supports: `filetype` + `extent`, and `extra_isize` (no
+`metadata_csum`, `gdt_csum`, or `64bit`, so no checksum maintenance is
+needed), 256-byte inodes whose enlarged region holds every timestamp at its
+widest, 32-byte group descriptors, block size 4096 bytes for volumes
 ≥ 128 MiB and 1024 bytes otherwise, and `blocks_per_group = 8 *
 block_size`. Only whole groups are laid down — so the reader's group
 count is exact — and **every** group is fully materialised (no
@@ -264,7 +294,7 @@ size 1024, one block group, 128-byte inodes, `filetype` on, with block
 and inode bitmaps and free space) holding an extent-mapped root, an
 extent-mapped file, a subdirectory with a nested file, and a classic
 block-mapped file that combines direct pointers, sparse holes, and a
-single-indirect block. The 44 host-side tests cover superblock
+single-indirect block. The host-side tests cover superblock
 validation, `node_info`, ordered listing with `.`/`..` suppression and
 end-of-directory, `lookup` and subdirectory traversal, extent and
 classic reads (including across holes and the direct/indirect boundary),
@@ -285,7 +315,10 @@ tree's blocks), and the POSIX-ACL decode —
 standalone `decode`/`find` units (both value-base conventions, bad
 version, the inline budget cap, unrelated attributes) plus end-to-end
 `security` reads of an external xattr block, a garbage block, and an
-inline ACL in a 256-byte-inode volume.
+inline ACL in a 256-byte-inode volume. The timestamp tests decode every
+epoch of the extended layout, round-trip each record's range and refuse
+past it, and stamp each write operation under a test clock, with no stamp
+while the clock has no time and the deletion time a freed inode records.
 
 A separate integration suite (`tests/checksummed.rs`) validates the
 checksum maintenance against **real `mke2fs 1.47.0`** images committed

@@ -13,6 +13,7 @@ use super::*;
 use std::vec;
 use std::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::listed;
 use tairix_abi::DriverKind;
 
@@ -696,6 +697,112 @@ fn attr(fs: &mut Adfs<MemDisk>, node: NodeId, key: &[u8]) -> Option<Vec<u8>> {
         .map(|len| buf[..len].to_vec())
 }
 
+/// `fs`, stamping `wall` from now on, or no time.
+fn at(mut fs: Adfs<MemDisk>, wall: Option<Time64>) -> Adfs<MemDisk> {
+    fs.set_volume_host(TestClock::volume(), TestClock::at(wall));
+    fs
+}
+
+/// `time` to the centisecond RISC OS stamps hold.
+fn to_centisecond(time: Time64) -> Time64 {
+    Time64::new(time.secs(), time.subsec_nanos() / 10_000_000 * 10_000_000).expect("canonical")
+}
+
+#[test]
+fn a_new_object_is_typed_and_stamped_and_a_write_restamps_it() {
+    let made = Time64::new(1_792_067_697, 123_456_789).expect("canonical");
+    let later = Time64::new(1_792_067_797, 987_654_321).expect("canonical");
+    for (variant, bytes) in VARIANTS {
+        let mut fs = at(fresh(variant, bytes), Some(made));
+        let root = FilesystemRead::root(&fs);
+        fs.create(root, b"File", NodeKind::RegularFile)
+            .expect("create");
+        let node = fs.lookup(root, b"File").expect("found");
+        assert_eq!(
+            attr(&mut fs, node, b"acorn.filetype").as_deref(),
+            Some(&b"ffd"[..])
+        );
+        assert_eq!(
+            fs.node_info(node).expect("info").times.modified,
+            to_centisecond(made),
+            "{variant:?}"
+        );
+        fs.create(root, b"Dir", NodeKind::Directory).expect("mkdir");
+        let dir = fs.lookup(root, b"Dir").expect("found");
+        assert_eq!(
+            fs.node_info(dir).expect("info").times.modified,
+            to_centisecond(made),
+            "{variant:?}"
+        );
+
+        let mut fs = at(fs, Some(later));
+        fs.write_at(root, b"File", 0, b"body").expect("write");
+        let node = fs.lookup(root, b"File").expect("found");
+        assert_eq!(
+            fs.node_info(node).expect("info").times.modified,
+            to_centisecond(later),
+            "{variant:?}"
+        );
+
+        let mut fs = at(fs, Some(made));
+        fs.rename(root, b"File", root, b"Moved").expect("rename");
+        let node = fs.lookup(root, b"Moved").expect("found");
+        assert_eq!(
+            fs.node_info(node).expect("info").times.modified,
+            to_centisecond(later),
+            "a rename moves the name, never the stamp ({variant:?})"
+        );
+    }
+}
+
+#[test]
+fn an_untyped_objects_addresses_survive_a_write() {
+    let (variant, bytes) = VARIANTS[0];
+    let mut fs = at(
+        fresh(variant, bytes),
+        Some(Time64::from_secs(1_792_067_697)),
+    );
+    let root = FilesystemRead::root(&fs);
+    let node = make(&mut fs, root, b"Image", b"code");
+    fs.remove_attr(node, b"acorn.filetype").expect("untype");
+    let node = fs.lookup(root, b"Image").expect("found");
+    fs.set_attr(node, b"acorn.loadaddr", b"00008000")
+        .expect("load");
+    let node = fs.lookup(root, b"Image").expect("found");
+    fs.set_attr(node, b"acorn.execaddr", b"00008000")
+        .expect("exec");
+    fs.write_at(root, b"Image", 0, b"more code").expect("write");
+    let node = fs.lookup(root, b"Image").expect("found");
+    for key in [&b"acorn.loadaddr"[..], b"acorn.execaddr"] {
+        assert_eq!(attr(&mut fs, node, key).as_deref(), Some(&b"00008000"[..]));
+    }
+}
+
+#[test]
+fn with_no_time_to_give_an_adfs_stamp_is_zero_and_reads_as_none() {
+    let (variant, bytes) = VARIANTS[0];
+    let mut fs = at(fresh(variant, bytes), None);
+    let root = FilesystemRead::root(&fs);
+    let node = make(&mut fs, root, b"File", b"body");
+    assert_eq!(
+        attr(&mut fs, node, b"acorn.datestamp").as_deref(),
+        Some(&b"0000000000"[..])
+    );
+    assert_eq!(
+        fs.node_info(node).expect("info").times,
+        NodeTimes::default()
+    );
+
+    // 2255 is past what the 40-bit stamp holds: no stamp, never a wrapped one.
+    let mut fs = at(fs, Some(Time64::from_secs(9_000_000_000)));
+    fs.write_at(root, b"File", 0, b"more").expect("write");
+    let node = fs.lookup(root, b"File").expect("found");
+    assert_eq!(
+        attr(&mut fs, node, b"acorn.datestamp").as_deref(),
+        Some(&b"0000000000"[..])
+    );
+}
+
 #[test]
 fn acorn_metadata_round_trips() {
     for (variant, bytes) in VARIANTS {
@@ -703,13 +810,20 @@ fn acorn_metadata_round_trips() {
         let root = FilesystemRead::root(&fs);
         let node = make(&mut fs, root, b"Typed", b"body");
 
-        // A fresh file is untyped: raw addresses, no filetype or stamp.
+        // A fresh file is Data, as RISC OS makes one, and with no clock to
+        // stamp it from it carries the zero stamp, which reads as no time.
         assert_eq!(
             attr(&mut fs, node, b"acorn.loadaddr").as_deref(),
-            Some(&b"00000000"[..])
+            Some(&b"fffffd00"[..])
         );
-        assert_eq!(attr(&mut fs, node, b"acorn.filetype"), None);
-        assert_eq!(attr(&mut fs, node, b"acorn.datestamp"), None);
+        assert_eq!(
+            attr(&mut fs, node, b"acorn.filetype").as_deref(),
+            Some(&b"ffd"[..])
+        );
+        assert_eq!(
+            attr(&mut fs, node, b"acorn.datestamp").as_deref(),
+            Some(&b"0000000000"[..])
+        );
         assert_eq!(
             attr(&mut fs, node, b"acorn.attr").as_deref(),
             Some(&b"RW/"[..])

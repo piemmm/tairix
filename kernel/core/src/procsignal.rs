@@ -1848,10 +1848,10 @@ mod tests {
         let sched_arch = std::sync::Arc::new(TestArch::with_cpus(1));
         let scheduler =
             Scheduler::new(SchedulerConfig::defaults_for(1), sched_arch).expect("scheduler builds");
-        let scheduler: &'static Scheduler<TestArch> = Box::leak(Box::new(scheduler));
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let scheduler: &'static Scheduler<TestArch> = crate::forever(Box::new(scheduler));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static KernelProcessWait<TestArch> =
-            Box::leak(Box::new(KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(KernelProcessWait::new(wait_arch)));
         (wait, scheduler)
     }
 
@@ -2200,7 +2200,7 @@ mod tests {
         )
         .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
-        let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
+        let landed: &'static LandingRecorder = crate::forever(Box::new(LandingRecorder::new()));
         signaller
             .install_task_reclaim(landed)
             .expect("first install on this producer");
@@ -2442,7 +2442,7 @@ mod tests {
     impl SchedulerPolicy<TestArch> for KillsElsewhere {
         fn new(config: SchedulerConfig, arch: std::sync::Arc<TestArch>) -> SchedResult<Self> {
             let inner: &'static Scheduler<TestArch> =
-                Box::leak(Box::new(Scheduler::new(config, arch)?));
+                crate::forever(Box::new(Scheduler::new(config, arch)?));
             Ok(Self {
                 inner,
                 victim: Victim::StillRunning,
@@ -2568,7 +2568,7 @@ mod tests {
         let _g = running_kill_test_lock();
         let ours = ensure_test_lander();
         let (wait, inner) = scaffold();
-        let scheduler: &'static KillsElsewhere = Box::leak(Box::new(KillsElsewhere {
+        let scheduler: &'static KillsElsewhere = crate::forever(Box::new(KillsElsewhere {
             inner,
             victim: Victim::RetiresBeforeTheKillerReturns,
             doomed: SpinLock::new(BTreeSet::new()),
@@ -2607,7 +2607,7 @@ mod tests {
     fn a_group_exit_leaves_a_dying_sibling_to_the_death_it_already_owes() {
         let _g = running_kill_test_lock();
         let (wait, inner) = scaffold();
-        let scheduler: &'static KillsElsewhere = Box::leak(Box::new(KillsElsewhere {
+        let scheduler: &'static KillsElsewhere = crate::forever(Box::new(KillsElsewhere {
             inner,
             victim: Victim::StillRunning,
             doomed: SpinLock::new(BTreeSet::new()),
@@ -2615,8 +2615,9 @@ mod tests {
         let (leader, _) = spawn_child(inner);
         let (sibling, _) = spawn_child(inner);
         let sink: &'static crate::test_sink::TestSink =
-            Box::leak(Box::new(crate::test_sink::TestSink::new()));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            crate::forever(Box::new(crate::test_sink::TestSink::new()));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         caps.write()
             .insert(tairix_kernel_sec::TaskCapabilities::derive(
                 ProcessId(leader),
@@ -2631,7 +2632,7 @@ mod tests {
         clear_kill_gate(sibling);
         install_gate(sibling, ProcessId(leader)).expect("the sibling's gate names its group");
         let signaller = KernelProcessSignal::new(wait, scheduler, caps);
-        let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
+        let landed: &'static LandingRecorder = crate::forever(Box::new(LandingRecorder::new()));
         signaller
             .install_task_reclaim(landed)
             .expect("first install on this producer");
@@ -2667,7 +2668,7 @@ mod tests {
         )
         .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
-        let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
+        let landed: &'static LandingRecorder = crate::forever(Box::new(LandingRecorder::new()));
         signaller
             .install_task_reclaim(landed)
             .expect("first install on this producer");
@@ -3401,7 +3402,8 @@ mod tests {
     #[test]
     fn foreground_deliver_refuses_a_stale_process_instance() {
         let (wait, scheduler) = scaffold();
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let (child, _child_pid) = spawn_child(scheduler);
         wait.register_child(
             ProcessId(7),
@@ -3410,7 +3412,7 @@ mod tests {
         )
         .expect("registered");
         let signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>> =
-            Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
+            crate::forever(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
 
         // The keystroke was aimed at the instance the grant saw …
         let aimed_at = admit_instance(caps, ProcessId(child), ProcId::from_raw([0x11; 16]));
@@ -3444,7 +3446,8 @@ mod tests {
     #[test]
     fn foreground_deliver_reaches_the_instance_it_was_aimed_at() {
         let (wait, scheduler) = scaffold();
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let (child, _child_pid) = spawn_child(scheduler);
         wait.register_child(
             ProcessId(7),
@@ -3453,7 +3456,7 @@ mod tests {
         )
         .expect("registered");
         let signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>> =
-            Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
+            crate::forever(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
 
         let aimed_at = admit_instance(caps, ProcessId(child), ProcId::from_raw([0x33; 16]));
         assert_eq!(signaller.deliver(aimed_at, Signal::Stop), Ok(()));
@@ -3508,7 +3511,8 @@ mod tests {
     #[test]
     fn no_signal_reaches_a_child_whose_record_is_unpublished() {
         let (wait, scheduler) = scaffold();
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let child = scheduler
             .spawn_parked(0, Priority::Normal, |_| TaskAction::Exit)
             .expect("admitted parked");
@@ -3762,10 +3766,11 @@ mod tests {
     impl SessionScene {
         fn new() -> Self {
             let (wait, scheduler) = scaffold();
-            let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            let caps: &'static RwLock<CapTable> =
+                crate::forever(Box::new(RwLock::new(CapTable::new())));
             let signaller: &'static KernelProcessSignal<TestArch, Scheduler<TestArch>> =
-                Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
-            let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
+                crate::forever(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
+            let landed: &'static LandingRecorder = crate::forever(Box::new(LandingRecorder::new()));
             signaller
                 .install_task_reclaim(landed)
                 .expect("first install on this producer");
@@ -3773,7 +3778,7 @@ mod tests {
                 caps,
                 signaller,
                 landed,
-                audit: Box::leak(Box::new(crate::test_sink::TestSink::new())),
+                audit: crate::forever(Box::new(crate::test_sink::TestSink::new())),
                 scheduler,
             }
         }
@@ -3956,7 +3961,8 @@ mod tests {
     #[test]
     fn an_instance_kill_claims_only_the_instance_it_names() {
         let _g = running_kill_test_lock();
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let owner = admit_instance(caps, ProcessId(0x6161), ProcId::from_raw([0x61; 16]));
         let _held = gate(0x6161);
         let teardown = exit_of(0x6161, 137);

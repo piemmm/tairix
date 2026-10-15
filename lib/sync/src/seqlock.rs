@@ -43,11 +43,14 @@
 //! # Ordering guarantees
 //!
 //! - A successful [`read`](SeqLock::read) sees only "committed" values:
-//!   it samples the sequence with [`Acquire`] before *and* after copying
-//!   the payload and discards the result if either sample is odd or the
-//!   two disagree.
-//! - A writer increments the sequence with [`Release`] semantics around
-//!   the mutation, publishing every write to the payload.
+//!   it samples the sequence with [`Acquire`] before copying the payload
+//!   and again behind an acquire fence after it, and discards the result
+//!   if the first sample is odd or the two disagree.
+//! - A writer makes the sequence odd and issues a [`Release`] fence before
+//!   it touches the payload, then commits with a [`Release`] increment. The
+//!   fence pairs with the reader's, so a reader that copied any word of a
+//!   write in progress sees the odd sequence; the commit publishes the whole
+//!   payload to a reader that sees it.
 //!
 //! # IRQ level
 //!
@@ -219,8 +222,12 @@ impl<T: Copy> SeqLock<T> {
     /// they interleave their words and commit a value neither wrote.
     pub unsafe fn write(&self, value: T) {
         // Mark "writer in progress" by setting LSB.
-        let prev = self.seq.fetch_add(1, Ordering::Release);
+        let prev = self.seq.fetch_add(1, Ordering::Relaxed);
         debug_assert!(prev & 1 == 0, "SeqLock concurrent writers detected");
+        // Orders the payload stores after the odd sequence, which a release
+        // on the increment would not: the reader's acquire fence pairs with
+        // it, so a reader that copied any new word sees the odd value.
+        fence(Ordering::Release);
         self.store(&value);
         // Mark "writer done"; release publishes the payload writes.
         self.seq.fetch_add(1, Ordering::Release);

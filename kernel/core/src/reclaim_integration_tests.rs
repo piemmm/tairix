@@ -35,7 +35,7 @@ fn budget() -> CacheBudget {
 
 /// A leaked capturing sink for the caches' audit records.
 fn sink() -> &'static TestSink {
-    Box::leak(Box::new(TestSink::new()))
+    crate::forever(Box::new(TestSink::new()))
 }
 
 /// Both production caches over **one** shared gauge, warmed: the

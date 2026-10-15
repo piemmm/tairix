@@ -2598,7 +2598,7 @@ mod tests {
     #[test]
     fn the_same_cpu_stall_report_marks_a_rotted_context_stale() {
         let cpu = crate::test_boot::claim_cpu();
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let state = active_with_progress(cpu, 1_000);
         state.wd_ctx_pc.store(0x4000_0000, Ordering::Relaxed);
         state.wd_ctx_task.store(9, Ordering::Relaxed);
@@ -2677,7 +2677,7 @@ mod tests {
         // field are the debug-only detail's job and never appear here, so
         // the persistent hash-chained log never carries a KASLR-defeating
         // raw kernel pointer.
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = diag(
             0xffff_0000_1234_5678,
             12,
@@ -2741,7 +2741,7 @@ mod tests {
         // the absolute runtime pc, so a capture resolves against the debug
         // ELF without disclosing the (KASLR-relocatable) load base.
         set_kernel_image_base(TEST_IMAGE_BASE);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let mut bt = [0u64; cpu_state::WD_BT_MAX];
         bt[0] = TEST_IMAGE_BASE + 0x0021_d42c;
         bt[1] = TEST_IMAGE_BASE + 0x0021_e100;
@@ -2808,7 +2808,7 @@ mod tests {
         // disclosed raw — but the non-address breadcrumb still renders, so
         // the record stays useful.
         set_kernel_image_base(TEST_IMAGE_BASE);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let mut bt = [0u64; cpu_state::WD_BT_MAX];
         bt[0] = 0x0021_d42c; // below the image base — not rebasable
         let d = Diag {
@@ -2854,7 +2854,7 @@ mod tests {
         // victim acknowledged and never completed. The victim's own record
         // names it.
         set_kernel_image_base(TEST_IMAGE_BASE);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = Diag {
             in_flight: InFlightInterrupt::Acknowledged { intid: 27 },
             stuck: Some(StuckInterrupt {
@@ -2876,7 +2876,7 @@ mod tests {
         // can never let "the port cannot tell us" read as "the core is
         // inside no interrupt".
         set_kernel_image_base(TEST_IMAGE_BASE);
-        let idle: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let idle: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         report_detail_to(
             idle,
             Level::Error,
@@ -2889,7 +2889,7 @@ mod tests {
         );
         assert_eq!(field(&idle.snapshot()[0], "in_flight"), Some("none"));
 
-        let unread: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let unread: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         report_detail_to(
             unread,
             Level::Error,
@@ -2909,7 +2909,7 @@ mod tests {
         // A wedge with no pc, breadcrumb, backtrace or lock site to report
         // must still emit the detail line when the victim named the
         // interrupt it is inside — that reading is the whole diagnosis.
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         report_detail_to(
             sink,
             Level::Error,
@@ -2929,7 +2929,7 @@ mod tests {
         // A live sample makes a later `sampled=pre_silence` record
         // credible, so the capability is stated plainly rather than
         // discarded.
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         emit_self_sample(sink, FeatureSupport::Supported);
         let ev = &sink.snapshot()[0];
         assert_eq!(ev.id, AuditEvent::CpuWatchdogSelfSample.id());
@@ -2958,7 +2958,7 @@ mod tests {
                 "not yet probed",
             ),
         ] {
-            let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+            let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
             emit_self_sample(sink, support);
             let ev = &sink.snapshot()[0];
             assert_eq!(ev.level, Level::Warn);
@@ -2973,7 +2973,7 @@ mod tests {
     fn the_self_sample_record_carries_no_address() {
         // A capability statement, not an address-bearing detail.
         set_kernel_image_base(TEST_IMAGE_BASE);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         emit_self_sample(sink, FeatureSupport::Supported);
         let ev = &sink.snapshot()[0];
         assert!(no_field_contains(ev, "0x"));
@@ -3110,7 +3110,7 @@ mod tests {
     #[test]
     fn the_debug_detail_names_the_stuck_lock() {
         let site = core::panic::Location::caller();
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = Diag {
             pc: 0,
             task: WatchdogSample::NO_TASK,
@@ -3138,7 +3138,7 @@ mod tests {
         assert_eq!(field(ev, "k_lock"), Some(site.file()));
         assert_eq!(field(ev, "k_lock_state"), Some("acquiring"));
         // The state tag flips to `held` for a lock the CPU had taken.
-        let sink2: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink2: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let held = Diag {
             lock_acquiring: false,
             #[cfg(feature = "watchdog-diagnostics")]
@@ -3156,7 +3156,7 @@ mod tests {
     #[test]
     fn the_lock_site_field_discloses_no_runtime_address() {
         let site = core::panic::Location::caller();
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = Diag {
             pc: 0,
             task: WatchdogSample::NO_TASK,
@@ -3194,7 +3194,7 @@ mod tests {
         // No SPI is stuck (the wedge is a pure in-kernel spin with IRQs
         // masked, not a storm), so the observer reports no line rather than
         // a fabricated one — but still marks the sample pre-silence.
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = diag(
             0x0021_d42c,
             WatchdogSample::NO_TASK,
@@ -3235,7 +3235,7 @@ mod tests {
         // driver owns it (`unbound`), that says the wedge is elsewhere; the
         // masked, undeliverable line the observer used to blame is never
         // reported at all now.
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = diag(
             0x0021_d524,
             WatchdogSample::NO_TASK,
@@ -3268,7 +3268,7 @@ mod tests {
         // service itself (a chained MSI multiplexer, the console UART) is
         // named rather than dismissed as `unbound`, so a reader sees which
         // kernel-internal source a wedged CPU could not service.
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = diag(
             0x0021_d5f0,
             WatchdogSample::NO_TASK,
@@ -3297,7 +3297,7 @@ mod tests {
 
     #[test]
     fn a_user_context_record_says_user() {
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = diag(0x4000_0000, 15, false, false, None, StuckOwner::Unknown);
         report_summary_to(
             sink,
@@ -3319,7 +3319,7 @@ mod tests {
 
     #[test]
     fn a_record_omits_context_it_does_not_have() {
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         report_summary_to(
             sink,
             AuditEvent::CpuStallCleared,
@@ -3420,7 +3420,7 @@ mod tests {
 
     #[test]
     fn a_recovery_record_names_the_kind_and_outcome() {
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         recovery_to(
             sink,
             3,
@@ -3492,7 +3492,7 @@ mod tests {
         // user-root translation park) apart from one going *into* it
         // (`user_switch`) on a board with no non-maskable sample.
         set_kernel_image_base(TEST_IMAGE_BASE);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let d = Diag {
             pc: TEST_IMAGE_BASE + 0x1c_7524,
             task: WatchdogSample::NO_TASK,

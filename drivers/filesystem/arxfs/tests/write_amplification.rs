@@ -306,6 +306,10 @@ impl VolumeHost for FrozenTimer {
         Some(0)
     }
 
+    fn wall_time(&self) -> Option<tairix_abi::time::Time64> {
+        None
+    }
+
     fn writeback_due(&self, _volume: DriverHandle, _deadline_ns: Option<u64>) {}
 
     fn reserve_crossed(&self, _volume: DriverHandle, _in_reserve: bool) {}

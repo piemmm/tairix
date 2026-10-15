@@ -384,6 +384,8 @@ trait**, `FilesystemRead`, not an added method on the frozen one
 | Method                            | Capability gate                       |
 |-----------------------------------|---------------------------------------|
 | `root()`                          | Driver handle.                        |
+| `name_matching()`                 | Driver handle.                        |
+| `node_identity()`                 | Driver handle.                        |
 | `node_info(node)`                 | Driver handle.                        |
 | `lookup(dir, name)`               | Driver handle.                        |
 | `read_at(file, offset, &mut)`     | Driver handle.                        |
@@ -398,6 +400,15 @@ clusters a FAT file's size needs or a FAT directory's chain, ARXFS mapped
 extents), and `content_gen` the version of the node's data, which the volume
 never hands out twice (`NodeInfo::NO_CONTENT_GEN`, `0`, where the format keeps
 none: ext4, FAT32 and ADFS).
+
+`name_matching` and `node_identity` are declarations only the format can
+make, so neither has a default. `node_identity` says how long a node keeps
+its id: `Stable` where the format numbers its nodes (ARXFS, ext4), and
+`ContentDerived` where it names a file by facts a write rewrites — FAT32
+packs a file's first cluster and size into its id, and ADFS names an object
+with no allocation by its name. The cache in front of every mounted volume
+looks a name up again after writing through it on the second kind, so a read
+after a write is never answered for the id the write replaced.
 
 `read_dir` hands a visitor the directory's entries in order, each a
 `DirEntry { node, info, next_cursor }` with its name borrowed from the
@@ -426,9 +437,7 @@ path to learn its kind or sizes.
 Implementations expose raw structural access only and make **no**
 permission decisions — the VFS authorises every traversal against the
 §5.3 model before calling here (`AGENTS.md` §5.4). The first
-implementation is the [FAT32 driver](../filesystem/fat32.md); the
-read-only [ext4 driver](../filesystem/ext4.md) implements this trait
-without `FilesystemWrite`.
+implementation is the [FAT32 driver](../filesystem/fat32.md).
 
 The mutating surface is a second separate versioned trait,
 `FilesystemWrite`, again additive rather than a widening of the frozen
@@ -453,30 +462,38 @@ against the §5.3 template (and refuses a write to a `READ_ONLY` mount)
 before delegating (`AGENTS.md` §5.4). The first implementation is the
 read/write [FAT32 driver](../filesystem/fat32.md).
 
-A driver that stores full POSIX metadata *per inode* — owner, group,
-mode bits, an ACL, and an optional capability gate (§5.3) — additionally
-implements a third separate versioned trait, `FilesystemSecurity`, so
-the VFS can use that **stored** record as the policy input instead of a
-uniform mount-point template:
+Every mountable driver also implements a third separate versioned trait,
+`FilesystemSecurity`, and the VFS judges each node against the §5.3 record
+it reports:
 
-| Method            | Capability gate    |
-|-------------------|--------------------|
-| `security(node)`  | Driver handle.     |
+| Method                         | Capability gate                   |
+|--------------------------------|-----------------------------------|
+| `security(node)`               | Driver handle.                    |
+| `set_security(node, record)`   | Driver handle (writable mount).   |
+| `stamp_owner(node, uid, gid)`  | Driver handle (writable mount).   |
 
 `security` returns a `NodeSecurity { mode, uid, gid, required_cap, acl }`
 record, where `acl` is up to `MAX_ACL_ENTRIES` (eight) grant-only
 `SecurityAcl { subject, perms }` entries (`subject` is a
 `SecuritySubject::User | Group`, `perms` an `rwx` triad). Like the other
-surfaces the driver only *reports* the record and makes no decision; the
-VFS translates it into its policy metadata and applies the §5.3 model
-(`AGENTS.md` §5.4). A driver such as FAT that keeps no per-file owner
-simply does not implement this trait, and the VFS keeps applying the
-mount-point template. The first implementation is the native
-[`arxfs` driver](../filesystem/arxfs.md); the
-[`ext4` driver](../filesystem/ext4.md) also implements it, reporting each
-inode's stored mode and owner (its POSIX ACLs live in xattr blocks the
-read surface does not yet decode, so it surfaces no `required_cap` and no
-ACL entries).
+surfaces the driver only *reports and stores* the record and makes no
+decision; the VFS translates it into its policy metadata and applies the
+§5.3 model (`AGENTS.md` §5.4).
+
+A create records its creator as the new node's owner through `stamp_owner`
+in the same operation, and if that fails the VFS takes the node back out,
+so a create lands whole or leaves nothing. What a format can store differs,
+and a refusal reaches the caller as `NotSupported`:
+
+- the native [`arxfs` driver](../filesystem/arxfs.md) stores the whole
+  record;
+- the [`ext4` driver](../filesystem/ext4.md) reports each inode's owner,
+  group, mode and POSIX ACL grants, records a creator's owner and group,
+  and refuses a `set_security` it could not store whole;
+- the [FAT32 driver](../filesystem/fat32.md) reports one fixed record per
+  kind and keeps no owner, so a stamp stores nothing and `set_security` is
+  refused; mounted removable media take the storage-group identity map
+  instead.
 
 A node's four §21 timestamps travel **in `NodeInfo`** — the `times:
 NodeTimes { created, modified, accessed, changed }` field the read
@@ -495,6 +512,19 @@ holds stamps only in the parent's directory record — reports them through
 `read_dir` (a stat by node reports the epoch). There is no separate
 `FilesystemTimestamps` trait: folding the times into `NodeInfo` removed
 both it and the old separate `DirEntry.modified` stamp (`AGENTS.md` §2.2).
+
+A driver takes the time it stamps from `VolumeHost::wall_time`, the
+kernel wall clock as seen through the host every mounted driver is handed
+by `set_volume_host`. The host gives a time only once a source has set the
+clock and while its reading is plausible (`is_plausible_wall_time`). A
+stamp outlives the boot and carries no provenance, so the system records no
+time rather than one it cannot vouch for. Until the clock is set, and on a
+volume with no host, as when an image is formatted, every stamp an
+operation takes is the format's own "no stamp" spelling. It reads back as
+`Time64::UNIX_EPOCH`, which `stat` shows as `-`, and the next operation
+after the clock is set stamps a real time. Each format converts the time to
+its own fields within a declared precision and range. An instant outside
+that range is recorded as no stamp, never clamped or wrapped.
 
 Every mountable driver additionally implements a separate versioned
 whole-volume statistics trait, `FilesystemStats`, alongside (never a

@@ -348,6 +348,27 @@ mod tests {
         reader.join().unwrap();
     }
 
+    #[test]
+    fn seqlock_never_returns_a_payload_two_writes_contributed_to() {
+        let s = Arc::new(SeqLock::new([0usize; 3]));
+        let writer = {
+            let s = s.clone();
+            thread::spawn(move || {
+                for i in 1usize..=500 {
+                    // SAFETY: this test is the sole writer.
+                    unsafe {
+                        s.write([i; 3]);
+                    }
+                }
+            })
+        };
+        for _ in 0..500 {
+            let [a, b, c] = s.read();
+            assert!(a == b && b == c, "a torn payload: {a} {b} {c}");
+        }
+        writer.join().unwrap();
+    }
+
     // -- Once / OnceCell ---------------------------------------------------
 
     #[test]

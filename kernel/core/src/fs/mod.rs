@@ -279,9 +279,9 @@ pub enum VfsError {
     /// The volume is out of space, or the driver cannot store an attribute
     /// within its per-inode count, total byte, or metadata-block bound.
     NoSpace,
-    /// The covering mount's on-disk format has nowhere to store extended
-    /// attributes (its driver carries no attribute facet). Retrying can
-    /// never succeed on that mount; distinct from a driver fault.
+    /// The covering mount's on-disk format cannot hold what was asked of it:
+    /// an extended attribute, a link, or a security record of a node's own.
+    /// Retrying can never succeed on that mount; distinct from a driver fault.
     NotSupported,
     /// Path resolution traversed too many symbolic links (a cycle, or a
     /// chain longer than the hop budget), the spliced path outgrew its
@@ -370,7 +370,7 @@ impl fmt::Display for VfsError {
             Self::NoData => "no such attribute",
             Self::BufferTooSmall => "buffer too small",
             Self::NoSpace => "no space left on device",
-            Self::NotSupported => "attributes not supported by the mounted format",
+            Self::NotSupported => "not supported by the mounted format",
             Self::OutOfMemory => "out of memory",
             Self::Stale => "directory replaced during its listing",
             Self::LimitExceeded => "more entries than the walk allows",

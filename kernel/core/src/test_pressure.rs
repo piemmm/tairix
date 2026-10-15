@@ -38,10 +38,13 @@ impl FreeMemorySource for TestSource {
 
 /// A gauge plus its adjustable source, starting with `free` bytes free.
 pub(crate) fn pressured(free: usize) -> (&'static TestSource, &'static MemoryPressure) {
-    let source: &'static TestSource = Box::leak(Box::new(TestSource {
+    let source: &'static TestSource = crate::forever(Box::new(TestSource {
         free: AtomicUsize::new(free),
     }));
-    (source, Box::leak(Box::new(MemoryPressure::over(source))))
+    (
+        source,
+        crate::forever(Box::new(MemoryPressure::over(source))),
+    )
 }
 
 /// A gauge pinned at plentiful free memory: normal pressure.
@@ -81,7 +84,7 @@ pub(crate) fn global_pressure_source() -> &'static TestSource {
     static INSTALLED: Once<&'static TestSource> = Once::new();
     INSTALLED
         .call_once_infallible(|| {
-            let source: &'static TestSource = Box::leak(Box::new(TestSource {
+            let source: &'static TestSource = crate::forever(Box::new(TestSource {
                 free: AtomicUsize::new(free_for(PressureBand::Normal)),
             }));
             crate::memstats::MEM_STATS.system_pressure(source);

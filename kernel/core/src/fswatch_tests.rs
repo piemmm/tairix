@@ -17,7 +17,7 @@ const FILE: NodeId = NodeId::from_raw(12);
 /// A registry of the calling test's own, so no test shares tables, charges
 /// or the journal budget with another.
 fn registry() -> &'static WatchRegistry {
-    Box::leak(Box::new(WatchRegistry::new()))
+    crate::forever(Box::new(WatchRegistry::new()))
 }
 
 fn table(volume: u8) -> VolumeWatch {
@@ -216,7 +216,7 @@ impl FreeMemorySource for TinyMachine {
 
 fn tiny_machine() -> &'static MemoryPressure {
     static SOURCE: TinyMachine = TinyMachine;
-    Box::leak(Box::new(MemoryPressure::over(&SOURCE)))
+    crate::forever(Box::new(MemoryPressure::over(&SOURCE)))
 }
 
 #[test]
@@ -253,7 +253,7 @@ impl FreeMemorySource for SmallMachine {
 #[test]
 fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
     static SOURCE: SmallMachine = SmallMachine;
-    let gauge: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(&SOURCE)));
+    let gauge: &'static MemoryPressure = crate::forever(Box::new(MemoryPressure::over(&SOURCE)));
     let registry = registry();
     let volume = [0xE8; 16];
     let claim = registry

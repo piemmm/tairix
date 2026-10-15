@@ -98,6 +98,10 @@ impl FilesystemRead for MockFs {
         tairix_abi::driver::filesystem::NameMatching::Exact
     }
 
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        tairix_abi::driver::filesystem::NodeIdentity::Stable
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         match node.raw() {
             ROOT | DOCS => Ok(NodeInfo {
@@ -202,6 +206,10 @@ impl FilesystemRead for BadFs {
 
     fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
         tairix_abi::driver::filesystem::NameMatching::Exact
+    }
+
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        tairix_abi::driver::filesystem::NodeIdentity::Stable
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -1224,6 +1232,10 @@ impl FilesystemRead for SecMockFs {
         tairix_abi::driver::filesystem::NameMatching::Exact
     }
 
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        tairix_abi::driver::filesystem::NodeIdentity::Stable
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         match node.raw() {
             ROOT => Ok(NodeInfo {
@@ -1614,6 +1626,10 @@ impl FilesystemRead for StuckCursorFs {
         tairix_abi::driver::filesystem::NameMatching::Exact
     }
 
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        tairix_abi::driver::filesystem::NodeIdentity::Stable
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         if node.raw() == ROOT {
             Ok(NodeInfo {
@@ -1987,6 +2003,10 @@ impl FilesystemRead for NoLinksFs {
 
     fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
         tairix_abi::driver::filesystem::NameMatching::Exact
+    }
+
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        tairix_abi::driver::filesystem::NodeIdentity::Stable
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -2775,6 +2795,10 @@ impl FilesystemRead for RefusingFs {
         tairix_abi::driver::filesystem::NameMatching::Exact
     }
 
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        tairix_abi::driver::filesystem::NodeIdentity::Stable
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         if node.raw() != REFUSING_ROOT {
             return Err(DriverError::NotFound);
@@ -2990,4 +3014,79 @@ fn a_driver_reported_transient_is_never_read_as_a_name_conflict() {
         assert_eq!(outcome, Err(VfsError::Io));
     }
     assert_eq!(DriverError::Busy.as_errno(), Errno::WouldBlock);
+}
+
+/// A node that cannot be handed to its creator is taken back out: the create
+/// fails whole and leaves no half-made name for a retry to collide with.
+#[test]
+fn a_create_that_cannot_reach_its_creator_leaves_nothing_behind() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new().with_security_refused(DriverError::DeviceFault);
+    assert_eq!(
+        vfs.create_via_secured(&admin, &vfs.cover(&p("/made")), &mut fs),
+        Err(VfsError::Io)
+    );
+    assert_eq!(
+        vfs.mkdir_via_secured(&admin, &vfs.cover(&p("/folder")), &mut fs),
+        Err(VfsError::Io)
+    );
+    assert_eq!(
+        vfs.symlink_via_secured(&admin, &vfs.cover(&p("/link")), &mut fs, "/made"),
+        Err(VfsError::Io)
+    );
+    let root = fs.root();
+    for name in [&b"made"[..], b"folder", b"link"] {
+        assert_eq!(fs.lookup(root, name), Err(DriverError::NotFound));
+    }
+}
+
+/// A record the mounted format cannot hold is refused as unsupported, never
+/// as a path problem the caller could fix: a mode change on such a volume
+/// used to read as "not a directory".
+#[test]
+fn a_record_the_format_cannot_hold_is_not_supported() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.create_via_secured(&admin, &vfs.cover(&p("/file")), &mut fs)
+        .expect("create");
+    let mut fs = fs.with_security_refused(DriverError::Unsupported);
+    assert_eq!(
+        vfs.set_mode_via_secured(&admin, &vfs.cover(&p("/file")), &mut fs, 0o600),
+        Err(VfsError::NotSupported)
+    );
+    assert_eq!(VfsError::NotSupported.to_errno(), Errno::NotSupported);
+}
+
+/// A rename between kinds is refused as POSIX names it: a directory cannot
+/// replace a non-directory, and a non-directory cannot replace a directory.
+#[test]
+fn a_rename_between_kinds_is_refused_by_which_kind_moves() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RwMockFs::new();
+    vfs.create_via_secured(&admin, &vfs.cover(&p("/file")), &mut fs)
+        .expect("create");
+    vfs.mkdir_via_secured(&admin, &vfs.cover(&p("/dir")), &mut fs)
+        .expect("mkdir");
+    let rename = |fs: &mut RwMockFs, from: &str, to: &str| {
+        vfs.rename_via_secured(
+            &admin,
+            &vfs.cover_pair(&p(from), &p(to)),
+            fs,
+            tairix_abi::RenameFlags::empty(),
+        )
+    };
+    assert_eq!(
+        rename(&mut fs, "/dir", "/file"),
+        Err(VfsError::NotADirectory)
+    );
+    assert_eq!(
+        rename(&mut fs, "/file", "/dir"),
+        Err(VfsError::IsADirectory)
+    );
 }

@@ -54,8 +54,8 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    NodeTimes, VolumeStats,
+    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind,
+    NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
 };
 use tairix_abi::fs::FS_NAME_MAX;
 use tairix_abi::time::{CivilTime, Time64};
@@ -190,6 +190,15 @@ fn node_cluster(node: NodeId) -> u32 {
     u32::try_from(node.raw() & u64::from(FAT32_CLUSTER_MASK)).unwrap_or(0)
 }
 
+/// `node`, if [`pack_node`] could have made it: no live node is
+/// [`NodeId::NONE`] or lacks the validity bit.
+fn live_node(node: NodeId) -> Result<NodeId, DriverError> {
+    if node.raw() & NODE_VALID_FLAG == 0 {
+        return Err(DriverError::NotFound);
+    }
+    Ok(node)
+}
+
 /// Whether a [`NodeId`] denotes a directory.
 fn node_is_dir(node: NodeId) -> bool {
     node.raw() & NODE_DIR_FLAG != 0
@@ -252,12 +261,27 @@ struct EntryStamps {
 }
 
 impl EntryStamps {
-    /// No stamp at all: what this driver, which reads no clock, gives a new
-    /// entry.
+    /// No stamp at all: the zero date FAT reads as none.
     const NONE: Self = Self {
         created: [0; 7],
         written: [0; 4],
     };
+
+    /// A new entry's stamps, every one `now` — the access date too, which a
+    /// read never moves — or none while the time is unknown or outside the
+    /// 1980–2107 the fields hold.
+    fn at(now: Option<Time64>) -> Self {
+        let Some(dos) = now.and_then(DosStamp::of) else {
+            return Self::NONE;
+        };
+        let mut stamps = Self::NONE;
+        stamps.created[0] = dos.centis;
+        stamps.created[1..3].copy_from_slice(&dos.time.to_le_bytes());
+        stamps.created[3..5].copy_from_slice(&dos.date.to_le_bytes());
+        stamps.created[5..7].copy_from_slice(&dos.date.to_le_bytes());
+        stamps.written = dos.written();
+        stamps
+    }
 
     fn of(raw: &RawEntry) -> Self {
         let mut stamps = Self::NONE;
@@ -277,7 +301,8 @@ struct ParsedEntry {
     size: u32,
     is_dir: bool,
     /// The entry's timestamps decoded from the short entry's DOS date/time
-    /// fields: `created` from the creation date+time, `modified` from the
+    /// fields: `created` from the creation date+time and its hundredths,
+    /// `modified` from the
     /// last-write date+time, `accessed` from the last-access *date* (FAT
     /// stores no access time-of-day, so it is that date at midnight UTC).
     /// `changed` (ctime) is [`Time64::UNIX_EPOCH`]: FAT keeps no
@@ -374,6 +399,8 @@ pub struct Fat32<B: Block> {
     /// live directory's chain only grows, so the hint holds until a chain is
     /// freed.
     seek: Option<SeekHint>,
+    /// The host the mount's stamps take their time from, once it has one.
+    host: Option<&'static dyn VolumeHost>,
 }
 
 /// The volume's stable 16-byte identity, derived from the boot sector:
@@ -575,10 +602,11 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
         size: le32(raw, 28),
         is_dir: raw[11] & ATTR_DIRECTORY != 0,
         times: NodeTimes {
-            // Creation date (0x10) + time (0x0E); last-write date (0x18) +
-            // time (0x16); last-access date (0x12), no time-of-day. FAT has
-            // no metadata-change (ctime) stamp, so `changed` is the epoch.
-            created: dos_datetime_to_time64(le16(raw, 16), le16(raw, 14)),
+            // Creation date (0x10) + time (0x0E) + hundredths (0x0D);
+            // last-write date (0x18) + time (0x16); last-access date (0x12),
+            // no time-of-day. FAT has no metadata-change (ctime) stamp, so
+            // `changed` is the epoch.
+            created: dos_creation_to_time64(le16(raw, 16), le16(raw, 14), raw[13]),
             modified: dos_datetime_to_time64(le16(raw, 24), le16(raw, 22)),
             accessed: dos_datetime_to_time64(le16(raw, 18), 0),
             changed: Time64::UNIX_EPOCH,
@@ -590,17 +618,71 @@ fn parse_short_entry(raw: &[u8; DIR_ENTRY_LEN]) -> ParsedEntry {
     }
 }
 
+/// An instant as FAT's fields hold it: the date, the time to two seconds,
+/// and the hundredths a creation stamp adds within those two seconds.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct DosStamp {
+    date: u16,
+    time: u16,
+    /// `0..=199`.
+    centis: u8,
+}
+
+impl DosStamp {
+    /// `time` in FAT's fields, as UTC civil time — FAT records no zone, and
+    /// TAIRiX keeps zones out of what it stores — or `None` outside the
+    /// 1980–2107 they hold, never a clamped date.
+    fn of(time: Time64) -> Option<Self> {
+        let civil = CivilTime::from_time64(time);
+        let year = u16::try_from(civil.year.checked_sub(1980)?)
+            .ok()
+            .filter(|&y| y <= 127)?;
+        let field = |value: u32| u16::try_from(value).ok();
+        let second = field(civil.second)?;
+        Some(Self {
+            date: (year << 9) | (field(civil.month)? << 5) | field(civil.day)?,
+            time: (field(civil.hour)? << 11) | (field(civil.minute)? << 5) | (second / 2),
+            centis: u8::try_from(u32::from(second % 2) * 100 + time.subsec_nanos() / 10_000_000)
+                .ok()?,
+        })
+    }
+
+    /// The last-write stamp: time, then date.
+    fn written(self) -> [u8; 4] {
+        let [t0, t1] = self.time.to_le_bytes();
+        let [d0, d1] = self.date.to_le_bytes();
+        [t0, t1, d0, d1]
+    }
+}
+
+/// Decode a creation stamp — a DOS date/time pair and the hundredths
+/// within its two seconds — into a [`Time64`], UTC.
+///
+/// Hundredths of 200 or more are no encoding of a time, so the stamp is
+/// not decodable and is [`Time64::UNIX_EPOCH`], as an undecodable pair is.
+fn dos_creation_to_time64(date: u16, time: u16, centis: u8) -> Time64 {
+    let base = dos_datetime_to_time64(date, time);
+    if centis > 199 || base == Time64::UNIX_EPOCH {
+        return Time64::UNIX_EPOCH;
+    }
+    Time64::new(
+        base.secs() + i64::from(centis / 100),
+        u32::from(centis % 100) * 10_000_000,
+    )
+    .unwrap_or(Time64::UNIX_EPOCH)
+}
+
 /// Decode a DOS (FAT) date/time pair into a [`Time64`], UTC.
 ///
 /// `date` packs `year-1980` (bits 9..16), month `1..=12` (bits 5..9), and
 /// day `1..=31` (bits 0..5); `time` packs hours (bits 11..16), minutes
 /// (bits 5..11), and two-second units (bits 0..5). FAT keeps no timezone,
-/// so the stored local wall time is reported as-is — the format's own
-/// declared precision and range limit, not a TAIRiX one. Every decodable
-/// pair (1980..=2107) is representable in [`Time64`], so the conversion
-/// never truncates; a field combination that is not a real calendar
-/// date/time is not decodable and yields [`Time64::UNIX_EPOCH`], the
-/// documented "no stamp" value — never a clamped or guessed date.
+/// and TAIRiX writes these fields as UTC civil time, so they are read as
+/// UTC — the declared zone policy. Every decodable pair (1980..=2107) is
+/// representable in [`Time64`], so the conversion never truncates; a field
+/// combination that is not a real calendar date/time is not decodable and
+/// yields [`Time64::UNIX_EPOCH`], the documented "no stamp" value — never a
+/// clamped or guessed date.
 fn dos_datetime_to_time64(date: u16, time: u16) -> Time64 {
     let civil = CivilTime {
         year: i64::from(date >> 9) + 1980,
@@ -1043,6 +1125,7 @@ impl<B: Block> Fat32<B> {
             free_clusters,
             identity,
             seek: None,
+            host: None,
         })
     }
 
@@ -1663,17 +1746,39 @@ impl<B: Block> Fat32<B> {
     }
 
     /// Patch the first-cluster and size fields of the short entry at
-    /// `short_offset`.
+    /// `short_offset`, and its last-write stamp when the contents changed.
+    /// The stamp lies between the two, so a content change is one write.
     fn set_entry_meta(
         &mut self,
         short_offset: u64,
         cluster: u32,
         size: u32,
+        written: Option<[u8; 4]>,
     ) -> Result<(), DriverError> {
         let cb = cluster.to_le_bytes();
-        self.write_bytes(short_offset + 20, &cb[2..4])?;
-        self.write_bytes(short_offset + 26, &cb[0..2])?;
-        self.write_bytes(short_offset + 28, &size.to_le_bytes())
+        let mut tail = [0u8; 6];
+        tail[..2].copy_from_slice(&cb[0..2]);
+        tail[2..].copy_from_slice(&size.to_le_bytes());
+        let Some(written) = written else {
+            self.write_bytes(short_offset + 20, &cb[2..4])?;
+            return self.write_bytes(short_offset + 26, &tail);
+        };
+        let mut span = [0u8; 12];
+        span[..2].copy_from_slice(&cb[2..4]);
+        span[2..6].copy_from_slice(&written);
+        span[6..].copy_from_slice(&tail);
+        self.write_bytes(short_offset + 20, &span)
+    }
+
+    /// The instant an operation stamps, or `None` while the host has no time
+    /// to give.
+    fn now(&self) -> Option<Time64> {
+        self.host.and_then(VolumeHost::wall_time)
+    }
+
+    /// The last-write stamp a content change records now.
+    fn written_now(&self) -> [u8; 4] {
+        EntryStamps::at(self.now()).written
     }
 
     /// Choose a new entry's alias, the lowest `~N` tail no live alias holds,
@@ -1776,16 +1881,18 @@ impl<B: Block> Fat32<B> {
     }
 
     /// Initialise a freshly allocated directory cluster with its `.` and
-    /// `..` links. `parent_cluster` is `0` when the parent is the root.
+    /// `..` links, each stamped as the directory is. `parent_cluster` is `0`
+    /// when the parent is the root.
     fn init_dir_cluster(
         &mut self,
         child_cluster: u32,
         parent_cluster: u32,
+        stamps: EntryStamps,
     ) -> Result<(), DriverError> {
         let dot = {
             let mut f = [b' '; 11];
             f[0] = b'.';
-            Self::build_short_entry(&f, ATTR_DIRECTORY, child_cluster, 0, EntryStamps::NONE)
+            Self::build_short_entry(&f, ATTR_DIRECTORY, child_cluster, 0, stamps)
         };
         let dotdot = {
             let mut f = [b' '; 11];
@@ -1796,7 +1903,7 @@ impl<B: Block> Fat32<B> {
             } else {
                 parent_cluster
             };
-            Self::build_short_entry(&f, ATTR_DIRECTORY, pc, 0, EntryStamps::NONE)
+            Self::build_short_entry(&f, ATTR_DIRECTORY, pc, 0, stamps)
         };
         let base = self.cluster_byte(child_cluster);
         self.write_bytes(base, &dot)?;
@@ -1917,17 +2024,16 @@ impl<B: Block> Fat32<B> {
         }
 
         let is_dir = matches!(kind, NodeKind::Directory);
+        let stamps = EntryStamps::at(self.now());
         let child_cluster = if is_dir {
             let fresh = self.alloc_cluster(true)?;
-            self.init_dir_cluster(fresh, dir_cluster)?;
+            self.init_dir_cluster(fresh, dir_cluster, stamps)?;
             fresh
         } else {
             0
         };
         let attr = if is_dir { ATTR_DIRECTORY } else { 0x20 };
-        if let Err(e) =
-            self.write_dir_entry(dir_cluster, name, attr, child_cluster, 0, EntryStamps::NONE)
-        {
+        if let Err(e) = self.write_dir_entry(dir_cluster, name, attr, child_cluster, 0, stamps) {
             // Reclaim the directory cluster if naming the entry failed, so a
             // rejected create leaves no orphaned chain behind.
             if is_dir && child_cluster >= 2 {
@@ -2038,7 +2144,12 @@ impl<B: Block> Fat32<B> {
         self.write_data(first, offset, data)?;
         let new_size =
             u32::try_from(old_size.max(end)).map_err(|_| DriverError::LengthOutOfRange)?;
-        self.set_entry_meta(entry.short_offset, first, new_size)?;
+        self.set_entry_meta(
+            entry.short_offset,
+            first,
+            new_size,
+            Some(self.written_now()),
+        )?;
         Ok(data.len())
     }
 
@@ -2056,7 +2167,14 @@ impl<B: Block> Fat32<B> {
         }
         let old_size = u64::from(entry.size);
         if size == old_size {
-            return Ok(());
+            // A truncation that keeps the length is still the open that
+            // truncates a file, and is stamped as one.
+            return self.set_entry_meta(
+                entry.short_offset,
+                entry.cluster,
+                entry.size,
+                Some(self.written_now()),
+            );
         }
         let bpc = self.layout.bytes_per_cluster;
         let new_size = u32::try_from(size).map_err(|_| DriverError::LengthOutOfRange)?;
@@ -2067,7 +2185,7 @@ impl<B: Block> Fat32<B> {
                 if entry.cluster >= 2 {
                     self.free_chain(entry.cluster)?;
                 }
-                self.set_entry_meta(entry.short_offset, 0, 0)?;
+                self.set_entry_meta(entry.short_offset, 0, 0, Some(self.written_now()))?;
                 return Ok(());
             }
             // Walk to the new last cluster, sever and free the remainder.
@@ -2082,12 +2200,22 @@ impl<B: Block> Fat32<B> {
                 self.free_chain(tail)?;
             }
             self.set_fat(cluster, FAT32_EOC_WRITE)?;
-            self.set_entry_meta(entry.short_offset, entry.cluster, new_size)?;
+            self.set_entry_meta(
+                entry.short_offset,
+                entry.cluster,
+                new_size,
+                Some(self.written_now()),
+            )?;
         } else {
             let needed = size.div_ceil(bpc);
             let first = self.ensure_chain(entry.cluster, needed)?;
             self.zero_range(first, old_size, size - old_size)?;
-            self.set_entry_meta(entry.short_offset, first, new_size)?;
+            self.set_entry_meta(
+                entry.short_offset,
+                first,
+                new_size,
+                Some(self.written_now()),
+            )?;
         }
         Ok(())
     }
@@ -2272,7 +2400,7 @@ impl<B: Block> Fat32<B> {
                 dst_cluster
             };
             let dotdot_offset = self.cluster_byte(src_entry.cluster) + DIR_ENTRY_LEN as u64;
-            self.set_entry_meta(dotdot_offset, parent_field, 0)?;
+            self.set_entry_meta(dotdot_offset, parent_field, 0, None)?;
         }
         Ok(())
     }
@@ -2287,7 +2415,12 @@ impl<B: Block> FilesystemRead for Fat32<B> {
         NameMatching::AsciiCaseInsensitive
     }
 
+    fn node_identity(&self) -> NodeIdentity {
+        NodeIdentity::ContentDerived
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
+        let node = live_node(node)?;
         let allocated = self.allocation(node_cluster(node), node_is_dir(node), node_size(node))?;
         // FAT stores timestamps only in the *parent's* directory entry, not
         // in anything addressable by the packed node identity, so a stat by
@@ -2332,6 +2465,7 @@ impl<B: Block> FilesystemRead for Fat32<B> {
     }
 
     fn read_at(&mut self, file: NodeId, offset: u64, buf: &mut [u8]) -> Result<usize, DriverError> {
+        let file = live_node(file)?;
         if node_is_dir(file) {
             return Err(DriverError::Unsupported);
         }
@@ -2490,6 +2624,10 @@ impl<B: Block> FilesystemWrite for Fat32<B> {
         // All mutations are written straight through to the block device.
         Ok(())
     }
+
+    fn set_volume_host(&mut self, _volume: DriverHandle, host: &'static dyn VolumeHost) {
+        self.host = Some(host);
+    }
 }
 
 impl<B: Block> FilesystemSecurity for Fat32<B> {
@@ -2517,6 +2655,11 @@ impl<B: Block> FilesystemSecurity for Fat32<B> {
         // security record. Storing a silently-lossy record is forbidden,
         // so the write is refused whole (fail closed).
         Err(DriverError::Unsupported)
+    }
+
+    fn stamp_owner(&mut self, node: NodeId, _uid: u32, _gid: u32) -> Result<(), DriverError> {
+        // FAT32 records no owner: a new node is owned as every node is.
+        self.node_info(node).map(|_| ())
     }
 }
 

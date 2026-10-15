@@ -206,13 +206,12 @@ mod tests {
         assert_eq!(run_secondary(1), SecondaryExit::NotPublished);
 
         let sink: &'static crate::test_sink::TestSink =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(crate::test_sink::TestSink::new()));
-        let handle: &'static FakeDispatch =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(FakeDispatch {
-                ran_on: AtomicU32::new(u32::MAX),
-                online: AtomicU32::new(u32::MAX),
-                sink,
-            }));
+            crate::forever(alloc::boxed::Box::new(crate::test_sink::TestSink::new()));
+        let handle: &'static FakeDispatch = crate::forever(alloc::boxed::Box::new(FakeDispatch {
+            ran_on: AtomicU32::new(u32::MAX),
+            online: AtomicU32::new(u32::MAX),
+            sink,
+        }));
         publish_secondary_dispatch(handle).expect("first publish succeeds");
         assert!(
             publish_secondary_dispatch(handle).is_err(),

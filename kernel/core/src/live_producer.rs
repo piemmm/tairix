@@ -611,7 +611,7 @@ mod tests {
     /// A `TestArch` reporting `cpu`, leaked to the `'static` shape the
     /// producers hold (mirroring the boot-global arch handle).
     fn arch_at(cpu: u32) -> &'static TestArch {
-        Box::leak(Box::new(TestArch::on_cpu(cpu)))
+        crate::forever(Box::new(TestArch::on_cpu(cpu)))
     }
 
     /// Wrap `fake` in the refcounted [`ProcessSpace`]
@@ -931,9 +931,10 @@ mod tests {
             length: (16 * PAGE) as u64,
         });
         let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
-        let physmap: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(base, 16 * PAGE)));
-        let quarantine: &'static crate::dmaquarantine::DmaQuarantine = Box::leak(Box::new(
+            crate::forever(Box::new(FrameAllocator::new(&map).expect("allocator")));
+        let physmap: &'static SimPhysMap =
+            crate::forever(Box::new(SimPhysMap::new(base, 16 * PAGE)));
+        let quarantine: &'static crate::dmaquarantine::DmaQuarantine = crate::forever(Box::new(
             crate::dmaquarantine::DmaQuarantine::new(frames, physmap, &OneNodeTree),
         ));
         let _guard = publish_live_space_for_test(
@@ -976,13 +977,14 @@ mod tests {
             length: (16 * PAGE) as u64,
         });
         let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
+            crate::forever(Box::new(FrameAllocator::new(&map).expect("allocator")));
         // A direct map over other memory: none of these frames is in it.
-        let elsewhere: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(
+        let elsewhere: &'static SimPhysMap = crate::forever(Box::new(SimPhysMap::new(
             PhysAddr::new(64 * PAGE as u64),
             PAGE,
         )));
-        let reachable: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(base, 16 * PAGE)));
+        let reachable: &'static SimPhysMap =
+            crate::forever(Box::new(SimPhysMap::new(base, 16 * PAGE)));
         let cpu = crate::test_boot::claim_cpu();
         let blind = LiveSharedMem::new(arch_at(cpu), frames, elsewhere);
         let free = frames.free_frames();
@@ -1030,9 +1032,9 @@ mod tests {
             length: (RAM_PAGES * PAGE) as u64,
         });
         let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
+            crate::forever(Box::new(FrameAllocator::new(&map).expect("allocator")));
         let physmap: &'static SimPhysMap =
-            Box::leak(Box::new(SimPhysMap::new(base, RAM_PAGES * PAGE)));
+            crate::forever(Box::new(SimPhysMap::new(base, RAM_PAGES * PAGE)));
         let shared = LiveSharedMem::new(arch_at(crate::test_boot::claim_cpu()), frames, physmap);
         let reserve = frames.reserve_frames();
         assert!(reserve > 0);
@@ -1078,8 +1080,9 @@ mod tests {
             length: (64 * PAGE) as u64,
         });
         let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
-        let physmap: &'static SimPhysMap = Box::leak(Box::new(SimPhysMap::new(base, 64 * PAGE)));
+            crate::forever(Box::new(FrameAllocator::new(&map).expect("allocator")));
+        let physmap: &'static SimPhysMap =
+            crate::forever(Box::new(SimPhysMap::new(base, 64 * PAGE)));
         let shared = LiveSharedMem::new(arch_at(crate::test_boot::claim_cpu()), frames, physmap);
         let dma = || frames.snapshot().class[MemoryClass::Dma as usize];
         let free = frames.free_frames();

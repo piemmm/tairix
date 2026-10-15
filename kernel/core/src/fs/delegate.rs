@@ -307,10 +307,14 @@ enum Walk {
 /// volume and exhausted memory are [`VfsError::NoSpace`] and
 /// [`VfsError::OutOfMemory`]. Only an unrecoverable backing fault reaches
 /// [`VfsError::Io`].
+///
+/// A driver also answers [`DriverError::Unsupported`] for a node of the
+/// wrong kind, but every walk and operation here checks kinds before it
+/// calls the driver, so the code arrives only as what the format cannot do.
 const fn map_driver_error(error: DriverError) -> VfsError {
     match error {
         DriverError::NotFound => VfsError::NotFound,
-        DriverError::Unsupported => VfsError::NotADirectory,
+        DriverError::Unsupported => VfsError::NotSupported,
         DriverError::BufferTooSmall | DriverError::LengthOutOfRange => VfsError::InvalidPath,
         DriverError::AlreadyExists => VfsError::AlreadyExists,
         DriverError::DirectoryNotEmpty => VfsError::NotEmpty,
@@ -321,20 +325,6 @@ const fn map_driver_error(error: DriverError) -> VfsError {
         DriverError::NoSpace => VfsError::NoSpace,
         DriverError::OutOfMemory => VfsError::OutOfMemory,
         _ => VfsError::Io,
-    }
-}
-
-/// Maps a [`DriverError`] from a link operation onto the VFS error type.
-///
-/// The one code whose meaning is genuinely surface-specific: on the link
-/// surface [`DriverError::Unsupported`] is "this format stores no such
-/// object", the permanent limit no retry clears, where on a path walk it is
-/// "a file was used as a directory". Everything else maps as
-/// [`map_driver_error`].
-const fn map_link_error(error: DriverError) -> VfsError {
-    match error {
-        DriverError::Unsupported => VfsError::NotSupported,
-        other => map_driver_error(other),
     }
 }
 
@@ -377,11 +367,12 @@ pub trait MetaPolicy<R: FilesystemRead + ?Sized> {
     /// A driver's raw `create` mints the node with the format's own
     /// default record (`ARXFS` stamps the system user), which would lock
     /// an ordinary creator out of a file it just made. Under [`PerInode`]
-    /// the stored record's ownership is rewritten to the creating
-    /// caller's `(uid, gid)` — mode, ACL, and capability gate untouched —
-    /// in the same VFS operation that created the node, so ownership is
-    /// never observably wrong. Under [`Uniform`] there is no per-node
-    /// record to stamp, so the mount template stays the whole story.
+    /// the creating caller's `(uid, gid)` is recorded as the owner —
+    /// mode, ACL, and capability gate untouched — in the same VFS operation
+    /// that created the node, so ownership is never observably wrong; a
+    /// format that records no owner keeps the one its volume reports for
+    /// every node. Under [`Uniform`] there is no per-node record to stamp,
+    /// so the mount template stays the whole story.
     fn stamp_creation(fs: &mut R, node: NodeId, cred: &Credentials<'_>) -> Result<(), VfsError>;
 }
 
@@ -409,10 +400,8 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> MetaPolicy<R> for PerInode
     }
 
     fn stamp_creation(fs: &mut R, node: NodeId, cred: &Credentials<'_>) -> Result<(), VfsError> {
-        let mut sec = fs.security(node).map_err(map_driver_error)?;
-        sec.uid = cred.uid.0;
-        sec.gid = cred.gid.0;
-        fs.stamp_security(node, sec).map_err(map_driver_error)
+        fs.stamp_owner(node, cred.uid.0, cred.gid.0)
+            .map_err(map_driver_error)
     }
 }
 
@@ -469,7 +458,8 @@ impl<R: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>
     /// # Errors
     ///
     /// [`VfsError::NotFound`], [`VfsError::NotADirectory`],
-    /// [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    /// [`VfsError::PermissionDenied`], [`VfsError::NotSupported`] where the
+    /// format stores no record of the node's own, or [`VfsError::Io`].
     pub fn set_mode(
         &mut self,
         cred: &Credentials<'_>,
@@ -517,7 +507,8 @@ impl<R: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized>
     /// # Errors
     ///
     /// [`VfsError::NotFound`], [`VfsError::NotADirectory`],
-    /// [`VfsError::PermissionDenied`], or [`VfsError::Io`].
+    /// [`VfsError::PermissionDenied`], [`VfsError::NotSupported`] where the
+    /// format stores no record of the node's own, or [`VfsError::Io`].
     pub fn set_owner(
         &mut self,
         cred: &Credentials<'_>,
@@ -1154,7 +1145,10 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             return Err(VfsError::InvalidPath);
         }
         let mut buf = alloc::vec![0u8; len];
-        let read = self.fs.read_link(node, &mut buf).map_err(map_link_error)?;
+        let read = self
+            .fs
+            .read_link(node, &mut buf)
+            .map_err(map_driver_error)?;
         if read != len {
             // The driver disagreed with the length its own `node_info`
             // reported; refuse rather than resolve a partial target.
@@ -1520,8 +1514,24 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
             let node = fs
                 .create(place.parent, place.name.as_bytes(), kind)
                 .map_err(map_driver_error)?;
-            P::stamp_creation(fs, node, cred)
+            Self::hand_to_creator(fs, &place, node, cred)
         })
+    }
+
+    /// Give the node a create just made at `place` to its creator, taking it
+    /// back out when that fails: a create lands whole or leaves nothing.
+    fn hand_to_creator(
+        fs: &mut F,
+        place: &Place,
+        node: NodeId,
+        cred: &Credentials<'_>,
+    ) -> Result<(), VfsError> {
+        let stamped = P::stamp_creation(fs, node, cred);
+        if stamped.is_err() {
+            // The stamp's refusal is the answer whether or not this lands.
+            let _ = fs.remove(place.parent, place.name.as_bytes());
+        }
+        stamped
     }
 
     /// Create a symbolic link at `components` whose stored target is
@@ -1562,8 +1572,8 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         self.mutate(|fs| {
             let node = fs
                 .create_link(place.parent, place.name.as_bytes(), target.as_bytes())
-                .map_err(map_link_error)?;
-            P::stamp_creation(fs, node, cred)
+                .map_err(map_driver_error)?;
+            Self::hand_to_creator(fs, &place, node, cred)
         })
     }
 
@@ -1622,7 +1632,7 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
             return Err(VfsError::AlreadyExists);
         }
         self.mutate(|fs| fs.link(place.parent, place.name.as_bytes(), node))
-            .map_err(map_link_error)
+            .map_err(map_driver_error)
     }
 
     /// Write `data` into the file at `components` starting at `offset`,
@@ -1760,9 +1770,10 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// itself is additionally required (POSIX). A capability gate on either
     /// end is honoured too, so a gated name cannot be moved aside or replaced
     /// by a caller that does not hold it — not even within one parent, where
-    /// POSIX authorises nothing against the moved node. The structural move —
-    /// the existence, kind-compatibility, empty-target, and
-    /// directory-into-its-own-subtree checks — is performed by the driver.
+    /// POSIX authorises nothing against the moved node. Kind compatibility is
+    /// checked here; the rest of the structural move — the existence,
+    /// empty-target, and directory-into-its-own-subtree checks — is performed
+    /// by the driver.
     ///
     /// Under [`RenameFlags::NO_REPLACE`] a destination naming any entry but
     /// the source's own refuses the move. The caller holds the volume's lock
@@ -1784,7 +1795,9 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
     /// * [`VfsError::NotEmpty`] if the destination is a non-empty directory.
     /// * [`VfsError::DirectoryCycle`] if the move would place a directory
     ///   inside its own subtree.
-    /// * [`VfsError::NotADirectory`] on a kind-incompatible replacement.
+    /// * [`VfsError::NotADirectory`] if a directory would replace a
+    ///   non-directory, and [`VfsError::IsADirectory`] if a non-directory
+    ///   would replace a directory.
     /// * [`VfsError::PermissionDenied`] — including when either end carries a
     ///   capability gate the caller does not hold.
     /// * [`VfsError::Io`].
@@ -1809,6 +1822,16 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
                 .matches(src.name.as_bytes(), dst.name.as_bytes());
         if flags.refuses_replace() && dst.found.is_some() && !onto_itself {
             return Err(VfsError::AlreadyExists);
+        }
+        if let Some((dst_node, dst_info, _)) = &dst.found {
+            let moving_dir = src_info.kind == NodeKind::Directory;
+            if *dst_node != src_node && moving_dir != (dst_info.kind == NodeKind::Directory) {
+                return Err(if moving_dir {
+                    VfsError::NotADirectory
+                } else {
+                    VfsError::IsADirectory
+                });
+            }
         }
 
         // A directory moved to a different parent has its `..` rewritten, so

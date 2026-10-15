@@ -66,7 +66,7 @@
 
 extern crate alloc;
 
-// Host tests need `std` for `Box::leak`, `catch_unwind`, and
+// Host tests need `std` for `catch_unwind` and
 // `String::from_utf8`. The crate itself remains `no_std` for
 // production builds (no hacks).
 #[cfg(test)]
@@ -94,6 +94,7 @@ pub mod driver_store;
 pub mod filelock;
 pub mod filemap;
 pub mod foreground;
+mod forever;
 pub mod fs;
 pub mod fswatch;
 pub mod futex;
@@ -234,6 +235,7 @@ pub use driver_store::{
     SYSTEM_VOLUME_STORE_PATH,
 };
 pub use filemap::{FileMap, NullFileMap, NULL_FILE_MAP};
+pub use forever::forever;
 pub use fs::{
     read_bootstrap_file, Access, AclEntry, AclWho, Attachment, BootstrapFile, BoundedReadError,
     CachedFs, Credentials, FilesystemAlreadyInstalled, FilesystemService, IdentityAlreadyInstalled,

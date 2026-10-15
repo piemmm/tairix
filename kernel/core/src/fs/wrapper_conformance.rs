@@ -33,7 +33,8 @@ use alloc::boxed::Box;
 
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity,
-    FilesystemStats, FilesystemWrite, NodeId, NodeKind, NodeSecurity, VolumeHost,
+    FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeIdentity, NodeKind, NodeSecurity,
+    VolumeHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 
@@ -50,7 +51,9 @@ pub const DIR_NAME: &[u8] = b"dir";
 
 /// An inner driver supporting every method of every facet: a root holding
 /// a regular file with contents, a symbolic link naming it, and a
-/// subdirectory.
+/// subdirectory. Its declarations are the ones no wrapper would invent — a
+/// folding name match, ids that may follow contents — so a wrapper that
+/// answers either itself is caught.
 ///
 /// The caller wraps this and hands the wrapper to the `assert_*`
 /// functions, which re-resolve everything by name through the wrapper's
@@ -58,7 +61,7 @@ pub const DIR_NAME: &[u8] = b"dir";
 /// suite uses only the trait surface and never needs the fixture's ids.
 #[must_use]
 pub fn fixture() -> RwMockFs {
-    let mut fs = RwMockFs::new();
+    let mut fs = RwMockFs::new().with_content_derived_ids();
     let root = fs.root();
     let file = fs
         .create(root, FILE_NAME, NodeKind::RegularFile)
@@ -93,6 +96,17 @@ pub fn assert_read_forwards<W: FilesystemRead + ?Sized>(wrapper: &mut W) {
         root.raw(),
         0,
         "the wrapper reports no root; `root` is not being forwarded"
+    );
+    assert_eq!(
+        wrapper.name_matching(),
+        NameMatching::AsciiCaseInsensitive,
+        "`name_matching` is not being forwarded"
+    );
+    assert_eq!(
+        wrapper.node_identity(),
+        NodeIdentity::ContentDerived,
+        "`node_identity` is not being forwarded: a cache above it would keep a \
+         name's id across a write that changed it"
     );
 
     let file = child(wrapper, FILE_NAME);
@@ -199,6 +213,10 @@ impl VolumeHost for RecordingHost {
         Some(0)
     }
 
+    fn wall_time(&self) -> Option<tairix_abi::time::Time64> {
+        None
+    }
+
     fn writeback_due(&self, volume: DriverHandle, _deadline_ns: Option<u64>) {
         self.0.store(volume.as_u64(), Ordering::Release);
     }
@@ -210,11 +228,11 @@ impl VolumeHost for RecordingHost {
 ///
 /// Its trait default is a silent no-op, so a wrapper that drops it costs no
 /// error and no test failure anywhere else — the inner driver simply never
-/// defers a commit again, and the batching win disappears without a trace.
+/// defers a commit or stamps a time again, without a trace.
 /// The fixture reports to the host as it is installed, so an unforwarded
 /// call leaves the host with nothing recorded.
 fn assert_volume_host_forwards<W: FilesystemWrite + ?Sized>(wrapper: &mut W) {
-    let host: &'static RecordingHost = Box::leak(Box::new(RecordingHost(AtomicU64::new(0))));
+    let host: &'static RecordingHost = crate::forever(Box::new(RecordingHost(AtomicU64::new(0))));
     let volume = DriverHandle::from_raw(CONFORMANCE_VOLUME).expect("non-zero handle");
     wrapper.set_volume_host(volume, host);
     assert_eq!(
@@ -269,6 +287,18 @@ pub fn assert_security_forwards<W: FilesystemRead + FilesystemSecurity + ?Sized>
         (changed.mode, changed.uid, changed.gid),
         "the wrapper did not carry the stored record through"
     );
+
+    wrapper
+        .stamp_owner(file, changed.uid + 1, changed.gid + 1)
+        .expect("`stamp_owner` is not being forwarded");
+    let stamped = wrapper
+        .security(file)
+        .expect("`security` is not being forwarded");
+    assert_eq!(
+        (stamped.mode, stamped.uid, stamped.gid),
+        (changed.mode, changed.uid + 1, changed.gid + 1),
+        "the wrapper did not carry the owner stamp through"
+    );
 }
 
 /// The wrapper *replaces* the security facet rather than forwarding it:
@@ -283,6 +313,17 @@ pub fn assert_security_replaced<W: FilesystemRead + FilesystemSecurity + ?Sized>
         wrapper.set_security(file, NodeSecurity::new(0o600, 1, 1)),
         Err(DriverError::Unsupported),
         "a mapped record is mount policy, so storing one is refused whole"
+    );
+    let mapped = wrapper.security(file).expect("record");
+    assert_eq!(
+        wrapper.stamp_owner(file, 1, 1),
+        Ok(()),
+        "a creation on a mapped volume is not refused"
+    );
+    assert_eq!(
+        wrapper.security(file).expect("record"),
+        mapped,
+        "and takes the mapped owner, like every other node"
     );
 }
 

@@ -16,7 +16,8 @@ use tairix_browse::{Places, ToolbarBand, Volume};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
-use super::{operation_control, OperationControl};
+use super::{create_refusal, operation_control, OperationControl};
+use tairix_abi::Errno;
 
 /// The window the operation's panel is laid out in for these tests.
 const WINDOW: Rect = Rect::new(0, 0, 480, 480);
@@ -275,4 +276,26 @@ fn the_progress_is_shown_once_a_frame_and_on_finishing() {
         progress_due(true, shown, shown),
         "the last state is always shown"
     );
+}
+
+/// A refused create says why it was refused, and claims a taken name only for
+/// a taken name: every refusal used to read as one.
+#[test]
+fn a_refused_create_names_its_own_reason() {
+    assert_eq!(
+        create_refusal(Errno::AlreadyExists),
+        "a destination of that name already exists"
+    );
+    for other in [
+        Errno::NoSpace,
+        Errno::PermissionDenied,
+        Errno::NotSupported,
+        Errno::DeviceFault,
+    ] {
+        assert_ne!(
+            create_refusal(other),
+            create_refusal(Errno::AlreadyExists),
+            "{other:?}"
+        );
+    }
 }

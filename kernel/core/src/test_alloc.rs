@@ -9,7 +9,7 @@
 //!
 //! Unit tests run in parallel threads inside one process, so one shared
 //! counter would be perturbed by unrelated tests (including their
-//! deliberately `Box::leak`ed fixtures) and make any assertion flaky. Each
+//! fixtures kept for the process) and make any assertion flaky. Each
 //! measurement therefore owns its own [`LiveBytes`] balance: a soak opts
 //! exactly the threads it owns (its caller and its server) into its own
 //! counter ([`opt_in_current_thread`]), so the balance it reads is

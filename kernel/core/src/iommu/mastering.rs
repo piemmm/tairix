@@ -205,7 +205,7 @@ mod tests {
     }
 
     fn port(answer: Option<MasterChange>) -> &'static Port {
-        Box::leak(Box::new(Port {
+        crate::forever(Box::new(Port {
             answer,
             calls: SpinLock::new(Vec::new()),
             held: SpinLock::new(()),
@@ -214,7 +214,7 @@ mod tests {
     }
 
     fn sink() -> &'static TestSink {
-        Box::leak(Box::new(TestSink::new()))
+        crate::forever(Box::new(TestSink::new()))
     }
 
     fn field<'a>(event: &'a CapturedEvent, key: &str) -> Option<&'a str> {

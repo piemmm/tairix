@@ -93,6 +93,23 @@ fn loom_seqlock_reader_writer() {
 }
 
 #[test]
+fn loom_seqlock_never_returns_a_torn_payload() {
+    loom::model(|| {
+        let s = Arc::new(SeqLock::new((0u64, 0u64)));
+        let s1 = s.clone();
+        let writer = thread::spawn(move || {
+            // SAFETY: this thread is the sole writer.
+            unsafe {
+                s1.write((1, 1));
+            }
+        });
+        let (low, high) = s.read();
+        assert_eq!(low, high, "a payload two writes contributed to");
+        writer.join().unwrap();
+    });
+}
+
+#[test]
 fn loom_oncecell_single_init() {
     loom::model(|| {
         let cell: Arc<OnceCell<u32>> = Arc::new(OnceCell::new());

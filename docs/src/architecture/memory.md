@@ -1466,7 +1466,9 @@ properties:
   cached, so a later read fills only the hole and charges no entry twice; a
   directory's own entry in its parent goes whenever entries are added to or
   removed from it. Writes/truncates also drop the file's chunks
-  and stat; create/remove/rename drop the affected
+  and stat, and on a format whose ids follow contents (FAT32's pack a
+  file's size and first cluster) the name's lookup, so the next access
+  learns the id the write gave it; create/remove/rename drop the affected
   directory's *entire* lookup set (driver name matching may fold case),
   its directory entries, and its stat; an unidentifiable mutation
   target purges the whole cache; a detected ledger imbalance poisons

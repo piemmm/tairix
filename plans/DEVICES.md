@@ -635,9 +635,10 @@ volume-policy service.
   `tairix_kernel::volume_policy::LATE_STORAGE_GID` cell). A runtime-attached
   ownerless filesystem (FAT32) is wrapped in `GroupMappedFs`: every node
   reports system ownership under that group — directories `0o775`, files
-  `0o664`, `set_security` refused (the format cannot hold a record) — and
-  the mount template matches, so any logged-in member reads and writes the
-  medium without ambient authority while non-members read only. No
+  `0o664`, `set_security` refused (the format cannot hold a record), and a
+  new node owned the same way — and the mount template matches, so any
+  logged-in member reads, writes and creates on the medium without ambient
+  authority while non-members read only. No
   installed gid (or a registry without the group) leaves the volume
   restrictively system-owned (fail closed, never an invented gid); volumes
   with a real owner model (ext4, ARXFS) are never wrapped. Removable

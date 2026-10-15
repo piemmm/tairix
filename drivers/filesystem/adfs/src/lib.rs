@@ -62,7 +62,7 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, DirVisit, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeInfo, NodeKind, NodeTimes, VolumeStats,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeTimes, VolumeHost, VolumeStats,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -216,15 +216,52 @@ fn fixed_size_u32(format: FixedFormat) -> u32 {
     }
 }
 
-/// The single stamp a typed object stores, widened to [`Time64`]; an
-/// untyped object (raw load/exec addresses) stores no stamp and
-/// honestly reports the epoch.
+/// The single stamp a typed object stores, widened to [`Time64`]. An
+/// untyped object (raw load/exec addresses) stores no stamp, and RISC OS's
+/// epoch itself is a clock that was never set: both honestly report the
+/// epoch.
 fn object_stamp(object: &Object) -> Time64 {
     match acorn::decode_load_exec(object.load, object.exec) {
+        acorn::LoadExec::Typed {
+            centiseconds: 0, ..
+        }
+        | acorn::LoadExec::Untyped { .. } => Time64::UNIX_EPOCH,
         acorn::LoadExec::Typed { centiseconds, .. } => {
             acorn::centiseconds_to_time64(centiseconds).unwrap_or(Time64::UNIX_EPOCH)
         }
-        acorn::LoadExec::Untyped { .. } => Time64::UNIX_EPOCH,
+    }
+}
+
+/// The filetype a new object takes: Data, as RISC OS gives a file created
+/// without one. A new untyped object would be a load-and-run image at
+/// address zero.
+const FILETYPE_DATA: u16 = 0xFFD;
+
+/// `object` as a typed object of `filetype` stamped at `now`, to the
+/// centisecond — or stamped zero, read as none, while the time is unknown or
+/// beyond the 1900–2248 RISC OS's 40-bit stamp holds.
+fn typed_at(object: &Object, filetype: u16, now: Option<Time64>) -> Result<Object, DriverError> {
+    let centiseconds = now
+        .and_then(|time| {
+            Time64::new(time.secs(), time.subsec_nanos() / 10_000_000 * 10_000_000).ok()
+        })
+        .and_then(|time| acorn::time64_to_centiseconds(time).ok())
+        .unwrap_or(0);
+    let (load, exec) =
+        acorn::encode_typed(filetype, centiseconds).map_err(|_| DriverError::OutOfRange)?;
+    Ok(Object {
+        load,
+        exec,
+        ..*object
+    })
+}
+
+/// `object` restamped at `now` because its contents changed. An untyped
+/// object's load and exec words are addresses, not a stamp, and stay.
+fn restamped(object: &Object, now: Option<Time64>) -> Result<Object, DriverError> {
+    match acorn::decode_load_exec(object.load, object.exec) {
+        acorn::LoadExec::Typed { filetype, .. } => typed_at(object, filetype, now),
+        acorn::LoadExec::Untyped { .. } => Ok(*object),
     }
 }
 
@@ -281,9 +318,17 @@ pub struct Adfs<B: Block> {
     /// and the lookups between them do not re-read it to check it again.
     /// Replaced by each write's own result, and dropped by any other.
     validated: Option<(u32, BigHeader)>,
+    /// The host the mount's stamps take their time from, once it has one.
+    host: Option<&'static dyn VolumeHost>,
 }
 
 impl<B: Block> Adfs<B> {
+    /// The instant an operation stamps, or `None` while the host has no time
+    /// to give.
+    fn now(&self) -> Option<Time64> {
+        self.host.and_then(VolumeHost::wall_time)
+    }
+
     /// Attach to an existing ADFS volume on `device`, identifying its
     /// format and validating every checksummed structure on the way.
     ///
@@ -318,6 +363,7 @@ impl<B: Block> Adfs<B> {
             resolved: [None; RESOLVED_LEN],
             next_resolved: 0,
             validated: None,
+            host: None,
         };
         // The root directory must itself validate.
         let root = adfs.root_addr();
@@ -1106,6 +1152,10 @@ impl<B: Block> FilesystemRead for Adfs<B> {
         NameMatching::AsciiCaseInsensitive
     }
 
+    fn node_identity(&self) -> NodeIdentity {
+        NodeIdentity::ContentDerived
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         if !node_is_valid(node) {
             return Err(DriverError::NotFound);
@@ -1286,7 +1336,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         if self.dir_lookup(dir_addr, name)?.is_some() {
             return Err(DriverError::AlreadyExists);
         }
-        let mut object = Object::named(name)?;
+        let mut object = typed_at(&Object::named(name)?, FILETYPE_DATA, self.now())?;
         match kind {
             NodeKind::RegularFile => {
                 // Created with owner read/write, no data allocation.
@@ -1370,11 +1420,13 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             self.zero_object_range(indaddr, u64::from(size), offset)?;
         }
         self.object_write(indaddr, offset, data)?;
-        if end > u64::from(size) || indaddr != object.indaddr {
-            let mut updated = object;
-            updated.indaddr = indaddr;
-            // `end` was bounded by `u32::MAX` above.
-            updated.size = size.max(u32::try_from(end).unwrap_or(u32::MAX));
+        // The entry is the object's only metadata, so the stamp costs a
+        // directory write only where the write did not already need one.
+        let mut updated = restamped(&object, self.now())?;
+        updated.indaddr = indaddr;
+        // `end` was bounded by `u32::MAX` above.
+        updated.size = size.max(u32::try_from(end).unwrap_or(u32::MAX));
+        if updated != object {
             self.dir_update_at(dir_addr, index, &updated)?;
         }
         Ok(data.len())
@@ -1390,7 +1442,7 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
         }
         let old = u64::from(object.size);
         let dir_addr = node_addr(dir);
-        let mut updated = object;
+        let mut updated = restamped(&object, self.now())?;
         match size.cmp(&old) {
             core::cmp::Ordering::Greater => {
                 updated.indaddr = self.grow_object(object.indaddr, object.size, size, dir_addr)?;
@@ -1403,10 +1455,15 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
             core::cmp::Ordering::Less => {
                 self.shrink_object(object.indaddr, object.size, size)?;
             }
-            core::cmp::Ordering::Equal => return Ok(()),
+            // A truncation that keeps the length is still the open that
+            // truncates a file, and is stamped as one.
+            core::cmp::Ordering::Equal => {}
         }
         // `size` was bounded by `u32::MAX` above.
         updated.size = u32::try_from(size).unwrap_or(u32::MAX);
+        if updated == object {
+            return Ok(());
+        }
         self.dir_update_at(dir_addr, index, &updated)
     }
 
@@ -1520,6 +1577,10 @@ impl<B: Block> FilesystemWrite for Adfs<B> {
     fn flush(&mut self) -> Result<(), DriverError> {
         // Every mutation writes through to the device.
         Ok(())
+    }
+
+    fn set_volume_host(&mut self, _volume: DriverHandle, host: &'static dyn VolumeHost) {
+        self.host = Some(host);
     }
 }
 

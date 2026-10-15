@@ -555,7 +555,7 @@ impl Clock for NullClock {
 /// Run the full `tairix_appload` gate over `fs`, exactly as the spawn
 /// path does.
 pub(crate) fn gate_load(fs: &MemFs, anchor: [u8; 32]) -> Result<LoadedApp, AppError> {
-    let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+    let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
     let store = FsBundleStore::new(fs, 1000, &NoCaps);
     let verifier = AnchorVerifier::new(anchor);
     let clock = NullClock;

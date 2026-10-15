@@ -125,13 +125,13 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
         )
         .expect("other mount");
 
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
     cell.register(h_shared, shared, "shared", "memfs", [0u8; 16], None)
         .expect("register shared");
     cell.register(h_other, other, "other", "memfs", [0u8; 16], None)
         .expect("register other");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
 
@@ -218,7 +218,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
         )
         .expect("colliding runtime mount");
 
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
     cell.register(h_parent, parent, "root", "memfs", [0u8; 16], None)
         .expect("register parent");
@@ -226,7 +226,7 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
         .expect("register usb");
     cell.register(h_dup, driver(), "dup", "memfs", [0u8; 16], None)
         .expect("register dup");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
     let caps = caps();
@@ -285,7 +285,7 @@ fn service(
     identity_installed: bool,
     read_only: bool,
 ) -> MountedFilesystemService<RwMockFs> {
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     if mount_installed {
         cell.install_vfs(vfs(read_only)).expect("install vfs");
         // The in-memory driver is mounted at [`MOUNT`] under handle 9 (see
@@ -295,7 +295,7 @@ fn service(
         cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
             .expect("register driver");
     }
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     if identity_installed {
         identity
             .install(identity_table())
@@ -393,12 +393,12 @@ fn the_storage_catalog_lists_its_volumes_and_stores_nothing() {
 /// A fully-installed writable service whose created directories are
 /// traversable (mode `0o755`), so a test can build a tree and then walk it.
 fn ready_traversable() -> MountedFilesystemService<RwMockFs> {
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(9).expect("non-zero handle");
     cell.register(handle, dir_driver(), "vol", "memfs", [0u8; 16], None)
         .expect("register driver");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity
         .install(identity_table())
         .expect("install identity");
@@ -649,7 +649,7 @@ fn a_listing_whose_directory_is_replaced_between_batches_is_stale() {
 /// no record once the listing goes.
 #[test]
 fn a_listing_whose_directory_is_removed_and_its_number_reused_is_stale() {
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(9).expect("non-zero handle");
     cell.register(
@@ -661,7 +661,7 @@ fn a_listing_whose_directory_is_removed_and_its_number_reused_is_stale() {
         None,
     )
     .expect("register driver");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
     let caps = caps();
@@ -727,7 +727,7 @@ fn a_listing_whose_directory_is_removed_and_its_number_reused_is_stale() {
 fn a_listing_holds_no_mount_table_guard_into_its_driver() {
     let h_parent = DriverHandle::from_raw(9).expect("handle");
     let h_usb = DriverHandle::from_raw(10).expect("handle");
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     let parent = dir_driver().with_lookup_probe(Box::new(move || {
         let vfs = cell.vfs().expect("installed");
         assert!(
@@ -753,7 +753,7 @@ fn a_listing_holds_no_mount_table_guard_into_its_driver() {
         .expect("register parent");
     cell.register(h_usb, driver(), "usb1", "memfs", [0u8; 16], None)
         .expect("register usb");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
     assert_eq!(names_a_batch_at_a_time(&svc, "/Storage"), ["usb1"]);
@@ -1258,12 +1258,12 @@ fn chown_caps() -> CapabilitySet {
 /// test principal a member of the supplementary group `gid`, so the
 /// unprivileged owner-may-set-a-group-they-belong-to branch is exercised.
 fn ready_with_supplementary(gid: u32) -> MountedFilesystemService<RwMockFs> {
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(9).expect("non-zero handle");
     cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
         .expect("register driver");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     let mut builder = IdentityTableBuilder::new();
     builder.push_group(GroupRecord {
         gid: GroupId(TEST_GID),
@@ -1511,13 +1511,13 @@ fn production_layout() -> MountedFilesystemService<RwMockFs> {
         }
     }
 
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
     cell.register(system_handle, system, "system", "memfs", [0u8; 16], None)
         .expect("register system");
     cell.register(root_handle, rootvol, "root", "memfs", [0u8; 16], None)
         .expect("register root");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     MountedFilesystemService::new(cell, identity)
 }
@@ -1633,9 +1633,9 @@ fn a_volume_shown_at_several_paths_is_reported_once() {
             mounts.set_backing(&path, handle, subtree).expect("back");
         }
     }
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
 
@@ -1716,7 +1716,7 @@ fn a_volume_coming_going_or_failing_is_published_as_a_mounts_notice() {
     use tairix_abi::NoticeTopic;
     let generation =
         || crate::notice::generation(NoticeTopic::Mounts, &crate::seat::NULL_SEAT_REGISTRY);
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(11).expect("handle");
 
@@ -1744,12 +1744,12 @@ fn a_volume_coming_going_or_failing_is_published_as_a_mounts_notice() {
 /// unwell (`plans/FIX-IO.md` IO2/IO3; `plans/DEVICES.md` D4).
 #[test]
 fn mount_snapshot_overlays_reported_block_health() {
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(9).expect("handle");
     cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
         .expect("register");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
 
@@ -1885,7 +1885,7 @@ where
         + Send
         + 'static,
 {
-    let cell: &'static LateFilesystem<F> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<F> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(read_only)).expect("install vfs");
     cell.register(
         DriverHandle::from_raw(9).expect("handle"),
@@ -1896,7 +1896,7 @@ where
         None,
     )
     .expect("register");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     MountedFilesystemService::new(cell, identity)
 }
@@ -1980,7 +1980,7 @@ fn attr_access_follows_the_nodes_own_permissions() {
     });
     let table = builder.verify(&NullSink).expect("well-formed table");
 
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     cell.register(
         DriverHandle::from_raw(9).expect("handle"),
@@ -1991,7 +1991,7 @@ fn attr_access_follows_the_nodes_own_permissions() {
         None,
     )
     .expect("register");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(table).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
 
@@ -2150,6 +2150,10 @@ impl FilesystemRead for NoAttrsFs {
 
     fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
         self.0.name_matching()
+    }
+
+    fn node_identity(&self) -> tairix_abi::driver::filesystem::NodeIdentity {
+        tairix_abi::driver::filesystem::NodeIdentity::Stable
     }
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         self.0.node_info(node)
@@ -2653,11 +2657,11 @@ fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
         )
         .expect("rebased mount");
 
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
     cell.register(h, volume, "vol", "memfs", [0u8; 16], None)
         .expect("register");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
 
@@ -2901,11 +2905,11 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
             alloc::vec![alloc::string::String::from("Area")],
         )
         .expect("rebased mount");
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
     cell.register(h, volume, "vol", "memfs", [0u8; 16], None)
         .expect("register");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
 
@@ -3135,13 +3139,13 @@ fn a_program_is_read_only_from_a_mount_that_runs_programs() {
             )
             .expect("stick");
     }
-    let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
     cell.register(h_root, root, "root", "memfs", [0u8; 16], None)
         .expect("register root");
     cell.register(h_stick, stick, "stick", "memfs", [0u8; 16], None)
         .expect("register stick");
-    let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
     let svc = MountedFilesystemService::new(cell, identity);
 

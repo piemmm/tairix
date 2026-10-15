@@ -191,7 +191,7 @@ pub fn install_frame_heap_source(
     let Ok(slots) = SlotWindow::new(window_pages, frames, physmap) else {
         return false;
     };
-    let source: &'static FrameHeapSource = Box::leak(Box::new(FrameHeapSource {
+    let source: &'static FrameHeapSource = crate::forever(Box::new(FrameHeapSource {
         frames,
         kvmap,
         pages: FramePages::new(frames, physmap),

@@ -1464,7 +1464,7 @@ mod tests {
     }
 
     fn text_queue() -> &'static ConsoleInputQueue {
-        Box::leak(Box::new(ConsoleInputQueue::new()))
+        crate::forever(Box::new(ConsoleInputQueue::new()))
     }
 
     /// A console whose write half records only the disposition of its
@@ -1486,12 +1486,12 @@ mod tests {
     /// A registry over one surface-bearing console, plus the handle the
     /// test reads the surface state back through.
     fn registry_with_surface() -> (SeatRegistry, &'static SurfaceConsole) {
-        let console: &'static SurfaceConsole = Box::leak(Box::new(SurfaceConsole {
+        let console: &'static SurfaceConsole = crate::forever(Box::new(SurfaceConsole {
             // A fresh system is a text login, so the console starts shown.
             surface: SpinLock::new(Surface::Shown),
         }));
         let devices: &'static [ConsoleDevice] =
-            Box::leak(Box::new([ConsoleDevice::new(console, &NULL_CONSOLE_READ)]));
+            crate::forever(Box::new([ConsoleDevice::new(console, &NULL_CONSOLE_READ)]));
         (
             SeatRegistry::new(&NULL_CONSOLE_INPUT).with_consoles(devices),
             console,
@@ -2306,7 +2306,7 @@ mod tests {
         // Three installed consoles, because the registry validates the
         // target against the list whose surface it hands over.
         let devices: &'static [ConsoleDevice] =
-            Box::leak(Box::new([(); 3].map(|()| {
+            crate::forever(Box::new([(); 3].map(|()| {
                 ConsoleDevice::new(&crate::console::NULL_CONSOLE, &NULL_CONSOLE_READ)
             })));
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT).with_consoles(devices);

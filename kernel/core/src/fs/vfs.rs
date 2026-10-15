@@ -913,6 +913,8 @@ impl Vfs {
     /// * [`VfsError::ReadOnly`] if the covering mount is read-only.
     /// * [`VfsError::PermissionDenied`] if the caller is not the node's
     ///   owner or fails a search/capability check on the way to it.
+    /// * [`VfsError::NotSupported`] if the format stores no record of the
+    ///   node's own.
     /// * [`VfsError::NotADirectory`] or [`VfsError::Io`].
     pub fn set_mode_via_secured<
         F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized,
@@ -947,6 +949,8 @@ impl Vfs {
     /// * [`VfsError::PermissionDenied`] if the caller lacks the authority
     ///   for the requested change or fails a search/capability check on the
     ///   way to the node.
+    /// * [`VfsError::NotSupported`] if the format stores no record of the
+    ///   node's own.
     /// * [`VfsError::NotADirectory`] or [`VfsError::Io`].
     pub fn set_owner_via_secured<
         F: FilesystemRead + FilesystemSecurity + FilesystemWrite + ?Sized,

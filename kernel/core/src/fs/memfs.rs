@@ -22,7 +22,8 @@ use core::ops::Bound;
 use tairix_abi::driver::filesystem::{
     AllocationClass, DirEntry, DirVisit, FilesystemAttrs, FilesystemAttrsFs,
     FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats, FilesystemWrite,
-    NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeHost, VolumeStats,
+    NameMatching, NodeId, NodeIdentity, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeHost,
+    VolumeStats,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_fsmeta::{AttrFlags, AttrSet};
@@ -73,6 +74,11 @@ pub struct RwMockFs {
     /// Run on entry to every lookup, so a test can check what its caller
     /// holds while inside the driver.
     lookup_probe: Option<Box<dyn Fn() + Send>>,
+    /// What every security store answers instead of storing, so a test can
+    /// stand in for a format that holds no record.
+    security_refusal: Option<DriverError>,
+    /// How long ids are declared to last; the ids themselves never change.
+    node_identity: NodeIdentity,
     /// Run on entry to every space-accounting read, so a test can count them.
     stats_probe: Option<Box<dyn Fn() + Send>>,
     /// The class the kernel set for the operations that follow.
@@ -110,6 +116,8 @@ impl RwMockFs {
             name_matching: NameMatching::AsciiCaseInsensitive,
             free: None,
             lookup_probe: None,
+            security_refusal: None,
+            node_identity: NodeIdentity::Stable,
             stats_probe: None,
             class: AllocationClass::Ordinary,
         }
@@ -119,6 +127,14 @@ impl RwMockFs {
     #[must_use]
     pub fn with_exact_names(mut self) -> Self {
         self.name_matching = NameMatching::Exact;
+        self
+    }
+
+    /// Declare ids that may follow contents, as FAT32's do, so a layer that
+    /// passes the declaration on is seen to.
+    #[must_use]
+    pub fn with_content_derived_ids(mut self) -> Self {
+        self.node_identity = NodeIdentity::ContentDerived;
         self
     }
 
@@ -135,6 +151,14 @@ impl RwMockFs {
     #[must_use]
     pub(crate) fn with_lookup_probe(mut self, probe: Box<dyn Fn() + Send>) -> Self {
         self.lookup_probe = Some(probe);
+        self
+    }
+
+    /// Answer every security store, an owner stamp included, with `refusal`.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_security_refused(mut self, refusal: DriverError) -> Self {
+        self.security_refusal = Some(refusal);
         self
     }
 
@@ -278,6 +302,10 @@ impl FilesystemRead for RwMockFs {
 
     fn name_matching(&self) -> NameMatching {
         self.name_matching
+    }
+
+    fn node_identity(&self) -> NodeIdentity {
+        self.node_identity
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -678,6 +706,9 @@ impl FilesystemSecurity for RwMockFs {
     }
 
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        if let Some(refusal) = self.security_refusal {
+            return Err(refusal);
+        }
         let idx = Self::index(node)?;
         match self.sec.get_mut(idx) {
             Some(stored) => {

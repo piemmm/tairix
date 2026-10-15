@@ -20,6 +20,7 @@ use super::*;
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::DriverKind;
 
@@ -658,6 +659,34 @@ fn security_reports_a_directorys_record() {
 fn security_of_an_absent_node_is_not_found() {
     let mut fs = mount();
     assert_eq!(fs.security(NodeId::NONE), Err(DriverError::NotFound));
+}
+
+#[test]
+fn a_created_node_takes_its_creators_owner_and_group() {
+    // Wide enough to need both halves of each split id.
+    let (uid, gid) = (0x0001_03E8, 0x0002_0064);
+    let mut fs = mount();
+    let root = fs.root();
+    let file = fs
+        .create(root, b"mine.txt", NodeKind::RegularFile)
+        .expect("create");
+    let dir = fs
+        .create(root, b"mine", NodeKind::Directory)
+        .expect("mkdir");
+    fs.stamp_owner(file, uid, gid).expect("stamp the file");
+    fs.stamp_owner(dir, uid, gid).expect("stamp the folder");
+
+    let mut fs = remount(fs);
+    let root = fs.root();
+    for (name, mode) in [(&b"mine.txt"[..], 0o644), (b"mine", 0o755)] {
+        let node = fs.lookup(root, name).expect("found after remount");
+        let sec = fs.security(node).expect("security");
+        assert_eq!((sec.uid, sec.gid, sec.mode), (uid, gid, mode));
+    }
+    assert_eq!(
+        fs.stamp_owner(NodeId::NONE, uid, gid),
+        Err(DriverError::NotFound)
+    );
 }
 
 // --- Write surface (`FilesystemWrite`). ---
@@ -1816,8 +1845,7 @@ fn inode_time_classic_field_is_signed() {
 }
 
 #[test]
-fn inode_time_extra_extends_the_epoch_past_2038() {
-    // Epoch bit 1 prepends 1 above bit 31: the low word is then unsigned.
+fn inode_time_extra_carries_the_epoch_and_the_nanoseconds() {
     assert_eq!(
         crate::decode_inode_time(5, Some(0b01)),
         Ok(Time64::from_secs((1 << 32) + 5))
@@ -1837,6 +1865,200 @@ fn inode_time_corrupt_nanoseconds_fail_closed() {
         crate::decode_inode_time(0, Some(1_000_000_000 << 2)),
         Err(tairix_abi::DriverError::DeviceFault)
     );
+}
+
+#[test]
+fn inode_time_decodes_every_epoch_of_the_extended_layout() {
+    // The ext4 disk layout's table: each epoch adds 2^32 seconds to the
+    // signed classic field, whichever way its top bit lies.
+    for (base, epoch, secs) in [
+        (0x8000_0000_u32, 0_u32, -(1_i64 << 31)),
+        (0x7FFF_FFFF, 0, (1 << 31) - 1),
+        (0x8000_0000, 1, 1 << 31),
+        (0x0000_0000, 1, 1 << 32),
+        (0x8000_0000, 2, (1 << 31) + (1 << 32)),
+        (0x0000_0000, 2, 1 << 33),
+        (0x8000_0000, 3, (1 << 31) + (1 << 33)),
+        (0x7FFF_FFFF, 3, (1 << 31) - 1 + 3 * (1 << 32)),
+    ] {
+        assert_eq!(
+            crate::decode_inode_time(base, Some(epoch)),
+            Ok(Time64::from_secs(secs)),
+            "epoch {epoch} over {base:#x}"
+        );
+    }
+}
+
+#[test]
+fn a_stamp_after_2038_reads_as_its_own_year() {
+    // 2040-01-01T00:00:00Z as Linux writes it: the low word, whose top bit is
+    // set, and epoch 1. Read as epoch-over-unsigned, it came back as 2176.
+    assert_eq!(
+        crate::decode_inode_time(2_208_988_800, Some(1)),
+        Ok(Time64::from_secs(2_208_988_800))
+    );
+}
+
+#[test]
+fn inode_time_round_trips_the_range_each_record_holds() {
+    let max = (1_i64 << 31) - 1 + 3 * (1 << 32);
+    for time in [
+        Time64::from_secs(-(1 << 31)),
+        Time64::new(-1, 999_999_999).expect("canonical"),
+        Time64::UNIX_EPOCH,
+        Time64::from_secs((1 << 31) - 1),
+        Time64::from_secs(1 << 31),
+        Time64::new(2_208_988_800, 123_456_789).expect("canonical"),
+        Time64::from_secs(1 << 32),
+        Time64::new(max, 999_999_999).expect("canonical"),
+    ] {
+        let (secs, extra) = crate::encode_inode_time(time, true).expect("in range");
+        assert_eq!(crate::decode_inode_time(secs, Some(extra)), Ok(time));
+    }
+    assert_eq!(
+        crate::encode_inode_time(Time64::from_secs(-(1 << 31) - 1), true),
+        None
+    );
+    assert_eq!(
+        crate::encode_inode_time(Time64::from_secs(max + 1), true),
+        None
+    );
+
+    // A classic record keeps whole seconds and stops at 2038.
+    let (secs, _) =
+        crate::encode_inode_time(Time64::new((1 << 31) - 1, 7).expect("canonical"), false)
+            .expect("in range");
+    assert_eq!(
+        crate::decode_inode_time(secs, None),
+        Ok(Time64::from_secs((1 << 31) - 1))
+    );
+    assert_eq!(
+        crate::encode_inode_time(Time64::from_secs(1 << 31), false),
+        None
+    );
+}
+
+/// `fs`, stamping `wall` from now on, or no time.
+fn at<B: Block>(mut fs: Ext4<B>, wall: Option<Time64>) -> Ext4<B> {
+    fs.set_volume_host(TestClock::volume(), TestClock::at(wall));
+    fs
+}
+
+#[test]
+fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
+    let t1 = Time64::new(2_208_988_800, 5).expect("canonical");
+    let t2 = Time64::new(2_208_988_900, 6).expect("canonical");
+    let t3 = Time64::new(2_208_989_000, 7).expect("canonical");
+    let mut fs = at(
+        Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format"),
+        Some(t1),
+    );
+    let root = fs.root();
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let made = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        (made.created, made.modified, made.changed, made.accessed),
+        (t1, t1, t1, t1)
+    );
+    let parent = fs.node_info(root).expect("info").times;
+    assert_eq!((parent.modified, parent.changed), (t1, t1));
+
+    fs = at(fs, Some(t2));
+    fs.write_at(root, b"f", 0, b"data").expect("write");
+    let written = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        (
+            written.created,
+            written.accessed,
+            written.modified,
+            written.changed
+        ),
+        (t1, t1, t2, t2)
+    );
+
+    fs = at(fs, Some(t3));
+    fs.rename(root, b"f", root, b"g").expect("rename");
+    let moved = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        (moved.modified, moved.changed),
+        (t2, t3),
+        "a rename changes the name, never the contents"
+    );
+    assert_eq!(fs.node_info(root).expect("info").times.modified, t3);
+
+    // The stamps are on the medium, not only in the handle.
+    let mut fs = Ext4::open(fs.into_block()).expect("reopen");
+    let file = fs.lookup(fs.root(), b"g").expect("found");
+    let kept = fs.node_info(file).expect("info").times;
+    assert_eq!((kept.created, kept.modified, kept.changed), (t1, t2, t3));
+}
+
+#[test]
+fn with_no_time_to_give_ext4_records_no_stamp() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let root = fs.root();
+    let file = fs
+        .create(root, b"f", NodeKind::RegularFile)
+        .expect("create");
+    let times = fs.node_info(file).expect("info").times;
+    assert_eq!(
+        (times.created, times.modified, times.changed, times.accessed),
+        (
+            Time64::UNIX_EPOCH,
+            Time64::UNIX_EPOCH,
+            Time64::UNIX_EPOCH,
+            Time64::UNIX_EPOCH
+        )
+    );
+
+    // A time the record cannot hold is no stamp either, never a wrapped one.
+    let mut fs = at(fs, Some(Time64::from_secs(1 << 40)));
+    fs.write_at(root, b"f", 0, b"data").expect("write");
+    assert_eq!(
+        fs.node_info(file).expect("info").times.modified,
+        Time64::UNIX_EPOCH
+    );
+}
+
+#[test]
+fn a_freed_inode_records_when_it_went_or_the_marker_when_that_is_unknown() {
+    let gone = Time64::from_secs(1_900_000_000);
+    let mut fs = at(
+        Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format"),
+        Some(gone),
+    );
+    let root = fs.root();
+    let dated = fs
+        .create(root, b"dated", NodeKind::RegularFile)
+        .expect("create");
+    let undated = fs
+        .create(root, b"undated", NodeKind::RegularFile)
+        .expect("create");
+    fs.remove(root, b"dated").expect("remove");
+    let mut fs = at(fs, None);
+    fs.remove(root, b"undated").expect("remove");
+
+    let mut raw = fs.inode_scratch().expect("scratch");
+    for (node, dtime) in [(dated, 1_900_000_000), (undated, crate::DELETED_DTIME)] {
+        fs.read_inode_raw(node_inode(node).expect("an inode"), &mut raw)
+            .expect("read");
+        assert_eq!(crate::le32(&raw, crate::INODE_DTIME), dtime);
+    }
+}
+
+#[test]
+fn a_classic_record_keeps_whole_seconds_and_no_birth_time() {
+    let stamp = Time64::new(1_900_000_000, 999).expect("canonical");
+    let mut fs = at(mount(), Some(stamp));
+    let root = fs.root();
+    let file = fs
+        .create(root, b"classic", NodeKind::RegularFile)
+        .expect("create");
+    let times = fs.node_info(file).expect("info").times;
+    assert_eq!(times.modified, Time64::from_secs(1_900_000_000));
+    assert_eq!(times.created, Time64::UNIX_EPOCH);
 }
 
 // ---------------------------------------------------------------------------
@@ -2202,6 +2424,29 @@ fn a_failed_remove_leaves_the_name_and_its_inode() {
     let mut buf = [0u8; 16];
     let read = fs.read_at(victim, 0, &mut buf).expect("read");
     assert_eq!(&buf[..read], b"still here");
+}
+
+/// A create whose directory update fails takes back its name and its inode,
+/// so the caller told it failed finds nothing there.
+#[test]
+fn a_create_whose_directory_update_fails_leaves_nothing() {
+    let fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let mut fs = Ext4::open(FailingWrites {
+        inner: fs.into_block(),
+        failing: None,
+    })
+    .expect("mount");
+    let root = fs.root();
+    let before = fs.stats().expect("stats");
+    let sector = fs.locate_inode(ROOT_INODE).expect("the root's record") / FMT_SECTOR as u64;
+    fs.block.failing = Some(sector..sector + 1);
+    assert_eq!(
+        fs.create(root, b"f", NodeKind::RegularFile),
+        Err(DriverError::DeviceFault)
+    );
+    fs.block.failing = None;
+    assert_eq!(fs.lookup(root, b"f"), Err(DriverError::NotFound));
+    assert_eq!(fs.stats().expect("stats"), before, "the inode went back");
 }
 
 /// A create that finds no room for its name — the directory needs a block

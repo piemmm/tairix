@@ -1045,7 +1045,10 @@ relevant — and **audited**; a malformed instant, a short buffer, or a
 non-settable `state` (`Unset`, or any undefined discriminant) fails closed,
 and the kernel attests the state itself so a caller cannot mislabel it. The
 clock boots `Unset`; until a trusted time source drives it, `wall_time_get`
-reports the epoch. The first-party Rust wrappers are `tairix_rt::wall_time` /
+reports the epoch. Mounted volumes stamp file times from this same clock
+through their host, and stamp none while it is unset or its reading is
+implausible ([driver traits](../abi/driver_traits.md)). The first-party Rust
+wrappers are `tairix_rt::wall_time` /
 `tairix_rt::wall_time_set`; the C stubs are `tairix_sys_wall_time_get` /
 `tairix_sys_wall_time_set`.
 

@@ -110,6 +110,12 @@ pub trait InitSpawnCtx {
         None
     }
 
+    /// The wall clock the volumes the boot path mounts stamp their times
+    /// from; the unset [`crate::NULL_WALL_CLOCK`] leaves every stamp empty.
+    fn wall_clock(&self) -> &'static (dyn crate::WallClockSource + 'static) {
+        &crate::NULL_WALL_CLOCK
+    }
+
     /// The boot audit sink the build path records `ProcessSpawn*` events
     /// through.
     fn audit(&self) -> &(dyn Sink + Sync);
@@ -1343,9 +1349,9 @@ mod tests {
         }
 
         set_max_level(Level::Trace);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let (bytes, image) = tiny_image();
-        let simmap: &'static SimPhysMap = Box::leak(Box::new(sim()));
+        let simmap: &'static SimPhysMap = crate::forever(Box::new(sim()));
         // An allocator over exactly the simulated RAM window, so every
         // frame the build draws is reachable for the zero-on-free scrub.
         let mut map = BootMemoryMap::new();
@@ -1355,7 +1361,7 @@ mod tests {
             length: (64 * PAGE_SIZE) as u64,
         });
         let frames: &'static FrameAllocator =
-            Box::leak(Box::new(FrameAllocator::new(&map).expect("allocator")));
+            crate::forever(Box::new(FrameAllocator::new(&map).expect("allocator")));
         let caps = Granted(&[CapabilityId::PROC_SPAWN]);
         let before = frames.free_frames();
 
@@ -1409,7 +1415,7 @@ mod tests {
     #[test]
     fn denied_without_proc_spawn_capability_touches_no_state() {
         set_max_level(Level::Trace);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let (bytes, image) = tiny_image();
         let mut space = host_space();
         let physmap = sim();
@@ -1482,7 +1488,7 @@ mod tests {
             Granted(&[CapabilityId::SANDBOX_SPAWN]),
             Granted(&[CapabilityId::PROC_SPAWN]),
         ] {
-            let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+            let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
             let (bytes, image) = tiny_image();
             let simmap = sim();
             let frames = frames_over_sim();
@@ -1514,7 +1520,7 @@ mod tests {
         // The property the narrow capability exists for: it buys an
         // isolated decode worker, never the authority to start a process.
         set_max_level(Level::Trace);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let (bytes, image) = tiny_image();
         let simmap = sim();
         let frames = frames_over_sim();
@@ -1553,7 +1559,7 @@ mod tests {
     #[test]
     fn build_failure_is_audited_and_reported() {
         set_max_level(Level::Trace);
-        let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let sink: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let (bytes, image) = tiny_image();
         let mut space = host_space();
         let physmap = sim();
@@ -1609,7 +1615,7 @@ mod tests {
             let frames = FrameAllocator::new(&map).expect("one-region allocator");
             Self {
                 frames,
-                sink: Box::leak(Box::new(TestSink::new())),
+                sink: crate::forever(Box::new(TestSink::new())),
             }
         }
     }
@@ -1670,7 +1676,7 @@ mod tests {
             let frames = FrameAllocator::new(&map).expect("one-region allocator");
             Self {
                 frames,
-                sink: Box::leak(Box::new(TestSink::new())),
+                sink: crate::forever(Box::new(TestSink::new())),
             }
         }
     }

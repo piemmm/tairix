@@ -186,7 +186,7 @@ impl MemStats {
         }
         // One boot-lifetime leak, deliberate: the gauge is shared as
         // `&'static` by every cache for the life of the kernel.
-        let gauge: &'static MemoryPressure = Box::leak(Box::new(
+        let gauge: &'static MemoryPressure = crate::forever(Box::new(
             MemoryPressure::over(backing).observed_by(&PRESSURE_BAND_WAKE),
         ));
         *slot = Some(gauge);
@@ -424,7 +424,7 @@ mod tests {
     }
 
     fn leaked_fake() -> &'static Fake {
-        Box::leak(Box::new(Fake {
+        crate::forever(Box::new(Fake {
             free: AtomicUsize::new(1 << 30),
             total: 1 << 30,
         }))

@@ -195,8 +195,7 @@ pub static NULL_USERS_DB: NullUsersDbSource = NullUsersDbSource;
 ///
 /// The held bytes are the salted credential records of the user database;
 /// they are zeroed when the source is dropped (zero-on-free for credential-bearing memory). A production boot
-/// `Box::leak`s the holder so it lives for the kernel's lifetime and the
-/// `Drop` never fires; the guarantee still holds for any non-leaked use
+/// keeps the holder for the kernel's life, so its `Drop` never fires; the guarantee still holds for any non-leaked use
 /// (tests, a future re-load path).
 pub struct HeldUsersDbSource {
     /// Validated `users-v1` text, exactly as read off the root volume.
@@ -557,7 +556,7 @@ where
 ///
 /// Shares the-checked read, the fail-closed parse, and the audit
 /// records with [`load_users_db`]. On success the
-/// returned holder owns the exact `users-v1` bytes (zeroed when dropped); the boot path `Box::leak`s it and installs it through
+/// returned holder owns the exact `users-v1` bytes (zeroed when dropped); the boot path keeps it for the kernel's life and installs it through
 /// `KernelSyscallHandlers::with_users_db`. On any refusal **no** holder
 /// is produced and the read buffer is zeroed, so a system whose database
 /// cannot be read serves none rather than inventing accounts.

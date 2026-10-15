@@ -14663,8 +14663,8 @@ where
     ///
     /// All borrows must outlive the slot the hook is published into.
     /// `KernelState` (constructed by [`crate::kernel_main`]) holds the targets
-    /// for the lifetime of the running kernel; the hook is `Box::leak`'d
-    /// alongside it so the published `'static dyn DispatchHook` is sound (no
+    /// for the lifetime of the running kernel; the hook is kept for the
+    /// kernel's life alongside it so the published `'static dyn DispatchHook` is sound (no
     /// global mutable static; the leak is a one-shot, immutable publish).
     #[must_use]
     // Mirrors `KernelSyscallHandlers::new`: the same distinct kernel-
@@ -15630,7 +15630,7 @@ mod tests {
     }
 
     fn make_sink() -> &'static TestSink {
-        Box::leak(Box::new(TestSink::new()))
+        crate::forever(Box::new(TestSink::new()))
     }
 
     fn caps_with(items: &[CapabilityId]) -> CapabilitySet {
@@ -16148,9 +16148,9 @@ mod tests {
             .write()
             .register_thread(SecTaskId(41), ProcessId(40))
             .expect("the sibling aliases the live record");
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         crate::procwait::ProcessWait::register_child(
             wait,
             ProcessId(2),
@@ -16235,9 +16235,9 @@ mod tests {
         let ctl = UnsupportedController;
 
         table.write().insert(make_caps_record(44, &[], sink));
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         crate::procwait::ProcessWait::register_child(
             wait,
             ProcessId(2),
@@ -18252,7 +18252,7 @@ mod tests {
         let ctl = UnsupportedController;
         let permissive = PermissiveController;
 
-        irq.set_clock(Box::leak(Box::new(FrozenClock)))
+        irq.set_clock(crate::forever(Box::new(FrozenClock)))
             .expect("clock installs once");
 
         let caps = make_caps_record(8, &[CapabilityId::IRQ_BIND], sink);
@@ -18871,10 +18871,10 @@ mod tests {
 
     /// Leak a single-console list whose both halves are one [`PurgeConsole`].
     fn single_purge_console() -> (&'static PurgeConsole, &'static [ConsoleDevice]) {
-        let console: &'static PurgeConsole = Box::leak(Box::new(PurgeConsole::default()));
+        let console: &'static PurgeConsole = crate::forever(Box::new(PurgeConsole::default()));
         (
             console,
-            Box::leak(Box::new([ConsoleDevice::new(console, console)])),
+            crate::forever(Box::new([ConsoleDevice::new(console, console)])),
         )
     }
 
@@ -18898,7 +18898,7 @@ mod tests {
     fn single_write_console(
         write: &'static (dyn crate::console::ConsoleWrite + 'static),
     ) -> &'static [ConsoleDevice] {
-        Box::leak(Box::new([ConsoleDevice::new(
+        crate::forever(Box::new([ConsoleDevice::new(
             write,
             &crate::console::NULL_CONSOLE_READ,
         )]))
@@ -18910,7 +18910,7 @@ mod tests {
     fn single_read_console(
         read: &'static (dyn crate::console::ConsoleRead + Sync + 'static),
     ) -> &'static [ConsoleDevice] {
-        Box::leak(Box::new([ConsoleDevice::new(
+        crate::forever(Box::new([ConsoleDevice::new(
             &crate::console::NULL_CONSOLE,
             read,
         )]))
@@ -18944,7 +18944,7 @@ mod tests {
             caps: &caps,
         };
 
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19030,7 +19030,7 @@ mod tests {
         aspaces
             .write()
             .set_streams(ProcessId(2), DescriptorTable::standard());
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19071,7 +19071,7 @@ mod tests {
             caps: &caps,
         };
 
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19114,7 +19114,7 @@ mod tests {
             caps: &caps,
         };
 
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19188,7 +19188,7 @@ mod tests {
 
         let line = b"login: \n";
         let console: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(line)));
+            crate::forever(Box::new(RecordingConsoleRead::new(line)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19280,7 +19280,7 @@ mod tests {
             .write()
             .set_streams(ProcessId(2), DescriptorTable::standard());
         let console: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"unseen")));
+            crate::forever(Box::new(RecordingConsoleRead::new(b"unseen")));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19327,7 +19327,7 @@ mod tests {
         };
 
         let console: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(&[])));
+            crate::forever(Box::new(RecordingConsoleRead::new(&[])));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19373,7 +19373,7 @@ mod tests {
         // by `CONSOLE_READ_MAX`, not by the device.
         let input = alloc::vec![0x41u8; CONSOLE_READ_MAX + 100];
         let console: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(&input)));
+            crate::forever(Box::new(RecordingConsoleRead::new(&input)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19410,7 +19410,7 @@ mod tests {
         };
 
         let console: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"data")));
+            crate::forever(Box::new(RecordingConsoleRead::new(b"data")));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19455,7 +19455,7 @@ mod tests {
             caps: &caps,
         };
 
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19500,7 +19500,7 @@ mod tests {
             caps: &caps,
         };
 
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19544,7 +19544,7 @@ mod tests {
         };
 
         let console: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"data")));
+            crate::forever(Box::new(RecordingConsoleRead::new(b"data")));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -19809,9 +19809,9 @@ mod tests {
         caps: &'static RwLock<CapTable>,
         image_builder: &'static (dyn ArchImageBuilder + 'static),
     ) -> &'static SpawnServices {
-        let runtime: &'static TestSpawnRuntime = Box::leak(Box::new(TestSpawnRuntime));
-        let peers: &'static PeerWatch = Box::leak(Box::new(PeerWatch::new()));
-        Box::leak(Box::new(SpawnServices::new(
+        let runtime: &'static TestSpawnRuntime = crate::forever(Box::new(TestSpawnRuntime));
+        let peers: &'static PeerWatch = crate::forever(Box::new(PeerWatch::new()));
+        crate::forever(Box::new(SpawnServices::new(
             frames,
             Some(frames),
             audit,
@@ -19837,12 +19837,13 @@ mod tests {
         if installed_spawn_services().is_some() {
             return;
         }
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = crate::forever(Box::new(StubImageBuilder));
         let services = leak_body_services(
             frames,
             audit,
@@ -19935,7 +19936,7 @@ mod tests {
         };
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -20046,7 +20047,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -20200,9 +20201,9 @@ mod tests {
         };
         let (memfs, anchor, _run) =
             crate::test_bundle::composed_bundle(alloc::vec![CapabilityId::CONSOLE_WRITE]);
-        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let memfs: &'static crate::test_bundle::MemFs = crate::forever(Box::new(memfs));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_available();
         let h = spawn_handler(
             &sched,
@@ -20281,11 +20282,11 @@ mod tests {
         };
         // An available store whose volume holds an *unrelated* bundle, so the
         // store directory resolves but `ps.app` is genuinely absent.
-        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(
+        let memfs: &'static crate::test_bundle::MemFs = crate::forever(Box::new(
             crate::test_bundle::MemFs::new(&[("/System/Commands/other.app/Run", b"x")]),
         ));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending([0u8; 32])));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending([0u8; 32])));
         store.note_available();
         let h = spawn_handler(
             &sched,
@@ -20351,9 +20352,9 @@ mod tests {
         // The bundle is present, but every stat of an existing node is refused
         // — a permission denial, not an absence.
         let memfs: &'static crate::test_bundle::MemFs =
-            Box::leak(Box::new(memfs.with_stat_error(Errno::PermissionDenied)));
+            crate::forever(Box::new(memfs.with_stat_error(Errno::PermissionDenied)));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_available();
         let h = spawn_handler(
             &sched,
@@ -20417,9 +20418,9 @@ mod tests {
         // The store is left pending (its latch unresolved); the filesystem is
         // irrelevant because the probe never stats while the store is pending.
         let memfs: &'static crate::test_bundle::MemFs =
-            Box::leak(Box::new(crate::test_bundle::MemFs::new(&[])));
+            crate::forever(Box::new(crate::test_bundle::MemFs::new(&[])));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending([0u8; 32])));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending([0u8; 32])));
         let h = spawn_handler(
             &sched,
             &table,
@@ -20455,12 +20456,13 @@ mod tests {
     #[test]
     fn body_load_of_a_bundle_without_a_store_is_not_found() {
         install_trace_filter();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = crate::forever(Box::new(StubImageBuilder));
         let services = leak_body_services(
             frames,
             audit,
@@ -20497,16 +20499,17 @@ mod tests {
     fn body_load_of_a_bundle_with_an_unavailable_store_is_not_found() {
         install_trace_filter();
         let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
-        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let memfs: &'static crate::test_bundle::MemFs = crate::forever(Box::new(memfs));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_unavailable();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = crate::forever(Box::new(StubImageBuilder));
         let services =
             leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
         let seed = body_seed();
@@ -20533,17 +20536,18 @@ mod tests {
         install_trace_filter();
         let (memfs, anchor, run) =
             crate::test_bundle::composed_bundle(alloc::vec![CapabilityId::CONSOLE_WRITE]);
-        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let memfs: &'static crate::test_bundle::MemFs = crate::forever(Box::new(memfs));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_available();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let builder: &'static RecordingImageBuilder =
-            Box::leak(Box::new(RecordingImageBuilder::new()));
+            crate::forever(Box::new(RecordingImageBuilder::new()));
         let services =
             leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
         let seed = body_seed();
@@ -20588,17 +20592,18 @@ mod tests {
     fn a_store_bundle_child_is_attested_with_its_app_identity() {
         install_trace_filter();
         let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
-        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let memfs: &'static crate::test_bundle::MemFs = crate::forever(Box::new(memfs));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_available();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let builder: &'static RecordingImageBuilder =
-            Box::leak(Box::new(RecordingImageBuilder::new()));
+            crate::forever(Box::new(RecordingImageBuilder::new()));
         let services =
             leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
         let args: [&[u8]; 1] = [BUNDLE_COMMAND.as_bytes()];
@@ -20632,13 +20637,14 @@ mod tests {
     #[test]
     fn a_prebuilt_child_carries_no_app_identity() {
         install_trace_filter();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let builder: &'static RecordingImageBuilder =
-            Box::leak(Box::new(RecordingImageBuilder::new()));
+            crate::forever(Box::new(RecordingImageBuilder::new()));
         let services = leak_body_services(
             frames,
             audit,
@@ -20677,13 +20683,14 @@ mod tests {
             (Errno::BadMagic, tairix_abi::LOAD_MALFORMED),
             (Errno::OutOfMemory, tairix_abi::LOAD_OOM),
         ] {
-            let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-            let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+            let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+            let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
             let aspaces: &'static RwLock<AddressSpaceRegistry> =
-                Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-            let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+                crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            let caps: &'static RwLock<CapTable> =
+                crate::forever(Box::new(RwLock::new(CapTable::new())));
             let builder: &'static RecordingImageBuilder =
-                Box::leak(Box::new(RecordingImageBuilder::failing(errno)));
+                crate::forever(Box::new(RecordingImageBuilder::failing(errno)));
             let services = leak_body_services(
                 frames,
                 audit,
@@ -20729,12 +20736,13 @@ mod tests {
     #[test]
     fn a_kill_taken_at_the_body_boundary_supersedes_a_finished_load() {
         install_trace_filter();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = crate::forever(Box::new(StubImageBuilder));
         let services = leak_body_services(
             frames,
             audit,
@@ -21100,11 +21108,11 @@ mod tests {
                 1 << 30
             }
         }
-        let source: &'static PlentyFree = Box::leak(Box::new(PlentyFree));
+        let source: &'static PlentyFree = crate::forever(Box::new(PlentyFree));
         let pressure: &'static tairix_reclaim::MemoryPressure =
-            Box::leak(Box::new(tairix_reclaim::MemoryPressure::over(source)));
+            crate::forever(Box::new(tairix_reclaim::MemoryPressure::over(source)));
         let audit: &'static crate::test_sink::TestSink =
-            Box::leak(Box::new(crate::test_sink::TestSink::new()));
+            crate::forever(Box::new(crate::test_sink::TestSink::new()));
         // The cache keys its index under the per-boot hash key; without one it
         // is born poisoned and every launch re-reads the bundle.
         crate::test_boot::publish_hash_key();
@@ -21131,17 +21139,18 @@ mod tests {
     fn a_second_body_load_of_a_store_bundle_is_served_from_the_cache() {
         install_trace_filter();
         let (memfs, anchor, run) = crate::test_bundle::composed_bundle(alloc::vec![]);
-        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs)));
+        let fs: &'static InstrumentedFs = crate::forever(Box::new(InstrumentedFs::new(memfs)));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         install_launch_cache(store);
         store.note_available();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = crate::forever(Box::new(StubImageBuilder));
         let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
         let grants = full_grants();
 
@@ -21168,17 +21177,18 @@ mod tests {
     fn a_cached_body_load_still_authorises_the_read() {
         install_trace_filter();
         let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
-        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs)));
+        let fs: &'static InstrumentedFs = crate::forever(Box::new(InstrumentedFs::new(memfs)));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         install_launch_cache(store);
         store.note_available();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = crate::forever(Box::new(StubImageBuilder));
         let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
         let grants = full_grants();
 
@@ -21203,17 +21213,18 @@ mod tests {
     fn a_cached_body_load_refuses_a_mount_that_runs_no_programs() {
         install_trace_filter();
         let (memfs, anchor, _run) = crate::test_bundle::composed_bundle(alloc::vec![]);
-        let fs: &'static InstrumentedFs = Box::leak(Box::new(InstrumentedFs::new(memfs)));
+        let fs: &'static InstrumentedFs = crate::forever(Box::new(InstrumentedFs::new(memfs)));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         install_launch_cache(store);
         store.note_available();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let builder: &'static StubImageBuilder = Box::leak(Box::new(StubImageBuilder));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let builder: &'static StubImageBuilder = crate::forever(Box::new(StubImageBuilder));
         let services = leak_body_services(frames, audit, fs, Some(store), aspaces, caps, builder);
         let grants = full_grants();
 
@@ -21238,17 +21249,18 @@ mod tests {
             .get_mut("/System/Commands/ps.app/Run")
             .expect("run present")
             .push(0xFF);
-        let memfs: &'static crate::test_bundle::MemFs = Box::leak(Box::new(memfs));
+        let memfs: &'static crate::test_bundle::MemFs = crate::forever(Box::new(memfs));
         let store: &'static crate::appspawn::AppStore =
-            Box::leak(Box::new(crate::appspawn::AppStore::pending(anchor)));
+            crate::forever(Box::new(crate::appspawn::AppStore::pending(anchor)));
         store.note_available();
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let builder: &'static RecordingImageBuilder =
-            Box::leak(Box::new(RecordingImageBuilder::new()));
+            crate::forever(Box::new(RecordingImageBuilder::new()));
         let services =
             leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
         let seed = body_seed();
@@ -21315,7 +21327,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -21381,7 +21393,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -21500,7 +21512,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -21557,7 +21569,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -22065,7 +22077,7 @@ mod tests {
             table: &'static RwLock<CapTable>,
             end_anchor: Option<ProcessId>,
         ) -> &'static Self {
-            Box::leak(Box::new(Self {
+            crate::forever(Box::new(Self {
                 table,
                 end_anchor,
                 claimed: tairix_sync::SpinLock::new(None),
@@ -22131,9 +22143,11 @@ mod tests {
         table: &'static RwLock<CapTable>,
         aspaces: &'static RwLock<AddressSpaceRegistry>,
     ) -> KernelSpawnCtx<'static, TestArch> {
-        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
-        let sched: &'static Scheduler<TestArch> = Box::leak(Box::new(make_sched(arch.clone())));
-        let requested: &'static [HwResource] = Box::leak(Box::new([HwResource::dma(
+        let arch: &'static Arc<TestArch> =
+            crate::forever(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched: &'static Scheduler<TestArch> =
+            crate::forever(Box::new(make_sched(arch.clone())));
+        let requested: &'static [HwResource] = crate::forever(Box::new([HwResource::dma(
             0,
             0x1000,
             tairix_abi::DmaCoherence::Snooped,
@@ -22172,9 +22186,10 @@ mod tests {
     #[test]
     fn a_kill_aimed_at_a_half_admitted_child_reaches_nothing() {
         install_trace_filter();
-        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let table: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         table.write().insert(session_record(1, 0x22));
         let wait = OnRegister::leaked(table, None);
         let ctx = node_child_ctx(wait, table, aspaces);
@@ -22202,13 +22217,14 @@ mod tests {
         use core::sync::atomic::{AtomicU64, Ordering};
 
         install_trace_filter();
-        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let table: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         table.write().insert(session_record(1, 0x23));
         let ctx = node_child_ctx(&crate::procwait::NULL_PROCESS_WAIT, table, aspaces);
-        let under_lock: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
-        let after_lock: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
+        let under_lock: &'static AtomicU64 = crate::forever(Box::new(AtomicU64::new(0)));
+        let after_lock: &'static AtomicU64 = crate::forever(Box::new(AtomicU64::new(0)));
         ctx.arch.set_ipi_hook(move |_| {
             let wakes = if table.try_read().is_none() {
                 under_lock
@@ -22256,7 +22272,8 @@ mod tests {
     #[test]
     fn a_joined_child_outlives_the_process_that_named_its_session() {
         install_trace_filter();
-        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let table: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let placement = {
             let mut caps = table.write();
             place(
@@ -22285,7 +22302,7 @@ mod tests {
             .expect("the requester lies within the parent's session")
         };
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         // The requester exits as the child is registered with its parent.
         let wait = OnRegister::leaked(table, Some(ProcessId(3)));
         let ctx = node_child_ctx(wait, table, aspaces).with_placement(placement);
@@ -22310,7 +22327,8 @@ mod tests {
     #[test]
     fn an_anchors_exit_is_reported_only_once_its_session_is_empty() {
         install_trace_filter();
-        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let table: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         {
             let mut caps = table.write();
             place(
@@ -22378,7 +22396,8 @@ mod tests {
     #[test]
     fn a_child_whose_session_ends_while_it_is_admitted_is_reported_once_as_killed() {
         install_trace_filter();
-        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let table: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         {
             let mut caps = table.write();
             place(
@@ -22395,7 +22414,7 @@ mod tests {
             );
         }
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         let wait = OnRegister::leaked(table, Some(ProcessId(2)));
         let ctx = node_child_ctx(wait, table, aspaces);
 
@@ -22454,11 +22473,11 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let wait: &'static SuccessorOnExit = Box::leak(Box::new(SuccessorOnExit {
+        let wait: &'static SuccessorOnExit = crate::forever(Box::new(SuccessorOnExit {
             aspaces,
             node: 0x5A,
             admissions: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
@@ -22510,9 +22529,9 @@ mod tests {
             .write()
             .register_thread(SecTaskId(41), ProcessId(40))
             .expect("the sibling aliases the live record");
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         wait.register_child(
             ProcessId(2),
             ProcessId(40),
@@ -22792,13 +22811,14 @@ mod tests {
             rxe: alloc::borrow::Cow::Borrowed(SPAWN_RXE),
             requested,
         };
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let builder: &'static RecordingImageBuilder =
-            Box::leak(Box::new(RecordingImageBuilder::new()));
+            crate::forever(Box::new(RecordingImageBuilder::new()));
         let services = leak_body_services(
             frames,
             audit,
@@ -22831,13 +22851,14 @@ mod tests {
 
         // Wired: `leak_body_services` builds `SpawnServices` with a `Some`
         // page-table allocator, so the recording builder must observe it.
-        let frames: &'static FrameAllocator = Box::leak(Box::new(spawn_test_frames()));
-        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let frames: &'static FrameAllocator = crate::forever(Box::new(spawn_test_frames()));
+        let audit: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let builder: &'static RecordingImageBuilder =
-            Box::leak(Box::new(RecordingImageBuilder::new()));
+            crate::forever(Box::new(RecordingImageBuilder::new()));
         let services = leak_body_services(
             frames,
             audit,
@@ -22858,15 +22879,16 @@ mod tests {
 
         // Unwired: services built with no page-table allocator hand the build
         // `None` (an arch build then fails closed).
-        let audit2: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit2: &'static TestSink = crate::forever(Box::new(TestSink::new()));
         let aspaces2: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let caps2: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let caps2: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
         let builder2: &'static RecordingImageBuilder =
-            Box::leak(Box::new(RecordingImageBuilder::new()));
-        let runtime2: &'static TestSpawnRuntime = Box::leak(Box::new(TestSpawnRuntime));
-        let peers2: &'static PeerWatch = Box::leak(Box::new(PeerWatch::new()));
-        let services2: &'static SpawnServices = Box::leak(Box::new(SpawnServices::new(
+            crate::forever(Box::new(RecordingImageBuilder::new()));
+        let runtime2: &'static TestSpawnRuntime = crate::forever(Box::new(TestSpawnRuntime));
+        let peers2: &'static PeerWatch = crate::forever(Box::new(PeerWatch::new()));
+        let services2: &'static SpawnServices = crate::forever(Box::new(SpawnServices::new(
             frames,
             None,
             audit2,
@@ -22924,7 +22946,7 @@ mod tests {
         };
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -23001,7 +23023,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -23077,7 +23099,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -23132,7 +23154,7 @@ mod tests {
         };
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -23140,7 +23162,7 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let wait_producer: &'static RecordingProcessWait = Box::leak(Box::new(
+        let wait_producer: &'static RecordingProcessWait = crate::forever(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 0,
                 status: tairix_abi::WaitStatus::Exited(0),
@@ -23265,7 +23287,7 @@ mod tests {
         };
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -23684,9 +23706,9 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         wait.register_child(
             ProcessId(2),
             ProcessId(9),
@@ -23923,7 +23945,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24035,7 +24057,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24045,7 +24067,7 @@ mod tests {
             ])))));
         let mut mock = RecordingFs::new();
         mock.read_data = b"hello".to_vec();
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
         )
@@ -24150,7 +24172,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24158,7 +24180,7 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
         )
@@ -24240,7 +24262,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.read_data = b"hello".to_vec();
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -24324,7 +24346,7 @@ mod tests {
             task_id: SecTaskId(3),
             caps: &holder_caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -24493,7 +24515,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24605,7 +24627,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24613,7 +24635,7 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
         )
@@ -24680,7 +24702,7 @@ mod tests {
         // The program's manifest requests a real capability; the sandbox
         // brand must strip it regardless.
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24689,7 +24711,7 @@ mod tests {
                 },
             ])))));
         let wait_producer: &'static RecordingProcessWait =
-            Box::leak(Box::new(RecordingProcessWait::new(Err(Errno::NotFound))));
+            crate::forever(Box::new(RecordingProcessWait::new(Err(Errno::NotFound))));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
         )
@@ -24778,7 +24800,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24834,7 +24856,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24888,7 +24910,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -24960,7 +24982,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -25025,7 +25047,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -25086,7 +25108,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -25166,7 +25188,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -25174,7 +25196,7 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
         )
@@ -25232,7 +25254,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -25295,9 +25317,9 @@ mod tests {
         );
         assert_eq!(bare.console_count(&ctx), Ok(0));
 
-        let video: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let uart: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+        let video: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let uart: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([
             ConsoleDevice::new(video, &crate::console::NULL_CONSOLE_READ),
             ConsoleDevice::new(uart, &crate::console::NULL_CONSOLE_READ),
         ]));
@@ -25336,9 +25358,9 @@ mod tests {
             caps: &caps,
         };
 
-        let video: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let uart: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+        let video: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let uart: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([
             ConsoleDevice::new(video, &crate::console::NULL_CONSOLE_READ),
             ConsoleDevice::new(uart, &crate::console::NULL_CONSOLE_READ),
         ]));
@@ -25396,10 +25418,10 @@ mod tests {
         };
 
         let keyboard: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"")));
+            crate::forever(Box::new(RecordingConsoleRead::new(b"")));
         let uart_rx: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"root\n")));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+            crate::forever(Box::new(RecordingConsoleRead::new(b"root\n")));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([
             ConsoleDevice::new(&crate::console::NULL_CONSOLE, keyboard),
             ConsoleDevice::new(&crate::console::NULL_CONSOLE, uart_rx),
         ]));
@@ -25445,11 +25467,11 @@ mod tests {
             caps: &caps,
         };
 
-        let echo: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let echo: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let rx: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"hi\r")));
+            crate::forever(Box::new(RecordingConsoleRead::new(b"hi\r")));
         let consoles: &'static [ConsoleDevice] =
-            Box::leak(Box::new([ConsoleDevice::new(echo, rx)]));
+            crate::forever(Box::new([ConsoleDevice::new(echo, rx)]));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -25490,11 +25512,11 @@ mod tests {
             caps: &caps,
         };
 
-        let echo: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
+        let echo: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
         let rx: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"secret")));
+            crate::forever(Box::new(RecordingConsoleRead::new(b"secret")));
         let consoles: &'static [ConsoleDevice] =
-            Box::leak(Box::new([ConsoleDevice::new(echo, rx)]));
+            crate::forever(Box::new([ConsoleDevice::new(echo, rx)]));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -25562,13 +25584,14 @@ mod tests {
             caps: &caps,
         };
 
-        let echo: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let rx: &'static RecordingConsoleRead = Box::leak(Box::new(RecordingConsoleRead::new(b"")));
+        let echo: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let rx: &'static RecordingConsoleRead =
+            crate::forever(Box::new(RecordingConsoleRead::new(b"")));
         let consoles: &'static [ConsoleDevice] =
-            Box::leak(Box::new([ConsoleDevice::new(echo, rx)]));
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+            crate::forever(Box::new([ConsoleDevice::new(echo, rx)]));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         wait.register_child(
             ProcessId(2),
             ProcessId(9),
@@ -25628,9 +25651,9 @@ mod tests {
         // The victim (9) is a live child of parent 2 with a registered
         // capability record — the state a real mid-syscall task carries.
         table.write().insert(make_caps_record(9, &[], sink));
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         wait.register_child(
             ProcessId(2),
             ProcessId(9),
@@ -25708,14 +25731,14 @@ mod tests {
         let shell_caps = make_caps_record(shell, &[CapabilityId::CONSOLE_READ], sink);
         let job_caps = make_caps_record(job, &[CapabilityId::CONSOLE_READ], sink);
         let rx: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"typed")));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            crate::forever(Box::new(RecordingConsoleRead::new(b"typed")));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([ConsoleDevice::new(
             &crate::console::NULL_CONSOLE,
             rx,
         )]));
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         for (parent, child) in [(1, shell), (shell, job)] {
             wait.register_child(
                 ProcessId(parent),
@@ -25870,14 +25893,14 @@ mod tests {
         }
 
         let rx: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"hello")));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            crate::forever(Box::new(RecordingConsoleRead::new(b"hello")));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([ConsoleDevice::new(
             &crate::console::NULL_CONSOLE,
             rx,
         )]));
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         wait.register_child(
             ProcessId(2),
             ProcessId(9),
@@ -25983,14 +26006,14 @@ mod tests {
         }
 
         let rx: &'static RecordingConsoleRead =
-            Box::leak(Box::new(RecordingConsoleRead::new(b"hello")));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+            crate::forever(Box::new(RecordingConsoleRead::new(b"hello")));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([ConsoleDevice::new(
             &crate::console::NULL_CONSOLE,
             rx,
         )]));
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         wait.register_child(
             ProcessId(shell_task),
             ProcessId(fg_task),
@@ -26059,14 +26082,15 @@ mod tests {
             caps: &fg_caps,
         };
 
-        let rx: &'static RecordingConsoleRead = Box::leak(Box::new(RecordingConsoleRead::new(b"")));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+        let rx: &'static RecordingConsoleRead =
+            crate::forever(Box::new(RecordingConsoleRead::new(b"")));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([ConsoleDevice::new(
             &crate::console::NULL_CONSOLE,
             rx,
         )]));
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         wait.register_child(
             ProcessId(2),
             ProcessId(9),
@@ -26215,9 +26239,9 @@ mod tests {
         };
 
         let (console, consoles) = single_purge_console();
-        let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+        let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
-            Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
+            crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
         wait.register_child(
             ProcessId(2),
             ProcessId(9),
@@ -26345,10 +26369,11 @@ mod tests {
 
         // A console list but no process-wait producer: the child claim is
         // never authorised (the null producer fails closed).
-        let echo: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let rx: &'static RecordingConsoleRead = Box::leak(Box::new(RecordingConsoleRead::new(b"")));
+        let echo: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let rx: &'static RecordingConsoleRead =
+            crate::forever(Box::new(RecordingConsoleRead::new(b"")));
         let consoles: &'static [ConsoleDevice] =
-            Box::leak(Box::new([ConsoleDevice::new(echo, rx)]));
+            crate::forever(Box::new([ConsoleDevice::new(echo, rx)]));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -26409,8 +26434,8 @@ mod tests {
 
         // The seat's text sink is the video console's input queue.
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -26453,8 +26478,8 @@ mod tests {
         };
 
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -26586,8 +26611,8 @@ mod tests {
         };
 
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -26675,8 +26700,8 @@ mod tests {
         };
 
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -26714,8 +26739,8 @@ mod tests {
         };
 
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -26766,8 +26791,8 @@ mod tests {
                 caps: &caps,
             };
             let queue: &'static crate::console::ConsoleInputQueue =
-                Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-            let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+                crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+            let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
             let $h = KernelSyscallHandlers::new(
                 &sched, &table, &$arch, $sink, &irq, &ctl, &ipc, &aspaces, &rng,
             )
@@ -26915,8 +26940,8 @@ mod tests {
         };
 
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -27010,8 +27035,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -27082,8 +27107,8 @@ mod tests {
         };
 
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -27154,7 +27179,7 @@ mod tests {
             caps: &caps,
         };
 
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([
             ConsoleDevice::new(
                 &crate::console::NULL_CONSOLE,
                 &crate::console::NULL_CONSOLE_READ,
@@ -27168,7 +27193,7 @@ mod tests {
         // boot path's paired selection does: the registry owns the topology
         // check, because it also hands the seat's display surface to the
         // foreground console it names.
-        let seat: &'static SeatRegistry = Box::leak(Box::new(
+        let seat: &'static SeatRegistry = crate::forever(Box::new(
             SeatRegistry::new(&crate::console::NULL_CONSOLE_INPUT).with_consoles(consoles),
         ));
         let h = KernelSyscallHandlers::new(
@@ -27219,7 +27244,7 @@ mod tests {
             caps: &admin_caps,
         };
 
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(
             &crate::console::NULL_CONSOLE_INPUT,
         )));
         let h = KernelSyscallHandlers::new(
@@ -27301,7 +27326,7 @@ mod tests {
             caps: &caps,
         };
 
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(
             &crate::console::NULL_CONSOLE_INPUT,
         )));
         seat.acquire(SEAT_PRIMARY, SeatOwner(7))
@@ -27407,7 +27432,7 @@ mod tests {
         };
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -27415,8 +27440,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([
             ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
             ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
         ]));
@@ -27502,7 +27527,7 @@ mod tests {
         };
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -27510,8 +27535,8 @@ mod tests {
                     args: &[],
                 },
             ])))));
-        let console: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+        let console: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([
             ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
             ConsoleDevice::new(console, &crate::console::NULL_CONSOLE_READ),
         ]));
@@ -27563,7 +27588,7 @@ mod tests {
         };
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -27621,7 +27646,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -27675,7 +27700,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -27747,11 +27772,11 @@ mod tests {
             capability_grants: CapabilitySet::empty(),
         });
         let id_table = builder.verify(sink).expect("valid identity table");
-        let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+        let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
         identity.install(id_table).expect("identity install");
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -27831,11 +27856,11 @@ mod tests {
             capability_grants: ceiling,
         });
         let id_table = builder.verify(sink).expect("valid identity table");
-        let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+        let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
         identity.install(id_table).expect("identity install");
 
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -27948,7 +27973,7 @@ mod tests {
         // The authoritative compiled system identity — the same table the
         // boot `sec` phase installs — resolves the service uid's group set
         // and capability ceiling.
-        let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+        let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
         identity
             .install(
                 crate::groups::system_identity_table(sink).expect("compiled identity table builds"),
@@ -27961,7 +27986,7 @@ mod tests {
         manifest.extend_from_slice(borrowed);
         let manifest: &'static [CapabilityId] = alloc::vec::Vec::leak(manifest);
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -28100,7 +28125,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -28176,7 +28201,7 @@ mod tests {
         };
         // The login shape: a manifest requesting authority init never held.
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -28250,7 +28275,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -28264,7 +28289,7 @@ mod tests {
         let id_table = IdentityTableBuilder::new()
             .verify(sink)
             .expect("empty identity table verifies");
-        let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
+        let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
         identity.install(id_table).expect("identity install");
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
@@ -28316,7 +28341,7 @@ mod tests {
             caps: &caps,
         };
         let programs: &'static ProgramRegistry =
-            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+            crate::forever(Box::new(ProgramRegistry::new(crate::forever(Box::new([
                 EmbeddedProgram {
                     path: SPAWN_PATH,
                     rxe: SPAWN_RXE,
@@ -28418,7 +28443,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -28463,7 +28488,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -28547,7 +28572,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -28593,7 +28618,7 @@ mod tests {
             ResourceLimit::new(0x2000, u64::MAX).expect("well-formed"),
         );
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -28656,7 +28681,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -28749,7 +28774,7 @@ mod tests {
             ResourceLimit::new(0x1000, u64::MAX).expect("well-formed"),
         );
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -28864,22 +28889,22 @@ mod tests {
         let registry = crate::filelock::registry_guard();
         install_trace_filter();
         let sink = make_sink();
-        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(arch)));
-        let sched = Box::leak(Box::new(make_sched(arch.clone())));
-        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let arch: &'static Arc<TestArch> = crate::forever(Box::new(Arc::new(arch)));
+        let sched = crate::forever(Box::new(make_sched(arch.clone())));
+        let table = crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let ipc = crate::forever(Box::new(RwLock::new(PortRegistry::new())));
         let (space, physmap) =
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/big");
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let rng = Box::leak(Box::new(unseeded_rng()));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = crate::forever(Box::new(unseeded_rng()));
         aspaces
             .write()
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        let irq = Box::leak(Box::new(IrqTable::new(31)));
-        let ctl = Box::leak(Box::new(UnsupportedController));
-        let caps = Box::leak(Box::new(make_caps_record(
+        let irq = crate::forever(Box::new(IrqTable::new(31)));
+        let ctl = crate::forever(Box::new(UnsupportedController));
+        let caps = crate::forever(Box::new(make_caps_record(
             2,
             &[CapabilityId::FS_ACCESS],
             sink,
@@ -28890,7 +28915,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.stat.id = lock_file_id(node);
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_filesystem(fs);
         (aspaces, h, ctx, registry)
@@ -29146,22 +29171,23 @@ mod tests {
     fn a_backing_with_no_stable_identity_is_refused_rather_than_aliased() {
         install_trace_filter();
         let sink = make_sink();
-        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
-        let sched = Box::leak(Box::new(make_sched(arch.clone())));
-        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let arch: &'static Arc<TestArch> =
+            crate::forever(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = crate::forever(Box::new(make_sched(arch.clone())));
+        let table = crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let ipc = crate::forever(Box::new(RwLock::new(PortRegistry::new())));
         let (space, physmap) =
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/big");
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let rng = Box::leak(Box::new(unseeded_rng()));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = crate::forever(Box::new(unseeded_rng()));
         aspaces
             .write()
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        let irq = Box::leak(Box::new(IrqTable::new(31)));
-        let ctl = Box::leak(Box::new(UnsupportedController));
-        let caps = Box::leak(Box::new(make_caps_record(
+        let irq = crate::forever(Box::new(IrqTable::new(31)));
+        let ctl = crate::forever(Box::new(UnsupportedController));
+        let caps = crate::forever(Box::new(make_caps_record(
             2,
             &[CapabilityId::FS_ACCESS],
             sink,
@@ -29172,7 +29198,7 @@ mod tests {
         };
         // The default mock reports `FileId::NONE`: no identity to key a lock
         // on, so two unrelated nodes would share one owner's records.
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_filesystem(fs);
         let fd = lock_open(&h, &ctx, OpenFlags::READ);
@@ -29284,22 +29310,23 @@ mod tests {
     ) {
         install_trace_filter();
         let sink = make_sink();
-        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
-        let sched = Box::leak(Box::new(make_sched(arch.clone())));
-        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let arch: &'static Arc<TestArch> =
+            crate::forever(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = crate::forever(Box::new(make_sched(arch.clone())));
+        let table = crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let ipc = crate::forever(Box::new(RwLock::new(PortRegistry::new())));
         let (space, physmap) =
             send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/big");
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let rng = Box::leak(Box::new(unseeded_rng()));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = crate::forever(Box::new(unseeded_rng()));
         aspaces
             .write()
             .register(ProcessId(2), space, physmap)
             .expect("registration succeeds");
-        let irq = Box::leak(Box::new(IrqTable::new(31)));
-        let ctl = Box::leak(Box::new(UnsupportedController));
-        let caps = Box::leak(Box::new(make_caps_record(
+        let irq = crate::forever(Box::new(IrqTable::new(31)));
+        let ctl = crate::forever(Box::new(UnsupportedController));
+        let caps = crate::forever(Box::new(make_caps_record(
             2,
             &[CapabilityId::FS_ACCESS],
             sink,
@@ -29310,8 +29337,8 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.read_data = read_data;
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
-        let fm: &'static RecordingFileMap = Box::leak(Box::new(RecordingFileMap::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
+        let fm: &'static RecordingFileMap = crate::forever(Box::new(RecordingFileMap::new()));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_filesystem(fs)
             .with_file_map(fm);
@@ -29713,7 +29740,7 @@ mod tests {
             .record_anon_region(ProcessId(2), base, 4)
             .expect("a disjoint extent is recorded");
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -29847,17 +29874,19 @@ mod tests {
     ) {
         install_trace_filter();
         let sink = make_sink();
-        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
-        let sched = Box::leak(Box::new(make_sched(arch.clone())));
-        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let arch: &'static Arc<TestArch> =
+            crate::forever(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = crate::forever(Box::new(make_sched(arch.clone())));
+        let table: &'static RwLock<CapTable> =
+            crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let ipc = crate::forever(Box::new(RwLock::new(PortRegistry::new())));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let rng = Box::leak(Box::new(unseeded_rng()));
-        let irq = Box::leak(Box::new(IrqTable::new(31)));
-        let ctl = Box::leak(Box::new(UnsupportedController));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = crate::forever(Box::new(unseeded_rng()));
+        let irq = crate::forever(Box::new(IrqTable::new(31)));
+        let ctl = crate::forever(Box::new(UnsupportedController));
         let crashes: &'static crate::crash::CrashStore =
-            Box::leak(Box::new(crate::crash::CrashStore::new()));
+            crate::forever(Box::new(crate::crash::CrashStore::new()));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_crashes(crashes);
         (sink, table, aspaces, crashes, h)
@@ -30286,22 +30315,23 @@ mod tests {
     ) {
         install_trace_filter();
         let sink = make_sink();
-        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
-        let sched = Box::leak(Box::new(make_sched(arch.clone())));
-        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let arch: &'static Arc<TestArch> =
+            crate::forever(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = crate::forever(Box::new(make_sched(arch.clone())));
+        let table = crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let ipc = crate::forever(Box::new(RwLock::new(PortRegistry::new())));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let rng = Box::leak(Box::new(unseeded_rng()));
-        let irq = Box::leak(Box::new(IrqTable::new(31)));
-        let ctl = Box::leak(Box::new(UnsupportedController));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = crate::forever(Box::new(unseeded_rng()));
+        let irq = crate::forever(Box::new(IrqTable::new(31)));
+        let ctl = crate::forever(Box::new(UnsupportedController));
         let span =
             crate::aspace::StackSpan::new(STACK_RESERVE_BASE, STACK_COMMITTED_BASE, STACK_TOP)
                 .expect("the fixture span is page-aligned and well-formed");
         aspaces
             .write()
             .set_stack_span(ProcessId(2), SecTaskId(2), span);
-        let producer: &'static StackGrowMemMap = Box::leak(Box::new(StackGrowMemMap::new()));
+        let producer: &'static StackGrowMemMap = crate::forever(Box::new(StackGrowMemMap::new()));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng)
             .with_mem_map(producer);
         (producer, aspaces, h, sink)
@@ -31030,7 +31060,7 @@ mod tests {
         let (live, _observer) = PublishedLive::published(live_space);
         let _guard = crate::kthread::publish_live_space_for_test(cpu, live);
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31127,7 +31157,7 @@ mod tests {
 
         // No live space is published for this CPU — the case the wholesale
         // re-freeze silently skipped.
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31285,7 +31315,7 @@ mod tests {
             Err(Errno::NotImplemented)
         );
 
-        let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
+        let producer: &'static RecordingMemMap = crate::forever(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31340,7 +31370,7 @@ mod tests {
     }
 
     fn recording_port_io() -> &'static RecordingPortIo {
-        Box::leak(Box::new(RecordingPortIo {
+        crate::forever(Box::new(RecordingPortIo {
             reads: tairix_sync::SpinLock::new(None),
             writes: tairix_sync::SpinLock::new(None),
             kernel_owned: None,
@@ -31436,7 +31466,7 @@ mod tests {
         let handle = aspaces
             .write()
             .mint_grant(ProcessId(2), tairix_abi::hwtree::HwResource::port(0x70, 2));
-        let facility: &'static RecordingPortIo = Box::leak(Box::new(RecordingPortIo {
+        let facility: &'static RecordingPortIo = crate::forever(Box::new(RecordingPortIo {
             reads: tairix_sync::SpinLock::new(None),
             writes: tairix_sync::SpinLock::new(None),
             kernel_owned: Some(0x71),
@@ -31696,11 +31726,12 @@ mod tests {
             ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
-        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: tairix_sync::SpinLock::new(None),
-            last_kind: tairix_sync::SpinLock::new(None),
-            ret: Ok(0x9000_0000),
-        }));
+        let facility: &'static RecordingMmioFacility =
+            crate::forever(Box::new(RecordingMmioFacility {
+                last: tairix_sync::SpinLock::new(None),
+                last_kind: tairix_sync::SpinLock::new(None),
+                ret: Ok(0x9000_0000),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31748,11 +31779,12 @@ mod tests {
             ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
-        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: tairix_sync::SpinLock::new(None),
-            last_kind: tairix_sync::SpinLock::new(None),
-            ret: Ok(0x9000_0000),
-        }));
+        let facility: &'static RecordingMmioFacility =
+            crate::forever(Box::new(RecordingMmioFacility {
+                last: tairix_sync::SpinLock::new(None),
+                last_kind: tairix_sync::SpinLock::new(None),
+                ret: Ok(0x9000_0000),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31788,11 +31820,12 @@ mod tests {
             ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
-        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: tairix_sync::SpinLock::new(None),
-            last_kind: tairix_sync::SpinLock::new(None),
-            ret: Ok(0x9000_0000),
-        }));
+        let facility: &'static RecordingMmioFacility =
+            crate::forever(Box::new(RecordingMmioFacility {
+                last: tairix_sync::SpinLock::new(None),
+                last_kind: tairix_sync::SpinLock::new(None),
+                ret: Ok(0x9000_0000),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31916,7 +31949,7 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         let driver = crate::test_boot::claim_task();
         let caps = make_caps_record(driver, &[], sink);
         let ctx = CallerContext {
@@ -31929,7 +31962,7 @@ mod tests {
             HwResource::mmio(0xFE00_0000, 0x1000),
             13,
         );
-        let facility: &'static RevokedMidMap = Box::leak(Box::new(RevokedMidMap {
+        let facility: &'static RevokedMidMap = crate::forever(Box::new(RevokedMidMap {
             aspaces,
             node: 13,
             cpu,
@@ -31968,7 +32001,7 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         let owner = crate::test_boot::claim_task();
         let holder = crate::test_boot::claim_peer_task();
         let caps = make_caps_record(holder, &[CapabilityId::SHM], sink);
@@ -31977,7 +32010,7 @@ mod tests {
             caps: &caps,
         };
         let owner_facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_1000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_1000 }));
         let (owner_va, region) =
             crate::sharedreg::create(owner_facility, ProcessId(owner), 1).expect("created");
         let (_space, _published) = driver_with_live_space(aspaces, holder, cpu);
@@ -31985,7 +32018,7 @@ mod tests {
             aspaces
                 .write()
                 .mint_node_grant(ProcessId(holder), HwResource::shared(region), 14);
-        let facility: &'static RevokedMidMap = Box::leak(Box::new(RevokedMidMap {
+        let facility: &'static RevokedMidMap = crate::forever(Box::new(RevokedMidMap {
             aspaces,
             node: 14,
             cpu,
@@ -32037,11 +32070,12 @@ mod tests {
             HwResource::framebuffer(0x9000_0000, &mode, FramebufferMemory::WriteCombine)
                 .expect("valid WC framebuffer"),
         );
-        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: tairix_sync::SpinLock::new(None),
-            last_kind: tairix_sync::SpinLock::new(None),
-            ret: Ok(0xA000_0000),
-        }));
+        let facility: &'static RecordingMmioFacility =
+            crate::forever(Box::new(RecordingMmioFacility {
+                last: tairix_sync::SpinLock::new(None),
+                last_kind: tairix_sync::SpinLock::new(None),
+                ret: Ok(0xA000_0000),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32108,11 +32142,12 @@ mod tests {
             ProcessId(2),
             tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0, tairix_abi::DmaCoherence::Snooped),
         );
-        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: tairix_sync::SpinLock::new(None),
-            last_kind: tairix_sync::SpinLock::new(None),
-            ret: Ok(0x9000_0000),
-        }));
+        let facility: &'static RecordingMmioFacility =
+            crate::forever(Box::new(RecordingMmioFacility {
+                last: tairix_sync::SpinLock::new(None),
+                last_kind: tairix_sync::SpinLock::new(None),
+                ret: Ok(0x9000_0000),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32150,11 +32185,12 @@ mod tests {
             ProcessId(2),
             tairix_abi::hwtree::HwResource::bus_window(0x6_0000_0000, 0x4000_0000, 0xC000_0000),
         );
-        let facility: &'static RecordingMmioFacility = Box::leak(Box::new(RecordingMmioFacility {
-            last: tairix_sync::SpinLock::new(None),
-            last_kind: tairix_sync::SpinLock::new(None),
-            ret: Ok(0x9000_0000),
-        }));
+        let facility: &'static RecordingMmioFacility =
+            crate::forever(Box::new(RecordingMmioFacility {
+                last: tairix_sync::SpinLock::new(None),
+                last_kind: tairix_sync::SpinLock::new(None),
+                ret: Ok(0x9000_0000),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32251,15 +32287,16 @@ mod tests {
                 tairix_abi::DmaCoherence::Snooped,
             ),
         );
-        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: tairix_sync::SpinLock::new(None),
-            freed: tairix_sync::SpinLock::new(None),
-            ret: Ok(crate::devres::DmaCarve {
-                cpu_va: 0xD000_0000,
-                device_addr: 0x4000_0000,
-                len: 0x1000,
-            }),
-        }));
+        let facility: &'static RecordingDmaFacility =
+            crate::forever(Box::new(RecordingDmaFacility {
+                last: tairix_sync::SpinLock::new(None),
+                freed: tairix_sync::SpinLock::new(None),
+                ret: Ok(crate::devres::DmaCarve {
+                    cpu_va: 0xD000_0000,
+                    device_addr: 0x4000_0000,
+                    len: 0x1000,
+                }),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32321,15 +32358,16 @@ mod tests {
             ProcessId(2),
             tairix_abi::hwtree::HwResource::mmio(0xFE98_0000, 0x4000),
         );
-        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: tairix_sync::SpinLock::new(None),
-            freed: tairix_sync::SpinLock::new(None),
-            ret: Ok(crate::devres::DmaCarve {
-                cpu_va: 0xD000_0000,
-                device_addr: 0x4000_0000,
-                len: 0x1000,
-            }),
-        }));
+        let facility: &'static RecordingDmaFacility =
+            crate::forever(Box::new(RecordingDmaFacility {
+                last: tairix_sync::SpinLock::new(None),
+                freed: tairix_sync::SpinLock::new(None),
+                ret: Ok(crate::devres::DmaCarve {
+                    cpu_va: 0xD000_0000,
+                    device_addr: 0x4000_0000,
+                    len: 0x1000,
+                }),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32378,15 +32416,16 @@ mod tests {
                 tairix_abi::DmaCoherence::Snooped,
             ),
         );
-        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: tairix_sync::SpinLock::new(None),
-            freed: tairix_sync::SpinLock::new(None),
-            ret: Ok(crate::devres::DmaCarve {
-                cpu_va: 0xD000_0000,
-                device_addr: 0x10_0000,
-                len: 0x1000,
-            }),
-        }));
+        let facility: &'static RecordingDmaFacility =
+            crate::forever(Box::new(RecordingDmaFacility {
+                last: tairix_sync::SpinLock::new(None),
+                freed: tairix_sync::SpinLock::new(None),
+                ret: Ok(crate::devres::DmaCarve {
+                    cpu_va: 0xD000_0000,
+                    device_addr: 0x10_0000,
+                    len: 0x1000,
+                }),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32443,15 +32482,16 @@ mod tests {
                 tairix_abi::DmaCoherence::Snooped,
             ),
         );
-        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: tairix_sync::SpinLock::new(None),
-            freed: tairix_sync::SpinLock::new(None),
-            ret: Ok(crate::devres::DmaCarve {
-                cpu_va: 0xD000_0000,
-                device_addr: 0x1000_0000,
-                len: 0x1000,
-            }),
-        }));
+        let facility: &'static RecordingDmaFacility =
+            crate::forever(Box::new(RecordingDmaFacility {
+                last: tairix_sync::SpinLock::new(None),
+                freed: tairix_sync::SpinLock::new(None),
+                ret: Ok(crate::devres::DmaCarve {
+                    cpu_va: 0xD000_0000,
+                    device_addr: 0x1000_0000,
+                    len: 0x1000,
+                }),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32505,15 +32545,16 @@ mod tests {
                 tairix_abi::DmaCoherence::Snooped,
             ),
         );
-        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: tairix_sync::SpinLock::new(None),
-            freed: tairix_sync::SpinLock::new(None),
-            ret: Ok(crate::devres::DmaCarve {
-                cpu_va: 0xD000_0000,
-                device_addr: 0x4000_0000,
-                len: 0x1000,
-            }),
-        }));
+        let facility: &'static RecordingDmaFacility =
+            crate::forever(Box::new(RecordingDmaFacility {
+                last: tairix_sync::SpinLock::new(None),
+                freed: tairix_sync::SpinLock::new(None),
+                ret: Ok(crate::devres::DmaCarve {
+                    cpu_va: 0xD000_0000,
+                    device_addr: 0x4000_0000,
+                    len: 0x1000,
+                }),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32648,15 +32689,16 @@ mod tests {
                 tairix_abi::DmaCoherence::Snooped,
             ),
         );
-        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: tairix_sync::SpinLock::new(None),
-            freed: tairix_sync::SpinLock::new(None),
-            ret: Ok(crate::devres::DmaCarve {
-                cpu_va: 0xD000_0000,
-                device_addr: 0x4000_0000,
-                len: 0x1000,
-            }),
-        }));
+        let facility: &'static RecordingDmaFacility =
+            crate::forever(Box::new(RecordingDmaFacility {
+                last: tairix_sync::SpinLock::new(None),
+                freed: tairix_sync::SpinLock::new(None),
+                ret: Ok(crate::devres::DmaCarve {
+                    cpu_va: 0xD000_0000,
+                    device_addr: 0x4000_0000,
+                    len: 0x1000,
+                }),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32711,15 +32753,16 @@ mod tests {
                 tairix_abi::DmaCoherence::Snooped,
             ),
         );
-        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: tairix_sync::SpinLock::new(None),
-            freed: tairix_sync::SpinLock::new(None),
-            ret: Ok(crate::devres::DmaCarve {
-                cpu_va: 0xD000_0000,
-                device_addr: 0x10_0000,
-                len: 0x1000,
-            }),
-        }));
+        let facility: &'static RecordingDmaFacility =
+            crate::forever(Box::new(RecordingDmaFacility {
+                last: tairix_sync::SpinLock::new(None),
+                freed: tairix_sync::SpinLock::new(None),
+                ret: Ok(crate::devres::DmaCarve {
+                    cpu_va: 0xD000_0000,
+                    device_addr: 0x10_0000,
+                    len: 0x1000,
+                }),
+            }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -32758,7 +32801,7 @@ mod tests {
         }
 
         fn watching(registry: Option<&'static RwLock<AddressSpaceRegistry>>) -> &'static Self {
-            Box::leak(Box::new(Self {
+            crate::forever(Box::new(Self {
                 calls: tairix_sync::SpinLock::new(Vec::new()),
                 wired: tairix_sync::SpinLock::new(Vec::new()),
                 epochs: core::sync::atomic::AtomicU64::new(1),
@@ -32949,7 +32992,7 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -33010,7 +33053,7 @@ mod tests {
     fn an_untranslated_hand_over_is_made_under_the_registry_lock() {
         let sink = make_sink();
         let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
-        let aspaces: &'static RwLock<AddressSpaceRegistry> = Box::leak(Box::new(aspaces));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> = crate::forever(Box::new(aspaces));
         let sched = make_sched(arch.clone());
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[], sink);
@@ -33065,11 +33108,12 @@ mod tests {
                 tairix_abi::DmaCoherence::Snooped,
             ),
         );
-        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
-            last: tairix_sync::SpinLock::new(None),
-            freed: tairix_sync::SpinLock::new(None),
-            ret: Err(Errno::OutOfMemory),
-        }));
+        let facility: &'static RecordingDmaFacility =
+            crate::forever(Box::new(RecordingDmaFacility {
+                last: tairix_sync::SpinLock::new(None),
+                freed: tairix_sync::SpinLock::new(None),
+                ret: Err(Errno::OutOfMemory),
+            }));
         let port = RecordingMastering::leaked();
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -33170,7 +33214,7 @@ mod tests {
     /// leaked to the `'static` shape the handler holds. The five `dma_free`
     /// tests share this.
     fn recording_dma_facility() -> &'static RecordingDmaFacility {
-        Box::leak(Box::new(RecordingDmaFacility {
+        crate::forever(Box::new(RecordingDmaFacility {
             last: tairix_sync::SpinLock::new(None),
             freed: tairix_sync::SpinLock::new(None),
             ret: Ok(crate::devres::DmaCarve {
@@ -33623,7 +33667,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+        let producer: &'static RecordingProcessWait = crate::forever(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 42,
                 status: tairix_abi::WaitStatus::Exited(7),
@@ -33677,7 +33721,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+        let producer: &'static RecordingProcessWait = crate::forever(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 42,
                 status: tairix_abi::WaitStatus::Exited(0),
@@ -33721,7 +33765,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+        let producer: &'static RecordingProcessWait = crate::forever(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 42,
                 status: tairix_abi::WaitStatus::Exited(7),
@@ -33768,7 +33812,7 @@ mod tests {
         };
 
         let producer: &'static RecordingProcessWait =
-            Box::leak(Box::new(RecordingProcessWait::new(Err(Errno::WouldBlock))));
+            crate::forever(Box::new(RecordingProcessWait::new(Err(Errno::WouldBlock))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -33921,7 +33965,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::with_child(2, 9, Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::with_child(2, 9, Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -33950,7 +33994,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingProcessSignal = Box::leak(Box::new(
+        let producer: &'static RecordingProcessSignal = crate::forever(Box::new(
             RecordingProcessSignal::with_child(2, 9, Err(Errno::NotFound)),
         ));
         let h = KernelSyscallHandlers::new(
@@ -33982,7 +34026,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34016,7 +34060,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34056,7 +34100,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34088,7 +34132,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34122,7 +34166,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34204,7 +34248,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34234,7 +34278,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34266,7 +34310,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34303,7 +34347,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::with_child(2, pid, Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34340,7 +34384,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34377,7 +34421,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34416,7 +34460,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34448,7 +34492,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34485,7 +34529,7 @@ mod tests {
         sink.clear();
 
         let producer: &'static RecordingProcessSignal =
-            Box::leak(Box::new(RecordingProcessSignal::childless(Ok(()))));
+            crate::forever(Box::new(RecordingProcessSignal::childless(Ok(()))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34536,7 +34580,7 @@ mod tests {
     fn power_filesystem(err: Option<Errno>) -> &'static RecordingFs {
         let mut fs = RecordingFs::new();
         fs.sync_err = err;
-        Box::leak(Box::new(fs))
+        crate::forever(Box::new(fs))
     }
 
     /// A power-off flushes every mounted volume, records the transition,
@@ -34740,7 +34784,7 @@ mod tests {
         };
 
         let producer: &'static RecordingProcessWait =
-            Box::leak(Box::new(RecordingProcessWait::new(Err(Errno::NotFound))));
+            crate::forever(Box::new(RecordingProcessWait::new(Err(Errno::NotFound))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -34774,7 +34818,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+        let producer: &'static RecordingProcessWait = crate::forever(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 42,
                 status: tairix_abi::WaitStatus::Exited(0),
@@ -34816,7 +34860,7 @@ mod tests {
             caps: &caps,
         };
 
-        let producer: &'static RecordingProcessWait = Box::leak(Box::new(
+        let producer: &'static RecordingProcessWait = crate::forever(Box::new(
             RecordingProcessWait::new(Ok(crate::procwait::WaitedChild {
                 pid: 0,
                 status: tairix_abi::WaitStatus::Exited(0),
@@ -35207,15 +35251,16 @@ mod tests {
     ) {
         install_trace_filter();
         let sink = make_sink();
-        let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
-        let sched = Box::leak(Box::new(make_sched(arch.clone())));
-        let table = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let ipc = Box::leak(Box::new(RwLock::new(PortRegistry::new())));
+        let arch: &'static Arc<TestArch> =
+            crate::forever(Box::new(Arc::new(TestArch::with_cpus(1))));
+        let sched = crate::forever(Box::new(make_sched(arch.clone())));
+        let table = crate::forever(Box::new(RwLock::new(CapTable::new())));
+        let ipc = crate::forever(Box::new(RwLock::new(PortRegistry::new())));
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let rng = Box::leak(Box::new(unseeded_rng()));
-        let irq = Box::leak(Box::new(IrqTable::new(31)));
-        let ctl = Box::leak(Box::new(UnsupportedController));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let rng = crate::forever(Box::new(unseeded_rng()));
+        let irq = crate::forever(Box::new(IrqTable::new(31)));
+        let ctl = crate::forever(Box::new(UnsupportedController));
         let h = KernelSyscallHandlers::new(sched, table, arch, sink, irq, ctl, ipc, aspaces, rng);
         (aspaces, h)
     }
@@ -35547,7 +35592,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let engine: &'static RecordingUsersAdmin = Box::leak(Box::new(RecordingUsersAdmin {
+        let engine: &'static RecordingUsersAdmin = crate::forever(Box::new(RecordingUsersAdmin {
             calls: tairix_sync::SpinLock::new(Vec::new()),
             response: RESPONSE,
         }));
@@ -35597,7 +35642,7 @@ mod tests {
             caps: &caps,
         };
 
-        let source: &'static StaticUsersDb = Box::leak(Box::new(StaticUsersDb(USERS_DB_TEXT)));
+        let source: &'static StaticUsersDb = crate::forever(Box::new(StaticUsersDb(USERS_DB_TEXT)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -35668,7 +35713,7 @@ mod tests {
             caps: &caps,
         };
 
-        let source: &'static AbsentUsersDb = Box::leak(Box::new(AbsentUsersDb));
+        let source: &'static AbsentUsersDb = crate::forever(Box::new(AbsentUsersDb));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -35725,7 +35770,7 @@ mod tests {
             caps: &caps,
         };
 
-        let absent: &'static AbsentUsersDb = Box::leak(Box::new(AbsentUsersDb));
+        let absent: &'static AbsentUsersDb = crate::forever(Box::new(AbsentUsersDb));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -35753,7 +35798,7 @@ mod tests {
             caps: &caps,
         };
 
-        let pending: &'static PendingUsersDb = Box::leak(Box::new(PendingUsersDb));
+        let pending: &'static PendingUsersDb = crate::forever(Box::new(PendingUsersDb));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -35816,9 +35861,9 @@ mod tests {
         let console_deadline = u64::MAX - 2;
         crate::waitq::CONSOLE_WAITQ.register(console_task, console_deadline);
 
-        let pending_once: &'static PendingOnceUsersDb = Box::leak(Box::new(PendingOnceUsersDb(
-            core::sync::atomic::AtomicBool::new(true),
-        )));
+        let pending_once: &'static PendingOnceUsersDb = crate::forever(Box::new(
+            PendingOnceUsersDb(core::sync::atomic::AtomicBool::new(true)),
+        ));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -35915,7 +35960,7 @@ mod tests {
             caps: &caps,
         };
 
-        let source: &'static StaticUsersDb = Box::leak(Box::new(StaticUsersDb(USERS_DB_TEXT)));
+        let source: &'static StaticUsersDb = crate::forever(Box::new(StaticUsersDb(USERS_DB_TEXT)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -35956,7 +36001,7 @@ mod tests {
             caps: &caps,
         };
 
-        let source: &'static StaticUsersDb = Box::leak(Box::new(StaticUsersDb(USERS_DB_TEXT)));
+        let source: &'static StaticUsersDb = crate::forever(Box::new(StaticUsersDb(USERS_DB_TEXT)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -36321,7 +36366,7 @@ mod tests {
         )
         .expect("record");
         let blob = rec.to_le_bytes().to_vec();
-        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+        let source: &'static StaticIntrospect = crate::forever(Box::new(StaticIntrospect {
             processes: blob.clone(),
             kernel_memory: alloc::vec::Vec::new(),
             limits: Ok(alloc::vec::Vec::new()),
@@ -36375,7 +36420,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+        let source: &'static StaticIntrospect = crate::forever(Box::new(StaticIntrospect {
             processes: alloc::vec::Vec::new(),
             kernel_memory: alloc::vec::Vec::new(),
             limits: Ok(alloc::vec::Vec::new()),
@@ -36431,7 +36476,7 @@ mod tests {
         row.origin = tairix_abi::sysinfo::CacheLedgerOrigin::Kernel;
         row.payload_bytes = 4096;
         let blob = row.to_le_bytes().to_vec();
-        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+        let source: &'static StaticIntrospect = crate::forever(Box::new(StaticIntrospect {
             processes: alloc::vec::Vec::new(),
             kernel_memory: alloc::vec::Vec::new(),
             limits: Ok(alloc::vec::Vec::new()),
@@ -36493,7 +36538,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+        let source: &'static StaticIntrospect = crate::forever(Box::new(StaticIntrospect {
             processes: alloc::vec::Vec::new(),
             kernel_memory: alloc::vec::Vec::new(),
             limits: Ok(alloc::vec::Vec::new()),
@@ -36605,7 +36650,7 @@ mod tests {
             caps: &caps,
         };
         let report = alloc::vec![7u8; tairix_abi::sysinfo::RESOURCE_LIMITS_REPORT_LEN];
-        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+        let source: &'static StaticIntrospect = crate::forever(Box::new(StaticIntrospect {
             processes: alloc::vec::Vec::new(),
             kernel_memory: alloc::vec::Vec::new(),
             limits: Ok(report.clone()),
@@ -36665,7 +36710,8 @@ mod tests {
             tairix_abi::HwNode::new(2, 1, tairix_abi::HwDeviceClass::Bus),
         ];
         let blob = encode_hw_snapshot(7, &nodes);
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(7, blob.clone())));
+        let source: &'static StaticHwTree =
+            crate::forever(Box::new(StaticHwTree::new(7, blob.clone())));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -36748,7 +36794,8 @@ mod tests {
             tairix_abi::HwDeviceClass::Root,
         )];
         let blob = encode_hw_snapshot(1, &nodes);
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(1, blob.clone())));
+        let source: &'static StaticHwTree =
+            crate::forever(Box::new(StaticHwTree::new(1, blob.clone())));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -36790,7 +36837,7 @@ mod tests {
         };
 
         let blob = encode_hw_snapshot(1, &[]);
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(1, blob)));
+        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(1, blob)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -36820,7 +36867,7 @@ mod tests {
         };
 
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(5, encode_hw_snapshot(5, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(5, encode_hw_snapshot(5, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -36965,7 +37012,7 @@ mod tests {
         };
 
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(3, encode_hw_snapshot(3, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(3, encode_hw_snapshot(3, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37043,7 +37090,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37096,7 +37143,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37148,7 +37195,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37202,7 +37249,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37260,7 +37307,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37307,7 +37354,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37379,11 +37426,11 @@ mod tests {
                 .expect("the node is free");
         }
         let tree: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         if gone {
             tree.gone.write().push(9);
         }
-        let msi: &'static RemovingMsi = Box::leak(Box::new(RemovingMsi {
+        let msi: &'static RemovingMsi = crate::forever(Box::new(RemovingMsi {
             tree,
             remove: removed.then_some(9),
             allocated: core::sync::atomic::AtomicUsize::new(0),
@@ -37494,9 +37541,9 @@ mod tests {
         let ctl = UnsupportedController;
         let aspaces = RwLock::new(AddressSpaceRegistry::new());
         let tree: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let msi: &'static CountingMsi =
-            Box::leak(Box::new(CountingMsi(core::sync::atomic::AtomicU32::new(0))));
+            crate::forever(Box::new(CountingMsi(core::sync::atomic::AtomicU32::new(0))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37602,8 +37649,8 @@ mod tests {
                 .expect("the node is free");
         }
         let tree: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
-        let msi: &'static RemovingMsi = Box::leak(Box::new(RemovingMsi {
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let msi: &'static RemovingMsi = crate::forever(Box::new(RemovingMsi {
             tree,
             remove: None,
             allocated: core::sync::atomic::AtomicUsize::new(0),
@@ -37683,8 +37730,8 @@ mod tests {
         let rng = unseeded_rng();
         let ctl = UnsupportedController;
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let irq: &'static IrqTable = Box::leak(Box::new(IrqTable::new(63)));
+            crate::forever(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let irq: &'static IrqTable = crate::forever(Box::new(IrqTable::new(63)));
         let driver = ProcessId(0x7_7001);
         {
             let mut aspaces = aspaces.write();
@@ -37694,7 +37741,7 @@ mod tests {
             aspaces.mint_node_grant(driver, HwResource::irq(40, 1), 5);
         }
         irq.bind(40, driver).expect("binds");
-        let recorder: &'static SuccessorAtExit = Box::leak(Box::new(SuccessorAtExit {
+        let recorder: &'static SuccessorAtExit = crate::forever(Box::new(SuccessorAtExit {
             aspaces,
             irq,
             loaded: core::sync::atomic::AtomicU8::new(0),
@@ -37728,7 +37775,7 @@ mod tests {
         let ctl = UnsupportedController;
         let creator = crate::test_boot::claim_task();
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
         let (creator_va, region) =
             crate::sharedreg::create(facility, ProcessId(creator), 1).expect("created");
         let mut child = emit_child_node();
@@ -37759,7 +37806,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37824,7 +37871,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         // Node 9's own parent's driver retired it by surprise.
         assert_eq!(source.remove(1, 9), Ok(alloc::vec![9]));
         let h = KernelSyscallHandlers::new(
@@ -37877,7 +37924,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -37950,7 +37997,7 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -38003,7 +38050,7 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -38056,7 +38103,7 @@ mod tests {
             refuses: bool,
             checks: usize,
         ) -> &'static Self {
-            Box::leak(Box::new(Self {
+            crate::forever(Box::new(Self {
                 surface: RwLock::new(surface),
                 refuses,
                 offered: RwLock::new(alloc::vec::Vec::new()),
@@ -38067,7 +38114,7 @@ mod tests {
         }
 
         fn installed(&'static self) -> &'static [ConsoleDevice] {
-            Box::leak(Box::new([ConsoleDevice::new(
+            crate::forever(Box::new([ConsoleDevice::new(
                 self,
                 &crate::console::NULL_CONSOLE_READ,
             )]))
@@ -38130,7 +38177,7 @@ mod tests {
 
     impl ConsoleBlocks {
         fn leaked() -> &'static Self {
-            Box::leak(Box::new(Self {
+            crate::forever(Box::new(Self {
                 requested: RwLock::new(alloc::vec::Vec::new()),
                 freed: RwLock::new(alloc::vec::Vec::new()),
             }))
@@ -38257,7 +38304,7 @@ mod tests {
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
             0,
             encode_hw_snapshot(0, &[engine_node(9, true, true)]),
         )));
@@ -38344,7 +38391,7 @@ mod tests {
         }
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
             0,
             encode_hw_snapshot(
                 0,
@@ -38429,7 +38476,7 @@ mod tests {
         }
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
             0,
             encode_hw_snapshot(
                 0,
@@ -38492,7 +38539,7 @@ mod tests {
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
             0,
             encode_hw_snapshot(0, &[engine_node(9, true, true)]),
         )));
@@ -38567,7 +38614,7 @@ mod tests {
         for key in keys {
             node.push_match_key(key).expect("room");
         }
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
             0,
             encode_hw_snapshot(0, &[node]),
         )));
@@ -38665,7 +38712,7 @@ mod tests {
             )
         }));
         assert!(nodes.len() * tairix_abi::HwNode::WIRE_LEN > 8192);
-        let source: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+        let source: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
             0,
             encode_hw_snapshot(0, &nodes),
         )));
@@ -38737,8 +38784,8 @@ mod tests {
             caps: &wm_caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(
             &crate::console::NULL_CONSOLE_INPUT,
         )));
         let h = KernelSyscallHandlers::new(
@@ -38836,7 +38883,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -38930,7 +38977,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -38976,7 +39023,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -39018,7 +39065,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         // Node 7 is not removable (models a node the caller does not own).
         source.unremovable.write().push(7);
         let h = KernelSyscallHandlers::new(
@@ -39061,7 +39108,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -39174,7 +39221,7 @@ mod tests {
                 caps: &caps,
             };
             let source: &'static StaticHwTree =
-                Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+                crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
             source.set_subtree(42, alloc::vec![43]);
             let h = KernelSyscallHandlers::new(
                 &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -39251,12 +39298,12 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         // Node 42 serves block-service endpoint 500, on which a volume is
         // still attached.
         source.set_endpoints(42, alloc::vec![500]);
         let fs: &'static RecordingFs =
-            Box::leak(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
+            crate::forever(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -39311,10 +39358,10 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         // Node 42 declares an endpoint, but no volume is attached on it.
         source.set_endpoints(42, alloc::vec![500]);
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -39560,10 +39607,10 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         source.set_subtree(43, alloc::vec![60]);
         source.set_subtree(42, alloc::vec![70, 71]);
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -39668,11 +39715,12 @@ mod tests {
         &'static tairix_kernel_iommu_api::model::ModelUnit<'static>,
         &'static StaticHwTree,
     ) {
-        let frames: &'static tairix_kernel_iommu_api::hostmem::HostFrames = Box::leak(Box::new(
-            tairix_kernel_iommu_api::hostmem::HostFrames::new(0x1_0000_0000),
-        ));
+        let frames: &'static tairix_kernel_iommu_api::hostmem::HostFrames =
+            crate::forever(Box::new(tairix_kernel_iommu_api::hostmem::HostFrames::new(
+                0x1_0000_0000,
+            )));
         let model: &'static tairix_kernel_iommu_api::model::ModelUnit<'static> =
-            Box::leak(Box::new(tairix_kernel_iommu_api::model::ModelUnit::new(
+            crate::forever(Box::new(tairix_kernel_iommu_api::model::ModelUnit::new(
                 frames, behaviour,
             )));
         let mut encoded = alloc::vec::Vec::new();
@@ -39688,7 +39736,7 @@ mod tests {
             .expect("resource fits");
             encoded.push(node);
         }
-        let tree: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+        let tree: &'static StaticHwTree = crate::forever(Box::new(StaticHwTree::new(
             1,
             encode_hw_snapshot(1, &encoded),
         )));
@@ -39718,7 +39766,7 @@ mod tests {
             )],
             "the reference unit enables"
         );
-        (Box::leak(Box::new(translation)), model, tree)
+        (crate::forever(Box::new(translation)), model, tree)
     }
 
     #[test]
@@ -39886,7 +39934,7 @@ mod tests {
         let (translation, _, tree) =
             translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
         let probe: &'static CustodianProbe =
-            Box::leak(Box::new(CustodianProbe(tairix_sync::SpinLock::new(None))));
+            crate::forever(Box::new(CustodianProbe(tairix_sync::SpinLock::new(None))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -39935,7 +39983,7 @@ mod tests {
         let (translation, _, tree) =
             translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
         let probe: &'static CustodianProbe =
-            Box::leak(Box::new(CustodianProbe(tairix_sync::SpinLock::new(None))));
+            crate::forever(Box::new(CustodianProbe(tairix_sync::SpinLock::new(None))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -40046,7 +40094,7 @@ mod tests {
         let (translation, _, tree) =
             translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
         let probe: &'static CustodianProbe =
-            Box::leak(Box::new(CustodianProbe(tairix_sync::SpinLock::new(None))));
+            crate::forever(Box::new(CustodianProbe(tairix_sync::SpinLock::new(None))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -40352,7 +40400,7 @@ mod tests {
                 caps: &caps,
             };
             let source: &'static StaticHwTree =
-                Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+                crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
             let h = KernelSyscallHandlers::new(
                 &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
             )
@@ -40395,11 +40443,11 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         // The node declares three endpoints; only the middle one is busy.
         source.set_endpoints(42, alloc::vec![500, 501, 502]);
         let fs: &'static RecordingFs =
-            Box::leak(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![501])));
+            crate::forever(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![501])));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -40446,10 +40494,10 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         source.set_endpoints(42, alloc::vec![500]);
         let fs: &'static RecordingFs =
-            Box::leak(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
+            crate::forever(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -40499,7 +40547,7 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -40542,13 +40590,13 @@ mod tests {
             caps: &caps,
         };
         let source: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
         // Node 7 is not owned by the caller: both the removal and the
         // endpoint lookup model the store's fail-closed `NotFound`.
         source.unremovable.write().push(7);
         source.set_endpoints(7, alloc::vec![500]);
         let fs: &'static RecordingFs =
-            Box::leak(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
+            crate::forever(Box::new(RecordingFs::with_busy_endpoints(alloc::vec![500])));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -41353,8 +41401,8 @@ mod tests {
             caps: &caps,
         };
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -41882,7 +41930,7 @@ mod tests {
             caps: &caps,
         };
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_1000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_1000 }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -41977,7 +42025,7 @@ mod tests {
         // A region owned by another task, granted to the mapper — the app
         // hands the session its frame region.
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: REGION_VA }));
+            crate::forever(Box::new(RecordingSharedFacility { va: REGION_VA }));
         let (owner_va, id) =
             crate::sharedreg::create(facility, ProcessId(region_owner), 1).expect("region created");
         let handle = aspaces
@@ -42047,7 +42095,7 @@ mod tests {
             caps: &caps,
         };
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_2000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_2000 }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -42094,7 +42142,7 @@ mod tests {
             caps: &caps,
         };
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -42159,7 +42207,7 @@ mod tests {
             caps: &caps,
         };
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_5000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_5000 }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -42762,7 +42810,7 @@ mod tests {
     fn fd_grant_delegates_only_a_held_bounded_path_descriptor() {
         let rig = GrantRig::new(b"/f");
         let ctx = rig.grantor();
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = rig.handlers(fs);
         let to_recipient = |fd: u32, ceiling: u64| {
             h.fd_grant(
@@ -42869,7 +42917,7 @@ mod tests {
     fn fd_redeem_is_owner_bound_and_one_shot() {
         let rig = GrantRig::new(b"/f");
         let ctx = rig.grantor();
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = rig.handlers(fs);
         let recipient_caps = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
 
@@ -42957,7 +43005,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.read_data = b"hello".to_vec();
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = rig.handlers(fs);
 
         let fd = u32::try_from(
@@ -43035,7 +43083,7 @@ mod tests {
         let gctx = rig.grantor();
         let mut mock = RecordingFs::new();
         mock.read_data = b"hello".to_vec();
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = rig.handlers(fs);
 
         // The relay holds `CAP_FS_ACCESS` — delegating is gated exactly as
@@ -43129,7 +43177,7 @@ mod tests {
     fn a_writable_delegation_asked_to_inherit_carries_the_grantors_own_reach() {
         let rig = GrantRig::new(b"/f");
         let gctx = rig.grantor();
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = rig.handlers(fs);
         let holder_caps = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
         let hctx = CallerContext {
@@ -43184,7 +43232,7 @@ mod tests {
         const HELD: u64 = 4096;
         let rig = GrantRig::new(b"/f");
         let gctx = rig.grantor();
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = rig.handlers(fs);
         let relay = GrantHolder {
             granted: &[CapabilityId::FS_ACCESS],
@@ -43266,7 +43314,7 @@ mod tests {
     fn fd_redeem_from_takes_only_the_named_grantors_delegation() {
         let rig = GrantRig::new(b"/f");
         let gctx = rig.grantor();
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = rig.handlers(fs);
         let mut page = grant_page(b"");
         page.extend_from_slice(rig.grantor_caps.proc_id().as_bytes());
@@ -43327,7 +43375,7 @@ mod tests {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = rig.handlers(fs);
 
         let fd = u32::try_from(
@@ -43413,8 +43461,8 @@ mod tests {
             task_id: SecTaskId(3),
             caps: &recipient_caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
-        let fm: &'static RecordingFileMap = Box::leak(Box::new(RecordingFileMap::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
+        let fm: &'static RecordingFileMap = crate::forever(Box::new(RecordingFileMap::new()));
         let h = rig.handlers(fs).with_file_map(fm);
 
         let fd = u32::try_from(
@@ -43498,8 +43546,8 @@ mod tests {
         let ctl = UnsupportedController;
 
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
 
         let id = 0xCA11_5EA7;
         let server_caps = make_caps_record(server, &[], sink);
@@ -43891,7 +43939,7 @@ mod tests {
 
     /// A hardware tree holding exactly `nodes`, for the lifetime of the test.
     fn tree_of(nodes: &[tairix_abi::HwNode]) -> &'static StaticHwTree {
-        Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, nodes))))
+        crate::forever(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, nodes))))
     }
 
     /// Bind endpoint `id` served by `server_caps` and receivable under
@@ -44282,7 +44330,7 @@ mod tests {
             caps: &caps,
         };
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
         let h = KernelSyscallHandlers::new(
             &sched,
             &scene.table,
@@ -44343,7 +44391,7 @@ mod tests {
             caps: &caps,
         };
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
         let port = RecordingMastering::leaked();
         let h = KernelSyscallHandlers::new(
             &sched,
@@ -44388,7 +44436,7 @@ mod tests {
         let sched = make_sched(scene.arch.clone());
         let ctl = UnsupportedController;
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_4000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_4000 }));
         let h = KernelSyscallHandlers::new(
             &sched,
             &scene.table,
@@ -44480,7 +44528,7 @@ mod tests {
         let sched = make_sched(scene.arch.clone());
         let ctl = UnsupportedController;
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_5000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_5000 }));
         let h = KernelSyscallHandlers::new(
             &sched,
             &scene.table,
@@ -44521,7 +44569,7 @@ mod tests {
         let sched = make_sched(scene.arch.clone());
         let ctl = UnsupportedController;
         let facility: &'static RecordingSharedFacility =
-            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_6000 }));
+            crate::forever(Box::new(RecordingSharedFacility { va: 0x2_0000_6000 }));
         let h = KernelSyscallHandlers::new(
             &sched,
             &scene.table,
@@ -44646,8 +44694,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         // Task ids unique to this test: the wait-set registry is process-
         // global, and another test asserts the exact count of sets it
         // releases for its own task id.
@@ -44877,7 +44925,7 @@ mod tests {
 
     impl TableWait {
         fn leaked() -> &'static Self {
-            Box::leak(Box::new(Self(tairix_sync::SpinLock::new(
+            crate::forever(Box::new(Self(tairix_sync::SpinLock::new(
                 crate::procwait::ProcessTable::new(),
             ))))
         }
@@ -45333,7 +45381,7 @@ mod tests {
                     .expect("registration succeeds");
             }
             let queue: &'static crate::console::ConsoleInputQueue =
-                Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+                crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
             Self {
                 sched: make_sched(arch.clone()),
                 table: RwLock::new(CapTable::new()),
@@ -45344,7 +45392,7 @@ mod tests {
                 ipc: RwLock::new(PortRegistry::new()),
                 aspaces,
                 rng: unseeded_rng(),
-                seats: Box::leak(Box::new(SeatRegistry::new(queue))),
+                seats: crate::forever(Box::new(SeatRegistry::new(queue))),
                 caps: [
                     make_caps_record(tasks[0], &[CapabilityId::IPC_BIND_PRIVILEGED], sink),
                     make_caps_record(tasks[1], &[CapabilityId::DISPLAY], sink),
@@ -45799,7 +45847,7 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let tree: &'static StaticHwTree =
-            Box::leak(Box::new(StaticHwTree::new(4, encode_hw_snapshot(4, &[]))));
+            crate::forever(Box::new(StaticHwTree::new(4, encode_hw_snapshot(4, &[]))));
         let kind = tairix_abi::WaitSourceKind::HardwareTree as u32;
 
         let unprivileged = make_caps_record(owner, &[], sink);
@@ -45897,8 +45945,8 @@ mod tests {
             caps: &caps,
         };
         let queue: &'static crate::console::ConsoleInputQueue =
-            Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
-        let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            crate::forever(Box::new(crate::console::ConsoleInputQueue::new()));
+        let seat: &'static SeatRegistry = crate::forever(Box::new(SeatRegistry::new(queue)));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -47330,7 +47378,7 @@ mod tests {
         aspaces: &'a RwLock<AddressSpaceRegistry>,
         sink: &'a TestSink,
     ) -> KernelSyscallHandlers<'a, TestArch> {
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([ConsoleDevice::new(
             &crate::console::NULL_CONSOLE,
             harness.queue,
         )]));
@@ -47366,7 +47414,7 @@ mod tests {
     impl ConsoleMemberHarness {
         fn new() -> Self {
             let arch = Arc::new(TestArch::with_cpus(1));
-            let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
+            let wait_arch: &'static TestArch = crate::forever(Box::new(TestArch::with_cpus(1)));
             Self {
                 sched: make_sched(arch.clone()),
                 arch,
@@ -47375,8 +47423,8 @@ mod tests {
                 rng: unseeded_rng(),
                 irq: IrqTable::new(31),
                 ctl: UnsupportedController,
-                queue: Box::leak(Box::new(crate::console::ConsoleInputQueue::new())),
-                wait: Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch))),
+                queue: crate::forever(Box::new(crate::console::ConsoleInputQueue::new())),
+                wait: crate::forever(Box::new(crate::procwait::KernelProcessWait::new(wait_arch))),
             }
         }
     }
@@ -48627,7 +48675,7 @@ mod tests {
         // The boot path leaks the production clock; tests do the same so the
         // `'static` builder is satisfied and a set persists across reads.
         let clock: &'static crate::wallclock::KernelWallClock =
-            Box::leak(Box::new(crate::wallclock::KernelWallClock::new()));
+            crate::forever(Box::new(crate::wallclock::KernelWallClock::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -48865,9 +48913,9 @@ mod tests {
         // Console 0 is a framebuffer text console reporting a known grid;
         // console 1 is a UART that reports no geometry (a `RecordingConsole`,
         // which takes the trait's `geometry() -> None` default).
-        let video: &'static GridConsole = Box::leak(Box::new(GridConsole(grid)));
-        let uart: &'static RecordingConsole = Box::leak(Box::new(RecordingConsole::new()));
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([
+        let video: &'static GridConsole = crate::forever(Box::new(GridConsole(grid)));
+        let uart: &'static RecordingConsole = crate::forever(Box::new(RecordingConsole::new()));
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([
             ConsoleDevice::new(video, &crate::console::NULL_CONSOLE_READ),
             ConsoleDevice::new(uart, &crate::console::NULL_CONSOLE_READ),
         ]));
@@ -49347,7 +49395,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -49426,7 +49474,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.open_err = Some(Errno::AlreadyExists);
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -49465,7 +49513,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.read_data = b"hello".to_vec();
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -49528,7 +49576,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -49597,7 +49645,7 @@ mod tests {
         // any write: both directions are deliberately short.
         mock.read_data = b"hi".to_vec();
         mock.write_accept = Some(1);
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -49683,7 +49731,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.read_data = b"abc".to_vec();
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -49769,7 +49817,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -49886,7 +49934,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.entries = readdir_fixture();
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -49993,7 +50041,7 @@ mod tests {
             times: tairix_abi::NodeTimes::default(),
             content_gen: 0,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50062,7 +50110,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50137,7 +50185,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50200,7 +50248,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50286,7 +50334,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.link_err = Some(Errno::IsADirectory);
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50347,7 +50395,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.symlink_err = Some(Errno::PermissionDenied);
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50398,7 +50446,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50453,7 +50501,7 @@ mod tests {
         let mut mock = RecordingFs::new();
         let target = "../real/name";
         mock.readlink_target = Some(alloc::string::String::from(target));
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50480,7 +50528,7 @@ mod tests {
             Err(Errno::BufferTooSmall)
         );
         // A path that is not a link fails closed from the service.
-        let plain: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let plain: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h2 = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50521,7 +50569,7 @@ mod tests {
         let mut mock = RecordingFs::new();
         let canonical = "/Storage/vol/real/name";
         mock.realpath = Some(alloc::string::String::from(canonical));
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50570,7 +50618,7 @@ mod tests {
             Err(Errno::BufferTooSmall)
         );
         // A path the service cannot canonicalise fails closed.
-        let absent: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let absent: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h2 = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50624,7 +50672,7 @@ mod tests {
             node: owner,
         };
         let fswatch: &'static crate::fswatch::WatchRegistry =
-            Box::leak(Box::new(crate::fswatch::WatchRegistry::new()));
+            crate::forever(Box::new(crate::fswatch::WatchRegistry::new()));
         let claim = fswatch
             .claim(
                 file_id.volume,
@@ -50646,7 +50694,7 @@ mod tests {
             times: tairix_abi::NodeTimes::default(),
             content_gen: 0,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -50727,7 +50775,7 @@ mod tests {
             volume: [0x9D; 16],
             node: owner,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51367,7 +51415,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51416,7 +51464,7 @@ mod tests {
         };
         let mut mock = RecordingFs::new();
         mock.open_err = Some(Errno::PermissionDenied);
-        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let fs: &'static RecordingFs = crate::forever(Box::new(mock));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51457,7 +51505,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51499,7 +51547,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51540,7 +51588,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51585,11 +51633,11 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let mut id = [0u8; 16];
         id[15] = 1;
         let forest: &'static crate::fs::VolumeForest =
-            Box::leak(Box::new(crate::fs::VolumeForest::new()));
+            crate::forever(Box::new(crate::fs::VolumeForest::new()));
         forest.publish(id, &["System"]).expect("publish succeeds");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -51634,7 +51682,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51675,7 +51723,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51722,7 +51770,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51815,7 +51863,7 @@ mod tests {
             task_id: SecTaskId(2),
             caps: &caps,
         };
-        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let fs: &'static RecordingFs = crate::forever(Box::new(RecordingFs::new()));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -51926,9 +51974,9 @@ mod tests {
             caps: &caps,
         };
 
-        let consoles: &'static [ConsoleDevice] = Box::leak(Box::new([ConsoleDevice::new(
-            Box::leak(Box::new(DiscardWrite)),
-            Box::leak(Box::new(TimedOutRead)),
+        let consoles: &'static [ConsoleDevice] = crate::forever(Box::new([ConsoleDevice::new(
+            crate::forever(Box::new(DiscardWrite)),
+            crate::forever(Box::new(TimedOutRead)),
         )]));
 
         // A handful of live process rows, as the broker's introspect walk
@@ -51955,7 +52003,7 @@ mod tests {
             blob.extend_from_slice(&row.to_le_bytes());
         }
         let blob_len = blob.len();
-        let source: &'static StaticIntrospect = Box::leak(Box::new(StaticIntrospect {
+        let source: &'static StaticIntrospect = crate::forever(Box::new(StaticIntrospect {
             processes: blob,
             kernel_memory: alloc::vec::Vec::new(),
             limits: Err(Errno::NotImplemented),

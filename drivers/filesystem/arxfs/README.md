@@ -5,7 +5,8 @@ filesystem that stores full POSIX metadata plus an inline access-control
 list and an optional capability gate **per inode** (`AGENTS.md` §5.3). It
 sits behind any `tairix_abi::driver::block::Block` device and is exposed
 through the versioned `tairix_abi::driver::filesystem::FilesystemRead`,
-`FilesystemWrite`, `FilesystemSecurity`, and `FilesystemTimestamps` traits.
+`FilesystemWrite`, and `FilesystemSecurity` traits, with each node's
+timestamps in `NodeInfo::times`, stamped from the host's wall clock.
 
 There is exactly **one** on-disk version. `arxfs` is built up internally
 in the stages of `docs/src/filesystem/arxfs-spec.md`, but the driver and its format are a

@@ -206,8 +206,11 @@ cannot race.
   flag, which the successor reads with `Acquire`.
 - **`SeqLock`** — readers sample the sequence counter twice with
   `Acquire` plus an explicit `Acquire` fence; writers bump the counter
-  to an odd value with `Release` before mutating and back to even with
-  `Release` on commit. The payload itself is a fixed array of
+  to an odd value and then issue a `Release` fence before mutating, and
+  bump it back to even with `Release` on commit. The fence is what orders
+  the payload stores after the odd value: a `Release` on the increment
+  orders only what precedes it, and a reader could then copy a new word
+  yet sample the same even sequence on both sides. The payload itself is a fixed array of
   `AtomicUsize` copied with `Relaxed` word accesses, *not* a `T` in a
   cell: a reader deliberately copies while a writer may be mid-update,
   and a racing non-atomic access is undefined in Rust rather than merely

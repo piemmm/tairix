@@ -17,6 +17,7 @@
 
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::WindowEvent;
+use tairix_abi::Errno;
 use tairix_browse::render::{content_area, progress_cancel_at};
 use tairix_browse::{Places, ToolbarBand};
 use tairix_geometry::{Rect, Scale};
@@ -141,6 +142,17 @@ pub fn advance_for_a_slice(mut step: impl FnMut() -> bool, mut clock: impl FnMut
 #[must_use]
 pub const fn progress_due(finished: bool, now_ns: u64, shown_ns: u64) -> bool {
     finished || now_ns.saturating_sub(shown_ns) >= Timeline::FRAME_NS
+}
+
+/// Why a copy could not make its destination file, from the kernel's answer.
+#[must_use]
+pub const fn create_refusal(error: Errno) -> &'static str {
+    match error {
+        Errno::AlreadyExists => "a destination of that name already exists",
+        Errno::NoSpace => "the destination is full",
+        Errno::PermissionDenied => "the destination folder may not be written to",
+        _ => "a destination file could not be created",
+    }
 }
 
 #[cfg(test)]
