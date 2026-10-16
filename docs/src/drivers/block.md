@@ -65,15 +65,17 @@ a checksum-less filesystem would never notice. The rule is therefore absolute:
 It is upheld structurally, never by convention:
 
 - **In the kernel**, the runtime volume service connects a device **once per
-  block-service endpoint** and shares that one client behind
-  `SharedBlock`'s sleeping lock, so every volume on a disk — each partition's
+  block-service endpoint** and shares that one client, read through one block
+  cache, behind `SharedBlock`'s sleeping lock, so every volume on a disk — each partition's
   mount, and the detach-time device-cache flush — serialises whole operations
   onto it. A mount holds an *owned* window (`OwnedBlockWindow`) because the
   filesystem driver long outlives the attach call that opened it; the last
-  window dropped closes the client and releases its window hold. Sharing the
-  client also gives a disk **one** health fold and one set of I/O counters
-  rather than a divergent copy per mount, which is the honest reading anyway:
-  health is a property of the device.
+  window dropped closes the client and releases its window hold. When the
+  device vanishes, every volume on it goes through the removal transition,
+  and its cache drops what it held as soon as nothing holds the device.
+  Sharing the client also gives a disk **one** health fold and one set of I/O
+  counters rather than a divergent copy per mount, which is the honest reading
+  anyway: health is a property of the device.
 - **Across processes**, the volume manager and the kernel's mounts are ordered
   rather than interleaved. The manager probes the whole device, **drops** its
   transport, and only then asks the kernel to attach the volumes it found.

@@ -43,7 +43,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::driver::filesystem::{
     DirVisit, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeInfo, NodeKind as DriverNodeKind, NodeTimes, VolumeHost,
+    FilesystemWrite, NodeInfo, NodeKind as DriverNodeKind, NodeTimes, VolumeHost, VolumeStats,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::sysinfo::{
@@ -138,6 +138,9 @@ struct DriverEntry<F: 'static> {
     /// The claim on the volume's watch table, released when the volume is
     /// unregistered.
     watch: Option<ClaimRef>,
+    /// The space figures the volume last reported, for a listing taken
+    /// while it is busy.
+    usage: Arc<SpinLock<VolumeStats>>,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entries`]
@@ -150,6 +153,7 @@ struct SnapshotEntry<F: 'static> {
     driver: Arc<SleepLock<F>>,
     volume_id: [u8; 16],
     availability: MountAvailability,
+    usage: Arc<SpinLock<VolumeStats>>,
 }
 
 /// The availability the mount snapshot reports for one registered volume:
@@ -315,6 +319,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 io: None,
                 writeback: WritebackDue::empty(),
                 watch,
+                usage: Arc::new(SpinLock::new(VolumeStats::default())),
             });
             shared
         };
@@ -395,6 +400,20 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         if recorded {
             crate::waitq::writeback_wake(deadline_ns);
         }
+    }
+
+    /// Whether the volume registered for `handle` holds a transaction its
+    /// driver has not published: writes it acknowledged that its device has
+    /// not been given. Takes only the registry's short lookup lock, so the
+    /// surprise-removal path may ask it.
+    #[must_use]
+    pub fn holds_unpublished(&self, handle: DriverHandle) -> bool {
+        let raw = handle.as_u64();
+        self.drivers
+            .lock()
+            .iter()
+            .find(|e| e.handle == raw)
+            .is_some_and(|e| e.writeback.holds_open())
     }
 
     /// The soonest write-back deadline any registered volume has published,
@@ -694,6 +713,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 driver: Arc::clone(&e.driver),
                 volume_id: e.volume_id,
                 availability: overlaid_availability(e.availability, e.io.as_ref()),
+                usage: Arc::clone(&e.usage),
             })
             .collect();
         entries.sort_unstable_by_key(|entry| entry.handle);
@@ -1956,9 +1976,7 @@ where
         let Ok(vfs) = self.mount.vfs() else {
             return Vec::new();
         };
-        // Copied out under the short read guard: `driver.lock()` below may
-        // park on a busy volume, and a spinning guard is never held across a
-        // park.
+        // Copied out, so the table's guard is held across no driver's lock.
         let volumes = vfs.mounts().volumes();
         let online = self.mount.entries();
         volumes
@@ -1967,9 +1985,19 @@ where
                 // A volume attached in the namespace whose driver is not yet
                 // registered serves nothing, so it is not reported.
                 let entry = online_entry(&online, attachment.driver())?;
-                // A driver fault reading its accounting reports the volume
-                // with zero usage: it exists, only its figures are unknown.
-                let usage = entry.driver.lock().stats().unwrap_or_default();
+                // A volume in the middle of a long operation reports the
+                // figures it last gave rather than holding the listing — and
+                // everyone waiting on it — until it is done. A driver fault
+                // reading its accounting reports zero usage: the volume
+                // exists, only its figures are unknown.
+                let usage = match entry.driver.try_lock() {
+                    Some(mut driver) => {
+                        let fresh = driver.stats().unwrap_or_default();
+                        *entry.usage.lock() = fresh;
+                        fresh
+                    }
+                    None => *entry.usage.lock(),
+                };
                 let target = shown_at.map_or_else(String::new, |at| spell(at.components()));
                 // `MountRecord::new` fails only on an over-long field or an
                 // inconsistent usage report; such a volume is left out rather

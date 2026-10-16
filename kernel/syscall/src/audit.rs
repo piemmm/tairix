@@ -18,6 +18,8 @@
 //! | 5005 | Debug | `SYSCALL_HANDLER_WOULD_BLOCK` | The owning subsystem had nothing to return yet and the caller may retry (`Errno::WouldBlock`). Not a rejection: recorded at `Debug` so a routine poll-while-pending cannot flood the log. |
 //! | 5006 | Debug | `SYSCALL_HANDLER_NOT_FOUND`   | The owning subsystem answered that the named object does not exist (`Errno::NotFound`). An ordinary answer, not a security decision (a genuine authorisation refusal is `PermissionDenied` and stays at `Error`): recorded at `Debug` so a routine existence probe of an optional file or endpoint cannot flood the log. |
 //! | 5007 | Debug | `SYSCALL_HANDLER_UNAVAILABLE` | The owning subsystem is not present on this build or not up yet (`Errno::NotImplemented`). No security decision was taken: recorded at `Debug` so a layered lookup that tries an optional source before its fallback — a settings override on the not-yet-mounted encrypted root, say — cannot flood the boot log. |
+//! | 5008 | Debug | `SYSCALL_HANDLER_PEER_CLOSED` | The other end of the caller's channel is gone (`Errno::BrokenPipe`). |
+//! | 5009 | Debug | `SYSCALL_HANDLER_ALREADY_EXISTS` | The owning subsystem answered that the name asked for is taken (`Errno::AlreadyExists`). An ordinary answer, not a security decision: recorded at `Debug` so a caller walking candidate names — the volume manager naming an attached volume, say — cannot flood the log. |
 //!
 //! Adding a new event takes the next free identifier in this file and a
 //! row in `docs/src/architecture/syscalls.md`.
@@ -104,6 +106,13 @@ pub enum AuditEvent {
     ///
     /// [`Errno::BrokenPipe`]: tairix_abi::Errno::BrokenPipe
     SyscallHandlerPeerClosed,
+    /// The owning subsystem answered that the name asked for is taken
+    /// ([`Errno::AlreadyExists`]): an exclusive create, or the volume
+    /// manager trying its next candidate catalog name. No security decision
+    /// was taken, so it is recorded at [`Level::Debug`].
+    ///
+    /// [`Errno::AlreadyExists`]: tairix_abi::Errno::AlreadyExists
+    SyscallHandlerAlreadyExists,
 }
 
 impl AuditEvent {
@@ -116,6 +125,7 @@ impl AuditEvent {
             Errno::NotFound => Self::SyscallHandlerNotFound,
             Errno::NotImplemented => Self::SyscallHandlerUnavailable,
             Errno::BrokenPipe => Self::SyscallHandlerPeerClosed,
+            Errno::AlreadyExists => Self::SyscallHandlerAlreadyExists,
             _ => Self::SyscallHandlerRejected,
         }
     }
@@ -133,6 +143,7 @@ impl AuditEvent {
             Self::SyscallHandlerNotFound => 5006,
             Self::SyscallHandlerUnavailable => 5007,
             Self::SyscallHandlerPeerClosed => 5008,
+            Self::SyscallHandlerAlreadyExists => 5009,
         })
     }
 
@@ -151,7 +162,8 @@ impl AuditEvent {
             | Self::SyscallHandlerWouldBlock
             | Self::SyscallHandlerNotFound
             | Self::SyscallHandlerUnavailable
-            | Self::SyscallHandlerPeerClosed => Level::Debug,
+            | Self::SyscallHandlerPeerClosed
+            | Self::SyscallHandlerAlreadyExists => Level::Debug,
             Self::SyscallPermissionDenied
             | Self::SyscallUnknown
             | Self::SyscallBadArguments
@@ -172,6 +184,7 @@ impl AuditEvent {
             Self::SyscallHandlerNotFound => "syscall target absent",
             Self::SyscallHandlerUnavailable => "syscall subsystem unavailable",
             Self::SyscallHandlerPeerClosed => "syscall peer closed",
+            Self::SyscallHandlerAlreadyExists => "syscall target name taken",
         }
     }
 }
@@ -213,6 +226,7 @@ mod tests {
             AuditEvent::SyscallHandlerNotFound,
             AuditEvent::SyscallHandlerUnavailable,
             AuditEvent::SyscallHandlerPeerClosed,
+            AuditEvent::SyscallHandlerAlreadyExists,
         ] {
             let EventId(raw) = ev.id();
             assert!(
@@ -229,6 +243,16 @@ mod tests {
         assert_eq!(AuditEvent::SyscallHandlerNotFound.id(), EventId(5006));
         assert_eq!(AuditEvent::SyscallHandlerUnavailable.id(), EventId(5007));
         assert_eq!(AuditEvent::SyscallHandlerPeerClosed.id(), EventId(5008));
+        assert_eq!(AuditEvent::SyscallHandlerAlreadyExists.id(), EventId(5009));
+    }
+
+    #[test]
+    fn a_taken_name_is_recorded_below_error() {
+        assert_eq!(
+            AuditEvent::of_failure(tairix_abi::Errno::AlreadyExists),
+            AuditEvent::SyscallHandlerAlreadyExists
+        );
+        assert!(AuditEvent::SyscallHandlerAlreadyExists.level() < Level::Info);
     }
 
     #[test]

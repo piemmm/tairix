@@ -56,6 +56,10 @@ tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # loop over a dying buffer can be optimised away, so the wipe routes through
 # the same audited crate the kernel caches use.
 zeroize = { version = "1.8.1", default-features = false }
+# The write-back core shared with the other block-backed drivers: the dirty
+# set, its RAM-derived bound, the commit scheduler, and the coalesced-transfer
+# window (`plans/ARXFS-WRITEBACK.md`).
+tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0" }
 
 [lints]
 workspace = true
@@ -68,3 +72,5 @@ workspace = true
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # The shared driver listing fixtures (`listing::listed`, `first_listed`).
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = ["test-util"] }
+# The settable write-back host the batching tests move a window's clock with.
+tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0", features = ["test-util"] }

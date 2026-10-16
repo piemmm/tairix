@@ -24,9 +24,9 @@ will not let overwrite a network sync.
 The kernel enforces the ladder itself rather than trusting a driver to be
 polite: `WallTimeState::supersedes` refuses a `Firmware` write over a
 `Trusted` or `Adjusted` reading, and `wall_time_set` answers
-`Errno::AlreadyExists`. Rolling a clock backwards is how an expired
-certificate is revived and how audit reasoning is reordered, so the refusal is
-structural.
+`Errno::AlreadyExists` and records the attempt as `WALL_CLOCK_SET_REFUSED`
+(4269). Rolling a clock backwards is how an expired certificate is revived and
+how audit reasoning is reordered, so the refusal is structural.
 
 ## Class trait
 

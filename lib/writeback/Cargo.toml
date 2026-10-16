@@ -1,0 +1,26 @@
+[package]
+name = "tairix-writeback"
+description = "TAIRiX filesystem write-back core shared by the block-backed drivers: the transaction-scoped dirty block set with per-operation savepoints and run coalescing, the RAM-derived pinned-memory bound, the dirty-age commit scheduler, and the coalesced-transfer window (plans/ARXFS-WRITEBACK.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# The settable test host every consumer's own tests drive a transaction's
+# window through. Never enabled by a shipping build.
+test-util = []
+
+[dependencies]
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The RAM-derived budget, the pressure bands, and the pinned-pool ledger the
+# bound is expressed in.
+tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
+# Staged blocks hold volume contents; a wipe a dying buffer cannot optimise
+# away routes through the audited crate the kernel caches use.
+zeroize = { version = "1.8.1", default-features = false }
+
+[lints]
+workspace = true

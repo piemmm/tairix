@@ -67,6 +67,17 @@ driver ACL entry (a `subject` plus an `rwx` triad) expands into one
 explicit deny. Either way the resulting `Metadata` feeds the *same*
 `authorize` decision above.
 
+A driver whose format keeps **POSIX.1e** access ACLs, such as
+[ext4](./ext4.md), reports its record under `AclModel::Posix`, and the ACL
+layer then decides the way the system that wrote the ACL would, in place of
+steps 2 and 3: the owner by the owner triad alone; a named user by its entry
+under the mask; a member of the owning group or of any named group by the
+union of the matching entries — the owning group's own entry among them —
+under the mask, refused if they do not grant it and never falling through
+to other; anyone else by the other triad. An entry granting nothing still
+names its principal, so a user or group listed with no access is refused,
+never judged as anyone else. The capability gate still comes first.
+
 ## Traversal
 
 Resolving a path requires **search (execute) permission on every directory
@@ -87,8 +98,10 @@ on the link, mirroring POSIX.
 
 Permission failures return `VfsError::PermissionDenied`. A write blocked by
 a read-only mount returns `VfsError::ReadOnly`. `VfsError::to_errno` maps
-these to the stable user/kernel `Errno` at the syscall boundary (both
-surface as `PermissionDenied`). Creating a top-level directory — including
+them to the stable user/kernel `Errno` at the syscall boundary as
+`PermissionDenied` and `ReadOnly` (the `EROFS` analogue, "read-only file
+system"), so a tool can tell a node it may not change from a volume nothing
+may change. Creating a top-level directory — including
 a legacy POSIX name the OS itself never authors — is governed by ordinary
 write permission on the root directory; the VFS reserves no error for the
 name itself (see the [layout page](./layout.md)).

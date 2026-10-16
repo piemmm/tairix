@@ -2,7 +2,7 @@
 //!
 //! The image is a specification-shaped ext4 volume held in a fixed
 //! array (the crate is `no_std`, so the tests stay allocation-free),
-//! driven through a [`MockBlock`] device. Block size is 1024, one block
+//! driven through a [`SizedBlock`] device. Block size is 1024, one block
 //! group, 128-byte inodes, the `filetype` feature on:
 //!
 //! ```text
@@ -20,6 +20,10 @@ use super::*;
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::driver::block::BlockGeometry;
+use tairix_abi::driver::filesystem::{SecurityAcl, SecuritySubject};
+
+use crate::extent::EXTENT_MAGIC;
+use crate::superblock::{EXT_MAGIC, INCOMPAT_FILETYPE, INCOMPAT_INLINE_DATA};
 use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
 use tairix_abi::DriverKind;
@@ -221,9 +225,12 @@ fn write_volume_metadata(img: &mut [u8]) {
     set_le32(img, sb + 0x14, 1); // s_first_data_block (1024-byte blocks)
     set_le32(img, sb + 0x18, 0); // s_log_block_size -> 1024
     set_le32(img, sb + 0x20, u32c(FS_BLOCK_COUNT)); // s_blocks_per_group
+    set_le32(img, sb + 0x24, u32c(FS_BLOCK_COUNT)); // s_clusters_per_group
     set_le32(img, sb + 0x28, INODES_PER_GROUP); // s_inodes_per_group
     set_le16(img, sb + 0x38, EXT_MAGIC); // s_magic
+    set_le16(img, sb + 0x3A, 1); // s_state: clean
     set_le32(img, sb + 0x4C, 1); // s_rev_level (dynamic)
+    set_le32(img, sb + 0x54, 11); // s_first_ino
     set_le16(img, sb + 0x58, u16c(INODE_SIZE)); // s_inode_size
     set_le32(img, sb + 0x60, INCOMPAT_FILETYPE); // s_feature_incompat
 
@@ -353,56 +360,6 @@ fn build_image() -> Vec<u8> {
     img
 }
 
-/// A fixed-size in-memory [`Block`] device over an ext4 image, using a
-/// 512-byte logical-block size distinct from the 1024-byte filesystem
-/// block so the device-staging path is exercised.
-struct MockBlock {
-    data: Vec<u8>,
-}
-
-impl MockBlock {
-    fn span(lba: u64, len: usize) -> Result<(usize, usize), DriverError> {
-        if len == 0 || !len.is_multiple_of(DEV_SECTOR) {
-            return Err(DriverError::BufferTooSmall);
-        }
-        let start = usize::try_from(lba)
-            .map_err(|_| DriverError::LengthOutOfRange)?
-            .saturating_mul(DEV_SECTOR);
-        let end = start
-            .checked_add(len)
-            .ok_or(DriverError::LengthOutOfRange)?;
-        if end > IMG_LEN {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        Ok((start, end))
-    }
-}
-
-impl Block for MockBlock {
-    fn geometry(&self) -> Result<BlockGeometry, DriverError> {
-        Ok(BlockGeometry {
-            block_size: u32c(DEV_SECTOR),
-            block_count: DEV_SECTOR_COUNT,
-        })
-    }
-
-    fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let (start, end) = Self::span(lba, buf.len())?;
-        buf.copy_from_slice(&self.data[start..end]);
-        Ok(())
-    }
-
-    fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let (start, end) = Self::span(lba, buf.len())?;
-        self.data[start..end].copy_from_slice(buf);
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), DriverError> {
-        Ok(())
-    }
-}
-
 /// Mock driver host modelling the load-time `CAP_DRV_LOAD` grant.
 struct MockHost {
     drv_load: bool,
@@ -418,11 +375,8 @@ impl DriverHost for MockHost {
     }
 }
 
-fn mount() -> Ext4<MockBlock> {
-    Ext4::open(MockBlock {
-        data: build_image(),
-    })
-    .expect("image is a valid ext4 volume")
+fn mount() -> Ext4<SizedBlock> {
+    Ext4::open(SizedBlock::over(build_image())).expect("image is a valid ext4 volume")
 }
 
 #[test]
@@ -440,7 +394,7 @@ fn open_rejects_bad_magic() {
     let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
     set_le16(&mut data, sb + 0x38, 0x1234);
     assert_eq!(
-        Ext4::open(MockBlock { data }).err(),
+        Ext4::open(SizedBlock::over(data)).err(),
         Some(DriverError::BadMagic)
     );
 }
@@ -623,7 +577,7 @@ fn node_id_none_is_not_found() {
 #[test]
 fn into_block_returns_the_underlying_device() {
     let fs = mount();
-    let dev = fs.into_block();
+    let dev = fs.into_block().expect("commit");
     assert_eq!(
         dev.geometry().expect("geometry").block_count,
         DEV_SECTOR_COUNT
@@ -693,8 +647,8 @@ fn a_created_node_takes_its_creators_owner_and_group() {
 
 /// Re-open the volume backing `fs`, exercising the persistence of any
 /// writes through a fresh mount.
-fn remount(fs: Ext4<MockBlock>) -> Ext4<MockBlock> {
-    Ext4::open(fs.into_block()).expect("re-open the mutated image")
+fn remount(fs: Ext4<SizedBlock>) -> Ext4<SizedBlock> {
+    Ext4::open(fs.into_block().expect("commit")).expect("re-open the mutated image")
 }
 
 #[test]
@@ -847,7 +801,7 @@ fn growth_marker(logical: u64) -> u8 {
 /// Sparsely write one distinct block at each [`GROWTH_LOGICALS`] offset of
 /// `hello.txt`, forcing its depth-0 inline root to grow into a depth-1
 /// extent tree.
-fn grow_hello_into_depth1(fs: &mut Ext4<MockBlock>) {
+fn grow_hello_into_depth1(fs: &mut Ext4<SizedBlock>) {
     let root = fs.root();
     for &logical in &GROWTH_LOGICALS {
         let block = [growth_marker(logical); FS_BLOCK];
@@ -1024,29 +978,29 @@ fn write_to_a_missing_child_is_not_found() {
 
 #[test]
 fn mutation_is_refused_on_an_unsupported_feature_set() {
-    // The `metadata_csum`/`gdt_csum` and `64bit` feature sets are now
-    // mutated in place (see `tests/checksummed.rs`, which validates the
-    // maintained checksums against real `mke2fs` images). Mutation still
-    // fails closed on a feature the write path cannot maintain.
-    // `checksum_seed` (incompat 0x2000) is one: it would invalidate the
-    // `crc32c(~0, uuid)` seed, so the volume stays read-only.
+    // `inline_data` is a feature the read path serves and the write path
+    // does not maintain, so the volume mounts read-only.
     let mut data = build_image();
     let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
-    set_le32(&mut data, sb + 0x60, INCOMPAT_FILETYPE | 0x2000); // + checksum_seed
-    let mut fs = Ext4::open(MockBlock { data }).expect("opens read-only");
-    // Reads still work; only mutation is refused.
+    set_le32(
+        &mut data,
+        sb + 0x60,
+        INCOMPAT_FILETYPE | INCOMPAT_INLINE_DATA,
+    );
+    let mut fs = Ext4::open(SizedBlock::over(data)).expect("opens read-only");
+    assert_eq!(fs.write_refusal(), Some("unsupported_feature"));
     assert!(fs.lookup(fs.root(), b"hello.txt").is_ok());
     assert_eq!(
         fs.create(fs.root(), b"x", NodeKind::RegularFile),
-        Err(DriverError::Unsupported)
+        Err(DriverError::ReadOnly)
     );
     assert_eq!(
         fs.write_at(fs.root(), b"hello.txt", 0, b"x"),
-        Err(DriverError::Unsupported)
+        Err(DriverError::ReadOnly)
     );
     assert_eq!(
         fs.remove(fs.root(), b"hello.txt"),
-        Err(DriverError::Unsupported)
+        Err(DriverError::ReadOnly)
     );
 }
 
@@ -1065,276 +1019,116 @@ fn create_exhausts_the_free_inodes() {
     );
 }
 
-// --- Extended-attribute POSIX ACLs (`FilesystemSecurity`). ---
+// --- POSIX access ACLs, on volumes e2fsprogs 1.47.0 made. ---
 
-/// Write a `POSIX_ACL_XATTR` value (version word + 8-byte
-/// `(e_tag, e_perm, e_id)` entries) into `img` at `pos`, returning its
-/// byte length.
-fn write_posix_acl(img: &mut [u8], pos: usize, entries: &[(u16, u16, u32)]) -> usize {
-    set_le32(img, pos, 2); // a_version
-    let mut off = pos + 4;
-    for &(tag, perm, id) in entries {
-        set_le16(img, off, tag);
-        set_le16(img, off + 2, perm);
-        set_le32(img, off + 4, id);
-        off += 8;
-    }
-    off - pos
+/// `mke2fs -t ext4 -b 1024 -I 128 -O metadata_csum,^has_journal`, then
+/// `debugfs` writes `/f` (uid and gid 1000, mode 0664) and sets
+/// `u::rw-,u:1000:rw-,g::r--,g:2000:r--,m::rw-,o::r--`: with no room in
+/// the inode, the ACL lives in an external attribute block.
+const ACL_BLOCK: &[u8] = include_bytes!("../tests/fixtures/acl_block.sparse");
+/// The same with 256-byte inodes, so the ACL lives in the inode body.
+const ACL_IBODY: &[u8] = include_bytes!("../tests/fixtures/acl_ibody.sparse");
+
+fn acl_volume(fixture: &[u8]) -> (Ext4<SizedBlock>, NodeId) {
+    let mut fs = Ext4::open(SizedBlock::over(sparse(fixture))).expect("an e2fsprogs volume");
+    let file = fs.lookup(fs.root(), b"f").expect("f");
+    (fs, file)
 }
 
-/// Write one `ext4_xattr_entry` for `system.posix_acl_access` (the whole
-/// name is encoded by `e_name_index = 2`, so `e_name_len` is zero) at
-/// `pos`.
-fn write_acl_xattr_entry(img: &mut [u8], pos: usize, value_offs: u16, value_size: u32) {
-    img[pos] = 0; // e_name_len
-    img[pos + 1] = 2; // e_name_index = POSIX_ACL_ACCESS
-    set_le16(img, pos + 2, value_offs); // e_value_offs
-    set_le32(img, pos + 4, 0); // e_value_inum (in-block value)
-    set_le32(img, pos + 8, value_size); // e_value_size
-    set_le32(img, pos + 12, 0); // e_hash
+fn named(user: u32, user_perms: u8, group: u32, group_perms: u8) -> [SecurityAcl; 2] {
+    [
+        SecurityAcl {
+            subject: SecuritySubject::User(user),
+            perms: user_perms,
+        },
+        SecurityAcl {
+            subject: SecuritySubject::Group(group),
+            perms: group_perms,
+        },
+    ]
 }
-
-/// The six entries a complete `getfacl`-style ACL carries; only the two
-/// named entries (`ACL_USER` 1000, `ACL_GROUP` 2000) surface as grants.
-const SAMPLE_ACL: [(u16, u16, u32); 6] = [
-    (1, 6, !0),   // ACL_USER_OBJ rw-
-    (2, 4, 1000), // ACL_USER 1000 r--
-    (4, 4, !0),   // ACL_GROUP_OBJ r--
-    (8, 5, 2000), // ACL_GROUP 2000 r-x
-    (16, 7, !0),  // ACL_MASK rwx
-    (32, 4, !0),  // ACL_OTHER r--
-];
 
 #[test]
-fn decode_posix_acl_keeps_only_named_user_and_group_grants() {
-    let mut value = [0u8; 4 + SAMPLE_ACL.len() * 8];
-    let len = write_posix_acl(&mut value, 0, &SAMPLE_ACL);
-    let mut sec = NodeSecurity::new(0o644, 0, 0);
-    decode_posix_acl(&value[..len], &mut sec);
+fn an_acl_is_decoded_from_an_external_block_and_from_the_inode_body() {
+    for fixture in [ACL_BLOCK, ACL_IBODY] {
+        let (mut fs, file) = acl_volume(fixture);
+        let sec = fs.security(file).expect("security");
+        assert_eq!((sec.uid, sec.gid), (1000, 1000));
+        assert_eq!(sec.mode, 0o664, "the owner, mask and other triads");
+        assert_eq!(
+            sec.acl_model,
+            AclModel::Posix {
+                group_obj: 0o4,
+                mask: 0o6
+            }
+        );
+        assert_eq!(sec.acl(), &named(1000, 0o6, 2000, 0o4));
+    }
+}
+
+#[test]
+fn a_mode_change_moves_the_acl_mask_and_keeps_its_entries() {
+    for fixture in [ACL_BLOCK, ACL_IBODY] {
+        let (mut fs, file) = acl_volume(fixture);
+        let mut sec = fs.security(file).expect("security");
+        sec.mode = 0o640;
+        fs.set_security(file, sec).expect("chmod");
+        let mut fs = remount(fs);
+        let file = fs.lookup(fs.root(), b"f").expect("f");
+        let after = fs.security(file).expect("a resealed record");
+        assert_eq!(after.mode, 0o640);
+        assert_eq!(
+            after.acl_model,
+            AclModel::Posix {
+                group_obj: 0o4,
+                mask: 0o4
+            }
+        );
+        assert_eq!(
+            after.acl(),
+            &named(1000, 0o6, 2000, 0o4),
+            "named entries untouched"
+        );
+    }
+}
+
+#[test]
+fn an_owner_change_is_stored_and_an_acl_edit_refused() {
+    let (mut fs, file) = acl_volume(ACL_BLOCK);
+    let mut sec = fs.security(file).expect("security");
+    sec.uid = 4242;
+    sec.gid = 77;
+    fs.set_security(file, sec).expect("chown");
+    let after = fs.security(file).expect("security");
+    assert_eq!((after.uid, after.gid), (4242, 77));
+
+    let mut widened = after;
+    widened.acl_model = AclModel::Posix {
+        group_obj: 0o7,
+        mask: 0o6,
+    };
     assert_eq!(
-        sec.acl(),
-        &[
-            SecurityAcl {
-                subject: SecuritySubject::User(1000),
-                perms: 4,
-            },
-            SecurityAcl {
-                subject: SecuritySubject::Group(2000),
-                perms: 5,
-            },
-        ]
+        fs.set_security(file, widened),
+        Err(DriverError::Unsupported)
     );
-}
-
-#[test]
-fn decode_posix_acl_rejects_a_bad_version() {
-    let mut value = [0u8; 12];
-    set_le32(&mut value, 0, 99); // not POSIX_ACL_VERSION
-    set_le16(&mut value, 4, 2); // ACL_USER
-    set_le16(&mut value, 6, 7);
-    set_le32(&mut value, 8, 1000);
-    let mut sec = NodeSecurity::new(0o644, 0, 0);
-    decode_posix_acl(&value, &mut sec);
-    assert!(sec.acl().is_empty());
-}
-
-#[test]
-fn decode_posix_acl_stops_at_the_inline_budget() {
-    // Ten named-user entries; the record only holds MAX_ACL_ENTRIES (8).
-    let mut value = vec![0u8; 4 + 10 * 8];
-    set_le32(&mut value, 0, 2);
-    for i in 0..10u32 {
-        let off = 4 + i as usize * 8;
-        set_le16(&mut value, off, 2); // ACL_USER
-        set_le16(&mut value, off + 2, 4);
-        set_le32(&mut value, off + 4, i);
-    }
-    let mut sec = NodeSecurity::new(0, 0, 0);
-    decode_posix_acl(&value, &mut sec);
-    assert_eq!(sec.acl().len(), 8);
-}
-
-#[test]
-fn find_posix_acl_locates_a_value_with_a_block_value_base() {
-    let mut region = [0u8; 256];
-    let value = [1u8, 2, 3, 4, 5];
-    let value_offs = 128usize;
-    region[value_offs..value_offs + value.len()].copy_from_slice(&value);
-    write_acl_xattr_entry(&mut region, 32, u16c(value_offs), u32c(value.len()));
-    let found = find_posix_acl(&region, 32, 0).expect("attribute present");
-    assert_eq!(found, &value);
-}
-
-#[test]
-fn find_posix_acl_locates_a_value_with_an_inode_value_base() {
-    let mut region = [0u8; 256];
-    let entries_start = 64usize; // header magic + 4 in the inode body
-    let value_offs = 80usize; // measured from entries_start
-    let value = [9u8, 8, 7];
-    let at = entries_start + value_offs;
-    region[at..at + value.len()].copy_from_slice(&value);
-    write_acl_xattr_entry(
-        &mut region,
-        entries_start,
-        u16c(value_offs),
-        u32c(value.len()),
-    );
-    let found = find_posix_acl(&region, entries_start, entries_start).expect("present");
-    assert_eq!(found, &value);
-}
-
-#[test]
-fn find_posix_acl_skips_unrelated_attributes() {
-    let mut region = [0u8; 64];
-    // A `user.attr` entry (name_index 1), then the zero-word terminator.
-    region[0] = 4; // e_name_len
-    region[1] = 1; // e_name_index = "user."
-    set_le16(&mut region, 2, 40);
-    set_le32(&mut region, 8, 4); // e_value_size
-    region[16..20].copy_from_slice(b"attr");
-    assert!(find_posix_acl(&region, 0, 0).is_none());
-}
-
-#[test]
-fn security_decodes_a_posix_acl_from_the_external_block() {
-    let mut img = build_image();
-    let acl_block: u32 = 16;
-    set_le32(&mut img, inode_offset(11) + 0x68, acl_block); // i_file_acl_lo
-
-    let base = block_offset(acl_block);
-    set_le32(&mut img, base, 0xEA02_0000); // h_magic
-    set_le32(&mut img, base + 4, 1); // h_refcount
-    set_le32(&mut img, base + 8, 1); // h_blocks
-    let value_offs = 128usize; // measured from the block start
-    let value_size = write_posix_acl(&mut img, base + value_offs, &SAMPLE_ACL);
-    write_acl_xattr_entry(
-        &mut img,
-        base + XATTR_BLOCK_HEADER_LEN,
-        u16c(value_offs),
-        u32c(value_size),
-    );
-
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
-    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
-    let sec = fs.security(file).expect("security");
-    assert_eq!(sec.mode, 0o644);
+    let mut gated = after;
+    gated.required_cap = Some(CapabilityId::DRV_LOAD);
+    assert_eq!(fs.set_security(file, gated), Err(DriverError::Unsupported));
     assert_eq!(
-        sec.acl(),
-        &[
-            SecurityAcl {
-                subject: SecuritySubject::User(1000),
-                perms: 4,
-            },
-            SecurityAcl {
-                subject: SecuritySubject::Group(2000),
-                perms: 5,
-            },
-        ]
+        fs.security(file),
+        Ok(after),
+        "a refused record changes nothing"
     );
 }
 
 #[test]
-fn security_ignores_a_garbage_external_block() {
-    let mut img = build_image();
-    let acl_block: u32 = 16;
-    set_le32(&mut img, inode_offset(11) + 0x68, acl_block);
-    // The block carries no xattr magic: the ACL is simply absent.
-    let base = block_offset(acl_block);
-    set_le32(&mut img, base, 0xDEAD_BEEF);
-
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
-    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
-    let sec = fs.security(file).expect("security");
-    assert!(sec.acl().is_empty());
-}
-
-#[test]
-fn security_decodes_an_inline_posix_acl_from_the_inode_body() {
-    // A second, 256-byte-inode volume: the enlarged inode record has room
-    // for an inline xattr region after `i_extra_isize`.
-    const BS: usize = 1024;
-    const ISIZE: usize = 256;
-    const IPG: u32 = 16;
-    const ITAB: usize = 5; // inode table spans blocks 5..=8 (16 * 256 B)
-    const ROOT_DATA: u32 = 9;
-    let mut img = vec![0u8; IMG_LEN];
-
-    let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
-    set_le32(&mut img, sb, IPG); // s_inodes_count
-    set_le32(&mut img, sb + 0x04, u32c(FS_BLOCK_COUNT)); // s_blocks_count_lo
-    set_le32(&mut img, sb + 0x14, 1); // s_first_data_block
-    set_le32(&mut img, sb + 0x18, 0); // s_log_block_size -> 1024
-    set_le32(&mut img, sb + 0x20, u32c(FS_BLOCK_COUNT)); // s_blocks_per_group
-    set_le32(&mut img, sb + 0x28, IPG); // s_inodes_per_group
-    set_le16(&mut img, sb + 0x38, EXT_MAGIC);
-    set_le32(&mut img, sb + 0x4C, 1); // s_rev_level (dynamic)
-    set_le16(&mut img, sb + 0x58, u16c(ISIZE)); // s_inode_size
-    set_le32(&mut img, sb + 0x60, INCOMPAT_FILETYPE);
-
-    let gd = 2 * BS;
-    set_le32(&mut img, gd, u32c(BLOCK_BITMAP_BLOCK));
-    set_le32(&mut img, gd + 0x04, u32c(INODE_BITMAP_BLOCK));
-    set_le32(&mut img, gd + 0x08, u32c(ITAB));
-
-    let ino_off = |ino: u32| ITAB * BS + (ino as usize - 1) * ISIZE;
-
-    // Root inode 2: extent-mapped directory, one block.
-    {
-        let b = ino_off(ROOT_INODE);
-        set_le16(&mut img, b, S_IFDIR | 0o755);
-        set_le32(&mut img, b + 0x04, u32c(BS));
-        set_le32(&mut img, b + 0x20, INODE_FLAG_EXTENTS);
-        let ib = b + I_BLOCK_OFFSET;
-        set_le16(&mut img, ib, EXTENT_MAGIC);
-        set_le16(&mut img, ib + 2, 1);
-        set_le16(&mut img, ib + 4, 4);
-        set_le16(&mut img, ib + 16, 1); // ee_len
-        set_le32(&mut img, ib + 20, ROOT_DATA); // ee_start_lo
-    }
-    {
-        let off = block_offset(ROOT_DATA);
-        let block = &mut img[off..off + BS];
-        let mut pos = put_dirent(block, 0, ROOT_INODE, b".", FT_DIR, false);
-        pos = put_dirent(block, pos, ROOT_INODE, b"..", FT_DIR, false);
-        let _ = put_dirent(block, pos, 11, b"f", FT_REG, true);
-    }
-
-    // File inode 11: empty regular file carrying an inline POSIX ACL.
-    {
-        let b = ino_off(11);
-        set_le16(&mut img, b, S_IFREG | 0o600);
-        set_le32(&mut img, b + 0x20, INODE_FLAG_EXTENTS);
-        let ib = b + I_BLOCK_OFFSET;
-        set_le16(&mut img, ib, EXTENT_MAGIC);
-        set_le16(&mut img, ib + 4, 4); // eh_max
-
-        let extra = 32usize;
-        set_le16(&mut img, b + 0x80, u16c(extra)); // i_extra_isize
-        let header = b + 0x80 + extra;
-        set_le32(&mut img, header, 0xEA02_0000); // inline xattr magic
-        let entries_start = header + 4;
-        let value_offs = 20usize; // measured from entries_start
-        let value_size = write_posix_acl(&mut img, entries_start + value_offs, &SAMPLE_ACL);
-        write_acl_xattr_entry(&mut img, entries_start, u16c(value_offs), u32c(value_size));
-    }
-
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid inline-ACL volume");
-    let file = fs.lookup(fs.root(), b"f").expect("found");
-    let sec = fs.security(file).expect("security");
-    assert_eq!(sec.mode, 0o600);
-    assert_eq!(
-        sec.acl(),
-        &[
-            SecurityAcl {
-                subject: SecuritySubject::User(1000),
-                perms: 4,
-            },
-            SecurityAcl {
-                subject: SecuritySubject::Group(2000),
-                perms: 5,
-            },
-        ]
-    );
+fn a_damaged_attribute_block_fails_closed() {
+    let mut image = sparse(ACL_BLOCK);
+    // Block 33 is `/f`'s attribute block.
+    image[33 * 1024] ^= 0xFF;
+    let mut fs = Ext4::open(SizedBlock::over(image)).expect("opens");
+    let file = fs.lookup(fs.root(), b"f").expect("f");
+    assert_eq!(fs.security(file), Err(DriverError::DeviceFault));
 }
 
 // --- First-party formatter (`Ext4::format`). ---
@@ -1371,24 +1165,32 @@ const META_CSUM: &[u8] = include_bytes!("../tests/fixtures/metadata_csum.img");
 
 /// The checksummed `mke2fs` volume.
 pub(crate) fn checksummed() -> Ext4<SizedBlock> {
-    Ext4::open(SizedBlock {
-        data: META_CSUM.to_vec(),
-    })
-    .expect("mount")
+    Ext4::open(SizedBlock::over(META_CSUM.to_vec())).expect("mount")
 }
 
-/// A zero-initialised, `Vec`-backed [`Block`] device of a configurable
-/// size, for exercising [`Ext4::format`] on volumes larger than the
-/// fixed read fixture.
+/// A `Vec`-backed [`Block`] device of 512-byte sectors that counts its
+/// flushes and, armed, fails every write after a budget: the one test
+/// device every module's tests drive.
 pub(crate) struct SizedBlock {
     pub(crate) data: Vec<u8>,
+    pub(crate) flushes: u32,
+    /// Writes the device still accepts before refusing every later one.
+    pub(crate) writes_left: Option<u32>,
 }
 
 impl SizedBlock {
+    /// A zeroed device of `sectors` sectors.
     pub(crate) fn new(sectors: u64) -> Self {
         let len = usize::try_from(sectors).expect("fits") * FMT_SECTOR;
+        Self::over(vec![0u8; len])
+    }
+
+    /// A device holding `data`.
+    pub(crate) fn over(data: Vec<u8>) -> Self {
         Self {
-            data: vec![0u8; len],
+            data,
+            flushes: 0,
+            writes_left: None,
         }
     }
 
@@ -1425,14 +1227,25 @@ impl Block for SizedBlock {
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
         let (start, end) = self.span(lba, buf.len())?;
+        if let Some(left) = self.writes_left.as_mut() {
+            if *left == 0 {
+                return Err(DriverError::DeviceFault);
+            }
+            *left -= 1;
+        }
         self.data[start..end].copy_from_slice(buf);
         Ok(())
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
+        self.flushes += 1;
         Ok(())
     }
 }
+
+#[path = "../tests/support/sparse.rs"]
+mod sparse_fixture;
+pub(crate) use sparse_fixture::sparse;
 
 /// A three-byte file name `f<NN>` for the inode-exhaustion test.
 fn nth_name(i: usize) -> [u8; 3] {
@@ -1515,7 +1328,7 @@ fn format_create_write_read_roundtrips_across_a_remount() {
     assert_eq!(fs.write_at(root, b"hello.txt", 0, body), Ok(body.len()));
 
     // Remount from the same device and read the file back.
-    let mut fs = Ext4::open(fs.into_block()).expect("reopen");
+    let mut fs = Ext4::open(fs.into_block().expect("commit")).expect("reopen");
     let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
     assert_eq!(fs.node_info(file).expect("info").size, body.len() as u64);
     let mut buf = [0u8; 64];
@@ -1552,7 +1365,7 @@ fn stats_track_the_live_superblock_and_the_uuid_is_remount_stable() {
     let restored = fs.stats().expect("stats");
     assert_eq!(restored.free_blocks, before.free_blocks);
     assert_eq!(restored.files_free, before.files_free);
-    let fs = Ext4::open(fs.into_block()).expect("reopen");
+    let fs = Ext4::open(fs.into_block().expect("commit")).expect("reopen");
     assert_eq!(fs.volume_uuid(), uuid);
 }
 
@@ -1611,7 +1424,7 @@ fn format_spans_multiple_block_groups() {
 
     // Remount and confirm an early file survives, including a block in
     // the second group's address range.
-    let mut fs = Ext4::open(fs.into_block()).expect("reopen");
+    let mut fs = Ext4::open(fs.into_block().expect("commit")).expect("reopen");
     let file = fs.lookup(fs.root(), &nth_name(0)).expect("found");
     let mut buf = [0u8; 4096];
     assert_eq!(fs.read_at(file, 0, &mut buf), Ok(4096));
@@ -1653,7 +1466,7 @@ fn rename_across_directories_persists() {
         fs.create(src, b"f.bin", NodeKind::RegularFile).unwrap();
         fs.write_at(src, b"f.bin", 0, b"data").unwrap();
         fs.rename(src, b"f.bin", dst, b"g.bin").expect("move");
-        fs.into_block()
+        fs.into_block().expect("commit")
     };
     let mut fs = Ext4::open(dev).expect("reopen");
     let root = fs.root();
@@ -1717,7 +1530,7 @@ fn rename_moves_a_directory_across_parents() {
         fs.create(d, b"leaf.bin", NodeKind::RegularFile).unwrap();
         fs.write_at(d, b"leaf.bin", 0, b"x").unwrap();
         fs.rename(p1, b"d", p2, b"d").expect("move dir");
-        fs.into_block()
+        fs.into_block().expect("commit")
     };
     let mut fs = Ext4::open(dev).expect("reopen");
     let root = fs.root();
@@ -1766,16 +1579,20 @@ fn rename_rejects_bad_destination_name() {
 
 #[test]
 fn node_info_reports_allocation_from_i_blocks() {
+    // 10 sectors in the low half plus 1 in the osd2 high half, which only a
+    // `huge_file` volume counts.
     let mut img = build_image();
     let base = inode_offset(11);
-    // 10 sectors in the low half plus 1 in the osd2 high half:
-    // (1 << 32) + 10 sectors of 512 bytes.
     set_le32(&mut img, base + 0x1C, 10);
     set_le16(&mut img, base + 0x74, 1);
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
-    let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
-    let info = fs.node_info(file).expect("info");
-    assert_eq!(info.allocated, ((1u64 << 32) + 10) * 512);
+    let mut huge = img.clone();
+    let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
+    set_le32(&mut huge, sb + 0x64, superblock::RO_COMPAT_HUGE_FILE);
+    for (image, sectors) in [(huge, (1u64 << 32) + 10), (img, 10)] {
+        let mut fs = Ext4::open(SizedBlock::over(image)).expect("valid volume");
+        let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
+        assert_eq!(fs.node_info(file).expect("info").allocated, sectors * 512);
+    }
 }
 
 #[test]
@@ -1788,7 +1605,7 @@ fn node_info_scales_huge_file_allocation_by_the_block_size() {
         base + 0x20,
         INODE_FLAG_EXTENTS | INODE_FLAG_HUGE_FILE,
     );
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let mut fs = Ext4::open(SizedBlock::over(img)).expect("valid volume");
     let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
     let info = fs.node_info(file).expect("info");
     // The huge-file flag makes `i_blocks` count filesystem blocks.
@@ -1803,7 +1620,7 @@ fn blocks_high_half_never_leaks_into_file_acl() {
     // leave the security record ACL-free and readable.
     let mut img = build_image();
     set_le16(&mut img, inode_offset(11) + 0x74, 0x7FFF);
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let mut fs = Ext4::open(SizedBlock::over(img)).expect("valid volume");
     let file = fs.lookup(fs.root(), b"hello.txt").expect("found");
     let sec = fs.security(file).expect("security reads cleanly");
     assert_eq!(sec.mode, 0o644);
@@ -1989,7 +1806,7 @@ fn each_operation_stamps_what_it_changed_at_the_hosts_time() {
     assert_eq!(fs.node_info(root).expect("info").times.modified, t3);
 
     // The stamps are on the medium, not only in the handle.
-    let mut fs = Ext4::open(fs.into_block()).expect("reopen");
+    let mut fs = Ext4::open(fs.into_block().expect("commit")).expect("reopen");
     let file = fs.lookup(fs.root(), b"g").expect("found");
     let kept = fs.node_info(file).expect("info").times;
     assert_eq!((kept.created, kept.modified, kept.changed), (t1, t2, t3));
@@ -2109,11 +1926,11 @@ fn plant_slow_symlink(img: &mut [u8], ino: u32, target: &[u8], data_block: u32) 
     img[off..off + target.len()].copy_from_slice(target);
 }
 
-fn mount_with_links() -> Ext4<MockBlock> {
+fn mount_with_links() -> Ext4<SizedBlock> {
     let mut img = build_image();
     plant_fast_symlink(&mut img, FAST_LINK_INO, FAST_LINK_TARGET);
     plant_slow_symlink(&mut img, SLOW_LINK_INO, SLOW_LINK_TARGET, SLOW_LINK_BLOCK);
-    Ext4::open(MockBlock { data: img }).expect("image is a valid ext4 volume")
+    Ext4::open(SizedBlock::over(img)).expect("image is a valid ext4 volume")
 }
 
 #[test]
@@ -2150,7 +1967,7 @@ fn a_short_target_with_allocated_blocks_is_read_as_a_slow_symlink() {
     let short: &[u8] = b"/tiny/target";
     let mut img = build_image();
     plant_slow_symlink(&mut img, FAST_LINK_INO, short, SLOW_LINK_BLOCK);
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let mut fs = Ext4::open(SizedBlock::over(img)).expect("valid volume");
 
     let mut out = [0u8; 64];
     let node = NodeId::from_raw(u64::from(FAST_LINK_INO));
@@ -2204,9 +2021,7 @@ fn a_links_bytes_are_never_readable_and_a_link_is_never_creatable() {
 }
 
 #[test]
-fn an_inline_data_link_declares_the_limit_rather_than_guessing() {
-    // An inline-data inode keeps its content in the inode's own
-    // extended-attribute area, which this driver decodes nowhere.
+fn an_inline_data_link_is_read_from_its_inode() {
     let mut img = build_image();
     plant_fast_symlink(&mut img, FAST_LINK_INO, FAST_LINK_TARGET);
     set_le32(
@@ -2214,13 +2029,18 @@ fn an_inline_data_link_declares_the_limit_rather_than_guessing() {
         inode_offset(FAST_LINK_INO) + 0x20,
         INODE_FLAG_INLINE_DATA,
     );
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
-
+    let mut on = img.clone();
+    let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
+    set_le32(&mut on, sb + 0x60, INCOMPAT_FILETYPE | INCOMPAT_INLINE_DATA);
+    let mut fs = Ext4::open(SizedBlock::over(on)).expect("valid volume");
     let mut out = [0u8; 128];
-    assert_eq!(
-        fs.read_link(NodeId::from_raw(u64::from(FAST_LINK_INO)), &mut out),
-        Err(DriverError::Unsupported)
-    );
+    let node = NodeId::from_raw(u64::from(FAST_LINK_INO));
+    assert_eq!(fs.read_link(node, &mut out), Ok(FAST_LINK_TARGET.len()));
+    assert_eq!(&out[..FAST_LINK_TARGET.len()], FAST_LINK_TARGET);
+
+    // Inline contents on a volume that never enabled them are damage.
+    let mut fs = Ext4::open(SizedBlock::over(img)).expect("valid volume");
+    assert_eq!(fs.read_link(node, &mut out), Err(DriverError::DeviceFault));
 }
 
 #[test]
@@ -2229,7 +2049,7 @@ fn a_link_with_no_target_is_refused_as_corrupt() {
     plant_fast_symlink(&mut img, FAST_LINK_INO, FAST_LINK_TARGET);
     // A zero-length target is structurally impossible.
     set_le32(&mut img, inode_offset(FAST_LINK_INO) + 0x04, 0);
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let mut fs = Ext4::open(SizedBlock::over(img)).expect("valid volume");
 
     let mut out = [0u8; 128];
     assert_eq!(
@@ -2266,7 +2086,7 @@ fn unlinking_one_name_of_a_foreign_hard_link_keeps_the_other_readable() {
     // other name still reaches — silent corruption of a foreign volume.
     let mut img = build_image();
     plant_second_name(&mut img, b"hello.alias", 11);
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let mut fs = Ext4::open(SizedBlock::over(img)).expect("valid volume");
     let root = fs.root();
     let file = fs.lookup(root, b"hello.txt").expect("the file");
     assert_eq!(fs.node_info(file).expect("stat").nlink, 2);
@@ -2291,7 +2111,7 @@ fn unlinking_one_name_of_a_foreign_hard_link_keeps_the_other_readable() {
 fn unlinking_the_last_name_of_a_foreign_hard_link_frees_the_inode() {
     let mut img = build_image();
     plant_second_name(&mut img, b"hello.alias", 11);
-    let mut fs = Ext4::open(MockBlock { data: img }).expect("valid volume");
+    let mut fs = Ext4::open(SizedBlock::over(img)).expect("valid volume");
     let root = fs.root();
     fs.remove(root, b"hello.txt").expect("drop one name");
     fs.remove(root, b"hello.alias").expect("drop the last name");
@@ -2331,36 +2151,88 @@ fn ext4_reads_link_counts_but_authors_no_second_name() {
     assert_eq!(fs.node_info(file).expect("stat").nlink, 1);
 }
 
-/// A [`SizedBlock`] whose writes into `failing` sectors fail while armed.
-struct FailingWrites {
-    inner: SizedBlock,
+/// The medium a [`FailingWrites`] device serves, shared with the test: its
+/// bytes as they stand, which a crash at any moment would leave, and the
+/// sectors whose writes fail.
+#[derive(Default)]
+struct Medium {
+    data: Vec<u8>,
     failing: Option<core::ops::Range<u64>>,
+}
+
+type Shared = alloc::rc::Rc<core::cell::RefCell<Medium>>;
+
+/// A device of 512-byte sectors over a [`Medium`] the test holds too.
+struct FailingWrites(Shared);
+
+impl FailingWrites {
+    /// A device over `data`, and the test's handle on its medium.
+    fn over(data: Vec<u8>) -> (Self, Shared) {
+        let medium = Shared::new(core::cell::RefCell::new(Medium {
+            data,
+            failing: None,
+        }));
+        (Self(alloc::rc::Rc::clone(&medium)), medium)
+    }
+
+    fn span(&self, lba: u64, len: usize) -> Result<core::ops::Range<usize>, DriverError> {
+        let start = usize::try_from(lba).map_err(|_| DriverError::OutOfRange)? * FMT_SECTOR;
+        let end = start + len;
+        if !len.is_multiple_of(FMT_SECTOR) || end > self.0.borrow().data.len() {
+            return Err(DriverError::OutOfRange);
+        }
+        Ok(start..end)
+    }
 }
 
 impl Block for FailingWrites {
     fn geometry(&self) -> Result<BlockGeometry, DriverError> {
-        self.inner.geometry()
+        Ok(BlockGeometry {
+            block_size: u32c(FMT_SECTOR),
+            block_count: (self.0.borrow().data.len() / FMT_SECTOR) as u64,
+        })
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.inner.read_blocks(lba, buf)
+        let span = self.span(lba, buf.len())?;
+        buf.copy_from_slice(&self.0.borrow().data[span]);
+        Ok(())
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
+        let span = self.span(lba, buf.len())?;
         let sectors = (buf.len() / FMT_SECTOR) as u64;
-        if self
+        let mut medium = self.0.borrow_mut();
+        if medium
             .failing
             .as_ref()
             .is_some_and(|range| lba < range.end && range.start < lba + sectors)
         {
             return Err(DriverError::DeviceFault);
         }
-        self.inner.write_blocks(lba, buf)
+        medium.data[span].copy_from_slice(buf);
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<(), DriverError> {
-        self.inner.flush()
+        Ok(())
     }
+}
+
+/// The device sectors filesystem block `block` covers.
+fn sectors_of<B: Block>(fs: &Ext4<B>, block: u64) -> core::ops::Range<u64> {
+    let per = u64::from(fs.layout.block_size) / FMT_SECTOR as u64;
+    block * per..(block + 1) * per
+}
+
+/// The table block holding inode `ino`.
+fn inode_block<B: Block>(fs: &mut Ext4<B>, ino: u32) -> u64 {
+    fs.inode_location(ino).expect("the record").0
+}
+
+/// What a power loss now would leave on `medium`, mounted.
+fn crashed(medium: &Shared) -> Ext4<SizedBlock> {
+    Ext4::open(SizedBlock::over(medium.borrow().data.clone())).expect("mounts after the crash")
 }
 
 /// The physical block holding logical block 0 of directory `dir`.
@@ -2396,17 +2268,53 @@ fn a_directory_block_failing_its_checksum_is_refused() {
     assert_eq!(fs.lookup(root, b"lost+found"), Ok(found));
 }
 
-/// A remove whose directory write fails leaves the name and the inode it
-/// names both in place: the name goes first, so a failure can never leave it
-/// naming a freed inode the next create would reuse.
+/// `mke2fs -t ext4 -b 1024 -J size=1 -O metadata_csum,^resize_inode` over
+/// 8 MiB (e2fsprogs 1.47.0): one group, `64bit`, `flex_bg`, `dir_index`,
+/// and a 1024-block internal journal.
+const JOURNALED: &[u8] = include_bytes!("../tests/fixtures/journaled.sparse");
+
+/// `mke2fs -t ext4 -b 1024 -J size=1 -O 64bit,^resize_inode -E desc_size=128`
+/// over 8 MiB (e2fsprogs 1.47.0), with `debugfs` writing `hello.txt`: group
+/// descriptors twice the 64 bytes this driver decodes.
+const WIDE_DESC: &[u8] = include_bytes!("../tests/fixtures/wide_desc.sparse");
+
+/// A descriptor wider than the part this driver decodes is read and restamped
+/// whole — its checksum covers all of it — rather than overrunning a buffer.
 #[test]
-fn a_failed_remove_leaves_the_name_and_its_inode() {
+fn a_volume_of_128_byte_descriptors_reads_writes_and_remounts() {
+    let mut fs = Ext4::open(SizedBlock::over(sparse(WIDE_DESC))).expect("mount");
+    assert_eq!(fs.layout.desc_size, 128);
+    let root = fs.root();
+    let hello = fs.lookup(root, b"hello.txt").expect("lookup");
+    let mut buf = [0u8; 32];
+    let n = fs.read_at(hello, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"wide descriptors\n");
+    fs.create(root, b"made", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"made", 0, b"here").expect("write");
+
+    let mut fs = Ext4::open(fs.into_block().expect("commit")).expect("remount");
+    let root = fs.root();
+    let made = fs.lookup(root, b"made").expect("lookup");
+    let n = fs.read_at(made, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"here");
+}
+
+/// The sectors of the superblock, which an unjournaled publication marks
+/// not clean before anything else.
+fn superblock_sectors() -> core::ops::Range<u64> {
+    let first = SUPERBLOCK_OFFSET / FMT_SECTOR as u64;
+    first..first + (SUPERBLOCK_LEN / FMT_SECTOR) as u64
+}
+
+/// A commit that fails before anything reaches the medium as the new state
+/// takes the operation back whole; no operation reported done is lost, so
+/// the handle goes on accepting writes.
+#[test]
+fn a_commit_failing_before_the_medium_changes_takes_the_operation_back() {
     let fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
-    let mut fs = Ext4::open(FailingWrites {
-        inner: fs.into_block(),
-        failing: None,
-    })
-    .expect("mount");
+    let (device, medium) = FailingWrites::over(fs.into_block().expect("commit").data);
+    let mut fs = Ext4::open(device).expect("mount");
     let root = fs.root();
     let victim = fs
         .create(root, b"victim", NodeKind::RegularFile)
@@ -2414,39 +2322,454 @@ fn a_failed_remove_leaves_the_name_and_its_inode() {
     fs.write_at(root, b"victim", 0, b"still here")
         .expect("write");
     let before = fs.stats().expect("stats");
-    let block = first_dir_block(&mut fs, root);
-    let per_block = u64::from(fs.layout.block_size) / FMT_SECTOR as u64;
-    fs.block.failing = Some(block * per_block..(block + 1) * per_block);
+    medium.borrow_mut().failing = Some(superblock_sectors());
     assert_eq!(fs.remove(root, b"victim"), Err(DriverError::DeviceFault));
-    fs.block.failing = None;
-    assert_eq!(fs.stats().expect("stats"), before, "nothing was freed");
+    medium.borrow_mut().failing = None;
+    assert_eq!(fs.write_refusal(), None, "nothing acknowledged was lost");
     assert_eq!(fs.lookup(root, b"victim"), Ok(victim));
+    assert_eq!(fs.stats().expect("stats"), before, "nothing was freed");
     let mut buf = [0u8; 16];
     let read = fs.read_at(victim, 0, &mut buf).expect("read");
     assert_eq!(&buf[..read], b"still here");
+    fs.remove(root, b"victim")
+        .expect("a later operation succeeds");
 }
 
-/// A create whose directory update fails takes back its name and its inode,
-/// so the caller told it failed finds nothing there.
+/// A commit torn part-way on an unjournaled volume stops the handle, and a
+/// crash then leaves the volume marked not clean: it mounts read-only until
+/// a checker has seen it.
 #[test]
-fn a_create_whose_directory_update_fails_leaves_nothing() {
+fn a_torn_commit_on_an_unjournaled_volume_leaves_it_for_a_checker() {
     let fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
-    let mut fs = Ext4::open(FailingWrites {
-        inner: fs.into_block(),
-        failing: None,
-    })
-    .expect("mount");
+    let (device, medium) = FailingWrites::over(fs.into_block().expect("commit").data);
+    let mut fs = Ext4::open(device).expect("mount");
     let root = fs.root();
-    let before = fs.stats().expect("stats");
-    let sector = fs.locate_inode(ROOT_INODE).expect("the root's record") / FMT_SECTOR as u64;
-    fs.block.failing = Some(sector..sector + 1);
+    let table = inode_block(&mut fs, ROOT_INODE);
+    medium.borrow_mut().failing = Some(sectors_of(&fs, table));
     assert_eq!(
         fs.create(root, b"f", NodeKind::RegularFile),
         Err(DriverError::DeviceFault)
     );
-    fs.block.failing = None;
-    assert_eq!(fs.lookup(root, b"f"), Err(DriverError::NotFound));
-    assert_eq!(fs.stats().expect("stats"), before, "the inode went back");
+    assert_eq!(fs.write_refusal(), Some("commit_failed"));
+    assert_eq!(
+        fs.create(root, b"g", NodeKind::RegularFile),
+        Err(DriverError::ReadOnly),
+        "a stopped handle takes no further operation"
+    );
+    let mut after = crashed(&medium);
+    assert_eq!(after.write_refusal(), Some("needs_check"));
+    assert!(after.node_info(after.root()).is_ok(), "reads go on");
+    // The device recovers and the handle is closed: what it holds goes out
+    // whole and the volume is clean again.
+    medium.borrow_mut().failing = None;
+    fs.flush().expect("published once the device takes it");
+    let mut fixed = crashed(&medium);
+    assert_eq!(fixed.write_refusal(), None);
+    assert!(fixed.lookup(fixed.root(), b"f").is_ok());
+}
+
+/// A commit torn after its journal commit is durable is finished at the next
+/// mount by replaying the journal: the operation is there whole, and the
+/// volume is writable again.
+#[test]
+fn a_commit_torn_after_the_journal_holds_it_is_replayed_at_mount() {
+    let (device, medium) = FailingWrites::over(sparse(JOURNALED));
+    let mut fs = Ext4::open(device).expect("mount");
+    assert!(fs.journal.is_some());
+    let root = fs.root();
+    let table = inode_block(&mut fs, ROOT_INODE);
+    medium.borrow_mut().failing = Some(sectors_of(&fs, table));
+    assert_eq!(
+        fs.create(root, b"kept", NodeKind::Directory),
+        Err(DriverError::DeviceFault),
+        "the home write failed"
+    );
+    let at = usize::try_from(SUPERBLOCK_OFFSET).expect("small") + SB_FEATURE_INCOMPAT;
+    assert_ne!(
+        le32(&medium.borrow().data, at) & INCOMPAT_RECOVER,
+        0,
+        "needs recovery"
+    );
+    let mut fs = crashed(&medium);
+    assert_eq!(fs.write_refusal(), None);
+    let kept = fs.lookup(fs.root(), b"kept").expect("replayed whole");
+    assert_eq!(fs.node_info(kept).expect("stat").kind, NodeKind::Directory);
+    assert_eq!(
+        fs.node_info(fs.root()).expect("stat").nlink,
+        4,
+        "., lost+found, kept"
+    );
+    fs.create(kept, b"inside", NodeKind::RegularFile)
+        .expect("writable");
+    let mut fs = remount(fs);
+    assert!(fs.lookup(kept, b"inside").is_ok());
+    let device = fs.into_block().expect("commit");
+    assert_eq!(
+        le32(&device.data, at) & INCOMPAT_RECOVER,
+        0,
+        "a quiet volume is clean"
+    );
+}
+
+/// A replay that rewrites the superblock with another geometry leaves nothing
+/// read before it standing: the volume is read afresh from what the replay
+/// left, never served through buffers sized for the geometry it replaced.
+#[test]
+fn a_replay_that_changes_the_geometry_reads_the_volume_afresh() {
+    use crate::superblock::{SB_BLOCKS_LO, SB_FIRST_DATA_BLOCK, SB_LOG_BLOCK_SIZE};
+
+    let (device, medium) = FailingWrites::over(sparse(JOURNALED));
+    let mut fs = Ext4::open(device).expect("mount");
+    let root = fs.root();
+    let sb_at = usize::try_from(SUPERBLOCK_OFFSET).expect("small");
+    let mut home = medium.borrow().data[sb_at..sb_at + SUPERBLOCK_LEN].to_vec();
+    // The same eight mebibytes as half as many two-kilobyte blocks, one
+    // group still: a superblock that parses, logged by the driver itself.
+    let blocks = le32(&fs.sb, SB_BLOCKS_LO);
+    put_le32(&mut fs.sb, SB_LOG_BLOCK_SIZE, 1);
+    put_le32(&mut fs.sb, SB_BLOCKS_LO, blocks / 2);
+    put_le32(&mut fs.sb, SB_FIRST_DATA_BLOCK, 0);
+    superblock::stamp(&mut fs.sb);
+    let table = inode_block(&mut fs, ROOT_INODE);
+    medium.borrow_mut().failing = Some(sectors_of(&fs, table));
+    assert_eq!(
+        fs.create(root, b"torn", NodeKind::Directory),
+        Err(DriverError::DeviceFault),
+        "the home write failed with the log committed"
+    );
+    // A device free to reorder home writes may land none of the new
+    // superblock: the old one stands, marked for the replay that brings the
+    // new one home.
+    let incompat = le32(&home, SB_FEATURE_INCOMPAT) | INCOMPAT_RECOVER;
+    put_le32(&mut home, SB_FEATURE_INCOMPAT, incompat);
+    superblock::stamp(&mut home);
+    let mut image = medium.borrow().data.clone();
+    image[sb_at..sb_at + SUPERBLOCK_LEN].copy_from_slice(&home);
+    // A volume laid out for one block size and described in another cannot
+    // be used; what matters is that it is read whole in the geometry the
+    // replay left, so every later operation answers rather than overruns a
+    // buffer sized for the old one.
+    let mut fs = Ext4::open(SizedBlock::over(image)).expect("mounts what the replay left");
+    assert_eq!(fs.layout.block_size, 2048);
+    // The journal read before the replay was mapped in the old block size;
+    // read afresh, this one cannot be found in the new, so nothing is
+    // written through a log the replay emptied.
+    assert_ne!(fs.write_refusal(), None);
+    let root = fs.root();
+    let _ = fs.node_info(root);
+    let _ = fs.lookup(root, b"lost+found");
+    let _ = fs.create(root, b"after", NodeKind::RegularFile);
+    let _ = fs.into_block();
+}
+
+/// A directory whose size promises far more blocks than it maps is walked over
+/// what it maps: the hole past its last block ends the walk, rather than each
+/// block it spans costing a lookup of its own.
+#[test]
+fn a_directory_sized_past_its_blocks_is_walked_over_what_it_maps() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let root = fs.root();
+    fs.create(root, b"kept", NodeKind::RegularFile)
+        .expect("create");
+    // A `largedir` directory's size has a high half: the largest it can
+    // carry, 2^54 blocks of promise over the one block it has.
+    fs.layout.largedir = true;
+    let mut raw = fs.inode_scratch().expect("scratch");
+    fs.read_inode_raw(ROOT_INODE, &mut raw).expect("read");
+    file::set_size(&mut raw, u64::MAX);
+    fs.write_inode_raw(ROOT_INODE, &mut raw).expect("write");
+
+    assert_eq!(fs.lookup(root, b"absent"), Err(DriverError::NotFound));
+    assert!(fs.lookup(root, b"kept").is_ok());
+    let names: Vec<Vec<u8>> = listed(&mut fs, root, 0, &[])
+        .expect("lists")
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    assert!(names.iter().any(|name| name == b"kept"));
+}
+
+/// Two journal blocks stored in one physical block are no log: a file whose
+/// runs overlap could present the same blocks round and round as a log of any
+/// length.
+#[test]
+fn a_journal_whose_runs_share_blocks_is_refused() {
+    assert!(JournalMap::new(vec![(0, 100, 10), (10, 120, 10)]).is_ok());
+    assert_eq!(
+        JournalMap::new(vec![(0, 100, 10), (10, 105, 10)]).err(),
+        Some(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        JournalMap::new(vec![(0, 100, 10), (10, 100, 10)]).err(),
+        Some(DriverError::DeviceFault)
+    );
+}
+
+/// A crash may leave the superblock's free totals behind the group
+/// descriptors, which every allocation keeps exact: a writable mount counts
+/// them again, so a stale total neither refuses room that is there nor is
+/// written back.
+#[test]
+fn stale_superblock_totals_are_recounted_at_mount() {
+    use crate::superblock::{SB_FREE_BLOCKS_LO, SB_FREE_INODES};
+
+    let image = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID)
+        .expect("format")
+        .into_block()
+        .expect("commit")
+        .data;
+    let exact = Ext4::open(SizedBlock::over(image.clone()))
+        .expect("mount")
+        .stats()
+        .expect("stats");
+    let mut stale = image;
+    let at = usize::try_from(SUPERBLOCK_OFFSET).expect("small");
+    let sb = &mut stale[at..at + SUPERBLOCK_LEN];
+    put_le32(sb, SB_FREE_BLOCKS_LO, 0);
+    put_le32(sb, SB_FREE_INODES, 0);
+    if le32(sb, SB_FEATURE_RO_COMPAT) & RO_COMPAT_METADATA_CSUM != 0 {
+        superblock::stamp(sb);
+    }
+    let mut fs = Ext4::open(SizedBlock::over(stale)).expect("mount");
+    let recounted = fs.stats().expect("stats");
+    assert_eq!(recounted.free_blocks, exact.free_blocks);
+    assert_eq!(recounted.files_free, exact.files_free);
+    let root = fs.root();
+    fs.create(root, b"room", NodeKind::RegularFile)
+        .expect("the room the groups hold");
+    let stats = remount(fs).stats().expect("stats");
+    assert_eq!(
+        stats.files_free,
+        exact.files_free - 1,
+        "and written back exact"
+    );
+}
+
+/// Set `flags` among inode `ino`'s, as `chattr` does.
+fn chattr<B: Block>(fs: &mut Ext4<B>, ino: u32, flags: u32) {
+    let mut raw = fs.inode_scratch().expect("scratch");
+    fs.read_inode_raw(ino, &mut raw).expect("read");
+    let set = le32(&raw, INODE_FLAGS) | flags;
+    put_le32(&mut raw, INODE_FLAGS, set);
+    fs.write_inode_raw(ino, &mut raw).expect("write");
+}
+
+/// What `chattr +i` and `chattr +a` hold fixed holds against every caller: an
+/// immutable file is never written, truncated, re-moded, renamed or removed,
+/// and an append-only one only grows at its end.
+#[test]
+fn an_immutable_or_append_only_file_is_held_as_the_volume_says() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let root = fs.root();
+    for (name, flag) in [
+        (&b"fixed"[..], INODE_FLAG_IMMUTABLE),
+        (b"log", INODE_FLAG_APPEND),
+    ] {
+        let node = fs
+            .create(root, name, NodeKind::RegularFile)
+            .expect("create");
+        fs.write_at(root, name, 0, b"first").expect("write");
+        chattr(&mut fs, node_inode(node).expect("inode"), flag);
+        let refused = Err(DriverError::PermissionDenied);
+        assert_eq!(fs.write_at(root, name, 0, b"over"), refused.map(|()| 0));
+        assert_eq!(fs.truncate(root, name, 0), refused);
+        assert_eq!(fs.remove(root, name), refused);
+        assert_eq!(fs.rename(root, name, root, b"moved"), refused);
+        let mut security = fs.security(node).expect("security");
+        security.mode = 0o600;
+        assert_eq!(fs.set_security(node, security), refused);
+        let appended = fs.write_at(root, name, 5, b"+more");
+        if flag == INODE_FLAG_APPEND {
+            assert_eq!(appended, Ok(5), "an append-only file grows at its end");
+        } else {
+            assert_eq!(appended, refused.map(|()| 0));
+        }
+    }
+    let other = fs
+        .create(root, b"other", NodeKind::RegularFile)
+        .expect("create");
+    assert_eq!(
+        fs.rename(root, b"other", root, b"fixed"),
+        Err(DriverError::PermissionDenied),
+        "a rename over a protected file would remove it"
+    );
+    assert!(fs.node_info(other).is_ok());
+}
+
+/// An immutable directory takes no new name and loses none; an append-only
+/// one takes new names but loses none.
+#[test]
+fn an_immutable_or_append_only_directory_is_held_as_the_volume_says() {
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let root = fs.root();
+    for (name, flag) in [
+        (&b"sealed"[..], INODE_FLAG_IMMUTABLE),
+        (b"inbox", INODE_FLAG_APPEND),
+    ] {
+        let dir = fs.create(root, name, NodeKind::Directory).expect("mkdir");
+        fs.create(dir, b"kept", NodeKind::RegularFile)
+            .expect("create");
+        chattr(&mut fs, node_inode(dir).expect("inode"), flag);
+        assert_eq!(fs.remove(dir, b"kept"), Err(DriverError::PermissionDenied));
+        assert_eq!(
+            fs.rename(dir, b"kept", root, b"out"),
+            Err(DriverError::PermissionDenied)
+        );
+        let added = fs.create(dir, b"new", NodeKind::RegularFile).map(|_| ());
+        if flag == INODE_FLAG_APPEND {
+            assert_eq!(added, Ok(()), "an append-only directory gains names");
+        } else {
+            assert_eq!(added, Err(DriverError::PermissionDenied));
+        }
+    }
+}
+
+/// An entry naming an inode no entry may — the journal, here — is damage:
+/// following it would let a delete free the live log.
+#[test]
+fn an_entry_naming_the_journal_is_refused_not_followed() {
+    let mut fs = Ext4::open(SizedBlock::over(sparse(JOURNALED))).expect("mount");
+    let root = fs.root();
+    fs.create(root, b"victim", NodeKind::RegularFile)
+        .expect("create");
+    let journal = fs.layout.journal_inum.expect("a journal");
+    let dir = fs.read_inode(ROOT_INODE).expect("root");
+    let seed = fs.dir_seed(ROOT_INODE, &dir);
+    let phys = first_dir_block(&mut fs, root);
+    let mut block = fs.block_scratch().expect("scratch");
+    fs.read_dir_block(seed, phys, &mut block).expect("read");
+    let end = fs.dir_data_end();
+    let at = fs
+        .locate(&block[..end], b"victim")
+        .expect("parses")
+        .expect("named")
+        .at;
+    put_le32(&mut block, at, journal);
+    fs.operation(|fs| fs.write_leaf(seed, phys, &mut block))
+        .expect("rewrite");
+
+    assert_eq!(fs.lookup(root, b"victim"), Err(DriverError::DeviceFault));
+    assert!(listed(&mut fs, root, 0, &[]).is_err(), "nor listed");
+    assert_eq!(fs.remove(root, b"victim"), Err(DriverError::DeviceFault));
+    let fs = remount(fs);
+    assert!(fs.journal.is_some(), "the log is intact");
+}
+
+/// A volume under multi-mount protection may be in another host's hands, so
+/// a log it holds is not replayed here: the replay is a write.
+#[test]
+fn a_log_on_a_multi_mount_protected_volume_is_not_replayed() {
+    let (device, medium) = FailingWrites::over(sparse(JOURNALED));
+    let mut fs = Ext4::open(device).expect("mount");
+    let root = fs.root();
+    let table = inode_block(&mut fs, ROOT_INODE);
+    medium.borrow_mut().failing = Some(sectors_of(&fs, table));
+    assert!(fs.create(root, b"torn", NodeKind::Directory).is_err());
+    let mut image = medium.borrow().data.clone();
+    let at = usize::try_from(SUPERBLOCK_OFFSET).expect("small");
+    let sb = &mut image[at..at + SUPERBLOCK_LEN];
+    let incompat = le32(sb, SB_FEATURE_INCOMPAT) | superblock::INCOMPAT_MMP;
+    put_le32(sb, SB_FEATURE_INCOMPAT, incompat);
+    superblock::stamp(sb);
+    let (device, medium) = FailingWrites::over(image.clone());
+    assert_eq!(Ext4::open(device).err(), Some(DriverError::Unsupported));
+    assert!(medium.borrow().data == image, "nothing was written");
+}
+
+/// A truncate a crash interrupted is finished from the orphan chain at mount,
+/// the tail of its last block zeroed as a truncate zeroes it: the bytes cut
+/// never reappear when the file grows again.
+#[test]
+fn an_interrupted_truncate_finished_at_mount_zeroes_its_tail() {
+    use crate::superblock::SB_LAST_ORPHAN;
+
+    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
+    let root = fs.root();
+    let node = fs
+        .create(root, b"cut", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"cut", 0, &[0xAB; 2048]).expect("write");
+    let ino = node_inode(node).expect("inode");
+    // What a crash mid-truncate leaves: the size cut to 100 bytes and the
+    // inode listed, its blocks and the tail of the first not yet cut.
+    fs.operation(|fs| {
+        let mut raw = fs.inode_scratch()?;
+        fs.read_inode_raw(ino, &mut raw)?;
+        file::set_size(&mut raw, 100);
+        put_le32(&mut raw, INODE_DTIME, 0);
+        fs.write_inode_raw(ino, &mut raw)?;
+        put_le32(&mut fs.sb, SB_LAST_ORPHAN, ino);
+        Ok(())
+    })
+    .expect("listed");
+
+    let mut fs = remount(fs);
+    assert_eq!(le32(&fs.sb, SB_LAST_ORPHAN), 0, "finished");
+    fs.write_at(root, b"cut", 1000, b"!").expect("grow");
+    let mut buf = [0u8; 1001];
+    let n = fs.read_at(node, 0, &mut buf).expect("read");
+    assert_eq!(n, 1001);
+    assert!(
+        buf[100..1000].iter().all(|&b| b == 0),
+        "the cut bytes stay cut"
+    );
+}
+
+/// `mke2fs -t ext4 -b 1024 -g 512 -J size=1 -O ^resize_inode` over 16 MiB
+/// (e2fsprogs 1.47.0): thirty-two groups of 512 blocks and a 1024-block
+/// internal journal, so one large file spans many groups.
+const MULTIGROUP: &[u8] = include_bytes!("../tests/fixtures/multigroup.sparse");
+
+/// A rename over a large file lets the replaced file go across transactions;
+/// a crash between them must find the rename whole — the name naming the
+/// moved file, the old name gone — never the name removed and its
+/// replacement not yet linked.
+#[test]
+fn a_rename_over_a_file_let_go_across_transactions_is_whole_after_a_crash() {
+    let mut image = sparse(MULTIGROUP);
+    // The smallest log this driver writes through, whose transactions are a
+    // few dozen blocks: letting go of a file across sixteen groups publishes
+    // part-way.
+    let log = {
+        let fs = Ext4::open_read_only(SizedBlock::over(image.clone())).expect("mount");
+        fs.journal_map
+            .as_ref()
+            .and_then(|map| map.resolve(0))
+            .expect("a log")
+    };
+    let at = usize::try_from(log).expect("small") * 1024 + crate::journal::SB_MAXLEN;
+    image[at..at + 4].copy_from_slice(&260u32.to_be_bytes());
+
+    let (device, medium) = FailingWrites::over(image);
+    let mut fs = Ext4::open(device).expect("mount");
+    let root = fs.root();
+    for name in [&b"old"[..], b"new"] {
+        fs.create(root, name, NodeKind::RegularFile)
+            .expect("create");
+    }
+    let chunk = vec![0xA5u8; 64 * 1024];
+    for at in 0..128u64 {
+        fs.write_at(root, b"old", at * chunk.len() as u64, &chunk)
+            .expect("write");
+    }
+    fs.write_at(root, b"new", 0, b"moved here").expect("write");
+    let dir_block = first_dir_block(&mut fs, root);
+    medium.borrow_mut().failing = Some(sectors_of(&fs, dir_block));
+    assert_eq!(
+        fs.rename(root, b"new", root, b"old"),
+        Err(DriverError::DeviceFault),
+        "the first publication holding the directory tears"
+    );
+
+    let mut fs = crashed(&medium);
+    let root = fs.root();
+    let moved = fs
+        .lookup(root, b"old")
+        .expect("the name names the moved file");
+    let mut buf = [0u8; 16];
+    let n = fs.read_at(moved, 0, &mut buf).expect("read");
+    assert_eq!(&buf[..n], b"moved here");
+    assert_eq!(fs.lookup(root, b"new"), Err(DriverError::NotFound));
 }
 
 /// A create that finds no room for its name — the directory needs a block
@@ -2461,7 +2784,7 @@ fn a_create_that_cannot_place_its_name_gives_its_inode_back() {
         fs.create(root, &long, NodeKind::RegularFile)
             .expect("fits in block 0");
     }
-    while fs.alloc_block().is_ok() {}
+    while fs.alloc_blocks(0, group::MAX_RUN, u64::MAX).is_ok() {}
     let before = fs.stats().expect("stats");
     long[0] = b'z';
     assert_eq!(
@@ -2541,27 +2864,9 @@ fn a_volume_whose_groups_outgrow_their_bitmaps_is_refused() {
         let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("offset fits");
         set_le32(&mut img, sb + field, u32c(8 * FS_BLOCK + 1));
         assert_eq!(
-            Ext4::open(MockBlock { data: img }).err(),
+            Ext4::open(SizedBlock::over(img)).err(),
             Some(DriverError::BadMagic),
             "superblock field {field:#x}"
         );
     }
-}
-
-/// A free count already at its ceiling is damage: freeing into it is refused
-/// before the bitmap changes, so the block is still allocated afterwards.
-#[test]
-fn a_free_count_at_its_ceiling_is_refused_before_anything_is_written() {
-    let mut fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 256, TEST_UUID).expect("format");
-    let block = fs.alloc_block().expect("a block");
-    let mut desc = fs.read_group_desc(0).expect("descriptor");
-    let free = le16(&desc, 0x0C);
-    put_le16(&mut desc, 0x0C, u16::MAX);
-    fs.write_group_desc(0, &mut desc).expect("descriptor");
-    assert_eq!(fs.free_block(block), Err(DriverError::DeviceFault));
-    put_le16(&mut desc, 0x0C, free);
-    fs.write_group_desc(0, &mut desc).expect("descriptor");
-    let before = fs.stats().expect("stats").free_blocks;
-    fs.free_block(block).expect("still allocated, so freed now");
-    assert_eq!(fs.stats().expect("stats").free_blocks, before + 1);
 }

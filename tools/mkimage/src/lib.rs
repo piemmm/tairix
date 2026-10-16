@@ -905,10 +905,10 @@ mod tests {
             .lookup(security, rootfs::USERS_DB_NAME.as_bytes())
             .is_err());
 
-        // A read-only mount refuses mutation fail-closed.
+        // A read-only mount refuses mutation fail-closed, as read-only.
         assert_eq!(
             sys.create(sys_root, b"x", NodeKind::Directory),
-            Err(DriverError::PermissionDenied)
+            Err(DriverError::ReadOnly)
         );
     }
 

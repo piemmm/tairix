@@ -731,6 +731,7 @@ tairix/
 │   │                    #   `screensavers/`.
 │   ├── wgsl/            # WGSL shader front end: source to SPIR-V.
 │   ├── window/          # Window-channel protocol engine.
+│   ├── writeback/       # Shared filesystem write-back core: dirty set, bound, commit window.
 │   └── xml/             # Shared fail-closed XML element scanner.
 │
 ├── userland/            # Grouped by <class>/<crate>, mirroring drivers/.

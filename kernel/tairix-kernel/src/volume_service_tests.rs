@@ -38,30 +38,81 @@ use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, 
 use tairix_abi::fs::OpenFlags;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
-use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, Errno};
+use tairix_abi::{CapabilityId, CapabilityQuery, DriverError, DriverHandle, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_drv_fs_arxfs::{EntropySource, Keying, ARXFS};
+use tairix_drv_fs_ext4::Ext4;
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use tairix_kernel_core::fs::{FilesystemService, FinalLink};
 use tairix_kernel_core::fswatch::WatchRegistry;
-use tairix_kernel_core::{sharedreg, Vfs};
+use tairix_kernel_core::{sharedreg, Path, Vfs};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTableBuilder, ProcessId, UserId, UserRecord,
 };
+use tairix_log::{Event, FieldValue, Sink};
 use tairix_reclaim::{FreeMemorySource, MemoryPressure};
 
 use crate::root_mount::LATE_IDENTITY;
 use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
-use crate::test_support::NullSink;
 use crate::test_support::{RamBlock, BLOCK_SIZE};
 use crate::volume_policy::LATE_STORAGE_GID;
 use crate::volume_service::{RuntimeVolumeService, VOLUME_SERVICE};
 use tairix_kernel_core::VolumeService as _;
 
-static SINK: NullSink = NullSink;
+/// One audited decision: its event id, the volume it names, and its cause.
+struct Audit {
+    id: u32,
+    volume: Option<String>,
+    cause: Option<String>,
+}
+
+/// Records every event the service audits, so a scenario can assert what it
+/// was told.
+struct Recorded(Mutex<Vec<Audit>>);
+
+impl Sink for Recorded {
+    fn write_event(&self, event: &Event<'_>) {
+        let field = |key: &str| {
+            event
+                .fields
+                .iter()
+                .find(|field| field.key == key)
+                .and_then(|field| match field.value {
+                    FieldValue::Str(text) => Some(String::from(text)),
+                    _ => None,
+                })
+        };
+        let audit = Audit {
+            id: event.id.0,
+            volume: field("volume"),
+            cause: field("cause"),
+        };
+        self.0.lock().unwrap().push(audit);
+    }
+}
+
+static SINK: Recorded = Recorded(Mutex::new(Vec::new()));
+
+/// The causes of every `id` event audited for `volume`, in order.
+fn audited(id: u32, volume: &str) -> Vec<Option<String>> {
+    SINK.0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|audit| audit.id == id && audit.volume.as_deref() == Some(volume))
+        .map(|audit| audit.cause.clone())
+        .collect()
+}
+
+/// The service's own event ids, as the volume manager and an operator read
+/// them back.
+const ATTACH_REFUSED: u32 = 4173;
+const SURPRISE_REMOVED_LOST: u32 = 4178;
+const ATTACHED_READ_ONLY: u32 = 4180;
+const NAME_TAKEN: u32 = 4181;
 
 /// The address-space registry endpoint teardown revokes per-endpoint
 /// grants against.
@@ -166,6 +217,9 @@ struct ServedDevice {
     class: Option<BlkDeviceClass>,
     flushes: usize,
     geometries: usize,
+    /// The block whose write the stick is pulled straight after, if any.
+    pull_after: Option<u64>,
+    pulled: bool,
 }
 
 impl ServedDevice {
@@ -177,6 +231,17 @@ impl ServedDevice {
             block,
             flushes: 0,
             geometries: 0,
+            pull_after: None,
+            pulled: false,
+        }
+    }
+
+    /// A device pulled the moment a write covering `lba` lands: that write
+    /// is kept, and every request after it fails as a removed stick's does.
+    fn pulled_after(block: RamBlock, lba: u64) -> Self {
+        Self {
+            pull_after: Some(lba),
+            ..Self::new(block)
         }
     }
 
@@ -185,9 +250,7 @@ impl ServedDevice {
     fn unclassified(block: RamBlock) -> Self {
         Self {
             class: None,
-            block,
-            flushes: 0,
-            geometries: 0,
+            ..Self::new(block)
         }
     }
 }
@@ -210,6 +273,9 @@ fn serve(
             let mut reply = [0u8; BLK_COMPLETION_LEN];
             let len = match BlkRequest::decode(&call.request) {
                 Err(err) => encode_error_completion(&mut reply, err).unwrap(),
+                Ok(_) if device.lock().unwrap().pulled => {
+                    encode_error_completion(&mut reply, Errno::DeviceOffline).unwrap()
+                }
                 Ok(request) => {
                     let mut device = device.lock().unwrap();
                     let bytes = request.blocks as usize * BLOCK_SIZE;
@@ -249,7 +315,13 @@ fn serve(
                                 core::ptr::copy_nonoverlapping(window, buf.as_mut_ptr(), bytes);
                             }
                             match device.block.write_blocks(request.lba, &buf) {
-                                Ok(()) => BlkCompletion::default().encode(&mut reply).unwrap(),
+                                Ok(()) => {
+                                    let end = request.lba + u64::from(request.blocks);
+                                    device.pulled = device
+                                        .pull_after
+                                        .is_some_and(|lba| (request.lba..end).contains(&lba));
+                                    BlkCompletion::default().encode(&mut reply).unwrap()
+                                }
                                 Err(err) => {
                                     encode_error_completion(&mut reply, err.as_errno()).unwrap()
                                 }
@@ -602,13 +674,14 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
             && !table_free(&booted, expected_identity),
         "the attached volume feeds its change table, and no other volume may"
     );
-    // A second attach of the same volume under another name is refused
-    // (duplicate identity) and unwinds cleanly.
+    // A second attach of the same volume under another name is refused as
+    // busy — it is attached already — and unwinds cleanly. It is not the name
+    // conflict the volume manager would answer by trying yet another name.
     let dup = VolumeAttachRequest {
         name: b"usb2",
         ..attach
     };
-    assert_eq!(VOLUME_SERVICE.attach(&dup), Err(Errno::AlreadyExists));
+    assert_eq!(VOLUME_SERVICE.attach(&dup), Err(Errno::Busy));
 
     // --- Use: the mounted volume serves reads through the production
     // `fs_*` service under the system principal. ---
@@ -634,12 +707,28 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     assert_identity_mapped_access();
     assert_a_member_creates_on_the_volume();
 
+    // An operation that resolved the volume before it detached and reaches
+    // its driver only after.
+    let in_flight = LATE_FILESYSTEM
+        .driver(served_handle("usb1"))
+        .expect("served");
+
     // --- Detach. ---
     let detach = VolumeDetachRequest {
         volume_id: expected_identity,
         force: false,
     };
     VOLUME_SERVICE.detach(&detach).expect("detach");
+    {
+        let mut fs = in_flight.lock();
+        let root = fs.root();
+        assert_eq!(
+            fs.write_at(root, b"hello.txt", 0, b"lost"),
+            Err(DriverError::DeviceFault),
+            "a write reaching a volume that has left is refused, not acknowledged and dropped"
+        );
+    }
+    drop(in_flight);
     assert_eq!(
         VOLUME_FOREST.resolve(&expected_identity),
         None,
@@ -666,14 +755,38 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         "detach commits the device cache"
     );
 
+    run_scenarios(window_ptr, facility);
+}
+
+/// Every further scenario, over the service the lifecycle test booted.
+fn run_scenarios(window_ptr: *mut u8, facility: &'static TestFacility) {
     dirty_surprise_removal_scenario(window_ptr, facility);
     clean_surprise_removal_scenario(window_ptr, facility);
+    pulling_a_partitioned_stick_retracts_every_volume_scenario(window_ptr, facility);
     forced_unmount_of_a_healthy_volume_scenario(window_ptr, facility);
     verified_reinsert_replays_scenario(window_ptr, facility);
     mutated_reinsert_conflicts_scenario(window_ptr, facility);
     sibling_volumes_share_one_client_scenario(window_ptr, facility);
     unrecognised_medium_mounts_as_unknown_scenario(window_ptr, facility);
     link_round_trip_through_the_real_service_scenario(window_ptr, facility);
+    a_taken_catalog_name_is_answered_as_taken_scenario(window_ptr, facility);
+    a_volume_its_driver_refuses_to_write_mounts_read_only_scenario(window_ptr, facility);
+    a_stick_pulled_mid_commit_returns_read_only_scenario(window_ptr, facility);
+    an_unpublished_transaction_is_recorded_lost_scenario(window_ptr, facility);
+}
+
+/// The driver handle of the volume shown at `/Storage/<name>`.
+fn served_handle(name: &str) -> DriverHandle {
+    let at = Path::parse(&std::format!("/Storage/{name}")).expect("a path");
+    LATE_FILESYSTEM
+        .vfs()
+        .expect("installed")
+        .mounts()
+        .volumes()
+        .iter()
+        .find(|(_, shown)| shown.as_ref() == Some(&at))
+        .map(|(volume, _)| volume.driver())
+        .expect("the volume is attached")
 }
 
 /// The per-scenario facts for [`attach_then_yank`]: the owning task, the
@@ -685,7 +798,17 @@ struct YankScenario {
     serial: u32,
     region_task: u64,
     name: &'static [u8],
-    dirty: bool,
+    unflushed: Unflushed,
+}
+
+/// What a scenario volume holds that its medium never took when it is yanked.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Unflushed {
+    Nothing,
+    /// A write the device took into its cache, which the journal retains.
+    DeviceWrite,
+    /// A transaction the volume's driver reports open and never published.
+    DriverTransaction,
 }
 
 /// One served, attached FAT32 volume for the surprise-removal scenarios,
@@ -719,15 +842,21 @@ fn attach_then_yank(
             name: scenario.name,
         })
         .expect("attach scenario volume");
-    if scenario.dirty {
-        // Dirty the volume's journal through the production write path.
-        let path = std::format!(
-            "/Storage/{}/hello.txt",
-            core::str::from_utf8(scenario.name).expect("ascii name")
-        );
-        FS_SERVICE
-            .write(0, &NoCaps, &path, 0, false, b"D")
-            .expect("write dirties the journal");
+    let name = core::str::from_utf8(scenario.name).expect("ascii name");
+    match scenario.unflushed {
+        Unflushed::Nothing => {}
+        Unflushed::DeviceWrite => {
+            // Dirty the volume's journal through the production write path.
+            let path = std::format!("/Storage/{name}/hello.txt");
+            FS_SERVICE
+                .write(0, &NoCaps, &path, 0, false, b"D")
+                .expect("write dirties the journal");
+        }
+        // What a driver deferring its commit reports, far enough out that
+        // nothing publishes it first.
+        Unflushed::DriverTransaction => {
+            LATE_FILESYSTEM.note_writeback_due(served_handle(name), Some(u64::MAX - 1));
+        }
     }
     // Yank the stick: the serving driver dies and the kernel tears its
     // endpoint down, which drives the vanish observer synchronously.
@@ -750,7 +879,7 @@ fn dirty_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
             serial: 0x0D15_C002,
             region_task: 0x70_0003,
             name: b"usb2",
-            dirty: true,
+            unflushed: Unflushed::DeviceWrite,
         },
     );
     let mut buf = [0u8; 32];
@@ -875,7 +1004,7 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
             serial: 0x0D15_C003,
             region_task: 0x70_0005,
             name: b"usb3",
-            dirty: false,
+            unflushed: Unflushed::Nothing,
         },
     );
     let mut buf = [0u8; 32];
@@ -902,6 +1031,122 @@ fn clean_surprise_removal_scenario(window_ptr: *mut u8, facility: &'static TestF
     assert_every_attached_volume_is_served();
 }
 
+/// Pulling a stick that carries two volumes retracts both — they share the
+/// one endpoint that vanished — and lets go of what its cache held, so no
+/// volume is left over a dead device and none of the medium stays in memory.
+fn pulling_a_partitioned_stick_retracts_every_volume_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (first, first_identity) = fat32_image(0x0D15_C010, b"first partition payload");
+    let (second, second_identity) = fat32_image(0x0D15_C011, b"second partition payload");
+    let extent_blocks = (first.data.len() / BLOCK_SIZE) as u64;
+    let mut data = first.data;
+    data.extend_from_slice(&second.data);
+    let owner = 0x70_1030;
+    let endpoint_id = 0xB1D0_5E17_0000_0030_u64;
+    let endpoint = register_endpoint(endpoint_id, owner);
+    let device = StdArc::new(Mutex::new(ServedDevice::new(RamBlock { data })));
+    let stop = StdArc::new(AtomicBool::new(false));
+    let server = serve(
+        StdArc::clone(&endpoint),
+        window_ptr as usize,
+        StdArc::clone(&device),
+        StdArc::clone(&stop),
+    );
+    let (_va, region) = sharedreg::create(facility, ProcessId(0x70_0030), 8).expect("region");
+    for (name, first_lba) in [(&b"pull1"[..], 0), (b"pull2", extent_blocks)] {
+        VOLUME_SERVICE
+            .attach(&VolumeAttachRequest {
+                endpoint: endpoint_id,
+                window: region,
+                first_lba,
+                blocks: extent_blocks,
+                fstype: VolumeFsType::Fat32,
+                name,
+            })
+            .expect("attach a partition");
+    }
+    assert_volume_reads("/Storage/pull1/hello.txt", b"first partition payload");
+    assert_volume_reads("/Storage/pull2/hello.txt", b"second partition payload");
+
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    stop.store(true, Ordering::Relaxed);
+    server.join().expect("server thread");
+
+    for (identity, path) in [
+        (first_identity, "/Storage/pull1/hello.txt"),
+        (second_identity, "/Storage/pull2/hello.txt"),
+    ] {
+        assert_eq!(VOLUME_FOREST.resolve(&identity), None, "{path} retracts");
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            FS_SERVICE.read(0, &NoCaps, path, 0, &mut buf).err(),
+            Some(Errno::NotFound),
+            "{path} fails closed"
+        );
+    }
+    assert_every_attached_volume_is_served();
+    let cached: Vec<usize> = VOLUME_SERVICE
+        .devices
+        .lock()
+        .iter()
+        .filter(|shared| shared.endpoint == endpoint_id)
+        .map(|shared| {
+            let mut held = usize::MAX;
+            shared
+                .device
+                .try_with_device(|cache| held = cache.accounting().total_bytes());
+            held
+        })
+        .collect();
+    assert!(
+        cached.iter().all(|&held| held == 0),
+        "the removed medium's cached blocks are let go at once: {cached:?}"
+    );
+}
+
+/// Surprise removal while the volume's driver holds a transaction it never
+/// published: those writes were acknowledged and never reached the device, so
+/// the removal is recorded as the loss it is, never as a clean one.
+fn an_unpublished_transaction_is_recorded_lost_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let identity = attach_then_yank(
+        window_ptr,
+        facility,
+        &YankScenario {
+            owner: 0x70_1030,
+            endpoint_id: 0xB1D0_5E17_0000_0030,
+            serial: 0x0D15_C00C,
+            region_task: 0x70_0030,
+            name: b"usb9",
+            unflushed: Unflushed::DriverTransaction,
+        },
+    );
+    assert_eq!(
+        VOLUME_FOREST.resolve(&identity),
+        Some(vec![String::from("Storage"), String::from("usb9")]),
+        "a volume that lost writes stays visible rather than retracting"
+    );
+    assert_eq!(
+        mount_record(b"usb9").availability(),
+        MountAvailability::UnavailableLost
+    );
+    assert_eq!(
+        audited(SURPRISE_REMOVED_LOST, "usb9"),
+        vec![Some(String::from("unpublished_writes"))]
+    );
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force: true,
+        })
+        .expect("the audited force retracts it");
+    assert_every_attached_volume_is_served();
+}
+
 /// One yank round for the re-insert scenarios: format a FAT32 image
 /// carrying `hello.txt`, serve it, attach it under `name`, dirty the
 /// journal through the production write path, and yank the serving
@@ -919,8 +1164,9 @@ fn dirty_yank_round(
     facility: &'static TestFacility,
     scenario: &YankScenario,
 ) -> YankedRound {
-    assert!(
-        scenario.dirty,
+    assert_eq!(
+        scenario.unflushed,
+        Unflushed::DeviceWrite,
         "a re-insert round always dirties the journal"
     );
     let endpoint = register_endpoint(scenario.endpoint_id, scenario.owner);
@@ -965,29 +1211,35 @@ fn dirty_yank_round(
     }
 }
 
-/// The served re-inserted device and its round facts: the device (for
-/// post-recovery image assertions), the stop/join pair the caller ends
-/// the round with, and the attach outcome.
-struct ReinsertRound {
+/// A served, inserted device and its round facts: the device (for image
+/// assertions), the stop/join pair the caller ends the round with, and the
+/// attach outcome.
+struct Inserted {
     device: StdArc<Mutex<ServedDevice>>,
     stop: StdArc<AtomicBool>,
     server: thread::JoinHandle<()>,
     outcome: Result<(), Errno>,
 }
 
-/// Serve `image` as the re-inserted device and re-attach it.
-fn reinsert(
-    window_ptr: *mut u8,
-    facility: &'static TestFacility,
+/// The facts one inserted device is served and attached under.
+struct Insertion {
     endpoint_id: u64,
     owner: u64,
     region_task: u64,
     name: &'static [u8],
-    image: Vec<u8>,
-) -> ReinsertRound {
-    let endpoint = register_endpoint(endpoint_id, owner);
-    let blocks = (image.len() / BLOCK_SIZE) as u64;
-    let device = StdArc::new(Mutex::new(ServedDevice::new(RamBlock { data: image })));
+    fstype: VolumeFsType,
+}
+
+/// Serve `device` and attach the volume it holds, as an inserted stick is.
+fn insert(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+    insertion: &Insertion,
+    device: ServedDevice,
+) -> Inserted {
+    let endpoint = register_endpoint(insertion.endpoint_id, insertion.owner);
+    let blocks = (device.block.data.len() / BLOCK_SIZE) as u64;
+    let device = StdArc::new(Mutex::new(device));
     let stop = StdArc::new(AtomicBool::new(false));
     let server = serve(
         StdArc::clone(&endpoint),
@@ -995,16 +1247,17 @@ fn reinsert(
         StdArc::clone(&device),
         StdArc::clone(&stop),
     );
-    let (_va, region) = sharedreg::create(facility, ProcessId(region_task), 8).expect("region");
+    let (_va, region) =
+        sharedreg::create(facility, ProcessId(insertion.region_task), 8).expect("region");
     let outcome = VOLUME_SERVICE.attach(&VolumeAttachRequest {
-        endpoint: endpoint_id,
+        endpoint: insertion.endpoint_id,
         window: region,
         first_lba: 0,
         blocks,
-        fstype: VolumeFsType::Fat32,
-        name,
+        fstype: insertion.fstype,
+        name: insertion.name,
     });
-    ReinsertRound {
+    Inserted {
         device,
         stop,
         server,
@@ -1027,19 +1280,24 @@ fn verified_reinsert_replays_scenario(window_ptr: *mut u8, facility: &'static Te
             serial: 0x0D15_C005,
             region_task: 0x70_0007,
             name: b"usb5",
-            dirty: true,
+            unflushed: Unflushed::DeviceWrite,
         },
     );
     // Re-insert the pre-write image: the device accepted the writes into
     // its volatile cache and lost them with the power.
-    let inserted = reinsert(
+    let inserted = insert(
         window_ptr,
         facility,
-        0xB1D0_5E17_0000_0006,
-        0x70_1008,
-        0x70_0008,
-        b"usb5",
-        round.pristine,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0006,
+            owner: 0x70_1008,
+            region_task: 0x70_0008,
+            name: b"usb5",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(RamBlock {
+            data: round.pristine,
+        }),
     );
     inserted.outcome.expect("the re-insert recovers the volume");
 
@@ -1103,21 +1361,24 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
             serial: 0x0D15_C006,
             region_task: 0x70_0009,
             name: b"usb6",
-            dirty: true,
+            unflushed: Unflushed::DeviceWrite,
         },
     );
     // A foreign mount updated the FSInfo free-cluster hint (sector 1,
     // offset 488) — inside the evidence window, outside the identity.
     let mut mutated = round.at_yank;
     mutated[512 + 488..512 + 492].copy_from_slice(&1234u32.to_le_bytes());
-    let inserted = reinsert(
+    let inserted = insert(
         window_ptr,
         facility,
-        0xB1D0_5E17_0000_0008,
-        0x70_100A,
-        0x70_000A,
-        b"usb6",
-        mutated,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0008,
+            owner: 0x70_100A,
+            region_task: 0x70_000A,
+            name: b"usb6",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(RamBlock { data: mutated }),
     );
     inserted
         .outcome
@@ -1139,7 +1400,7 @@ fn mutated_reinsert_conflicts_scenario(window_ptr: *mut u8, facility: &'static T
         FS_SERVICE
             .write(0, &NoCaps, "/Storage/usb6/hello.txt", 0, false, b"X")
             .err(),
-        Some(Errno::PermissionDenied),
+        Some(Errno::ReadOnly),
         "the conflicted volume is read-only until acknowledged"
     );
     // The retained set is still held: a plain detach would discard it
@@ -1546,4 +1807,195 @@ fn link_round_trip_through_the_real_service_scenario(
         .expect("detach the ARXFS volume");
     stop.store(true, Ordering::Relaxed);
     server.join().expect("arxfs server thread");
+}
+
+/// The byte of an ext4 superblock's `s_state` and its "errors detected" bit,
+/// and the device block the superblock starts in.
+const EXT4_STATE_BYTE: usize = 1024 + 0x3A;
+const EXT4_STATE_ERRORS: u8 = 0x02;
+const EXT4_SUPERBLOCK_LBA: u64 = (1024 / BLOCK_SIZE) as u64;
+
+/// Format the unjournaled ext4 image `Ext4::format` lays, carrying
+/// `hello.txt`.
+fn ext4_image(uuid: [u8; 16]) -> RamBlock {
+    let mut fs = Ext4::format(RamBlock::new(SECTORS_8MIB), 128, uuid).expect("format");
+    let root = fs.root();
+    fs.create(root, b"hello.txt", NodeKind::RegularFile)
+        .expect("create");
+    fs.write_at(root, b"hello.txt", 0, b"ext4 payload")
+        .expect("write");
+    fs.into_block().expect("the volume closes")
+}
+
+/// Detach the volume `identity` and end its serving round.
+fn retire(identity: [u8; 16], force: bool, round: Inserted) {
+    VOLUME_SERVICE
+        .detach(&VolumeDetachRequest {
+            volume_id: identity,
+            force,
+        })
+        .expect("the volume detaches");
+    round.stop.store(true, Ordering::Relaxed);
+    round.server.join().expect("server thread");
+}
+
+/// A second volume asking for a catalog name the first holds is answered
+/// "taken" and recorded as such, not as a refused volume, because the volume
+/// manager tries its next name on that answer; the first volume is untouched.
+/// The answer comes before the second filesystem is opened, so one that would
+/// not even mount is still told its name is taken.
+fn a_taken_catalog_name_is_answered_as_taken_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let (image, identity) = fat32_image(0x0D15_C00A, b"first");
+    let first = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0010,
+            owner: 0x70_1020,
+            region_task: 0x70_0020,
+            name: b"usb8",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(image),
+    );
+    first.outcome.expect("the first volume attaches");
+    let unmountable = RamBlock::new(SECTORS_64MIB);
+    let second = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0011,
+            owner: 0x70_1021,
+            region_task: 0x70_0021,
+            name: b"usb8",
+            fstype: VolumeFsType::Fat32,
+        },
+        ServedDevice::new(unmountable),
+    );
+    assert_eq!(second.outcome, Err(Errno::AlreadyExists));
+    assert_eq!(
+        audited(NAME_TAKEN, "usb8"),
+        [None],
+        "recorded as a taken name"
+    );
+    assert!(
+        audited(ATTACH_REFUSED, "usb8").is_empty(),
+        "a taken name is not a refused volume"
+    );
+    let mut buf = [0u8; 8];
+    let n = FS_SERVICE
+        .read(0, &NoCaps, "/Storage/usb8/hello.txt", 0, &mut buf)
+        .expect("the first volume still serves");
+    assert_eq!(&buf[..n], b"first");
+    retire(identity, false, first);
+    second.stop.store(true, Ordering::Relaxed);
+    second.server.join().expect("second server thread");
+}
+
+/// An ext4 volume carrying errors a checker recorded is attached read-only
+/// and the audit names why, so a write reads as a read-only file system and
+/// not as a permission the user could be granted.
+fn a_volume_its_driver_refuses_to_write_mounts_read_only_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let identity = [0xE4; 16];
+    let mut image = ext4_image(identity);
+    image.data[EXT4_STATE_BYTE] |= EXT4_STATE_ERRORS;
+    let round = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0012,
+            owner: 0x70_1022,
+            region_task: 0x70_0022,
+            name: b"ext4ro",
+            fstype: VolumeFsType::Ext4,
+        },
+        ServedDevice::new(image),
+    );
+    round.outcome.expect("the volume attaches");
+    assert_eq!(
+        audited(ATTACHED_READ_ONLY, "ext4ro"),
+        [Some(String::from("errors_recorded"))]
+    );
+    let mut buf = [0u8; 16];
+    let n = FS_SERVICE
+        .read(0, &NoCaps, "/Storage/ext4ro/hello.txt", 0, &mut buf)
+        .expect("a read-only volume serves reads");
+    assert_eq!(&buf[..n], b"ext4 payload");
+    assert_eq!(
+        FS_SERVICE
+            .write(0, &NoCaps, "/Storage/ext4ro/hello.txt", 0, false, b"X")
+            .err(),
+        Some(Errno::ReadOnly)
+    );
+    retire(identity, false, round);
+}
+
+/// A stick pulled mid-commit (`plans/DEVICES.md` D4c): the volume had been
+/// marked not clean and the pull came before the commit finished. Once its
+/// retained writes are replayed the volume needs a check, so it returns
+/// read-only and the recovery audit says why.
+fn a_stick_pulled_mid_commit_returns_read_only_scenario(
+    window_ptr: *mut u8,
+    facility: &'static TestFacility,
+) {
+    let identity = [0xE5; 16];
+    let owner = 0x70_1023;
+    let pulled = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0013,
+            owner,
+            region_task: 0x70_0023,
+            name: b"ext4pull",
+            fstype: VolumeFsType::Ext4,
+        },
+        ServedDevice::pulled_after(ext4_image(identity), EXT4_SUPERBLOCK_LBA),
+    );
+    pulled.outcome.expect("the volume attaches writable");
+    assert!(
+        audited(ATTACHED_READ_ONLY, "ext4pull").is_empty(),
+        "a clean volume attaches writable"
+    );
+    assert!(
+        FS_SERVICE
+            .write(0, &NoCaps, "/Storage/ext4pull/hello.txt", 0, false, b"D")
+            .is_err(),
+        "the pull interrupts the commit"
+    );
+    tairix_kernel_core::callreg::teardown_owned_by(owner, &ASPACES, &SINK);
+    pulled.stop.store(true, Ordering::Relaxed);
+    pulled.server.join().expect("pulled server thread");
+    let kept = pulled.device.lock().unwrap().block.data.clone();
+
+    let back = insert(
+        window_ptr,
+        facility,
+        &Insertion {
+            endpoint_id: 0xB1D0_5E17_0000_0014,
+            owner: 0x70_1024,
+            region_task: 0x70_0024,
+            name: b"ext4pull",
+            fstype: VolumeFsType::Ext4,
+        },
+        ServedDevice::new(RamBlock { data: kept }),
+    );
+    back.outcome.expect("the re-insert recovers the volume");
+    assert_eq!(
+        audited(ATTACHED_READ_ONLY, "ext4pull"),
+        [Some(String::from("needs_check"))]
+    );
+    assert_eq!(
+        FS_SERVICE
+            .write(0, &NoCaps, "/Storage/ext4pull/hello.txt", 0, false, b"X")
+            .err(),
+        Some(Errno::ReadOnly)
+    );
+    retire(identity, false, back);
 }

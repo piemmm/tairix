@@ -6851,6 +6851,32 @@ mod tests {
         assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerNotFound.id().0]);
     }
 
+    /// Regression: the volume manager walks candidate names on a taken one,
+    /// and each step was logged as an error-level rejection.
+    #[test]
+    fn a_taken_name_is_audited_as_taken_not_rejected() {
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers {
+            force_err: Some(Errno::AlreadyExists),
+            ..Default::default()
+        };
+        let d = Dispatcher::new(&h, &sink);
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1;
+        args.0[1] = 0x2000;
+        args.0[2] = 4;
+        assert_eq!(
+            d.dispatch(&ctx, u64::from(SyscallNumber::IPC_SEND.as_u16()), args),
+            Err(Errno::AlreadyExists)
+        );
+        assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerAlreadyExists.id().0]);
+    }
+
     #[test]
     fn a_not_implemented_outcome_is_audited_as_unavailable_not_rejected() {
         // `NotImplemented` says the subsystem is absent or not up yet, not

@@ -348,8 +348,8 @@ can never diverge in navigation semantics, listing policy, or look.
   two data models, not one algorithm copied twice. The drawn verb is the
   renderer's `build_delete_dialog` (a `lib/controls` `Dialog` naming the honest
   target count and warning about folders, with the Action Warmth on the safe
-  Cancel, never the destructive Delete), `delete_dialog_rect` (centred/clamped
-  bounds), `draw_delete_dialog`, and the mirror `delete_dialog_action_at`
+  Cancel, never the destructive Delete), `modal_dialog_rect` (centred/clamped
+  bounds), `draw_modal_dialog`, and the mirror `modal_dialog_action_at`
   hit-test resolving a press to the Delete or Cancel button (`DELETE_CONFIRM_INDEX`
   / `DELETE_CANCEL_INDEX`); the files app opens it on `Delete`, confirms with
   `Enter`/Delete and cancels with `Escape`/Cancel, then drives the `DeleteWalk`
@@ -392,8 +392,8 @@ can never diverge in navigation semantics, listing policy, or look.
   (FM11b): `ManagerTool::Trash` navigates (`navigate_to`) to the user's Trash —
   the navigable Trash location — and `ManagerTool::EmptyTrash`, enabled only in
   a non-empty Trash (`ManagerToolModel`), builds the `empty_trash_plan`,
-  confirms it with the `DeleteDisposition::Permanent` dialog, and drives its
-  `DeleteWalk` through the same interleaved progress/cancel runner a delete uses.
+  confirms it with the `DeleteDisposition::Permanent` dialog, and hands its
+  `DeleteWalk` to the same operations worker a delete uses.
 - **Drops** (`plans/FILES-INTERACTION.md` FI9): `drop_operation` is the one
   policy a drag's drop is decided by — a copy, or a move with `Shift`, and
   nothing for a drop that would put a folder inside itself or leave every item
@@ -410,15 +410,16 @@ can never diverge in navigation semantics, listing policy, or look.
   head held in either end's strip of the window scrolls the listing, `step`
   scrolls and re-sweeps, `cancel` takes back what it selected, and `draw` / `report_band`
   paint it and report the pixels it moved.
-- **New ▸** (`create`, `Browser::create_entry`,
+- **New ▸** (`create`, `Browser::prepare_entry` / `finish_entry`,
   `plans/FILES-INTERACTION.md` FI10): creating a folder or a blank document in
   the current listing. `validate_new_entry_name` spells the name through the
   one shared `tairix_path::validate_file_name` rule and refuses one a sibling
   holds (`CreateError::Clash`), both before any syscall.
-  `Browser::create_entry` spells the child path, applies the create through
-  the injected seam (`fs_mkdir`, or an exclusive `fs_open` for a document), and
-  on success re-lists and follows the selection onto the new entry, ready for
-  the inline rename; a refusal leaves the listing as it was
+  `Browser::prepare_entry` spells the child path as a `PendingEntry`, making
+  nothing; the app makes it (`fs_mkdir`, or an exclusive `fs_open` for a
+  document) off its loop, and `finish_entry` takes the answer — re-listing and
+  following the selection onto the new entry, ready for the inline rename, if
+  the view is still where it was made; a refusal leaves the listing as it was
   (`CreateError::Refused`). The create is the caller's own permission-checked
   call, so the read-only picker never calls it. `NewEntry::suggest_name` gives
   the first free name — `New Folder`, `New Text Document.txt`, then ` 2`, ` 3`
@@ -593,15 +594,15 @@ can never diverge in navigation semantics, listing policy, or look.
   so the precedence between the controls is stated once: the capability-free
   permission toggles resolve before the privileged ownership control, and a
   press on nothing resolves to nothing.
-- **Permission edit** (`mode_edit::set_mode`, `plans/NEW-FILEMANAGER.md`
+- **Permission edit** (`mode_edit`, `plans/NEW-FILEMANAGER.md`
   FM8b): the model of committing a new permission mode to a named node,
   host-proven ahead of the drawn permission control. `validate_mode` fails
   closed on any bit above `tairix_abi::fs::FS_MODE_MASK` (the settable
   `rwx`/setuid/setgid/sticky word) — refused, never masked into a different
-  mode, so the mode applied is exactly the one asked for. `set_mode` validates
-  before any syscall and applies the change through an injected `fs_set_mode`
-  seam; a VFS refusal leaves the node's mode unchanged and is surfaced as
-  `ModeError::Refused`. The change is the caller's own permission-checked
+  mode, so the mode applied is exactly the one asked for. The app validates
+  before it asks for the call, a word it refuses being `InvalidMode`; a VFS
+  refusal leaves the node's mode unchanged and the app words the kernel's own
+  answer. The change is the caller's own permission-checked
   `fs_set_mode` (no new capability), so the read-only picker never calls it.
   The drawn control is the Permissions section, composed of the shared
   `lib/controls` form family with no layout arithmetic of its own: an
@@ -614,7 +615,7 @@ can never diverge in navigation semantics, listing policy, or look.
   read one placement, so a press and a key reach the same toggle. The
   setuid/setgid/sticky bits stay in the octal/symbolic display and are edited
   via `chmod` — a deliberate scope boundary, and a toggle preserves them.
-- **Ownership edit** (`owner_edit::set_owner`, `plans/NEW-FILEMANAGER.md`
+- **Ownership edit** (`owner_edit`, `plans/NEW-FILEMANAGER.md`
   FM8b): the model of committing a new owning user and/or group to a named
   node (the `chown(2)` / `chgrp(2)` shape), host-proven ahead of the drawn
   ownership control. Unlike rename, mode, and mkdir — the user's own
@@ -624,11 +625,11 @@ can never diverge in navigation semantics, listing policy, or look.
   set-*id* bits on any change. The engine models none of that policy — it
   names *what* to change via `OwnerChange` (each field `None` = unchanged,
   `Some(id)` = set), and `validate_owner` fails closed on a field set to the
-  reserved `FS_OWNER_UNCHANGED` sentinel as an explicit target. `set_owner`
-  validates before any syscall, maps `None` onto the sentinel, and applies
-  through an injected `fs_set_owner` seam; a VFS refusal (including the
-  missing-`CAP_FS_CHOWN` denial) leaves the ownership unchanged and surfaces
-  as `OwnerError::Refused`. The drawn control is the Permissions section's
+  reserved `FS_OWNER_UNCHANGED` sentinel as an explicit target. `owner_ids`
+  validates and maps `None` onto the sentinel, giving the ids the app asks
+  `fs_set_owner` for; a VFS refusal (including the missing-`CAP_FS_CHOWN`
+  denial) leaves the ownership unchanged and is stated as
+  `OwnerError::Refused`. The drawn control is the Permissions section's
   ownership group: `render::OwnerField` and the `Owner` arm of
   `render::properties_hit` resolve a click to the uid or gid plate it edits,
   and `render::properties_owner_editor_rect` is the row slot the active
@@ -653,8 +654,9 @@ can never diverge in navigation semantics, listing policy, or look.
   is the shared `RowList`.
 - **Progress + cancel** (`progress`, `plans/NEW-FILEMANAGER.md` FM7b): the
   pure display + cancel *state* of a long file operation the file manager
-  drives interleaved with its event loop. `ProgressModel` carries the
-  operation kind (`ProgressOp::Delete`/`Copy`/`Trash`), the honest rising count
+  runs off its event loop. `ProgressModel` carries the operation kind
+  (`ProgressOp::Delete`/`Copy`/`Move`/`Trash`, each with the title a refusal
+  that stops it is stated under), the honest rising count
   the driving walk reports (`DeleteWalk::removed` / `CopyWalk::copied` / the
   move-to-Trash item count), and a
   *latched* cancel; its `title`/`status_line` never fabricate a percentage,

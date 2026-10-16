@@ -541,7 +541,9 @@ the capability could assert `Trusted` and the ladder below would be worthless.
 corrects a manual step and a manual step still corrects a sync, while neither
 can be undone by a local counter. `KernelWallClock::set` refuses a losing
 write with `Errno::AlreadyExists` and leaves the stored reading and the
-monotonic capture untouched.
+monotonic capture untouched; `wall_time_set` records the refusal as
+`WALL_CLOCK_SET_REFUSED`, since the generic syscall trail keeps a taken name
+below the default level.
 
 **`lib/abi::time` owns the civil calendar.** `CivilTime`, `days_from_civil`,
 `civil_from_days`, and `days_in_month` live there (`lib/fsmeta` keeps only the

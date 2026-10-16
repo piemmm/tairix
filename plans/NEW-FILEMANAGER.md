@@ -39,7 +39,7 @@ which the drift guard enforces.
 | FM6a | The engine activation decision (descend / launch a bundle / open a file) | done |
 | FM6b | The app: launch a `.app`, open a file through CU6 delegation, and the *Open With…* chooser | done |
 | FM7a | The selection and clipboard model | done |
-| FM7b | Move, copy, paste, delete, new folder — with interleaved progress and cancel | done |
+| FM7b | Move, copy, paste, delete, new folder — with progress and cancel | done |
 | FM8a | The pure properties view model | done |
 | FM8b | The manager's Properties window, with permission, ownership, and extended-attribute editing | done |
 | FM8c | Keyboard reach in the Properties window's attributes section | planned |
@@ -60,6 +60,7 @@ which the drift guard enforces.
 | FM17 | The browser window is never taller than its listing: it opens at the height the listing fills, restates that ceiling as it moves, and the window manager holds it there | done |
 | FM18 | The browser window can be made one row of its listing tall, a drag follows the range as it is restated, and the listing's bar stands beside the "Listing…" cue | done |
 | FM19 | A window follows every change any program makes to the folder it shows, through the directory watch, repainting only the rows that moved | done |
+| FM20 | Nothing touches a disk on the window's loop: long operations on an operations worker, every one-shot write on the reader by ticket, the opening ladder and the mount list on the reader, and every refusal stated in the window | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -122,8 +123,9 @@ listing and rail fill at its width (`render::fitted_height`, declared through
 window to a restated range, so a shrinking listing brings the window down and
 a drag or maximize stops at the listing. It opens at that height, up to the
 ordinary browser height (`manager_opening`, which the QEMU reconstruction
-shares), measured from the listing `first_listable` already read, and a move
-to another folder fits it afresh without undoing a height its user gave it.
+shares), measured from its first listing, which lands before the window is
+opened, and a move to another folder fits it afresh without undoing a height
+its user gave it.
 A listing still being read changes nothing.
 
 **FM18 — one row, and a bar that stays.** A browser window's floor is one
@@ -151,6 +153,37 @@ the listing; a rescan reads the folder again; a folder gone from its path is
 left for its parent. New Folder opens its rename once the listing shows the
 folder. A watch the kernel refuses leaves the listing correct but not live,
 and says so.
+
+**FM20 — nothing waits on a disk.** A delete, a move to Trash and a paste run
+on an operations worker, a thread beside the reader, one bounded unit at a
+time and one operation after another in the order asked
+(`operations::OperationDesk`): the worker posts its count and checks for a
+cancel between units, the loop parks and shows a new count at most once a
+frame, and an answer reaches only the window that asked — a closed window's
+operation stops and its answer is dropped. Every one-shot write — a rename,
+New ▸, the Properties mode, owner and attribute commits, the Trash folder, and
+the reads that word a delete's confirmation — is one `WriteJob` on the reader,
+answered by ticket to the window that keeps its live state until it lands.
+A window's first listing is asked of the reader before the window exists, and
+the window opens, fitted to it, once it lands; a refused listing moves it down
+its opening ladder (`command::Ladder`, which tries a place reached twice once),
+each step stated, and the window says where it was asked to open and where it
+opened instead; one landing where a window already shows is raised in its
+place. The mount list is asked of the reader at start. Every refusal is stated
+in the window that asked, in a notice naming the item and the volume's own
+answer, so a read-only volume reads as read-only: a stopped operation, a paste
+or drop that cannot begin, a refused one-shot write, a refused permission change
+in a Properties window, a write the full queue never sent. Notices queue
+(`notice::Notices`): one shows at a time, a later one waits behind it, and each
+source keeps only its latest waiting, so none replaces another and the queue is
+bounded by the sources. A window runs one one-shot write at a time and starts no
+operation while one is pending, so no write's answer lands behind an operation's
+panel; a gesture refused for it says so. A copy stopped or cancelled part-way
+removes the destination file it was writing, which it created exclusively, while
+its name still names that file (`plans/OPEN-DEFECTS.md` D1077 is the gap between
+that check and the removal). A machine that grants no thread carries each of
+these out on the loop — an operation in half-frame slices, still cancellable —
+slower, never wrong; on exit the desks are stopped and the worker joined.
 
 **FM-dialogs — the two popup surfaces.** Three defects, one of them shared
 with every other surface on the desktop.
@@ -309,9 +342,8 @@ to Trash** (`ManagerTool::Trash`) navigates the browser to the user's
 primitive, and **Empty Trash** (`ManagerTool::EmptyTrash`) — enabled only in a
 non-empty Trash via the new `chrome::ManagerToolModel` threaded through
 `render`/`manager_tool_at` — builds `empty_trash_plan`, confirms with the
-`DeleteDisposition::Permanent` dialog, and drives the plan's `DeleteWalk`
-through the same interleaved progress/cancel runner a delete uses
-(`ProgressOp::Delete`). Each tool carries a new built-in `lib/icon` glyph
+`DeleteDisposition::Permanent` dialog, and hands the plan's `DeleteWalk` to
+the operations worker a delete uses (`ProgressOp::Delete`). Each tool carries a new built-in `lib/icon` glyph
 (`IconKind::Trash` / `IconKind::EmptyTrash`). Host-tested in `lib/browse`
 (`navigate_to` off-spine/no-op/fail-closed; the Empty Trash enable-gate
 hit-test) and `lib/icon`; the freestanding files app builds + lints clean.
@@ -342,8 +374,8 @@ delete the `files.app` `Run` binary resolves the user's home from the exported
 `HOME`, ensures the fixed `Library/Trash` subtree (shared `trash::trash_dir`),
 and — when Trash and every target share a volume — carries the removal out as a
 recoverable **move to Trash** (`Job::Trash`: one `fs_rename` per target into its
-collision-free `trash_dest_path`, driven by the same interleaved
-progress/cancel runner), falling back fail-closed to the irreversible
+collision-free `trash_dest_path`, carried out by the operations worker),
+falling back fail-closed to the irreversible
 `DeleteWalk` unlink when Trash is unavailable or cross-volume. The confirmation
 `Dialog` is disposition-aware (`DeleteDisposition` threaded into the shared
 `render::build_delete_dialog`): a recoverable *Move to Trash* vs an irreversible
@@ -373,11 +405,11 @@ copy-then-delete over the user's own VFS seams, fail-closed and fail-loud),
 and FM7b's app-side Delete verb (the `Delete`-key modal confirmation `Dialog`
 + the end-to-end `DeleteWalk` drive over the user's own `fs_readdir`/`fs_unlink`),
 FM7b's app-side **progress + cancel** for both Delete and copy/paste (each
-confirmed operation handed to one interleaved `advance_operation` runner — a
-`Job::Delete` `DeleteWalk` or a `Job::Paste` state machine — the event loop
-drives a bounded slice at a time, drawing the shared `lib/browse::progress`
-panel and honouring a non-blocking mid-run cancel, so even a large recursive
-delete or a multi-gigabyte copy never freezes the window, §2.23),
+confirmed operation a `Job` — a `DeleteWalk`, a `TrashRun` or a `Paste` state
+machine — the operations worker carries out a unit at a time, the window
+drawing the shared `lib/browse::progress` panel and taking a cancel between
+units, so even a large recursive delete or a multi-gigabyte copy never freezes
+the window, FM20),
 FM6b's app-side bundle launch (`Enter` → `Browser::activate_selected` →
 descend a directory or spawn a `<Name>.app` bundle's own `Run` through the
 signed load gate under `CAP_PROC_SPAWN`, async and non-blocking, with launched
@@ -566,15 +598,11 @@ user pick any. See FM6b below.
   decorate a listing already shown), then the bundle scan (which no frame
   depends on). Nothing starves: each request set is finite and refilled only by
   the user asking again.
-  - The one read left on the app's own task is `first_listable`, which answers
-    *which* location to open — a question a deferred source cannot answer,
-    since its first answer is always "not yet" and every candidate would look
-    listable. The first window's read comes before any window exists; a later
-    window's is taken on the loop (`plans/OPEN-DEFECTS.md` D454).
-  - The rename's move runs on the reader thread too; the other writes — New ▸'s
-    create, the Properties commits, the Trash folder, and each step of a
-    delete, paste or move to Trash — are still taken on the loop
-    (`plans/OPEN-DEFECTS.md` D815).
+  - A window opens once its first listing lands; a refused listing moves it
+    to the next candidate location (FM20).
+  - Every one-shot write rides the reader thread too, answered by ticket; each
+    step of a delete, paste or move to Trash runs on the operations worker
+    (FM20).
   - A kernel that grants no thread, or a pipe it refuses, leaves the reads on
     the loop, stated once: slower under load, never wrong.
 
@@ -974,9 +1002,10 @@ position is unchanged whether or not tools follow, so `toolbar_command_at`
 needs no `tools` argument). The `files.app` `Run` binary routes a toolbar click
 (and the `Ctrl+Shift+N` keyboard equivalent) to `begin_new_entry`, which names
 a non-clashing placeholder (`NewEntry::suggest_name`), creates it through
-`Browser::create_entry` over the `fs_mkdir` seam under the user's own
-identity (**no new capability**), and opens the inline rename on the new folder;
-a refused create states its reason on `stderr` and leaves the listing put
+`Browser::prepare_entry`, has the reader make it with `fs_mkdir` under the
+user's own identity (**no new capability**), and opens the inline rename on the
+new folder once it has; a refused create states its reason in the window and
+leaves the listing put
 (§2.24, §5.4). Host-tested in `lib/browse` (`manager_tool_at` resolves New
 Folder and stays disjoint from the read-only commands, the empty-`tools` picker
 never resolves a write tool, and `NewEntry::suggest_name` disambiguation) and
@@ -1291,16 +1320,16 @@ message). Docs: `docs/src/desktop/apps.md`, `lib/browse/README.md` + rustdoc.
 **The pure new-folder model** (§2.19 — host-proven ahead of the drawn
 New Folder tool, exactly as the paste-execution model landed ahead of the app
 verbs): the `lib/browse::create` module (`CreateError` + `validate_new_entry_name`)
-plus `Browser::create_entry`. `validate_new_entry_name` spells the typed name
+plus `Browser::prepare_entry` / `finish_entry`. `validate_new_entry_name` spells the typed name
 through the one shared `lib/path::validate_file_name` rule and refuses a name a
-sibling already carries (`Clash`), both before any syscall. `create_entry`
+sibling already carries (`Clash`), both before any syscall. `prepare_entry`
 spells the new folder's absolute path through the one shared
-`Browser::spell_child` helper the launch/open targets also use (de-duplicated
-from the two former private copies, §2.2), applies it through an injected
-`fs_mkdir` seam under the user's own identity (**no new capability**), then
-re-lists and follows the selection onto the new folder ready for the inline
-rename — transactional and fail closed, a VFS refusal leaving the listing put
-and surfacing as `CreateError::Refused` (§2.24, §5.4). The read-only picker
+`Browser::spell_child` helper the launch/open targets also use (§2.2), making
+nothing; the app makes it off its loop under the user's own identity (**no new
+capability**), and `finish_entry` re-lists and follows the selection onto the
+new folder ready for the inline rename when the view is still where it was
+made — fail closed, a VFS refusal leaving the listing put and surfacing as
+`CreateError::Refused` (§2.24, §5.4). The read-only picker
 composes the same `Browser` and never calls it. Host-tested in `lib/browse`
 (commit creates + selects the new folder, each invalid-name class refused
 before any syscall, clash refused, VFS refusal surfaced leaving the listing
@@ -1364,7 +1393,7 @@ the removals, and the honest Action Warmth sits on the safe recommended
 **Cancel**, never the destructive **Delete** (§2.24). While the dialog is up it
 owns the window (`apply_modal_event` handles it first): `Escape`/Cancel dismiss,
 `Enter`/Delete confirm; a primary press routes through the mirror
-`render::delete_dialog_action_at` (over the dialog's own `Dialog::action_rects`),
+`render::modal_dialog_action_at` (over the dialog's own `Dialog::action_rects`),
 fail closed off a button. On confirm the app drives a `DeleteWalk` to completion
 — reading each directory with the same capability-checked listing call and
 shared decode the browser navigates with (`tairix_browse::vfs`), and
@@ -1376,8 +1405,8 @@ closed: the first refused read or unlink stops the removal, states the reason on
 than a fabricated success (§5.4). Only the write-capable file manager builds and
 drives this; the read-only picker never deletes. Host-tested in `lib/browse`
 (the confirm dialog's honest title/count + folder warning, the destructive/
-recommended action roles, `delete_dialog_rect` centering/clamp,
-`draw_delete_dialog` paint/degenerate-no-panic, and the `delete_dialog_action_at`
+recommended action roles, `modal_dialog_rect` centering/clamp,
+`draw_modal_dialog` paint/degenerate-no-panic, and the `modal_dialog_action_at`
 full-window mirror + fail-closed) and `lib/controls` (`Dialog::action_rects`
 matching `on_pointer`'s geometry). Docs: `docs/src/desktop/apps.md`,
 `lib/browse`/`lib/controls` README + rustdoc.
@@ -1424,7 +1453,7 @@ file through an `execute::CopyCursor` and a directory (or sealed `.app` bundle)
 through an `execute::CopyWalk`, over `fs_read`/`fs_write`/`fs_mkdir`/`fs_readdir`
 with one reused, fixed-size (`FS_IO_MAX`) buffer, so a copy of any size holds no
 unbounded buffer and never spins (§2.23, §26.6). It is bounded and fail closed:
-the first refused operation stops the paste, states the reason on `stderr`
+the first refused operation stops the paste, states the reason in the window
 naming the item (fail loud, §2.24), and leaves what already landed in place
 (§5.4); the view is re-listed so a partial paste is shown honestly. A completed
 `Cut` clears the clipboard; a `Copy` keeps it. A destination is created
@@ -1438,17 +1467,12 @@ autoload vertical. Docs: `docs/src/desktop/apps.md`, `files.app` README +
 `run.rs` rustdoc.
 
 **Progress + cancel covers both the Delete verb and copy/paste.** Neither
-interactive verb drives its walk to completion in one blocking pass: the
-confirmed work is handed to an interleaved **operation** the event loop advances
-a bounded slice at a time (`advance_operation`, up to `OPERATION_STEP_BUDGET`
-units of work per turn — one directory read, one unlink, one `fs_mkdir`, one
-copy chunk, or one rename), repainting a modal progress panel and polling the
-event mailbox *non-blocking* for a mid-run cancel or a close between slices, so
-even a large recursive delete or a multi-gigabyte copy never freezes the window
-and never busy-spins — the walk is genuine pending work, so continuously
-stepping it is not a spin (§2.23). One `Operation` carries either a `Job::Delete`
-(a `DeleteWalk`) or a `Job::Paste` (the app-side `Paste` state machine), so both
-drive through the one interleaving path (§2.2). The drawn surface is the shared
+interactive verb drives its walk on the window's loop: the confirmed work is a
+`Job` the operations worker carries out one unit at a time — one directory
+read, one unlink, one `fs_mkdir`, one copy chunk, or one rename — while the
+window shows a modal progress panel and takes a cancel or a close (FM20). One
+`Job` carries a `DeleteWalk`, a `TrashRun` or the app-side `Paste` state
+machine, so all three run through one path (§2.2). The drawn surface is the shared
 `lib/browse::progress` model (`ProgressModel` — op kind, the honest rising count
 from the walk's own figure, and a *latched* cancel) painted by
 `render::draw_progress_dialog` as a `lib/controls` `Panel` + an indeterminate
@@ -1458,22 +1482,20 @@ unknown until the reads reveal it, §2.24) + a Cancel `Button`;
 drawn button (fail closed off it, §2.2/§5.4). A latched cancel stops the walk at
 the next unit boundary (never mid-node, and never mid-chunk), and a completed or
 cancelled/refused run alike re-lists so a partial result is shown honestly
-(§2.24). The blocking and the non-blocking event paths share one `accept_frame`
-sender-attestation (§2.2).
+(§2.24).
 
-The **copy/paste** slice is app-side interleaving only, over the *existing*
-engine models and drawn surface (§2.19): `Ctrl+V` no longer drives the copy
-synchronously. `run_paste` validates the plan, stats the destination volume, and
-hands a `Paste` to the `Job::Paste` operation; the event loop then advances it
-through `advance_paste`. The `Paste` machine holds its exact position between
-slices in a `PasteStage` (`Idle` → begin the next item; `Copying` — a per-item
+The **copy/paste** slice runs over the *existing* engine models and drawn
+surface (§2.19). `run_paste` validates the plan and hands a `Paste` to the
+operations worker as a `Job`, whose first unit reads the destination volume.
+The `Paste` machine holds its exact position between units in a `PasteStage`
+(`Idle` → begin the next item; `Copying` — a per-item
 `CopyWalk` with an in-flight leaf-file `Transfer` streamed one bounded chunk at a
 time so a single huge file cannot block the loop; `Deleting` — a cross-volume
 move's source removal over the *same* shared `DeleteWalk`, so a move's cleanup
 and an interactive delete can never diverge, §2.2), decides each item's mechanism
 with `paste_strategy` as it runs, and reuses one fixed-size `FS_IO_MAX` buffer
 (§2.23, §26.6). It is fail closed: the first refusal stops the paste, states the
-reason on `stderr` naming the item (fail loud, §2.24), and leaves what already
+reason in the window naming the item (fail loud, §2.24), and leaves what already
 landed in place (§5.4). Initiating a `Cut` paste clears the clipboard (its
 sources are being moved); a `Copy` keeps it. The now-dead synchronous
 `run_paste_item`/`copy_tree`/`copy_file`/`copy_dir`/`delete_source` helpers are
@@ -1483,8 +1505,8 @@ The engine models are host-tested in `lib/browse` (FM7a + the `execute` model
 above: strategy per op × volume, chunked-copy completion/short-transfer/resume/
 overrun, the `CopyWalk`/`DeleteWalk` order + `TooDeep` + out-of-step, and the
 `ProgressModel` count/verb/no-percentage + latched cancel + `progress_cancel_at`
-mirror); the app-side drive interleaving (`advance_operation`/`advance_paste`)
-rides the FM9 autoload vertical. Docs: `docs/src/desktop/apps.md`, `lib/browse`
+mirror); the operation desk is host-tested in `files.app`'s `operations`
+module, and the app-side drive rides the FM9 autoload vertical. Docs: `docs/src/desktop/apps.md`, `lib/browse`
 README + rustdoc, `files.app` `run.rs` rustdoc.
 
 (**New Folder** — its drawn manager-only tool + `Ctrl+Shift+N` +
@@ -1569,12 +1591,12 @@ stall, not a frame (§28.1). `render::PropertiesFrame` is what the window draws:
 precedence once — the capability-free permission toggles resolve before the
 privileged ownership control, and a press on nothing resolves to nothing.
 
-**Permissions.** `lib/browse::mode_edit::set_mode` is the pure, path-targeted
-model: `validate_mode` fails closed on any bit above `FS_MODE_MASK` (refused,
-never masked into a different mode), the validation runs *before* any syscall,
-and the change goes through an injected `fs_set_mode` seam under the user's own
-identity (**no new capability**); a refusal surfaces as `ModeError::Refused`
-leaving the mode untouched (§2.24, §5.4). The section is two groups of the
+**Permissions.** `lib/browse::mode_edit` is the pure model: `validate_mode`
+fails closed on any bit above `FS_MODE_MASK` (refused, never masked into a
+different mode), the validation runs *before* any syscall, and the change is
+the reader's `fs_set_mode` under the user's own identity (**no new
+capability**); a refusal leaves the mode untouched and is
+stated in a notice worded from the kernel's answer (§2.24, §5.4). The section is two groups of the
 shared form family (`FieldGroup`/`FieldRow`, `plans/GUI-CONTROLS-DESIGN.md`
 §11.41) stacked by the shared plate column (`tairix_controls::stack`), with no
 layout arithmetic of its own (`render::PermsSection`): **ACCESS** — the
@@ -1898,7 +1920,7 @@ model and the app wiring, exactly as FM6/FM7/FM8 were.
   `Trash`, the user's own authority), and — when Trash and every target share a
   volume — resolves each target's collision-free `trash_dest_path`. On confirm
   a recoverable removal is a `Job::Trash` (one `fs_rename` per target into
-  Trash, driven by the same interleaved progress/cancel runner as delete/paste,
+  Trash, carried out by the operations worker as delete and paste are,
   `ProgressOp::Trash`); an unavailable or cross-volume Trash falls back, fail
   closed, to the existing `DeleteWalk` unlink. The confirmation `Dialog` is
   disposition-aware (`DeleteDisposition` threaded into the shared
@@ -1953,19 +1975,19 @@ wiring, exactly as FM6/FM7/FM8/FM10 were.
     jump-to-an-arbitrary-location primitive (neither an ancestor nor a listed
     child), transactional and fail closed like every other navigation, so the
     Trash's contents show like any directory. Always offered; an absent home or
-    unreachable Trash is stated on `stderr`, not hidden (§2.24).
+    unreachable Trash is stated in the window, not hidden (§2.24).
   - **Empty Trash** (`ManagerTool::EmptyTrash`) — enabled only when the current
     directory *is* the user's Trash and it is non-empty (a new
     `chrome::ManagerToolModel` the app computes from `HOME`, since the engine
     does not know it; threaded through `render`/`manager_tool_at` so a disabled
     tool renders muted and a click on it resolves to nothing, §5.4). Clicking it
-    re-reads the Trash (recomputing the location so a stale click can never
-    empty the wrong directory), builds `empty_trash_plan`, confirms with the
-    `DeleteDisposition::Permanent` dialog, and drives the plan's `DeleteWalk`
-    through the same interleaved progress/cancel runner a delete uses
+    recomputes the Trash location (so a stale click can never empty the wrong
+    directory), builds `empty_trash_plan` from the listing the window shows,
+    confirms with the `DeleteDisposition::Permanent` dialog, and hands the
+    plan's `DeleteWalk` to the operations worker a delete uses
     (`ProgressOp::Delete`), under the user's own `fs_readdir`/`fs_unlink` (no new
     capability). An already-empty Trash is a silent no-op; a refusal is stated
-    fail-loud on `stderr`.
+    in the window.
 
   Host-tested in `lib/browse` (`navigate_to` off-spine/no-op/fail-closed; the
   Empty Trash tool disabled-vs-enabled hit-test gating) and the freestanding

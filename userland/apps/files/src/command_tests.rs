@@ -9,7 +9,12 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{parse, unlistable_reason, Command, Role, Start, UsageError, USAGE};
+use tairix_abi::Errno;
+use tairix_browse::BrowseError;
+
+use super::{
+    listing_refusal, parse, unlistable_reason, Command, Ladder, Role, Start, UsageError, USAGE,
+};
 
 /// The [`Start`] a command line produced, or the test's own failure text when
 /// it was a usage error or the short help.
@@ -257,16 +262,133 @@ fn end_of_options_lets_a_dash_leading_directory_through() {
 }
 
 #[test]
-fn an_unlistable_location_states_the_place_and_the_fallback() {
+fn an_unlistable_location_states_the_place_why_and_the_fallback() {
     let home = ["Users".to_string(), "ada".to_string()];
     let files = ["Users", "ada", "UserFiles"].map(String::from);
     assert_eq!(
-        unlistable_reason(&files, &home),
-        "could not list /Users/ada/UserFiles; opening /Users/ada instead"
+        unlistable_reason(&files, "it does not exist", &home),
+        "could not list /Users/ada/UserFiles (it does not exist); opening /Users/ada instead"
     );
     // The root view spells as `/` rather than as nothing.
     assert_eq!(
-        unlistable_reason(&home, &[]),
-        "could not list /Users/ada; opening / instead"
+        unlistable_reason(&home, "you may not read it", &[]),
+        "could not list /Users/ada (you may not read it); opening / instead"
+    );
+}
+
+#[test]
+fn a_refused_listing_says_why_in_the_users_terms() {
+    assert_eq!(
+        listing_refusal(BrowseError::Source(Errno::PermissionDenied)),
+        "you may not read it"
+    );
+    assert_eq!(
+        listing_refusal(BrowseError::Source(Errno::NotFound)),
+        listing_refusal(BrowseError::NoSuchEntry)
+    );
+    assert_eq!(
+        listing_refusal(BrowseError::Source(Errno::NotADirectory)),
+        listing_refusal(BrowseError::NotADirectory)
+    );
+    assert_eq!(
+        listing_refusal(BrowseError::Source(Errno::DeviceOffline)),
+        "its device was removed"
+    );
+    assert_eq!(
+        listing_refusal(BrowseError::Source(Errno::OutOfRange)),
+        "it could not be read"
+    );
+}
+
+/// Owned components of an absolute spelling, for the ladder tests.
+fn place(path: &[&str]) -> Vec<String> {
+    path.iter()
+        .map(|component| (*component).to_string())
+        .collect()
+}
+
+/// Every place `ladder` tries, refusing each in turn.
+fn tried(mut ladder: Ladder) -> Vec<Vec<String>> {
+    let mut tried = vec![ladder.place().expect("a ladder has a place").to_vec()];
+    while ladder.step("it does not exist").is_some() {
+        tried.push(ladder.place().expect("a step lands on a place").to_vec());
+    }
+    assert_eq!(ladder.place(), None, "the last refusal leaves no place");
+    tried
+}
+
+#[test]
+fn a_named_place_is_tried_first_then_the_bare_open_places_then_the_root() {
+    let home = place(&["Users", "ada"]);
+    assert_eq!(
+        tried(Ladder::new(
+            Some(place(&["Storage", "Backup"])),
+            Some(&home)
+        )),
+        vec![
+            place(&["Storage", "Backup"]),
+            place(&["Users", "ada", "UserFiles"]),
+            home.clone(),
+            Vec::new(),
+        ]
+    );
+}
+
+/// A place the ladder reaches twice is tried once, wherever the repeat falls:
+/// naming home (which the bare-open places reach second) or the root (which
+/// the ladder always ends on) must not try the refused place a second time.
+#[test]
+fn a_place_reached_twice_is_tried_once() {
+    let home = place(&["Users", "ada"]);
+    let files = place(&["Users", "ada", "UserFiles"]);
+    assert_eq!(
+        tried(Ladder::new(Some(home.clone()), Some(&home))),
+        vec![home.clone(), files.clone(), Vec::new()]
+    );
+    assert_eq!(
+        tried(Ladder::new(Some(Vec::new()), Some(&home))),
+        vec![Vec::new(), files.clone(), home.clone()]
+    );
+    assert_eq!(
+        tried(Ladder::new(Some(files.clone()), Some(&home))),
+        vec![files, home, Vec::new()]
+    );
+}
+
+/// With no home to fall back to, the root view is all a bare open has.
+#[test]
+fn without_a_home_the_ladder_ends_at_the_root() {
+    assert_eq!(tried(Ladder::new(None, None)), vec![Vec::<String>::new()]);
+    assert_eq!(
+        tried(Ladder::new(Some(place(&["System"])), None)),
+        vec![place(&["System"]), Vec::new()]
+    );
+}
+
+/// Each step states its own hop, while what the window says is the whole
+/// move: from where it was asked to open to where it opens.
+#[test]
+fn a_step_states_its_hop_and_the_window_states_the_whole_move() {
+    let home = place(&["Users", "ada"]);
+    let mut ladder = Ladder::new(Some(place(&["Storage", "Backup"])), Some(&home));
+    assert_eq!(ladder.moved(), None, "still where it was asked to open");
+
+    assert_eq!(
+        ladder.step("its device was removed").as_deref(),
+        Some(
+            "could not list /Storage/Backup (its device was removed); \
+             opening /Users/ada/UserFiles instead"
+        )
+    );
+    assert_eq!(
+        ladder.step("you may not read it").as_deref(),
+        Some(
+            "could not list /Users/ada/UserFiles (you may not read it); opening /Users/ada instead"
+        )
+    );
+    assert_eq!(
+        ladder.moved().as_deref(),
+        Some("could not list /Storage/Backup (its device was removed); opening /Users/ada instead"),
+        "why the asked place was refused, not the last hop"
     );
 }

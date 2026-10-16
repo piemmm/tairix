@@ -5963,7 +5963,30 @@ where
         // The clock itself enforces the provenance ladder, so a `Firmware`
         // source cannot roll a validated reading back however the caller
         // spells its request.
-        self.wall_clock.set(wall, monotonic_ns, state).map(|()| 0)
+        let set = self.wall_clock.set(wall, monotonic_ns, state);
+        if set == Err(Errno::AlreadyExists) {
+            let stored = self.wall_clock.read(monotonic_ns).state();
+            crate::audit::emit(
+                self.audit,
+                Level::Warn,
+                AuditEvent::WallClockSetRefused,
+                &[
+                    Field {
+                        key: "caller",
+                        value: tairix_log::FieldValue::UnsignedInt(caller.process().0),
+                    },
+                    Field {
+                        key: "attempted",
+                        value: tairix_log::FieldValue::UnsignedInt(u64::from(state.as_u8())),
+                    },
+                    Field {
+                        key: "stored",
+                        value: tairix_log::FieldValue::UnsignedInt(u64::from(stored.as_u8())),
+                    },
+                ],
+            );
+        }
+        set.map(|()| 0)
     }
 
     fn boot_id_get(&self, caller: &CallerContext<'_>, out: u64, out_cap: usize) -> SyscallResult {
@@ -48746,6 +48769,50 @@ mod tests {
         assert_eq!(r.state(), WallTimeState::Trusted);
         assert_eq!(r.time().secs(), 1_700_000_000);
         assert!(r.time().subsec_nanos() < 1_000);
+        drop(guard);
+
+        // A weaker source cannot roll the trusted reading back, and the
+        // refusal is on the record: the generic syscall trail keeps a taken
+        // name below the default level, so the clock reports its own.
+        assert_eq!(
+            h.wall_time_set(
+                &ctx,
+                0x3000,
+                Time64::WIRE_LEN,
+                u32::from(WallTimeState::Firmware.as_u8())
+            ),
+            Err(Errno::AlreadyExists)
+        );
+        assert_one_wall_clock_refusal(sink, WallTimeState::Firmware, WallTimeState::Trusted);
+    }
+
+    /// Assert `sink` recorded exactly one refused wall-clock set, by caller 9,
+    /// naming the provenance `attempted` and the provenance `stored`.
+    fn assert_one_wall_clock_refusal(
+        sink: &TestSink,
+        attempted: tairix_abi::WallTimeState,
+        stored: tairix_abi::WallTimeState,
+    ) {
+        let refused: Vec<_> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.id == AuditEvent::WallClockSetRefused.id())
+            .collect();
+        assert_eq!(refused.len(), 1, "one refusal, one record");
+        assert_eq!(refused[0].level, Level::Warn);
+        let field = |key: &str| {
+            refused[0]
+                .fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(field("caller").as_deref(), Some("9"));
+        assert_eq!(
+            field("attempted"),
+            Some(alloc::format!("{}", attempted.as_u8()))
+        );
+        assert_eq!(field("stored"), Some(alloc::format!("{}", stored.as_u8())));
     }
 
     /// `boot_id_get` fails closed with `BufferTooSmall` for a buffer shorter

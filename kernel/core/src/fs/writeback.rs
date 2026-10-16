@@ -38,7 +38,7 @@
 //! open, so a skipped volume could keep its transaction with nothing left to
 //! fire.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use alloc::sync::Arc;
 
@@ -54,20 +54,31 @@ use super::mounted::LateFilesystem;
 
 /// One mounted volume's published write-back deadline: the absolute
 /// monotonic instant its open transaction must be published by, or
-/// [`NO_DEADLINE`] when it holds none.
+/// [`NO_DEADLINE`] when it holds none — and, apart from it, whether the
+/// driver still holds a transaction at all.
 ///
 /// Written by the driver from inside its own operation (under the mount
 /// lock) and read by the flusher without taking that lock, so a volume being
 /// operated on never delays the deadline scan. One `u64` per mount, with
 /// [`NO_DEADLINE`] standing for "nothing open" — a real deadline can never
 /// be `u64::MAX`, which is nanoseconds enough for five centuries of uptime.
+///
+/// The flusher consumes the deadline before it publishes, so the deadline
+/// alone cannot say whether work is still unpublished; the driver's own
+/// report can, and only the driver changes it.
 #[derive(Debug, Default)]
-pub(super) struct WritebackDue(AtomicU64);
+pub(super) struct WritebackDue {
+    deadline: AtomicU64,
+    open: AtomicBool,
+}
 
 impl WritebackDue {
     /// A slot for a volume with nothing to publish.
     pub(super) const fn empty() -> Self {
-        Self(AtomicU64::new(NO_DEADLINE))
+        Self {
+            deadline: AtomicU64::new(NO_DEADLINE),
+            open: AtomicBool::new(false),
+        }
     }
 
     /// Record the volume's deadline, or its absence.
@@ -76,15 +87,21 @@ impl WritebackDue {
     /// reporting an absurd instant can never spell "nothing open".
     pub(super) fn store(&self, deadline_ns: Option<u64>) {
         let encoded = deadline_ns.map_or(NO_DEADLINE, |at| at.min(NO_DEADLINE - 1));
-        self.0.store(encoded, Ordering::Release);
+        self.open.store(deadline_ns.is_some(), Ordering::Release);
+        self.deadline.store(encoded, Ordering::Release);
     }
 
     /// The recorded deadline, or `None` when the volume holds nothing.
     pub(super) fn load(&self) -> Option<u64> {
-        match self.0.load(Ordering::Acquire) {
+        match self.deadline.load(Ordering::Acquire) {
             NO_DEADLINE => None,
             deadline => Some(deadline),
         }
+    }
+
+    /// Whether the driver last reported a transaction it has not published.
+    pub(super) fn holds_open(&self) -> bool {
+        self.open.load(Ordering::Acquire)
     }
 
     /// Take the deadline if it has arrived by `now_ns`, leaving the slot
@@ -101,7 +118,7 @@ impl WritebackDue {
         if deadline > now_ns {
             return None;
         }
-        self.0
+        self.deadline
             .compare_exchange(deadline, NO_DEADLINE, Ordering::AcqRel, Ordering::Acquire)
             .ok()
     }

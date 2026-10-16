@@ -278,7 +278,7 @@ fn a_new_folders_focus_waits_for_its_listing_to_land() {
     let mut browser = Browser::open_root(folder.clone()).expect("open");
     *folder.deferred.borrow_mut() = true;
     folder.set(&["a", "new"]);
-    browser.create_entry("new", |_| Ok(())).expect("creates");
+    browser.create_now("new", |_| Ok(())).expect("creates");
     assert_eq!(browser.focus_pending(), Some("new"));
     assert_eq!(
         focused(&browser).map(Entry::name),
@@ -852,7 +852,7 @@ fn choosing_something_else_lets_a_pending_focus_go() {
     let mut browser = Browser::open_root(folder.clone()).expect("open");
     *folder.deferred.borrow_mut() = true;
     folder.set(&["a", "new", "z"]);
-    browser.create_entry("new", |_| Ok(())).expect("creates");
+    browser.create_now("new", |_| Ok(())).expect("creates");
     assert_eq!(browser.focus_pending(), Some("new"));
     browser.select(1).expect("the user picks z");
     assert_eq!(browser.focus_pending(), None);
@@ -871,7 +871,7 @@ fn a_focus_whose_name_never_showed_is_let_go_at_the_next_listing() {
     let mut browser = Browser::open_root(folder.clone()).expect("open");
     *folder.deferred.borrow_mut() = true;
     browser
-        .create_entry("gone-again", |_| Ok(()))
+        .create_now("gone-again", |_| Ok(()))
         .expect("creates");
     *folder.landed.borrow_mut() = true;
     assert!(browser.resume().expect("lands"));

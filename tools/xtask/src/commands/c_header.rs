@@ -158,6 +158,7 @@ const ERRNO_NAMES: &[(&str, Errno)] = &[
     ("STALE", Errno::Stale),
     ("NO_BANDWIDTH", Errno::NoBandwidth),
     ("DECLINED", Errno::Declined),
+    ("READ_ONLY", Errno::ReadOnly),
 ];
 
 /// The `abi-v1` driver-ABI error codes, paired with the
@@ -196,6 +197,7 @@ const DRIVER_ERROR_NAMES: &[(&str, DriverError)] = &[
     ("OUT_OF_MEMORY", DriverError::OutOfMemory),
     ("NO_BANDWIDTH", DriverError::NoBandwidth),
     ("STALE", DriverError::Stale),
+    ("READ_ONLY", DriverError::ReadOnly),
 ];
 
 /// One generated C header: its file name (relative to the include directory)

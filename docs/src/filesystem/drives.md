@@ -435,7 +435,11 @@ syscalls attach a filesystem driver to a hot-pluggable block source (the
 kernel blkio client over a served block-service endpoint + shared window),
 mount its root at `/Storage/<name>` with the removable-media flags, and
 publish/withdraw its `id::` root through the same forest — a detach flushes
-first and fails closed rather than discarding uncommitted data. **Automount
+first and fails closed rather than discarding uncommitted data. A catalog name
+another volume holds is answered `AlreadyExists` before the filesystem is
+opened, so the volume manager's next candidate name costs no open; a volume
+already attached under another name is `Busy`, which no other name answers.
+**Automount
 policy, catalog enumeration, and the mount-policy identity map are landed**
 (`plans/DEVICES.md` D3c/D3d): the `volmgr` policy driver probes and attaches
 recognised volumes with deterministic names, `/Storage` listings enumerate
@@ -473,6 +477,13 @@ condition a re-insert can clear, and a caller must be able to tell them apart.
 So the stand-in a removal installs under the volume's handle writes out every
 method of every facet it claims — including the ones the driver ABI defaults —
 because inheriting a default would answer the wrong one of these two.
+
+A removal applies to every volume on the device, a partitioned stick carrying
+several over one endpoint. A volume whose driver holds writes it acknowledged
+but never gave the device is recorded `lost`, whatever its journal holds. The
+device's block cache lets go of the removed medium's blocks at once when
+nothing is using it, and otherwise goes with the device at the next attach or
+detach; a volume held unavailable keeps its journal, never the device.
 
 ## 23. Audit events
 

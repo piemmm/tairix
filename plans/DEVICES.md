@@ -522,15 +522,21 @@ volume-policy service.
   authorisation still walks the real tree.
 - **The service** (`kernel/tairix-kernel::volume_service`, installed via
   the `BootInfo::with_volume_service` seam → `NULL_VOLUME_SERVICE`
-  fail-closed default): windows the extent (`PartitionBlock`), opens the
-  matched filesystem (ARXFS / ext4 / FAT32), mounts under
-  `/Storage/<name>` with `noexec` (+`ro` per the device),
-  and publishes the identity **last** with full unwind on any refusal.
-  Detach orders fs-flush → device-flush → unmount → unregister →
-  unpublish and fails closed (volume stays attached) on a flush error; a
-  vanished endpoint (device already gone) is not a refusal. Audit:
-  4172/4173 (`fs.hotplug.root_added` allow/deny), 4174/4175
-  (`root_removed`), publication through the one shared
+  fail-closed default): reads each device through one block cache below
+  its sharing lock, windows the extent (`PartitionBlock`), opens the
+  matched filesystem (ARXFS / ext4 / FAT32) — read-only on a
+  write-protected device, and bounded to the machine's write-back share
+  when writable — mounts under `/Storage/<name>` with `noexec` (+`ro` per
+  the device, or when the driver refuses to write the volume), and
+  publishes the identity **last** with full unwind on any refusal. Detach
+  orders fs-flush → device-flush → unmount → unregister → unpublish and
+  fails closed (volume stays attached) on a flush error; a vanished
+  endpoint (device already gone) is not a refusal. Audit: 4172/4173
+  (`fs.hotplug.root_added` allow/deny), 4174/4175 (`root_removed`), 4180
+  (attached or recovered read-only, with the driver's reason: an unsupported
+  feature, recorded errors, a crash a checker has not seen), 4181 (a catalog name
+  already taken, which the volume manager answers with its next
+  candidate), publication through the one shared
   `fs.root.publish.{allow,deny}` definition (4170/4171).
 - **Reality-driven decisions.** (1) ext4/FAT32 lacked the
   `FilesystemStats` surface and any volume identity: both gained honest

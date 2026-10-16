@@ -13,11 +13,9 @@ use tairix_abi::DriverError;
 
 use super::*;
 use crate::htree::Level;
+use crate::superblock::{COMPAT_DIR_INDEX, FLAG_SIGNED_HASH, SB_FLAGS, SUPERBLOCK_OFFSET};
 use crate::tests::{checksummed, SizedBlock, ONE_GROUP_SECTORS, TEST_UUID};
-use crate::{
-    le16, node_inode, put_le32, Child, COMPAT_DIR_INDEX, FT_REG, INODE_FLAGS, INODE_FLAG_INDEX,
-    SB_FLAGS_OFFSET, SB_FLAG_SIGNED_HASH, SUPERBLOCK_OFFSET,
-};
+use crate::{le16, node_inode, put_le32, Child, FT_REG, INODE_FLAGS, INODE_FLAG_INDEX};
 
 /// The format's `half_md4` hash version.
 const HALF_MD4: u8 = 1;
@@ -30,11 +28,11 @@ fn small(value: usize) -> u16 {
 /// reads name bytes.
 fn volume(flags: u32) -> Ext4<SizedBlock> {
     let fs = Ext4::format(SizedBlock::new(ONE_GROUP_SECTORS), 1024, TEST_UUID).expect("format");
-    let mut device = fs.into_block();
+    let mut device = fs.into_block().expect("commit");
     let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("small");
     let compat = le32(&device.data, sb + 0x5C) | COMPAT_DIR_INDEX;
     put_le32(&mut device.data, sb + 0x5C, compat);
-    put_le32(&mut device.data, sb + SB_FLAGS_OFFSET, flags);
+    put_le32(&mut device.data, sb + SB_FLAGS, flags);
     Ext4::open(device).expect("remount")
 }
 
@@ -342,7 +340,7 @@ fn check_tree<B: Block>(fs: &mut Ext4<B>, ino: u32) -> Tree {
 
 #[test]
 fn names_split_leaves_and_each_is_found_and_listed_once() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"big");
     let added = names(0, 400, 60);
     add(&mut fs, ino, target, &added);
@@ -362,7 +360,7 @@ fn names_split_leaves_and_each_is_found_and_listed_once() {
     assert_eq!(listed.len(), added.len(), "no name twice");
     assert_eq!(listed.into_iter().collect::<BTreeSet<_>>(), want);
     // And the same after a remount, with nothing cached.
-    let mut fs = Ext4::open(fs.into_block()).expect("remount");
+    let mut fs = Ext4::open(fs.into_block().expect("commit")).expect("remount");
     assert_eq!(check_tree(&mut fs, ino).names, want);
 }
 
@@ -370,7 +368,7 @@ fn names_split_leaves_and_each_is_found_and_listed_once() {
 /// blocks is invisible to it.
 #[test]
 fn a_listing_is_in_hash_order() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"ordered");
     add(&mut fs, ino, target, &names(0, 300, 40));
     let hash = NameHash::new(HALF_MD4, fs.layout.hash_signed, fs.layout.hash_seed).expect("hash");
@@ -386,7 +384,7 @@ fn a_listing_is_in_hash_order() {
 /// the node under it fills and splits.
 #[test]
 fn a_full_root_moves_down_a_level_then_a_full_node_splits() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"deep");
     let mut added = Vec::new();
     let mut tree = check_tree(&mut fs, ino);
@@ -416,7 +414,7 @@ fn a_full_root_moves_down_a_level_then_a_full_node_splits() {
 /// hands over every name present throughout exactly once.
 #[test]
 fn a_listing_resumed_across_splits_lists_each_lasting_name_once() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"busy");
     let lasting = names(0, 150, 50);
     add(&mut fs, ino, target, &lasting);
@@ -439,7 +437,7 @@ fn a_listing_resumed_across_splits_lists_each_lasting_name_once() {
 /// A cursor is never the start and names the place after its own entry.
 #[test]
 fn an_indexed_cursor_is_never_the_start_and_differs_per_name() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"cursors");
     add(&mut fs, ino, target, &names(0, 100, 30));
     let listed = list_with(&mut fs, dir, 1000, |_| {});
@@ -450,7 +448,7 @@ fn an_indexed_cursor_is_never_the_start_and_differs_per_name() {
 
 #[test]
 fn removed_names_are_gone_and_an_emptied_directory_can_be_removed() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"shrinking");
     let added = names(0, 200, 40);
     add(&mut fs, ino, target, &added);
@@ -477,7 +475,7 @@ fn removed_names_are_gone_and_an_emptied_directory_can_be_removed() {
 /// honest in an indexed directory.
 #[test]
 fn files_come_and_go_in_an_indexed_directory() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, _, _) = indexed_dir(&mut fs, b"files");
     let before = fs.stats().expect("stats");
     let made = names(0, 120, 30);
@@ -505,7 +503,7 @@ fn files_come_and_go_in_an_indexed_directory() {
 /// listed once each in name order, a resumed listing included.
 #[test]
 fn a_run_of_equal_hashes_is_found_and_listed_across_its_leaves() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"run");
     let hash = NameHash::new(HALF_MD4, fs.layout.hash_signed, fs.layout.hash_seed).expect("hash");
     let mut seen: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
@@ -644,7 +642,7 @@ fn a_cut_keeps_equal_hashes_together_when_it_can_and_balances_the_halves() {
 /// split keeps them where they are.
 #[test]
 fn names_left_outside_a_leafs_range_are_passed_over() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"torn");
     let added = names(0, 60, 40);
     add(&mut fs, ino, target, &added);
@@ -701,7 +699,7 @@ fn names_left_outside_a_leafs_range_are_passed_over() {
 /// but takes no new name, refused before anything changes.
 #[test]
 fn a_damaged_index_refuses_new_names_and_loses_nothing() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let root = fs.root();
     let dir = fs
         .create(root, b"damaged", NodeKind::Directory)
@@ -740,13 +738,13 @@ fn a_damaged_index_refuses_new_names_and_loses_nothing() {
 /// names are found and listed linearly, and none is added.
 #[test]
 fn an_index_on_a_volume_naming_no_signedness_takes_no_new_name() {
-    let mut fs = volume(SB_FLAG_SIGNED_HASH);
+    let mut fs = volume(FLAG_SIGNED_HASH);
     let (dir, ino, target) = indexed_dir(&mut fs, b"legacy");
     let added = names(0, 80, 30);
     add(&mut fs, ino, target, &added);
-    let mut device = fs.into_block();
+    let mut device = fs.into_block().expect("commit");
     let sb = usize::try_from(SUPERBLOCK_OFFSET).expect("small");
-    put_le32(&mut device.data, sb + SB_FLAGS_OFFSET, 0);
+    put_le32(&mut device.data, sb + SB_FLAGS, 0);
     let mut fs = Ext4::open(device).expect("remount");
     assert_eq!(
         fs.create(dir, b"another", NodeKind::RegularFile),
@@ -869,7 +867,7 @@ fn indexed_growth_fits_a_kernel_sized_stack() {
     std::thread::Builder::new()
         .stack_size(32 * 1024)
         .spawn(|| {
-            let mut fs = volume(SB_FLAG_SIGNED_HASH);
+            let mut fs = volume(FLAG_SIGNED_HASH);
             let (dir, ino, target) = indexed_dir(&mut fs, b"stacked");
             let mut added = 0;
             while check_tree(&mut fs, ino).levels == 0 {

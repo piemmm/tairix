@@ -487,7 +487,7 @@ pub fn finish_unlock<B: Block + 'static>(
     // the SMART11 block cache (`plans/SMARTRAM.md`), on the device side of the
     // sharing lock, so every window reads through one coherent,
     // pressure-governed cache of recently used blocks.
-    let blk = BlockCache::for_boot_disk(blk, pressure, audit)
+    let blk = BlockCache::for_disk(blk, crate::block_cache::BOOT_DISK_OWNER, pressure, audit)
         .map_err(|_| "root-unlock: block device geometry")?;
     // A `None` means classification refused the cache at birth (it is then
     // poisoned and admits nothing), so there is nothing to register — the

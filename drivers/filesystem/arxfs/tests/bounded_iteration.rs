@@ -37,10 +37,11 @@ use tairix_abi::driver::block::{Block, BlockGeometry, DiscardCapability};
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind};
 use tairix_abi::{CapabilityId, CapabilityQuery, DriverError};
 use tairix_drv_fs_arxfs::{
-    EntropySource, Keying, PassVerdict, ScrubBudget, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN,
+    EntropySource, Keying, PassVerdict, ScrubBudget, VolumeKey, ARXFS, VOLUME_KEY_LEN,
 };
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{PinnedAccounting, PressureBand, ReportedPressure};
+use tairix_writeback::RUN_BYTES;
 
 /// Stand in for the kernel's per-boot publication, so the volume's dedupe
 /// index is keyed here exactly as it is on a booted system. A second call is

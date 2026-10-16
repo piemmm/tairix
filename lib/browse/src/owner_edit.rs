@@ -6,9 +6,8 @@
 //! whether a requested `(uid, gid)` change is *well-formed* — each field is
 //! either left unchanged or set to a real id, never the reserved
 //! [`FS_OWNER_UNCHANGED`](tairix_abi::fs::FS_OWNER_UNCHANGED) sentinel as an
-//! explicit target — runs in `cargo test` with no kernel. The app supplies
-//! only the `fs_set_owner` seam and the ownership control; [`set_owner`] is
-//! what validates and then calls it.
+//! explicit target — runs in `cargo test` with no kernel. The app asks for the
+//! `fs_set_owner` call with the ids [`owner_ids`] spells.
 //!
 //! Authority is the kernel's, not the engine's. Unlike a rename, mode, or
 //! `mkdir` change — which are the user's own permission-checked writes needing
@@ -30,7 +29,7 @@ use tairix_abi::Errno;
 /// Modelling "leave unchanged" as [`None`] keeps the reserved
 /// [`FS_OWNER_UNCHANGED`](tairix_abi::fs::FS_OWNER_UNCHANGED) sentinel an
 /// *encoding* detail of the syscall boundary, not a value a caller has to
-/// know: [`set_owner`] maps [`None`] onto the sentinel when it calls the seam.
+/// know: [`owner_ids`] maps [`None`] onto the sentinel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub struct OwnerChange {
     /// The new owning user id, or [`None`] to leave the owner unchanged.
@@ -123,34 +122,31 @@ pub const fn validate_owner(change: OwnerChange) -> Result<(), OwnerError> {
     Ok(())
 }
 
-/// Change the owning user and/or group of the node at absolute `path`,
-/// applying the change through the injected `set_owner` seam (the `chown(2)` /
-/// `chgrp(2)` shape).
+/// The `(uid, gid)` pair `fs_set_owner` is called with for `change`, a field
+/// it leaves alone spelt as the reserved
+/// [`FS_OWNER_UNCHANGED`](tairix_abi::fs::FS_OWNER_UNCHANGED) sentinel.
 ///
-/// `set_owner` receives the path and the new `(uid, gid)`, each carrying
-/// [`FS_OWNER_UNCHANGED`](tairix_abi::fs::FS_OWNER_UNCHANGED) for a field the
-/// `change` leaves alone, and performs the `fs_set_owner` syscall under the
-/// caller's own identity. This is the one **privileged** write verb here: the
-/// secured VFS requires `CAP_FS_CHOWN` to reassign the owner or to set a group
-/// the caller is not a member of, and strips the set-*id* bits on any change.
-/// The engine adds no authority and makes none of that policy decision.
-///
-/// Transactional and fail closed: the change is validated
-/// ([`validate_owner`]) *before* any syscall, so a field set to the reserved
-/// sentinel as an explicit target is refused rather than misread. A VFS
-/// refusal leaves the node's ownership exactly as it was.
+/// This is the one **privileged** write verb here: the secured VFS requires
+/// `CAP_FS_CHOWN` to reassign the owner or to set a group the caller is not a
+/// member of, and strips the set-*id* bits on any change. Nothing here makes
+/// that decision.
 ///
 /// # Errors
 ///
-/// [`OwnerError::Invalid`] for a sentinel-as-target (decided before the
-/// syscall), or [`OwnerError::Refused`] when the VFS refuses the change
-/// (including the missing-`CAP_FS_CHOWN` denial).
-pub fn set_owner<F>(path: &str, change: OwnerChange, set_owner: F) -> Result<(), OwnerError>
-where
-    F: FnOnce(&str, u32, u32) -> Result<(), Errno>,
-{
-    validate_owner(change)?;
-    let uid = change.uid.unwrap_or(tairix_abi::fs::FS_OWNER_UNCHANGED);
-    let gid = change.gid.unwrap_or(tairix_abi::fs::FS_OWNER_UNCHANGED);
-    set_owner(path, uid, gid).map_err(OwnerError::Refused)
+/// [`OwnerError::Invalid`] for the sentinel named as a target, decided before
+/// any call is made.
+pub const fn owner_ids(change: OwnerChange) -> Result<(u32, u32), OwnerError> {
+    if let Err(err) = validate_owner(change) {
+        return Err(err);
+    }
+    let unchanged = tairix_abi::fs::FS_OWNER_UNCHANGED;
+    let uid = match change.uid {
+        Some(uid) => uid,
+        None => unchanged,
+    };
+    let gid = match change.gid {
+        Some(gid) => gid,
+        None => unchanged,
+    };
+    Ok((uid, gid))
 }

@@ -209,7 +209,8 @@ impl Block for MemDisk {
 /// store observer.
 fn cached() -> (Rc<RefCell<Store>>, BlockCache<MemDisk>) {
     let (store, disk) = MemDisk::new();
-    let cache = BlockCache::new(disk, budget(), unpressured(), sink()).expect("geometry queried");
+    let cache = BlockCache::new(disk, BOOT_DISK_OWNER, budget(), unpressured(), sink())
+        .expect("geometry queried");
     (store, cache)
 }
 
@@ -229,8 +230,8 @@ fn roomy_budget() -> CacheBudget {
 /// the readahead tests stream a long sequential run through.
 fn roomy_cached() -> (Rc<RefCell<Store>>, BlockCache<MemDisk>) {
     let (store, disk) = MemDisk::with_geometry(BS, 256);
-    let cache =
-        BlockCache::new(disk, roomy_budget(), unpressured(), sink()).expect("geometry queried");
+    let cache = BlockCache::new(disk, BOOT_DISK_OWNER, roomy_budget(), unpressured(), sink())
+        .expect("geometry queried");
     (store, cache)
 }
 
@@ -239,7 +240,7 @@ fn classification_admits_and_charges_the_block_device_subsystem() {
     let (_store, cache) = cached();
     assert_eq!(
         cache.owner(),
-        Some(ReclaimOwner::KernelSubsystem(OWNER_SUBSYSTEM))
+        Some(ReclaimOwner::KernelSubsystem(BOOT_DISK_OWNER))
     );
 }
 
@@ -467,8 +468,8 @@ fn one_request_takes_one_pressure_reading_however_many_blocks_it_retains() {
     // down per block, is both cheaper and the stricter bound.
     let (source, pressure) = pressured(TEST_TOTAL / 2);
     let (store, disk) = MemDisk::with_geometry(BS, 256);
-    let mut cache =
-        BlockCache::new(disk, roomy_budget(), pressure, sink()).expect("geometry queried");
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, roomy_budget(), pressure, sink())
+        .expect("geometry queried");
 
     let blocks = 128;
     let before = source.readings();
@@ -504,7 +505,7 @@ fn a_cache_that_can_retain_nothing_does_not_speculate() {
     // device read is pure waste and must not be issued.
     let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
     let (store, disk) = MemDisk::with_geometry(BS, 256);
-    let mut cache = BlockCache::new(disk, roomy_budget(), unpressured(), sink())
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, roomy_budget(), unpressured(), sink())
         .expect("geometry queried")
         .with_cache_control(control);
 
@@ -585,7 +586,7 @@ fn eviction_takes_the_least_recently_used_block_first() {
 fn growth_follows_the_band_ceiling_and_moderate_drains_the_class() {
     let (gauge_source, pressure) = pressured(free_for(PressureBand::Normal));
     let (store, disk) = MemDisk::new();
-    let mut cache = BlockCache::new(disk, budget(), pressure, sink()).unwrap();
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, budget(), pressure, sink()).unwrap();
     let mut buf = block_of(0);
     cache.read_blocks(0, &mut buf).unwrap();
     assert_eq!(cache.accounting().total_bytes(), COST);
@@ -634,7 +635,7 @@ fn growth_follows_the_band_ceiling_and_moderate_drains_the_class() {
 fn mild_pressure_shrinks_a_full_cache_to_the_low_watermark() {
     let (gauge_source, pressure) = pressured(free_for(PressureBand::Normal));
     let (_store, disk) = MemDisk::new();
-    let mut cache = BlockCache::new(disk, budget(), pressure, sink()).unwrap();
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, budget(), pressure, sink()).unwrap();
     // Spaced LBAs: fill the cache without arming sequential readahead.
     for lba in [0u64, 2, 4, 6, 8, 10] {
         let mut buf = block_of(0);
@@ -657,8 +658,14 @@ fn mild_pressure_shrinks_a_full_cache_to_the_low_watermark() {
 #[test]
 fn a_zero_backing_admits_nothing_but_still_serves() {
     let (store, disk) = MemDisk::new();
-    let mut cache =
-        BlockCache::new(disk, CacheBudget::from_backing(0), unpressured(), sink()).unwrap();
+    let mut cache = BlockCache::new(
+        disk,
+        BOOT_DISK_OWNER,
+        CacheBudget::from_backing(0),
+        unpressured(),
+        sink(),
+    )
+    .unwrap();
     let mut buf = block_of(0);
     cache.read_blocks(2, &mut buf).unwrap();
     assert_eq!(cache.accounting().total_bytes(), 0);
@@ -671,7 +678,8 @@ fn a_zero_backing_admits_nothing_but_still_serves() {
 fn an_uncacheable_geometry_poisons_but_the_device_still_serves() {
     let captured = sink();
     let (store, disk) = MemDisk::with_geometry(8192, 8);
-    let mut cache = BlockCache::new(disk, budget(), unpressured(), captured).unwrap();
+    let mut cache =
+        BlockCache::new(disk, BOOT_DISK_OWNER, budget(), unpressured(), captured).unwrap();
     let mut buf = vec![0u8; 8192];
     cache.read_blocks(1, &mut buf).unwrap();
     assert_eq!(store.borrow().reads, 1);
@@ -700,7 +708,14 @@ fn a_geometry_fault_refuses_to_wrap_the_device() {
         }
     }
     assert_eq!(
-        BlockCache::new(FaultyGeometry, budget(), unpressured(), sink()).err(),
+        BlockCache::new(
+            FaultyGeometry,
+            BOOT_DISK_OWNER,
+            budget(),
+            unpressured(),
+            sink()
+        )
+        .err(),
         Some(DriverError::DeviceFault)
     );
 }
@@ -748,7 +763,8 @@ fn payload_and_metadata_bytes_are_accounted_separately() {
 fn a_detected_defect_is_counted_and_reported_once() {
     let captured = sink();
     let (store, disk) = MemDisk::new();
-    let mut cache = BlockCache::new(disk, budget(), unpressured(), captured).unwrap();
+    let mut cache =
+        BlockCache::new(disk, BOOT_DISK_OWNER, budget(), unpressured(), captured).unwrap();
     let mut buf = block_of(0);
     cache.read_blocks(0, &mut buf).unwrap();
     cache.poison("ledger_imbalance");
@@ -763,7 +779,7 @@ fn a_detected_defect_is_counted_and_reported_once() {
     let keys: Vec<&str> = events[0].fields.iter().map(|(k, _)| k.as_str()).collect();
     assert_eq!(keys, ["cache", "owner", "owner_id", "cause"]);
     assert_eq!(events[0].fields[0].1, "block");
-    assert_eq!(events[0].fields[1].1, OWNER_SUBSYSTEM);
+    assert_eq!(events[0].fields[1].1, BOOT_DISK_OWNER);
     assert_eq!(events[0].fields[2].1, "0");
     assert_eq!(events[0].fields[3].1, "ledger_imbalance");
     // An already-poisoned cache never reports again, and still serves.
@@ -779,7 +795,8 @@ fn a_detected_defect_is_counted_and_reported_once() {
 fn normal_operation_emits_no_audit_records() {
     let captured = sink();
     let (_store, disk) = MemDisk::new();
-    let mut cache = BlockCache::new(disk, budget(), unpressured(), captured).unwrap();
+    let mut cache =
+        BlockCache::new(disk, BOOT_DISK_OWNER, budget(), unpressured(), captured).unwrap();
     let mut buf = block_of(0);
     cache.read_blocks(0, &mut buf).unwrap();
     cache.read_blocks(0, &mut buf).unwrap();
@@ -801,8 +818,8 @@ fn the_wipe_zeroes_the_payload_in_place() {
 /// and the widest of them in bytes.
 fn stream_whole_disk(block_size: u32, block_count: u64) -> (u64, usize) {
     let (store, disk) = MemDisk::with_geometry(block_size, block_count);
-    let mut cache =
-        BlockCache::new(disk, roomy_budget(), unpressured(), sink()).expect("geometry queried");
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, roomy_budget(), unpressured(), sink())
+        .expect("geometry queried");
     let mut widest = 0;
     let mut buf = vec![0u8; block_size as usize];
     for lba in 0..block_count {
@@ -832,7 +849,8 @@ fn the_readahead_window_never_outgrows_what_the_budget_retains() {
     // its own first blocks before the stream reached them.
     let (store, disk) = MemDisk::with_geometry(BS, 1024);
     let budget = CacheBudget::from_backing(4 * 1024 * 1024);
-    let mut cache = BlockCache::new(disk, budget, unpressured(), sink()).expect("geometry queried");
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, budget, unpressured(), sink())
+        .expect("geometry queried");
     let mut widest = 0;
     let mut buf = block_of(0);
     for lba in 0..1024 {
@@ -999,7 +1017,8 @@ fn readahead_falls_back_to_the_exact_span_when_the_coalesced_read_faults() {
             block_count: 64,
         },
     };
-    let mut cache = BlockCache::new(disk, roomy_budget(), unpressured(), sink()).unwrap();
+    let mut cache =
+        BlockCache::new(disk, BOOT_DISK_OWNER, roomy_budget(), unpressured(), sink()).unwrap();
     // Stream sequentially: block 1 onward would coalesce, but the device
     // refuses the wide read, so each such miss falls back to the exact
     // single-block read. Correctness is preserved throughout.
@@ -1027,7 +1046,7 @@ fn block_disabled_control() -> &'static CacheControl {
 #[test]
 fn a_disabled_block_cache_admits_nothing_and_always_reads_the_device() {
     let (store, disk) = MemDisk::new();
-    let mut cache = BlockCache::new(disk, budget(), unpressured(), sink())
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, budget(), unpressured(), sink())
         .expect("geometry queried")
         .with_cache_control(block_disabled_control());
     let mut first = block_of(0);
@@ -1053,7 +1072,7 @@ fn flipping_the_block_switch_off_purges_the_held_blocks() {
     // Start enabled: the cache fills as usual.
     let control: &'static CacheControl = Box::leak(Box::new(CacheControl::new()));
     let (store, disk) = MemDisk::new();
-    let mut cache = BlockCache::new(disk, budget(), unpressured(), sink())
+    let mut cache = BlockCache::new(disk, BOOT_DISK_OWNER, budget(), unpressured(), sink())
         .expect("geometry queried")
         .with_cache_control(control);
     let mut buf = block_of(0);

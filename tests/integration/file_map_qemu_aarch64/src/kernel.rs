@@ -221,9 +221,9 @@ extern "C" fn file_map_user_fault(
 /// The in-guest read-only filesystem double: serves exactly the one
 /// fixture file the shared definition emits, under the caller-blind
 /// `FilesystemService` seam the production handlers consume. Everything
-/// else fails closed — a mutation is `PermissionDenied` (the double is
-/// read-only), an unknown path is `NotFound`, and the surfaces this
-/// vertical never exercises are `NotImplemented` (an inert interface
+/// else fails closed — a mutation is `ReadOnly`, as on a read-only mount,
+/// an unknown path is `NotFound`, and the surfaces this vertical never
+/// exercises are `NotImplemented` (an inert interface
 /// announces itself, mirroring `NullFilesystemService`).
 struct FixtureFs;
 
@@ -239,7 +239,7 @@ impl FilesystemService for FixtureFs {
             return Err(Errno::NotFound);
         }
         if flags.is_write() {
-            return Err(Errno::PermissionDenied);
+            return Err(Errno::ReadOnly);
         }
         Ok(())
     }
@@ -275,7 +275,7 @@ impl FilesystemService for FixtureFs {
         _append: bool,
         _data: &[u8],
     ) -> Result<usize, Errno> {
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     }
 
     fn readdir(
@@ -364,7 +364,7 @@ impl FilesystemService for FixtureFs {
         _path: &str,
         _size: u64,
     ) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     }
 
     fn sync(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
@@ -372,7 +372,7 @@ impl FilesystemService for FixtureFs {
     }
 
     fn mkdir(&self, _uid: u32, _caps: &dyn CapabilityQuery, _path: &str) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     }
 
     fn unlink(
@@ -382,7 +382,7 @@ impl FilesystemService for FixtureFs {
         _path: &str,
         _flags: UnlinkFlags,
     ) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     }
 
     fn rename(
@@ -393,7 +393,7 @@ impl FilesystemService for FixtureFs {
         _to: &str,
         _flags: RenameFlags,
     ) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     }
 
     fn set_mode(
@@ -403,7 +403,7 @@ impl FilesystemService for FixtureFs {
         _path: &str,
         _mode: u32,
     ) -> Result<(), Errno> {
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     }
 
     // The fixture stores no extended attributes; every attribute call

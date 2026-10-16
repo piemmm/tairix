@@ -761,7 +761,7 @@ impl<B: Block> ARXFS<B> {
         // fails closed on a wrong key, a volume `keying` does not fit, or a
         // non-arxfs device.
         let geometry = Self::checked_geometry(&block)?;
-        let established = Self::establish(&mut block, geometry.0, keying, Pin::Claimed)?;
+        let established = Self::establish(&mut block, geometry.0.get(), keying, Pin::Claimed)?;
         let mut fs = Self::bootstrap(block, geometry, established);
         fs.read_only = true;
 

@@ -134,7 +134,7 @@ Legend: `✓` provided (optional features count) · `◐` partial ·
 
 | Feature | ARXFS | ext4 | btrfs | XFS | bcachefs |
 | --- | :-: | :-: | :-: | :-: | :-: |
-| TAIRiX driver | ✓ native | ✓ read/write | — | — | — |
+| TAIRiX driver | ✓ native | ✓ read/write, journaled | — | — | — |
 | Long file names (255 bytes) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | POSIX owner / mode / ACL | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Per-inode capability gate | ✓ | — | — | — | — |

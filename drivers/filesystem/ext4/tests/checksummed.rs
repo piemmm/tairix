@@ -329,7 +329,7 @@ fn mutate(fixture: &[u8]) -> Vec<u8> {
     fs.create(root, b"sub", NodeKind::Directory).expect("mkdir");
     fs.remove(root, b"sub").expect("rmdir");
 
-    fs.into_block().data
+    fs.into_block().expect("commit").data
 }
 
 #[test]

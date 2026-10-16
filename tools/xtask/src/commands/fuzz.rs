@@ -335,6 +335,12 @@ pub const TARGETS: &[Target] = &[
             "arxfs mount / metadata + directory decode (superblock ring, root, trees, dirents)",
     },
     Target {
+        package: "tairix-drv-fs-ext4",
+        test: "fuzz_ext4_mount",
+        description:
+            "ext4 mount / journal replay / walk and write (descriptors, extents, htrees, ACLs)",
+    },
+    Target {
         package: "tairix-drv-fs-adfs",
         test: "fuzz_adfs_mount",
         description:

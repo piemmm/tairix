@@ -9,7 +9,7 @@
 
 use tairix_abi::DriverError;
 
-use super::{le16, le32, put_le16, put_le32, MAX_NAME_LEN};
+use super::{le16, le32, put_le16, put_le32, FT_DIR, MAX_NAME_LEN};
 
 /// The low bit of an index entry's hash, set when names hashing to its even
 /// value continue from the block before.
@@ -472,6 +472,45 @@ pub(crate) fn check_root(block: &[u8], csum: bool) -> Result<RootInfo, DriverErr
         hash_version: block[ROOT_INFO + 4],
         levels: block[ROOT_INFO + 6],
     })
+}
+
+/// Lay `block` out as the root of a new index for directory `ino`, a child
+/// of `parent`, whose names `hash_version` places: `.`, then `..` spanning
+/// the block, the info record, and one entry naming leaf block 1. Unless
+/// `typed` (the volume's `filetype`), the two records carry no file type.
+pub(crate) fn init_root(
+    block: &mut [u8],
+    ino: u32,
+    parent: u32,
+    hash_version: u8,
+    typed: bool,
+    csum: bool,
+) -> Result<(), DriverError> {
+    block.fill(0);
+    let rest = u16::try_from(block.len() - 12).map_err(|_| DriverError::DeviceFault)?;
+    let file_type = if typed { FT_DIR } else { 0 };
+    put_le32(block, 0, ino);
+    put_le16(block, 4, 12);
+    block[6] = 1;
+    block[7] = file_type;
+    block[8] = b'.';
+    put_le32(block, 12, parent);
+    put_le16(block, 16, rest);
+    block[18] = 2;
+    block[19] = file_type;
+    block[20..22].copy_from_slice(b"..");
+    block[ROOT_INFO + 4] = hash_version;
+    block[ROOT_INFO + 5] = ROOT_INFO_LEN;
+    let at = Level::Root.offset();
+    let limit = Level::Root.limit(block.len(), csum);
+    put_le16(
+        block,
+        at,
+        u16::try_from(limit).map_err(|_| DriverError::DeviceFault)?,
+    );
+    put_le16(block, at + 2, 1);
+    put_le32(block, at + 4, 1);
+    Ok(())
 }
 
 /// Record `levels` interior levels under the root in `block`.

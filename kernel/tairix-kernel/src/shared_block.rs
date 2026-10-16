@@ -147,6 +147,17 @@ impl<B: Block> SharedBlock<B> {
             shared: Arc::clone(self),
         }
     }
+
+    /// Run `work` on the device only if no window is using it this instant,
+    /// answering whether it ran: for a caller that must not wait, as the
+    /// surprise-removal path must not.
+    pub fn try_with_device(&self, work: impl FnOnce(&mut B)) -> bool {
+        let Some(mut device) = self.device.try_lock() else {
+            return false;
+        };
+        work(&mut device);
+        true
+    }
 }
 
 // SAFETY: `SharedBlock` is the kernel's disk-sharing boundary, and it is the

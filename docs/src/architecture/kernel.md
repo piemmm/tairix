@@ -280,6 +280,7 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4265 | Warn  | `HW_NODE_REMOVE_REFUSED`    | audit  |
 | 4267 | Warn  | `VOLUME_RESERVE_ENTERED`    | audit  |
 | 4268 | Info  | `VOLUME_RESERVE_LEFT`       | audit  |
+| 4269 | Warn  | `WALL_CLOCK_SET_REFUSED`    | audit  |
 
 `PROCESS_SIGNAL_CROSS_PRINCIPAL` is the `signal` syscall's cross-principal
 authority decision (`plans/NEW-TASKBAR.md` T11). `signal` first tries the

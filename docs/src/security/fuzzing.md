@@ -65,8 +65,12 @@ with a one-line description each. The families are:
   relocation makes `load` fail closed, and that the output buffer is
   zeroed on every failure.
 * The remaining untrusted-input decoders each carry their own harness as
-  they land (`AGENTS.md` §19.5/§19.6): `fuzz_ramzip` and the ARXFS/ADFS
-  mount decoders (`fuzz_mount`, `fuzz_adfs_mount`), `fuzz_compress` (the
+  they land (`AGENTS.md` §19.5/§19.6): `fuzz_ramzip` and the ARXFS, ADFS and
+  ext4 mount decoders (`fuzz_mount`, `fuzz_adfs_mount`, `fuzz_ext4_mount` —
+  the last replaying a hostile journal too, and shaping half its inputs as
+  whole coordinated values in a superblock, a logged superblock or an extent
+  header, checksums re-sealed, which byte flips almost never reach),
+  `fuzz_compress` (the
   first-party LZ decoder), `fuzz_svg`, `fuzz_virtqueue` (the hostile
   device-written used ring), `fuzz_vt`, `fuzz_fdt`, and the partition
   table reader — see the registry for the current, complete set.

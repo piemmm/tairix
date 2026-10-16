@@ -25,7 +25,7 @@
 //!   ([`prepare_rename`](crate::Browser::prepare_rename)), Cut/Copy
 //!   ([`clipboard`](crate::Browser::clipboard)), Paste
 //!   ([`plan_paste`](crate::clipboard::plan_paste)), New ▸
-//!   ([`create_entry`](crate::Browser::create_entry)), Properties
+//!   ([`prepare_entry`](crate::Browser::prepare_entry)), Properties
 //!   ([`Properties`](crate::properties::Properties)), and Delete
 //!   ([`plan_delete`](crate::Browser::plan_delete)).
 //!
@@ -236,7 +236,7 @@ impl ToolbarModel {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ManagerTool {
     /// Create a new folder in the current directory
-    /// ([`create_entry`](Browser::create_entry)), which the file manager then
+    /// ([`prepare_entry`](Browser::prepare_entry)), which the file manager then
     /// opens the inline rename on.
     NewFolder,
     /// Go to the user's Trash — the navigable Trash location

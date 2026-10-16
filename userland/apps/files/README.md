@@ -71,11 +71,11 @@ before any syscall:
   so a hostile escape sequence is shown rather than replayed at the
   error stream.
 
-A refused or unlistable location **degrades, it does not exit**: the
-reason is stated on `stderr` and the window opens where a bare open would
-instead (the user's own files, their home, then the root view), so a bad
-argument never leaves the user
-with no window. Only a command line the program cannot act on at all —
+A refused or unlistable location **degrades, it does not exit**: when the
+reader finds the location cannot be listed, the window opens where a bare
+open would instead (the user's own files, their home, then the root view)
+and says why, so a bad argument never leaves the user with no window. A
+window opens once its first listing lands, at the height that listing fills. Only a command line the program cannot act on at all —
 an unknown option, a second operand, non-UTF-8 argv — is a refusal, and
 it exits `2` after stating the reason and the usage banner.
 
@@ -109,8 +109,8 @@ The desktop is asked for first, before anything is sized or painted
 hold, the listing is set at the desktop's own UI density, and a session in
 dark mode gets a dark window rather than a light one corrected after the
 user has seen it. A `DesktopChanged` afterwards is adopted and repainted —
-during a long copy too, where the modal progress panel is re-presented each
-pass — so a light/dark switch reaches this window at once. A desktop query
+during a long copy too, under its modal progress panel — so a light/dark
+switch reaches this window at once. A desktop query
 the session refuses, or a density this client cannot draw at, exits
 fail-loud with the stated reason rather than falling back to a guess.
 
@@ -133,10 +133,22 @@ and paste the selection (a same-volume move is one `fs_rename`, a
 cross-volume move copies-then-deletes, a copy streams in bounded chunks),
 `Delete` removes it after a modal confirmation, and `Alt+Enter` shows its
 properties — every write the launching user's own permission-checked VFS
-call, no new capability, stopping fail-loud on `stderr` at the first
-refusal (`AGENTS.md` §2.24, §5.4); a `CloseRequested` from the desktop
-ends the program cleanly; every bring-up refusal exits fail-loud with a
-reserved code and a stated reason on `stderr`.
+call, no new capability. None of them waits on the window's loop: a one-shot
+write rides the reader thread, and a delete, paste or move to Trash runs on
+an operations worker one bounded unit at a time, with a progress panel (only
+the panel is repainted as its count moves) and a cancel. Where the machine
+grants no worker, the operation runs on the loop in half-frame slices, still
+cancellable. The first refusal stops it and is stated in the window, naming the
+item and the volume's own answer (`AGENTS.md` §2.24, §5.4). Every other refusal
+is stated in the window too — a paste or drop that cannot begin, a change asked
+while the window is still making one, a Trash that cannot be read to be
+emptied — one notice at a time, a later one waiting its turn rather than
+replacing the one shown. An operation does not begin while the window waits on
+a one-shot change, whose answer would otherwise act on the listing behind its
+panel. Empty Trash confirms what the Trash holds when the reader reads it, not
+the listing on show. Closing a window cancels what it was running, removing a
+file it was part-way through copying; every bring-up refusal exits fail-loud
+with a reserved code and a stated reason on `stderr`.
 
 The window's **title is the directory it is showing**, retitled over the
 window channel whenever — and only when — the browser moves, so the desktop

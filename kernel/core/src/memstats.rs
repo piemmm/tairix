@@ -44,6 +44,8 @@
 //! how every consumer of the gauge reads it).
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -133,10 +135,11 @@ pub struct MemStats {
     /// hysteresis and transition counters have a single history.
     pressure: RwLock<Option<&'static MemoryPressure>>,
     /// Every registered live cache's identity plus a shared handle to its
-    /// ledger. Growable (one per mounted volume cache plus the boot
-    /// singletons), never a fixed ceiling; a ledger registered here lives
-    /// for the boot (the cloned [`CacheLedger`] keeps a torn-down cache's
-    /// final, zeroed books readable). Registration order is preserved, so
+    /// ledger. Growable (one per mounted volume or attached device cache
+    /// plus the boot singletons), never a fixed ceiling. A torn-down
+    /// cache's books stay readable until the next registration, which
+    /// drops them, so a volume attached and detached over and over cannot
+    /// grow the list. Registration order is preserved, so
     /// [`Self::cache_ledger_records`] pages a stable list.
     ledgers: RwLock<Vec<CacheLedger>>,
     /// Every registered **pinned** pool: memory the reclaim model
@@ -155,6 +158,22 @@ pub struct MemStats {
 /// The production registry the boot path and the introspection export
 /// share.
 pub static MEM_STATS: MemStats = MemStats::new();
+
+/// Drop every ledger whose cache is gone: one whose books nothing but this
+/// list's own ledgers still holds. `books` names a ledger's shared books
+/// and how many hold them; pools of one cache share one set.
+fn retain_live<L>(ledgers: &mut Vec<L>, books: impl Fn(&L) -> (*const (), usize)) {
+    let mut listed: BTreeMap<*const (), usize> = BTreeMap::new();
+    for ledger in ledgers.iter() {
+        *listed.entry(books(ledger).0).or_insert(0) += 1;
+    }
+    // A dropped ledger lowers its books' count, never another set's, so a
+    // set this list alone held stays at or below its listing to the last.
+    ledgers.retain(|ledger| {
+        let (shared, holders) = books(ledger);
+        holders > listed.get(&shared).copied().unwrap_or(0)
+    });
+}
 
 impl MemStats {
     /// An empty registry.
@@ -257,7 +276,12 @@ impl MemStats {
     /// filesystem cache, the block/transform caches, the launch cache);
     /// unit-test caches simply never register.
     pub fn register_ledger(&self, ledger: CacheLedger) {
-        self.ledgers.write().push(ledger);
+        let mut ledgers = self.ledgers.write();
+        retain_live(&mut ledgers, |ledger| {
+            let books = ledger.accounting();
+            (Arc::as_ptr(books).cast(), Arc::strong_count(books))
+        });
+        ledgers.push(ledger);
     }
 
     /// Install the live `ramzip` tier's stats feed. First install wins.
@@ -320,7 +344,12 @@ impl MemStats {
     /// Called by the production construction sites (a writable volume's
     /// write-back dirty set); unit-test pools simply never register.
     pub fn register_pinned_ledger(&self, ledger: PinnedLedger) {
-        self.pinned.write().push(ledger);
+        let mut pinned = self.pinned.write();
+        retain_live(&mut pinned, |ledger| {
+            let books = ledger.accounting();
+            (Arc::as_ptr(books).cast(), Arc::strong_count(books))
+        });
+        pinned.push(ledger);
     }
 
     /// One [`CacheLedgerRecord`] per registered ledger — the reclaimable
@@ -404,7 +433,6 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use alloc::sync::Arc;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use tairix_abi::sysinfo::CacheOwnerKind;
     use tairix_reclaim::{CacheAccounting, ReclaimOwner};
@@ -437,6 +465,26 @@ mod tests {
         let first = stats.system_pressure(backing);
         let second = stats.system_pressure(leaked_fake());
         assert!(core::ptr::eq(first, second), "one gauge, one history");
+    }
+
+    #[test]
+    fn a_torn_down_caches_ledgers_go_at_the_next_registration() {
+        let stats = MemStats::new();
+        let class = ReclaimClass::CleanFileData;
+        let owner = ReclaimOwner::KernelSubsystem("mem");
+        // One cache, two pools over one set of books, as a volume cache has.
+        let detached = Arc::new(CacheAccounting::new());
+        stats.register_ledger(CacheLedger::new("a", owner, class, Arc::clone(&detached)));
+        stats.register_ledger(CacheLedger::new("b", owner, class, Arc::clone(&detached)));
+        let live = Arc::new(CacheAccounting::new());
+        stats.register_ledger(CacheLedger::new("c", owner, class, Arc::clone(&live)));
+        assert_eq!(stats.cache_ledger_records().len(), 3, "both caches live");
+        drop(detached);
+        let next = Arc::new(CacheAccounting::new());
+        stats.register_ledger(CacheLedger::new("d", owner, class, Arc::clone(&next)));
+        let records = stats.cache_ledger_records();
+        let labels: Vec<&str> = records.iter().map(CacheLedgerRecord::label).collect();
+        assert_eq!(labels, ["c", "d"], "the gone cache's pools left");
     }
 
     #[test]
@@ -516,10 +564,12 @@ mod tests {
         // The same charges spread over a ledger each, as two independent
         // single-pool caches would present them.
         let separate = MemStats::new();
+        let mut caches = Vec::new();
         for (label, class, payload, metadata) in pools {
             let own = Arc::new(CacheAccounting::new());
             charge(&own, class, payload, metadata);
-            separate.register_ledger(CacheLedger::new(label, owner, class, own));
+            separate.register_ledger(CacheLedger::new(label, owner, class, Arc::clone(&own)));
+            caches.push(own);
         }
 
         for (_, class, payload, metadata) in pools {
@@ -567,7 +617,7 @@ mod tests {
             "wm.cursor",
             ReclaimOwner::DesktopSession { seat: 1 },
             ReclaimClass::DisposableUi,
-            first,
+            Arc::clone(&first),
         ));
         let second = Arc::new(CacheAccounting::new());
         second
@@ -577,7 +627,7 @@ mod tests {
             "arxfs.clean",
             ReclaimOwner::FilesystemVolume { volume: 3 },
             ReclaimClass::CleanFileData,
-            second,
+            Arc::clone(&second),
         ));
 
         let records = stats.cache_ledger_records();

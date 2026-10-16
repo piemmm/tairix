@@ -314,11 +314,11 @@ impl VfsError {
     /// [`Errno::NotADirectory`] (`ENOTDIR`), and a populated directory is
     /// [`Errno::NotEmpty`] (`ENOTEMPTY` — `rmdir --ignore-fail-on-non-empty`
     /// tolerates exactly this), and a directory where one is forbidden is
-    /// [`Errno::IsADirectory`] (`EISDIR`). `abi-v1` has no dedicated
-    /// `EINVAL`, so a malformed path or attribute key — and a rename that
-    /// would make a directory its own descendant — collapses onto
-    /// [`Errno::OutOfRange`]; the read-only refusal is reported as
-    /// [`Errno::PermissionDenied`]. An unrecoverable backing
+    /// [`Errno::IsADirectory`] (`EISDIR`), and a write to a read-only mount
+    /// is [`Errno::ReadOnly`] (`EROFS`). `abi-v1` has no dedicated `EINVAL`,
+    /// so a malformed path or attribute key — and a rename that would make
+    /// a directory its own descendant — collapses onto
+    /// [`Errno::OutOfRange`]. An unrecoverable backing
     /// fault ([`Self::Io`]) is [`Errno::DeviceFault`] — the `EIO` analogue,
     /// and what a surprise-removed volume's operations report — mirroring
     /// how [`DriverError::DeviceFault`](tairix_abi::driver::DriverError)
@@ -327,7 +327,8 @@ impl VfsError {
     pub const fn to_errno(self) -> Errno {
         match self {
             Self::NotFound => Errno::NotFound,
-            Self::PermissionDenied | Self::ReadOnly => Errno::PermissionDenied,
+            Self::PermissionDenied => Errno::PermissionDenied,
+            Self::ReadOnly => Errno::ReadOnly,
             Self::InvalidPath | Self::InvalidKey | Self::DirectoryCycle => Errno::OutOfRange,
             Self::IsADirectory => Errno::IsADirectory,
             Self::NotADirectory => Errno::NotADirectory,
@@ -386,7 +387,7 @@ mod tests {
     #[test]
     fn errno_mapping_is_stable() {
         assert_eq!(VfsError::NotFound.to_errno(), Errno::NotFound);
-        assert_eq!(VfsError::ReadOnly.to_errno(), Errno::PermissionDenied);
+        assert_eq!(VfsError::ReadOnly.to_errno(), Errno::ReadOnly);
         assert_eq!(
             VfsError::PermissionDenied.to_errno(),
             Errno::PermissionDenied

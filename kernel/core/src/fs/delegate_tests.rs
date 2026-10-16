@@ -2995,6 +2995,49 @@ fn a_full_volume_and_exhausted_memory_are_reported_as_themselves() {
     }
 }
 
+/// A driver that has stopped writing — a volume halted after a failed commit,
+/// behind a mount that is itself writable — is read-only to its caller, never
+/// the device fault it used to collapse into.
+#[test]
+fn a_driver_that_stopped_writing_is_reported_read_only() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RefusingFs {
+        refusal: DriverError::ReadOnly,
+    };
+    for outcome in [
+        vfs.create_via(&admin, &vfs.cover(&p("/x")), &mut fs),
+        vfs.mkdir_via(&admin, &vfs.cover(&p("/x")), &mut fs),
+        vfs.symlink_via(&admin, &vfs.cover(&p("/x")), &mut fs, "/target"),
+    ] {
+        assert_eq!(outcome, Err(VfsError::ReadOnly));
+    }
+    assert_eq!(
+        super::map_attr_driver_error(DriverError::ReadOnly),
+        VfsError::ReadOnly,
+        "an attribute write it refuses reads the same"
+    );
+    assert_eq!(VfsError::ReadOnly.to_errno(), Errno::ReadOnly);
+}
+
+/// A change the volume's own record forbids — a node `chattr` holds fixed —
+/// is refused to its caller, never reported as the device fault it used to
+/// collapse into.
+#[test]
+fn a_change_the_volume_forbids_is_refused_not_a_fault() {
+    let vfs = root_backed_rw_vfs();
+    let caps = CapabilitySet::empty();
+    let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
+    let mut fs = RefusingFs {
+        refusal: DriverError::PermissionDenied,
+    };
+    assert_eq!(
+        vfs.create_via(&admin, &vfs.cover(&p("/x")), &mut fs),
+        Err(VfsError::PermissionDenied)
+    );
+}
+
 /// A genuinely transient driver refusal keeps meaning "retry": it is not
 /// read as any of the structural conflicts that used to share its value.
 #[test]

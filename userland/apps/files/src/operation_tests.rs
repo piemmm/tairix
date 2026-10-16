@@ -16,7 +16,11 @@ use tairix_browse::{Places, ToolbarBand, Volume};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
 
-use super::{create_refusal, operation_control, OperationControl};
+use super::{
+    change_refusal, confirmation_may_open, create_refusal, empty_confirmation_may_open,
+    mode_flip_allowed, move_refusal, operation_control, reaches_operation_under_notice,
+    read_refusal, remove_refusal, trash_read_refusal, OperationControl,
+};
 use tairix_abi::Errno;
 
 /// The window the operation's panel is laid out in for these tests.
@@ -209,73 +213,15 @@ fn a_window_too_small_for_the_panel_resolves_no_cancel() {
     );
 }
 
-/// A turn steps the operation for half a desktop frame and no longer, always
-/// at least once, and stops the moment the operation finishes.
+/// A new count is shown once a desktop frame, however many land in it.
 #[test]
-fn a_turn_advances_the_operation_for_half_a_frame() {
-    use super::{advance_for_a_slice, OPERATION_SLICE_NS};
-    use core::cell::Cell;
-
-    let now = Cell::new(0u64);
-    let steps = Cell::new(0u32);
-    let finished = advance_for_a_slice(
-        || {
-            steps.set(steps.get() + 1);
-            now.set(now.get() + OPERATION_SLICE_NS.div_ceil(4));
-            false
-        },
-        || now.get(),
-    );
-    assert!(!finished);
-    assert_eq!(
-        steps.get(),
-        4,
-        "the slice is spent after its share of steps"
-    );
-
-    now.set(0);
-    steps.set(0);
-    let finished = advance_for_a_slice(
-        || {
-            steps.set(steps.get() + 1);
-            now.set(now.get() + 2 * OPERATION_SLICE_NS);
-            false
-        },
-        || now.get(),
-    );
-    assert!(!finished);
-    assert_eq!(
-        steps.get(),
-        1,
-        "a step longer than the slice still runs once"
-    );
-
-    steps.set(0);
-    let finished = advance_for_a_slice(
-        || {
-            steps.set(steps.get() + 1);
-            steps.get() == 2
-        },
-        || 0,
-    );
-    assert!(finished);
-    assert_eq!(steps.get(), 2, "it stops when the operation does");
-}
-
-/// The progress panel is shown once a desktop frame, however many turns that
-/// frame held, and always on the turn the operation finishes.
-#[test]
-fn the_progress_is_shown_once_a_frame_and_on_finishing() {
+fn the_progress_is_shown_once_a_frame() {
     use super::progress_due;
     use tairix_theme::Timeline;
 
     let shown = 5_000_000;
-    assert!(!progress_due(false, shown + Timeline::FRAME_NS - 1, shown));
-    assert!(progress_due(false, shown + Timeline::FRAME_NS, shown));
-    assert!(
-        progress_due(true, shown, shown),
-        "the last state is always shown"
-    );
+    assert!(!progress_due(shown + Timeline::FRAME_NS - 1, shown));
+    assert!(progress_due(shown + Timeline::FRAME_NS, shown));
 }
 
 /// A refused create says why it was refused, and claims a taken name only for
@@ -298,4 +244,125 @@ fn a_refused_create_names_its_own_reason() {
             "{other:?}"
         );
     }
+}
+
+/// A read-only destination is named as one, never as a permission the user
+/// could be granted.
+#[test]
+fn a_read_only_destination_is_told_apart_from_a_denied_one() {
+    assert_eq!(
+        create_refusal(Errno::ReadOnly),
+        "the destination volume is read-only"
+    );
+    assert_ne!(
+        create_refusal(Errno::ReadOnly),
+        create_refusal(Errno::PermissionDenied)
+    );
+}
+
+/// Each refusal says what stopped it, a read-only volume apart from a missing
+/// permission, and a failing device the same way whatever was being done.
+#[test]
+fn a_refusal_names_its_cause_and_a_failing_device_reads_alike() {
+    for refusal in [
+        create_refusal,
+        remove_refusal,
+        move_refusal,
+        change_refusal,
+        trash_read_refusal,
+    ] {
+        assert_ne!(refusal(Errno::ReadOnly), refusal(Errno::PermissionDenied));
+        assert_eq!(refusal(Errno::DeviceOffline), "its device was removed");
+    }
+    assert_eq!(remove_refusal(Errno::ReadOnly), "its volume is read-only");
+    assert_eq!(
+        move_refusal(Errno::AlreadyExists),
+        "an item with that name appeared at the destination"
+    );
+    assert_eq!(read_refusal(Errno::MediumError), "its device failed");
+    assert_eq!(change_refusal(Errno::ReadOnly), "its volume is read-only");
+    assert_eq!(
+        change_refusal(Errno::NotSupported),
+        "its volume cannot store that"
+    );
+    assert_eq!(
+        read_refusal(Errno::OutOfRange),
+        "a folder in it could not be read"
+    );
+}
+
+/// A plan that comes back after the user moved on — to another selection,
+/// another folder, or into something else on screen — opens no confirmation.
+#[test]
+fn a_delete_confirmation_opens_only_over_the_selection_it_plans() {
+    let path = |name: &str| alloc::vec![String::from("home"), String::from(name)];
+    let asked = tairix_browse::DeletePlan::new(alloc::vec![(path("a"), false)]).expect("a plan");
+    let other = tairix_browse::DeletePlan::new(alloc::vec![(path("b"), false)]).expect("a plan");
+    assert!(confirmation_may_open(&asked, Some(&asked), false));
+    assert!(
+        !confirmation_may_open(&asked, Some(&other), false),
+        "another selection"
+    );
+    assert!(
+        !confirmation_may_open(&asked, None, false),
+        "nothing selected"
+    );
+    assert!(
+        !confirmation_may_open(&asked, Some(&asked), true),
+        "something else open"
+    );
+}
+
+/// The Trash's contents come back after the user may have gone elsewhere: the
+/// confirmation opens only over the Trash that was read.
+#[test]
+fn an_empty_confirmation_opens_only_over_the_trash_it_read() {
+    let trash: Vec<String> = ["home", "Library", "Trash"].map(String::from).to_vec();
+    assert!(empty_confirmation_may_open(&trash, &trash, false));
+    assert!(
+        !empty_confirmation_may_open(&trash, &trash[..2], false),
+        "the window moved on"
+    );
+    assert!(
+        !empty_confirmation_may_open(&trash, &trash, true),
+        "something else open"
+    );
+}
+
+/// The panel is presented only as its count moves, so a window the desktop
+/// asks to draw again is drawn: a stalled operation would leave it blank.
+#[test]
+fn a_redraw_request_during_an_operation_is_answered() {
+    let theme = Theme::dark();
+    let event = WindowEvent::RedrawRequested { window_id: 1 };
+    assert_eq!(
+        operation_control(None, Scale::ONE, &theme, WINDOW, BAND, &event),
+        OperationControl::Redraw
+    );
+}
+
+/// A notice over the panel takes its own dismissal, which the panel would
+/// read as Cancel; only closing the window still reaches the operation.
+#[test]
+fn a_notice_over_the_panel_takes_everything_but_a_close() {
+    let escape = WindowEvent::Key {
+        window_id: 1,
+        key: KeyInput::Pressed {
+            key: KeyValue::Named(NamedKeyCode::Escape),
+            modifiers: Modifiers::default(),
+        },
+    };
+    assert!(!reaches_operation_under_notice(&escape));
+    assert!(reaches_operation_under_notice(
+        &WindowEvent::CloseRequested { window_id: 1 }
+    ));
+}
+
+/// A second flip taken from the mode as it was before the first landed would
+/// undo the first: it waits for the node to be read again.
+#[test]
+fn a_permission_flip_waits_for_the_last_one_to_be_read_back() {
+    assert!(mode_flip_allowed(false, false));
+    assert!(!mode_flip_allowed(true, false), "in flight");
+    assert!(!mode_flip_allowed(false, true), "landed, not yet read back");
 }

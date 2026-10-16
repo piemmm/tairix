@@ -360,6 +360,10 @@ pub enum Errno {
     /// it: the desktop session answers a pinboard *apply* this way when the
     /// user's next settings gesture displaced it, because that document is not
     /// going to be published and saying so beats leaving the caller parked.
+    ///
+    /// `volume_attach` answers this for a volume that is attached already, its
+    /// identity published under another name: unlike a taken catalog name
+    /// ([`AlreadyExists`](Self::AlreadyExists)), no other name would help.
     Busy = 41,
     /// A path could not be resolved because it traverses too many symbolic
     /// links, or because a link was found where the caller forbade one.
@@ -454,6 +458,15 @@ pub enum Errno {
     /// when it is reverted or runs out, so the caller returns to what it had
     /// rather than reporting a fault.
     Declined = 49,
+    /// The volume is mounted read-only, so nothing on it may change.
+    ///
+    /// Reported for any write to a read-only mount whatever the caller's
+    /// rights on the node: the system volume, a device whose write policy
+    /// forbids writing, or a volume its filesystem refuses to write (the
+    /// attach audit names why). Distinct from
+    /// [`PermissionDenied`](Self::PermissionDenied), which another owner,
+    /// mode or capability could clear: only a writable mount clears this.
+    ReadOnly = 50,
 }
 
 impl Errno {
@@ -580,6 +593,7 @@ impl Errno {
             47 => Some(Self::Stale),
             48 => Some(Self::NoBandwidth),
             49 => Some(Self::Declined),
+            50 => Some(Self::ReadOnly),
             _ => None,
         }
     }
@@ -637,6 +651,7 @@ impl fmt::Display for Errno {
             Self::Stale => "object changed beneath the handle",
             Self::NoBandwidth => "no bus bandwidth for the requested setting",
             Self::Declined => "declined at a prompt",
+            Self::ReadOnly => "read-only file system",
         };
         f.write_str(message)
     }
@@ -693,6 +708,7 @@ mod tests {
         assert_eq!(Errno::LinkLoop.as_i32(), 42);
         assert_eq!(Errno::IsADirectory.as_i32(), 43);
         assert_eq!(Errno::TooManyLinks.as_i32(), 44);
+        assert_eq!(Errno::ReadOnly.as_i32(), 50);
     }
 
     #[test]
@@ -749,11 +765,12 @@ mod tests {
             Errno::Stale,
             Errno::NoBandwidth,
             Errno::Declined,
+            Errno::ReadOnly,
         ] {
             assert_eq!(Errno::from_i32(errno.as_i32()), Some(errno));
         }
         assert_eq!(Errno::from_i32(0), None);
-        assert_eq!(Errno::from_i32(50), None);
+        assert_eq!(Errno::from_i32(51), None);
         assert_eq!(Errno::from_i32(-1), None);
     }
 

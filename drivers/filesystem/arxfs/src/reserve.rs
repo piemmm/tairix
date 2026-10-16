@@ -233,7 +233,7 @@ impl<B: Block> ARXFS<B> {
     ///
     /// # Errors
     ///
-    /// [`DriverError::PermissionDenied`] on a read-only handle, or the device's
+    /// [`DriverError::ReadOnly`] on a read-only handle, or the device's
     /// error while the reserve's runs are chosen.
     pub fn with_system_reserve(mut self, write_set: &[u64]) -> Result<Self, DriverError> {
         self.deny_if_read_only()?;

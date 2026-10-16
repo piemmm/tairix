@@ -1,40 +1,50 @@
 # ext4 driver
 
-`drivers/filesystem/ext4` (`tairix-drv-fs-ext4`) is a **read/write**
-driver for ext2/ext3/ext4 volumes behind any
-[`Block`](../abi/driver_traits.md) device. It implements the versioned
-`FilesystemRead`, `FilesystemWrite`, and `FilesystemSecurity` traits; the
-frozen `Filesystem` trait remains mount/unmount only, so each surface is
-a separate trait rather than a widening of the shipped one
-(`AGENTS.md` §2.4 / §9), exactly as for the [FAT32](./fat32.md) and
-[arxfs](./arxfs.md) drivers.
-
-ext4 is the dominant Linux on-disk format, so reading existing volumes
-(installation media, foreign disks) was the first need; mutation arrived
-later behind the separate `FilesystemWrite` trait, and now maintains the
-on-disk checksums (`metadata_csum`/`gdt_csum`) and wide 64-bit
-descriptors a real `mkfs.ext4` image carries.
+`drivers/filesystem/ext4` (`tairix-drv-fs-ext4`) reads and writes ext2,
+ext3 and ext4 volumes behind any [`Block`](../abi/driver_traits.md)
+device, through the versioned `FilesystemRead`, `FilesystemWrite`,
+`FilesystemSecurity` and `FilesystemStats` traits. ext4 is the format most
+removable drives formatted on Linux carry, so a volume `mke2fs` made is
+written as Linux would leave it: journaled where it has a journal, with
+every checksum it carries maintained, and readable by Linux and `e2fsck`
+afterwards.
 
 ## On-disk support
 
-| Feature                                  | Support                       |
-| ---------------------------------------- | ----------------------------- |
-| Block sizes 1024 / 2048 / 4096           | yes                           |
-| 128- or 256-byte inodes                  | yes                           |
-| 32- or 64-byte group descriptors (64bit) | yes                           |
-| Extent-mapped inodes (default ext4)      | yes, incl. multi-level trees  |
-| Classic block map (ext2/ext3)            | yes (direct + 1/2/3 indirect) |
-| Linear directory blocks                  | yes                           |
-| Hash-indexed (`htree`) directories       | yes: lookup, listing, add and remove through a root and one interior level |
+| Feature | Read | Write |
+| --- | --- | --- |
+| ext2, ext3, ext4 layouts; block sizes 1, 2 and 4 KiB | yes | yes |
+| 128-byte and larger inodes; 32- and 64-byte descriptors (`64bit`) | yes | yes |
+| Extent trees of any depth; the classic map to triple indirect | yes | yes |
+| Unwritten extents (read as zeros, written by converting them) | yes | yes |
+| Linear and hash-indexed directories (`dir_index`, `largedir`) | yes | yes |
+| `flex_bg`, `meta_bg`, `sparse_super`, `sparse_super2`, lazily initialised groups | yes | yes |
+| `metadata_csum`, `metadata_csum_seed`, `gdt_csum` | yes | yes |
+| `huge_file`, `large_file`, `dir_nlink`, `extra_isize` | yes | yes |
+| The internal journal, and replay of one a crash left | yes | yes |
+| The orphan chain and the orphan file | yes | yes |
+| POSIX access ACLs | yes | as a mode change moves them |
+| `inline_data` | files and links; inline directories refused | no |
+| `bigalloc`, `mmp`, `ea_inode`, `encrypt`, `casefold` | yes, but encrypted names are refused and casefolded ones matched exactly | no |
 
-`Ext4::open` validates the superblock magic (`0xEF53` at byte `0x38` of
-the superblock, which itself starts at the fixed byte offset 1024) and
-re-derives the geometry — block size, inodes/blocks per group, inode
-size, descriptor size, and the group-descriptor table offset — rejecting
-a bad magic or an inconsistent geometry with `DriverError::BadMagic` and
-an out-of-range block size with `DriverError::Unsupported`. The device
-logical-block size and the filesystem block size are independent: all
-I/O is staged one device block at a time.
+`Ext4::open` validates the superblock (magic, geometry against the device,
+the inode count against the groups, its checksum under `metadata_csum`)
+and refuses an incompatible feature the read path does not implement, an
+external journal, and a block size above 4 KiB. A volume the write path
+cannot maintain — a feature it does not keep, errors a checker recorded, a
+Hurd layout, a journal it cannot write or one a kernel aborted, an
+unjournaled volume a crash left unclean, orphans that cannot be finished —
+opens and serves reads, and `Ext4::write_refusal` names the reason. The
+volume service then mounts it read-only and audits that cause (event
+4180), so a refused write reads as a read-only file system.
+`Ext4::open_read_only` never writes, and refuses a journal that needs
+replay rather than serve the state beneath it. A replay can rewrite the
+superblock and the descriptors themselves, so the volume is read again from
+what it left, and that reading refuses a log still needing replay rather than
+replaying it twice. A volume under multi-mount protection (`mmp`), which
+another host may be writing, is never replayed, a replay being a write. A
+writable mount sets the superblock's free counts from the group descriptors,
+which every allocation keeps exact and a crash can leave the totals behind.
 
 ## Nodes and mapping
 
@@ -43,40 +53,36 @@ table; each operation reads the inode on demand. Logical-to-physical
 block mapping covers both on-disk layouts:
 
 - **Extent-mapped** inodes walk the extent tree from the inline root in
-  `i_block`, descending interior index nodes up to a bounded depth. An
-  uninitialised extent and a missing extent both read as zeros.
+  `i_block`, descending interior index nodes up to the format's depth of
+  five. An unwritten extent and a missing extent both read as zeros.
 - **Block-mapped** inodes resolve the 12 direct pointers and the single,
   double, and triple indirect blocks. A zero pointer is a sparse hole
   and reads as zeros.
 
+A read is one device request per physically contiguous run. Every
+extent and indirect block is checked against its checksum and the
+volume's bounds before it is followed.
+
 ## Symbolic links
 
-A link's target is read with `read_link`, in both spellings ext4 uses. The
-**fast** form keeps the target in the raw 60-byte `i_block` array and allocates
-nothing; the **slow** form stores it as ordinary file data. `i_size` is the
-target's length either way, and the discriminator is the one Linux's
-`ext4_inode_is_fast_symlink` uses: a fast link allocates no data, so `i_blocks`
-accounts for nothing beyond an external extended-attribute block (one
-allocation cluster, which is the block size unless the volume carries
-`bigalloc`). A target longer than the `i_block` array could not be inline
-whatever the accounting says, so that is checked first and the accounting is
-consulted only for one that would fit.
-
-Two honest limits rather than guesses: an **inline-data** link keeps its target
-in the inode's own extended-attribute area, which this driver decodes nowhere,
-so it answers `Unsupported`; and this driver **reads** foreign links but does
-not **author** them, so `create_link` answers `Unsupported` too — the VFS
-surfaces both as `NotSupported`, the permanent limit a caller can tell from a
-structural refusal. A link is never byte-readable (`read_at` refuses one) and
-`create` refuses the link kind, so no path here can produce a regular file
-whose contents merely look like a path.
+A link's target is read with `read_link` in the spellings ext4 uses: the
+**fast** form keeps it in the 60-byte `i_block` array and allocates no data
+block (its `i_blocks` accounts for nothing beyond an external attribute
+block), the **slow** form stores it as ordinary file data, and an
+**inline-data** link keeps it in `i_block` and the `system.data`
+attribute. An inode flagged inline on a volume without `inline_data` is
+damage. Links are removed but never authored: `create_link` and `link`
+answer `Unsupported`, which the VFS surfaces as `NotSupported`. Nothing
+here reads a link's `i_block`, or a device's, as a block map.
 
 ## Directories
 
 A child's kind comes from the directory entry's `file_type` byte when the
 `filetype` feature is set, otherwise from the child inode's mode; unused
 slots and the `.`/`..` self-links are skipped (the VFS resolves those
-itself, §16). A directory is read one of two ways.
+itself), and so are devices, pipes and sockets, which have no node kind
+here. A directory holding its entries inline or encrypted is refused. A
+directory is read one of two ways.
 
 **Linear.** Every block is a leaf, scanned in order by record length. A
 listing cursor is a record's byte offset: parsing resumes at the cursor's
@@ -105,10 +111,13 @@ that position. Its cursor is a keyed digest of the name, never `0`.
   bytes. A full root moves its entries down to a new interior level, and a
   full interior node splits; with both levels full a name is refused with
   `NoSpace`, as is one whose hash already spans 16 leaves.
-- **Write order.** The new block, then the inode mapping it, then the index
-  naming it, then the block it came from: stopped part-way, an entry is left
-  in two leaves rather than none, and readers pass over an entry outside its
-  leaf's hash range.
+- **A linear directory outgrowing its one block** on a `dir_index` volume
+  is given an index, as Linux does: its names move to a new leaf, block 0
+  becomes the root, hashed by the volume's default hash. A linear directory
+  already longer than a block stays linear.
+- **One transaction.** An insert's blocks — the new leaf, the inode mapping
+  it, the index naming it — commit together (see [Writing](#writing)), and
+  readers pass over an entry outside its leaf's hash range.
 - **Checksums.** Under `metadata_csum` every index block's tail and every
   leaf's tail is checked before it is used and resealed when written; a
   mismatch fails closed with `DeviceFault`. A linear directory's leaves are
@@ -123,79 +132,105 @@ that position. Its cursor is a keyed digest of the name, never `0`.
 
 ## Security
 
-ext4 stores a per-inode owner, mode, and ACL, but the driver makes **no**
-permission decision: the VFS metadata layer that mounts it is the policy
-point (`AGENTS.md` §5.4).
-
-The driver implements the versioned `FilesystemSecurity` trait (as
-[arxfs](./arxfs.md) does), so the VFS drives authorization from the
-stored per-inode §5.3 record. `security(node)` reports a `NodeSecurity`
-carrying the inode's POSIX mode (the low 12 bits, with the type bits
-stripped) and its owner uid/gid; each id recombines its low half
-(`i_uid`/`i_gid`) with the osd2 high half (`l_i_uid_high`/`l_i_gid_high`).
-ext4 has no inline capability gate, so the record carries no
-`required_cap`.
-
-`stamp_owner` writes a created node's owner and group into the same two
-halves, so a file or directory made through the VFS belongs to its creator.
-An explicit `set_security` is refused whole (`NotSupported` to the caller):
-the format has no place for a capability gate, and the driver does not
-rewrite ACL attribute blocks.
+The driver makes no permission decision; the VFS judges every node against
+the record `security(node)` reports. That record is the inode's mode (its
+low twelve bits), owner and group (each joined from its low half and the
+osd2 high half), with the `system.posix_acl_access` attribute folded in.
+ext4 has no capability gate, so the record carries none.
 
 ### POSIX ACLs
 
-Named-user and named-group POSIX ACL grants are decoded from the inode's
-`system.posix_acl_access` extended attribute into the record's inline
-ACL entries. ext4 keeps that attribute in two places, both of which the
-driver reads:
+The attribute is read where ext4 keeps it — the inode body after
+`i_extra_isize`, or the external block `i_file_acl` names — in ext4's own
+encoding: version 1, four-byte entries for the owner, owning group, mask
+and other, eight-byte ones for named users and groups. (The version-2,
+all-eight-byte form is what `getxattr` hands userspace, never what a
+volume holds; it is refused as damage.)
 
-- an **inline** region in the tail of an enlarged (`inode_size > 128`)
-  inode record, immediately after `i_extra_isize`, whose entry value
-  offsets are measured from the first entry; and
-- an **external block** named by `i_file_acl`, whose entry value offsets
-  are measured from the start of the block.
+An ACL with a mask becomes a POSIX.1e record (`AclModel::Posix`): the
+owner is judged by its own triad, a named user by its entry under the
+mask, a member of the owning group or of a named group by the union of
+those entries under the mask — refused if they do not grant it, never
+falling through to other — and anyone else by the other triad. The mode
+reported mirrors the owner, mask and other entries, as it does on the
+system that wrote it. A minimal ACL is the mode alone. A malformed ACL —
+a wrong version, a torn or unknown entry, a missing or repeated required
+entry, named entries with no mask, a subject named twice, more named
+entries than the record holds — fails closed: the node cannot be judged,
+so it cannot be reached.
 
-Both share the `ext4_xattr_entry` encoding (magic `0xEA020000`,
-`e_name_index = 2` for the access ACL). The `ACL_USER` / `ACL_GROUP`
-entries map to one grant-only `SecurityAcl` each (`SecuritySubject::User`
-/ `Group` with the POSIX `rwx` triad); the owner/owning-group/other/mask
-entries are already expressed by the mode bits, so they are skipped. A
-volume may carry the attribute inline, in the external block, in both, or
-in neither; an absent or malformed region simply contributes no grants
-(the mode bits still apply — `AGENTS.md` §5.4, fail closed). The record's
-inline ACL budget bounds the number of named grants surfaced.
+`stamp_owner` records a new node's creator in the transaction that created
+it, so a crash cannot leave a new file with its default owner.
+`set_security` stores a mode and an owner: a mode change moves the ACL's
+owner, mask and other entries with it, copying an attribute block another
+inode shares first. A record asking for a capability gate or a changed ACL
+is refused whole rather than stored in part. A new file does not inherit
+its directory's default ACL.
 
 ## Writing
 
-The `FilesystemWrite` surface (`create`, `write_at`, `truncate`,
-`remove`, `flush`) mutates a mounted volume. Like the read surface it
-makes **no** permission decision — the VFS authorises every write before
-delegating (`AGENTS.md` §5.4). New files and directories are created with
-the classic block map (12 direct pointers + the single indirect block);
-file data is allocated from the block bitmap, inodes from the inode
-bitmap, and the group-descriptor and superblock free counts are kept in
-step. Directory entries are added and removed as [Directories](#directories)
-describes; a removal drops the name before the inode it names, so a failed
-write never leaves a name pointing at a freed inode, and a create that
-cannot place its name gives its inode back. A renamed entry keeps the type
-its inode has. The directory and allocation paths take their block-sized
-scratch from the heap rather than the small kernel stack they nest on. `truncate` frees the tail
-blocks of the classic map and the extent map (the inline depth-0 root or
-a depth-1 tree) and zeroes the retained partial block so a later
-extension reads as zeros.
+Like the read surface, the write surface makes no permission decision: the
+VFS authorises every write first.
 
-A pre-existing extent-mapped file (those a foreign `mkfs` created) grows
-in place: `write_at` extends the last extent when the new block is
-contiguous and otherwise appends a fresh extent. When the four inline
-`i_block` extent slots are exhausted, the inline root is converted into
-a **depth-1 tree** — its extents move into a freshly allocated leaf
-block and the root becomes an index node — after which further leaves
-are attached through new (ascending-ordered) root index entries.
-`truncate`/`remove` free a depth-1 tree's emptied leaf blocks and drop
-their index entries, collapsing the root back to an empty depth-0 node
-when no leaf survives. A tree that would need a second index level
-(depth ≥ 2) is refused (see below); the driver never builds one, and the
-read path still maps any depth on disk.
+**Transactions.** Every operation runs against the open transaction, its
+metadata changes staged in `lib/writeback`'s dirty set and undone alone if
+the operation fails. The transaction is published when the host's
+write-back window closes, when it reaches its share of the machine's
+write-back memory or a share of the journal, or on a sync; a handle with no
+host, or a host with no clock, publishes every operation before reporting
+it done. A long write or cut stops at the bound and reports the bytes it
+stored, as `write(2)` does.
+
+**Journaled volumes.** A transaction is logged after the one before,
+circularly: descriptors and block images, a barrier — which also makes
+durable the file data written in place for it and the previous
+transaction's home writes — then the commit block and the journal
+superblock naming it, then a second barrier, and only then the blocks home.
+`needs_recovery` is set before anything is logged and stays set while the
+volume is busy; settling a quiet volume makes the home writes durable,
+empties the log durably, and only then clears the mark, so an idle volume
+is clean and the mark never reads clear over a log holding a transaction.
+A replay is only ever of the newest transaction, whose blocks no later
+change can have reused: a block freed is reused only after the transaction
+freeing it commits. Recovery reads whatever Linux left — revoke records,
+64-bit tags, v2 and v3 checksums, escaped blocks, asynchronous commits —
+and the writer adopts 64-bit tags and v3 checksums where the volume needs
+them, as Linux does on mount. A journal whose transactions would hold too
+few blocks, or one a kernel aborted, leaves the volume read-only.
+
+**Unjournaled volumes.** The superblock is marked not clean behind a
+barrier, the blocks written home behind another, and the mark lifted; a
+crash part-way leaves the volume for a checker.
+
+**Failure.** A commit that fails before anything reaches the medium as the
+new state is taken back whole; operations already reported done lose their
+work with it, so then the handle stops writing. One that fails once the
+medium carries the new state stops the handle too, the staged state kept
+as its read view, for the journal's replay, a checker, or a later explicit
+flush to finish.
+
+**Allocation.** Blocks come near the inode's group and the previous block
+of the file, in runs of up to one maximal extent; a lazily initialised
+group's bitmap is derived from the layout and checked against its
+descriptor's free count before it is first used, and a group whose
+derivation disagrees is left alone. Directories spread across groups.
+Freed blocks return to the bitmaps when their transaction commits.
+Descriptors and inode records are verified on every read, even from a
+block the transaction has staged.
+
+**Files.** New files are extent-mapped on an `extent` volume and
+classic-mapped otherwise; an extent tree splits and grows to the format's
+depth. A write fills a hole with fresh zeroed blocks, converts an unwritten
+range as it writes it, and overwrites in place. A truncate or delete frees
+in bounded passes; one spanning transactions is put on the orphan chain
+first and finished at the next mount if a crash interrupts it, the orphan
+file a newer kernel keeps drained the same way.
+
+**Protected inodes.** The flags `chattr` sets hold against every principal,
+the owner included. An immutable inode refuses every change: a write, a
+truncate, a change of owner or mode, a rename, a removal, and a new entry in
+an immutable directory. An append-only one takes writes at its end, and an
+append-only directory new entries; nothing else.
 
 ### Timestamps
 
@@ -222,114 +257,73 @@ as an orphan-list inode number, and a fixed non-zero marker otherwise.
 
 ### Checksums and wide descriptors
 
-The write path maintains every on-disk checksum a volume carries, so a
-default `mkfs.ext4` image (`metadata_csum`, `extent`, `64bit`) is mutated
-in place. The checksum primitives are **first-party** — a storage
-checksum is not a cryptographic primitive, so `AGENTS.md` §2.12's "never
-roll your own" does not apply:
+The write path maintains every on-disk checksum a volume carries. The
+checksum primitives are first-party: a storage checksum is not a
+cryptographic primitive.
 
 - **`metadata_csum`** uses crc32c (reversed polynomial `0x82F6_3B78`,
-  seeded with `crc32c(~0, s_uuid)`) — `lib/crc32c`'s, its dispatched
+  seeded with `s_checksum_seed` where the volume records one, else
+  `crc32c(~0, s_uuid)`) — `lib/crc32c`'s, its dispatched
   hardware instruction continuing each seed as a raw register — for the
   superblock `s_checksum`, each group descriptor `bg_checksum`, the
   block/inode-bitmap checksums, every inode (`i_checksum_lo`/`hi`, seeded
   per inode by number and generation), each directory leaf's
-  `ext4_dir_entry_tail`, each index block's `dx_tail`, and each allocated
-  extent block's `ext4_extent_tail`.
+  `ext4_dir_entry_tail`, each index block's `dx_tail`, each extent
+  block's `ext4_extent_tail`, each attribute block, and each orphan-file
+  block.
 - **`gdt_csum`/`uninit_bg`** uses crc16 (reversed polynomial `0xA001`)
   for the legacy group-descriptor checksum.
 - **`64bit`** descriptors carry the high halves of the bitmap checksums
   and `bg_itable_unused`, which the allocator also maintains.
 
-Mutation still **fails closed** (`DriverError::Unsupported`) on a feature
-the write path cannot maintain — anything outside the supported
-`incompat`/`ro_compat` allow-list, e.g. `bigalloc`, `meta_bg`,
-`inline_data`, or an explicit `checksum_seed` (which would invalidate the
-uuid-derived seed) — and on an uninitialised block group
-(`BLOCK_UNINIT`/`INODE_UNINIT`). `remove`/`truncate` of a file whose
-mapping is neither the classic map nor a depth-0/depth-1 extent tree,
-and growing an extent tree beyond a single index level (depth ≥ 2), are
-refused rather than orphaning blocks or half-building a tree. Such
-volumes stay fully **readable**. This is a deliberate, documented
-boundary (`AGENTS.md` §2.1 / §5.4), not a silent best-effort.
-
 ## Formatting (mkfs)
 
-`Ext4::format(block, inode_count)` lays a fresh, empty volume onto a
-blank `Block` device and returns it mounted — the write-side counterpart
-of `open()`, with no `mkfs` shell-out (`AGENTS.md` §12/§2.12). After
-`format()` the bytes are handed straight to `open()`, which remains the
-single source of truth for the on-disk layout.
-
-The formatter writes a deliberately conservative shape the read/write
-path fully supports: `filetype` + `extent`, and `extra_isize` (no
-`metadata_csum`, `gdt_csum`, or `64bit`, so no checksum maintenance is
-needed), 256-byte inodes whose enlarged region holds every timestamp at its
-widest, 32-byte group descriptors, block size 4096 bytes for volumes
-≥ 128 MiB and 1024 bytes otherwise, and `blocks_per_group = 8 *
-block_size`. Only whole groups are laid down — so the reader's group
-count is exact — and **every** group is fully materialised (no
-lazy/`UNINIT` groups), so the volume can be filled to exhaustion. The
-reserved inodes 1..=10 and an extent-mapped empty root directory
-(inode 2) are written; `inode_count` is the minimum total inode budget,
-rounded up to a whole number of inodes per group (≥ 16 per group).
-
-Allocation past the free data blocks or the inode budget fails with
-`DriverError::NoSpace` (POSIX `ENOSPC`), distinct from `DeviceFault`
-(`AGENTS.md` §5.4 / §2.9); a device too small for one group plus a data
-region, or a zero `inode_count`, is refused with `OutOfRange`. Files
-created on a formatted volume use the classic block map, so a single
-file reaches at most 12 direct + one single-indirect block.
+`Ext4::format(block, inode_count, uuid)` lays a fresh, empty volume onto a
+blank device, makes it durable, and opens it. It writes an unjournaled
+`filetype` + `extent` + `extra_isize` volume with 256-byte inodes, 32-byte
+descriptors, 4 KiB blocks from 128 MiB up and 1 KiB below, and every group
+materialised. Only group 0 carries a superblock and descriptor table,
+which `sparse_super2` with no backup groups declares. `inode_count` is a
+minimum, rounded up to a whole number per group, at least 16; a device too
+small for one group, a zero count or the nil `uuid` is refused with
+`OutOfRange`.
 
 ## Capabilities
 
-Loading requires `CAP_DRV_LOAD`; the `FilesystemRead` methods are reached
-only through the `DriverHandle` the host minted at load time. The driver
-runs in user space and does not request `CAP_DRV_KERNEL`.
+Loading requires `CAP_DRV_LOAD`; every other call is reached through the
+handle the host minted at load. The kernel's runtime volume service links
+the driver and serves it in-kernel today.
 
 ## Tests
 
-`cargo test -p tairix-drv-fs-ext4` builds an in-memory ext4 image (block
-size 1024, one block group, 128-byte inodes, `filetype` on, with block
-and inode bitmaps and free space) holding an extent-mapped root, an
-extent-mapped file, a subdirectory with a nested file, and a classic
-block-mapped file that combines direct pointers, sparse holes, and a
-single-indirect block. The host-side tests cover superblock
-validation, `node_info`, ordered listing with `.`/`..` suppression and
-end-of-directory, `lookup` and subdirectory traversal, extent and
-classic reads (including across holes and the direct/indirect boundary),
-the `Unsupported`/`BufferTooSmall`/`NotFound` guards, the `register`
-capability gate, the `FilesystemSecurity::security` record for a file
-and a directory, and the write surface: create + multi-block write
-round-trips (persisting across a remount), duplicate / invalid-name /
-non-directory rejection, sparse extension, `truncate` shrink-then-grow,
-directory creation with `.`/`..` and removal (empty vs.
-`DirectoryNotEmpty`), inode
-reuse after `remove`, the `write_at`/`truncate` directory and
-not-found guards, free-inode exhaustion, the fail-closed refusal of
-mutation on an unsupported (`checksum_seed`) feature set, the depth-0 →
-depth-1 extent-tree growth (sparse writes that overflow the inline root,
-with read-back and remount persistence, a sparse hole between extents,
-and depth-1 `truncate`-to-zero and `remove` freeing and reusing the
-tree's blocks), and the POSIX-ACL decode —
-standalone `decode`/`find` units (both value-base conventions, bad
-version, the inline budget cap, unrelated attributes) plus end-to-end
-`security` reads of an external xattr block, a garbage block, and an
-inline ACL in a 256-byte-inode volume. The timestamp tests decode every
-epoch of the extended layout, round-trip each record's range and refuse
-past it, and stamp each write operation under a test clock, with no stamp
-while the clock has no time and the deletion time a freed inode records.
+`cargo test -p tairix-drv-fs-ext4` runs each module's tests and the
+driver's over hand-built images and volumes e2fsprogs 1.47.0 made
+(`tests/fixtures`; the larger ones kept as `TXSPARSE` images, their
+all-zero blocks left out):
 
-A separate integration suite (`tests/checksummed.rs`) validates the
-checksum maintenance against **real `mke2fs 1.47.0`** images committed
-under `tests/fixtures/` — one `metadata_csum,extent,64bit` volume and one
-legacy `gdt_csum` volume. It recomputes every on-disk checksum with an
-*independent* crc implementation, both on the pristine fixture (proving
-the reference crc matches `mke2fs`) and after a
-`create`/`write`/`truncate`/`mkdir`/`remove` cycle (proving the driver
-wrote correct checksums); the mutated images also pass `e2fsck -f`
-cleanly. A `pjdfstest`-equivalent POSIX suite and an end-to-end QEMU
-vertical remain future work.
+- extent trees and the classic map: lookup, insertion with merging,
+  splitting and growth to the depth limit, bounded truncation, marking
+  unwritten ranges written;
+- the journal: replay of `debugfs`-written logs with revokes and an
+  escaped block, wraparound, revocation across a wrapped transaction id,
+  a commit block whose write fails, and emptying a quiet log;
+- allocation over lazily initialised groups, the reserve, deferred frees,
+  descriptors verified in a staged block;
+- ACLs from external blocks and inode bodies, a `chmod` moving the mask,
+  a shared block copied before it changes, malformed ACLs refused;
+- commits that fail before and after the medium changes, and a journaled
+  commit torn after its commit block replayed at the next mount;
+- and the read and write surfaces over the rest: listings, lookups,
+  symbolic links, timestamps, hard links, renames, a kernel-sized stack.
+
+`tests/checksummed.rs` recomputes every checksum of real `mke2fs` volumes
+with an independent crc after a write cycle.
+
+`tests/fuzz_ext4_mount.rs` is the fuzz harness `cargo xtask fuzz` runs: it
+mutates a formatted volume and the e2fsprogs fixtures — a journal needing
+recovery among them — and opens each read-only, then writable, replaying the
+journal and finishing orphans, walking, writing, committing and remounting;
+nothing may panic or hang.
 
 ## Extended-metadata representability
 
@@ -340,5 +334,5 @@ represent ARXFS extended attributes or foreign-filesystem preset metadata
 (`arxfs-spec.md` §21). Under the cross-filesystem preservation contract an
 exact-preservation copy of a file carrying such attributes onto ext4 reports
 `MetadataNotRepresentable`; a best-effort copy drops them only under an
-explicit, documented lossy policy. (ext4 xattr blocks are read today only to
-recover POSIX ACLs, not as a general key/value store.)
+explicit, documented lossy policy. (ext4 attributes are read only for POSIX
+ACLs and inline data, not as a general key/value store.)

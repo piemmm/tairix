@@ -527,6 +527,13 @@ pub enum DriverError {
     /// state again and acting on what it says now clears it. Maps to
     /// [`Errno::Stale`].
     Stale = 24,
+    /// The handle does not write: it was opened read-only, or the volume
+    /// stopped taking writes when a commit failed.
+    ///
+    /// Distinct from [`PermissionDenied`](Self::PermissionDenied), which
+    /// names the caller's authority over a node; this names the volume,
+    /// whoever asks. Maps to [`Errno::ReadOnly`].
+    ReadOnly = 25,
 }
 
 impl DriverError {
@@ -572,6 +579,7 @@ impl DriverError {
             22 => Ok(Self::OutOfMemory),
             23 => Ok(Self::NoBandwidth),
             24 => Ok(Self::Stale),
+            25 => Ok(Self::ReadOnly),
             _ => Err(Self::OutOfRange),
         }
     }
@@ -605,6 +613,7 @@ impl DriverError {
             Self::OutOfMemory => Errno::OutOfMemory,
             Self::NoBandwidth => Errno::NoBandwidth,
             Self::Stale => Errno::Stale,
+            Self::ReadOnly => Errno::ReadOnly,
             // A faulted device is its own client-visible condition; a busy
             // one is retryable (`WouldBlock`); an unsupported operation
             // reads as not implemented.
@@ -645,6 +654,7 @@ impl DriverError {
             Errno::NoSpace => Self::NoSpace,
             Errno::OutOfMemory => Self::OutOfMemory,
             Errno::NoBandwidth => Self::NoBandwidth,
+            Errno::ReadOnly => Self::ReadOnly,
             Errno::MediumError => Self::MediumError,
             Errno::DeviceOffline => Self::DeviceOffline,
             Errno::WouldBlock | Errno::EndpointStalled => Self::Busy,
@@ -1424,6 +1434,7 @@ mod tests {
         assert_eq!(DriverError::OutOfMemory.as_i32(), 22);
         assert_eq!(DriverError::NoBandwidth.as_i32(), 23);
         assert_eq!(DriverError::Stale.as_i32(), 24);
+        assert_eq!(DriverError::ReadOnly.as_i32(), 25);
     }
 
     #[test]
@@ -1466,6 +1477,7 @@ mod tests {
         assert_eq!(DriverError::OutOfMemory.as_errno(), Errno::OutOfMemory);
         assert_eq!(DriverError::NoBandwidth.as_errno(), Errno::NoBandwidth);
         assert_eq!(DriverError::Stale.as_errno(), Errno::Stale);
+        assert_eq!(DriverError::ReadOnly.as_errno(), Errno::ReadOnly);
     }
 
     #[test]
@@ -1495,12 +1507,13 @@ mod tests {
             DriverError::OutOfMemory,
             DriverError::NoBandwidth,
             DriverError::Stale,
+            DriverError::ReadOnly,
         ];
         for err in all {
             assert_eq!(DriverError::from_i32(err.as_i32()), Ok(err));
         }
         assert_eq!(DriverError::from_i32(0), Err(DriverError::OutOfRange));
-        assert_eq!(DriverError::from_i32(25), Err(DriverError::OutOfRange));
+        assert_eq!(DriverError::from_i32(26), Err(DriverError::OutOfRange));
         assert_eq!(DriverError::from_i32(-1), Err(DriverError::OutOfRange));
     }
 

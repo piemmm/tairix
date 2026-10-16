@@ -1,18 +1,21 @@
 //! The whole-disk block-level LRU cache (`plans/SMARTRAM.md` SMART11).
 //!
-//! [`BlockCache`] wraps the one brought-up boot disk *below* the
-//! block-sharing layer (`crate::shared_block::SharedBlock`), so every
-//! window onto the disk — the read-only `/System` driver-store window,
-//! the root-unlock window, and the writable-root window —
+//! [`BlockCache`] wraps a disk *below* the block-sharing layer
+//! (`crate::shared_block::SharedBlock`) — the brought-up boot disk and
+//! every attached removable device — so every window onto it (on the boot
+//! disk the read-only `/System` driver-store window, the root-unlock
+//! window and the writable-root window; on a removable one each volume's)
 //! reads through one coherent cache of recently used device blocks.
-//! It complements the higher layers rather than duplicating them:
 //! `kernel/core::fs::CachedFs` retains *served plaintext* per volume
 //! and the SMART3 `TransformClusterCache` retains *decompressed
 //! cluster plaintext*; this cache retains the raw device blocks
 //! underneath both, so their misses — and every uncached consumer of
 //! the disk (partition-table walks, driver-store scans, `ARXFS`
 //! metadata block reads) — avoid a device round-trip that otherwise
-//! parks the calling task across a completion interrupt.
+//! parks the calling task across a completion interrupt. Beneath a
+//! filesystem that stores its data as is (FAT32, ext4) a block served
+//! from above is held here too, under a separate budget
+//! (`plans/OPEN-DEFECTS.md` D1082).
 //!
 //! # Classification, budget, pressure
 //!
@@ -88,10 +91,12 @@ use zeroize::Zeroize;
 /// The fixed `cache` label this cache's audit records carry.
 const CACHE_LABEL: &str = "block";
 
-/// The stable subsystem identifier the cache's memory is charged to:
-/// the whole-disk layer below every mounted volume, so no single
-/// volume identity fits.
-const OWNER_SUBSYSTEM: &str = "boot_block_device";
+/// The stable subsystem identifier a disk cache's memory is charged to:
+/// the whole-disk layer below every volume on it, so no single volume
+/// identity fits.
+pub const BOOT_DISK_OWNER: &str = "boot_block_device";
+/// The same for the disk of an attached removable device.
+pub const REMOVABLE_DISK_OWNER: &str = "removable_block_device";
 
 /// Readahead only drives off *small* requests: one already this wide
 /// amortises its own device round-trip, so speculating past it wins nothing
@@ -195,12 +200,13 @@ impl<B: Block> BlockCache<B> {
     /// refuses it.
     pub fn new(
         device: B,
+        owner: &'static str,
         budget: CacheBudget,
         pressure: &'static MemoryPressure,
         sink: &'static (dyn Sink + Sync),
     ) -> Result<Self, DriverError> {
         let geometry = device.geometry()?;
-        let owner = ReclaimOwner::KernelSubsystem(OWNER_SUBSYSTEM);
+        let owner = ReclaimOwner::KernelSubsystem(owner);
         let candidate = CacheCandidate {
             class: Some(ReclaimClass::CleanFileData),
             owner: Some(owner),
@@ -239,21 +245,23 @@ impl<B: Block> BlockCache<B> {
         Ok(cache)
     }
 
-    /// The cache the boot path wraps the one brought-up disk in before
-    /// the block-sharing layer, budgeted from discovered RAM exactly like
-    /// the volume caches above it and governed by the system `pressure`
-    /// gauge.
+    /// The cache a disk is wrapped in before the block-sharing layer, its
+    /// memory charged to subsystem `owner`, budgeted from discovered RAM
+    /// exactly like the volume caches above it and governed by the system
+    /// `pressure` gauge.
     ///
     /// # Errors
     ///
     /// Propagates [`Block::geometry`]'s error, exactly as [`Self::new`].
-    pub fn for_boot_disk(
+    pub fn for_disk(
         device: B,
+        owner: &'static str,
         pressure: &'static MemoryPressure,
         sink: &'static (dyn Sink + Sync),
     ) -> Result<Self, DriverError> {
         Self::new(
             device,
+            owner,
             // Budget from discovered physical RAM (the kernel heap is now
             // growable, so its bootstrap size is no longer the memory to size
             // a cache against); falls back to the bootstrap size before the
@@ -380,7 +388,7 @@ impl<B: Block> BlockCache<B> {
 
     /// Drop every entry, wiping all payload and rebalancing the ledger
     /// to empty. Every whole-cache drain is counted as a teardown.
-    fn drop_all(&mut self) {
+    pub(crate) fn drop_all(&mut self) {
         self.accounting.record_teardown(ReclaimClass::CleanFileData);
         for entry in self.entries.values_mut() {
             Self::wipe(&mut entry.data);

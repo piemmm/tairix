@@ -495,8 +495,9 @@ device fault that leaves the map's image genuinely ambiguous does the same and
 demands the rebuild; nothing else does.
 
 The blocks and allocation-map pages use the one dirty layer beneath the
-driver's device-write seam (`wcache`): a physical-block-keyed set of sealed
-blocks with pre- and post-barrier phases that replaces on
+driver's device-write seam, the write-back core's `DirtySet` (`lib/writeback`):
+a physical-block-keyed set of sealed blocks with pre- and post-barrier phases
+that replaces on
 rewrite, so the repeated copy-on-writes of one B-tree node cost one device write
 rather than one each — 746 device writes down to 158 for a 64 KiB write on a
 512-byte volume. It is read-through, so a read-after-write inside the
@@ -651,8 +652,10 @@ permission decision itself: the VFS is the policy point (`AGENTS.md` §5.4).
   each fails closed with `PermissionDenied`.
 - The read/write methods are reached only through the `DriverHandle` the
   host minted at load time, and the VFS only delegates a write to a
-  non-`READ_ONLY` mount. The driver runs in user space; it does not
-  request `CAP_DRV_KERNEL`.
+  non-`READ_ONLY` mount. The kernel links the driver and serves it
+  in-kernel, the root volume and runtime volumes alike; serving drivers
+  that parse removable media from user space is open work
+  (`plans/OPEN-DEFECTS.md`).
 
 ## Test surface
 

@@ -54,6 +54,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::num::NonZeroUsize;
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
@@ -91,7 +92,6 @@ mod scrub;
 mod superblock;
 mod transaction;
 mod unlock;
-mod wcache;
 mod xform;
 
 #[cfg(test)]
@@ -124,8 +124,10 @@ use dedupe::{
 use header::{BlockHeader, BlockType, ReservedOwner, HEADER_LEN};
 use reserve::Draw;
 use superblock::{slot_block, Superblock, RING_BLOCKS, RING_SLOTS};
+use tairix_writeback::{
+    CommitScheduler, DirtySet, RunWindow, WritePhase, WritebackBound, WritebackReading, RUN_BYTES,
+};
 use transaction::TxnRoot;
-use wcache::{CommitScheduler, DirtySet, WritePhase, WritebackBound, WritebackReading};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
 const REGISTER_HANDLE_MARKER: u64 = 0x5275_7374_4653_0002;
@@ -208,66 +210,10 @@ const _: () = assert!(
 /// Smallest block size the format supports.
 const MIN_BLOCK_SIZE: usize = 512;
 
-/// Bytes one coalesced device request covers, in either direction.
-///
-/// A storage controller moves this much on a single DMA transfer, so both
-/// directions gather contiguous blocks up to it rather than paying a command
-/// and a completion wait per block: a read spanning one extent's physical run
-/// asks the device once for the whole run, and the commit drain issues one
-/// write per run of adjacent staged blocks. The window also bounds the staging
-/// each allocates — a longer run loops — so many volumes on a small machine
-/// stay bounded.
-pub const RUN_BYTES: usize = 64 * 1024;
-
 // A run must cover at least one block of every supported geometry, so a
 // transfer always makes progress, and a whole number of them, so no request is
-// misaligned. Held at compile time: the run length needs no runtime clamp.
+// misaligned.
 const _: () = assert!(RUN_BYTES >= MAX_BLOCK_SIZE && RUN_BYTES.is_multiple_of(MAX_BLOCK_SIZE));
-
-/// A bounded staging window for one coalesced device run, in either direction.
-///
-/// Fallibly reserved, so a machine too short of memory to hold it does slower
-/// I/O rather than failing the operation (deterministic OOM, never a panic),
-/// and wiped on drop: a read's window holds decrypted user content and the
-/// commit drain's holds sealed blocks.
-struct RunWindow {
-    bytes: Vec<u8>,
-}
-
-impl RunWindow {
-    /// A window of `span` bytes, or none when `span` is zero or the
-    /// reservation is refused.
-    fn new(span: usize) -> Self {
-        let mut bytes = Vec::new();
-        // A fallible reservation, then the zeroing a fill needs: `vec![0;
-        // span]` aborts the whole system on allocation failure, where an I/O
-        // path must fall back to its per-block form instead.
-        if span > 0 && bytes.try_reserve_exact(span).is_ok() {
-            bytes.resize(span, 0);
-        }
-        Self { bytes }
-    }
-
-    /// Whether the window is absent, and the caller must fall back.
-    fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    /// The staging bytes, or `None` when there is no window.
-    fn buf(&mut self) -> Option<&mut [u8]> {
-        if self.bytes.is_empty() {
-            None
-        } else {
-            Some(&mut self.bytes)
-        }
-    }
-}
-
-impl Drop for RunWindow {
-    fn drop(&mut self) {
-        self.bytes.zeroize();
-    }
-}
 
 /// Staging for the coalesced run reads of one serving read
 /// ([`ARXFS::read_block_run`]).
@@ -861,7 +807,7 @@ pub struct ARXFS<B: Block> {
     /// The published state the open transaction started from, restored when a
     /// commit fails and the whole transaction is abandoned.
     saved_txn: Roots,
-    /// When the open transaction must be published (`wcache` module).
+    /// When the open transaction must be published.
     schedule: CommitScheduler,
     /// When `true`, the handle never mutates the backing device: the
     /// repair-on-read paths (`read_meta`, and the mount's repair of the slot
@@ -885,13 +831,13 @@ pub struct ARXFS<B: Block> {
     /// the first mutation, so a read-only handle never pays for one.
     tree_edit: Option<btree::TreeEdit>,
     /// Sealed blocks the open transaction has written but not yet sent to the
-    /// device (`wcache` module). [`Self::commit`] drains it,
+    /// device. [`Self::commit`] drains it,
     /// [`Self::rollback`] undoes the running operation's share of it, and
     /// [`Self::stage_block`] refuses a read-only handle, so a read-only mount
     /// never holds one block here nor pays a byte for it.
     dirty: DirtySet,
     /// The RAM-derived byte ceiling, pressure gauge, and pinned ledger the
-    /// dirty set is held to (`wcache` module), or `None` for a handle the
+    /// dirty set is held to, or `None` for a handle the
     /// host has not bounded.
     bound: Option<WritebackBound>,
     /// What the gauge told the running operation: the band its window is
@@ -1119,7 +1065,7 @@ impl<B: Block> ARXFS<B> {
 
     /// Install the host for the mount registered as `volume`: its write-back
     /// timer, which is what lets a transaction stay open across operations
-    /// (`wcache` module), and the listener for the volume's reserve.
+    /// and the listener for the volume's reserve.
     ///
     /// The builder form of [`FilesystemWrite::set_volume_host`], for a
     /// caller holding the driver before it is boxed behind the trait.
@@ -1217,7 +1163,7 @@ impl<B: Block> ARXFS<B> {
     /// * [`DriverError::Unsupported`] if `dir` is not a directory or the
     ///   source is not a regular file.
     /// * [`DriverError::LengthOutOfRange`] if `dst_name` is empty or too long.
-    /// * [`DriverError::PermissionDenied`] if the handle is read-only — the
+    /// * [`DriverError::ReadOnly`] if the handle is read-only — the
     ///   refusal is returned **before** any state is touched, so a read-only
     ///   `/System` mount never dirties the device.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block or metadata
@@ -2266,7 +2212,7 @@ impl<B: Block> ARXFS<B> {
     /// for any internal write path that does not funnel through here.
     fn deny_if_read_only(&self) -> Result<(), DriverError> {
         if self.read_only {
-            return Err(DriverError::PermissionDenied);
+            return Err(DriverError::ReadOnly);
         }
         Ok(())
     }
@@ -2288,7 +2234,7 @@ impl<B: Block> ARXFS<B> {
         // whole mutation closed — the read-only `/System`
         // mount can be read but never written.
         if self.read_only {
-            return Err(DriverError::PermissionDenied);
+            return Err(DriverError::ReadOnly);
         }
         // A commit reached without an operation — an internal publish of state
         // built outside one — is a transaction of its own, so the snapshot a
@@ -2434,13 +2380,15 @@ impl<B: Block> ARXFS<B> {
 
     /// The device's block size and block count, refused unless a volume can
     /// be laid on them.
-    fn checked_geometry(block: &B) -> Result<(usize, u64), DriverError> {
+    fn checked_geometry(block: &B) -> Result<(NonZeroUsize, u64), DriverError> {
         let geo = block.geometry()?;
-        let block_size = usize::try_from(geo.block_size).map_err(|_| DriverError::Unsupported)?;
-        if !(MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size) || !block_size.is_power_of_two()
-        {
-            return Err(DriverError::Unsupported);
-        }
+        let block_size = usize::try_from(geo.block_size)
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .filter(|size| {
+                (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&size.get()) && size.is_power_of_two()
+            })
+            .ok_or(DriverError::Unsupported)?;
         if geo.block_count <= RING_BLOCKS + 8 {
             return Err(DriverError::NoSpace);
         }
@@ -2461,7 +2409,7 @@ impl<B: Block> ARXFS<B> {
     /// [`Self::checked_geometry`]), sealed as `established` says.
     fn bootstrap(
         block: B,
-        (block_size, total_blocks): (usize, u64),
+        (block_size, total_blocks): (NonZeroUsize, u64),
         established: Established,
     ) -> Self {
         let class = block.device_class();
@@ -2475,7 +2423,7 @@ impl<B: Block> ARXFS<B> {
             fs_uuid,
             protection,
             crypto_header,
-            block_size,
+            block_size: block_size.get(),
             total_blocks,
             inode_hint: 0,
             generation: 0,
@@ -2660,7 +2608,7 @@ impl<B: Block> ARXFS<B> {
     ///   or every copy that claims to be arxfs names no protection.
     /// * [`DriverError`] from the device if no copy can be read at all.
     pub fn probe_protection(block: &mut B) -> Result<VolumeProtection, DriverError> {
-        let (block_size, _) = Self::checked_geometry(block)?;
+        let block_size = Self::checked_geometry(block)?.0.get();
         let mut buf = [0u8; MAX_BLOCK_SIZE];
         let (claim, walk) = Self::walk_copies(
             block,
@@ -2727,7 +2675,7 @@ impl<B: Block> ARXFS<B> {
     /// block is ever written to the device, neither the mount-time
     /// companion-mirror repairs (the internal read paths skip them on a
     /// read-only handle) nor any later mutation — every mutating operation
-    /// fails closed with [`DriverError::PermissionDenied`], never a panic.
+    /// fails closed with [`DriverError::ReadOnly`], never a panic.
     ///
     /// This is how the boot path mounts the read-only, signed-bundle
     /// `/System` volume (the design-B pre-unlock driver store,
@@ -2747,7 +2695,7 @@ impl<B: Block> ARXFS<B> {
     /// `read_only` is set the handle never writes the device (one open path for both modes).
     fn open_inner(mut block: B, keying: Keying<'_>, read_only: bool) -> Result<Self, DriverError> {
         let geometry = Self::checked_geometry(&block)?;
-        let established = Self::establish(&mut block, geometry.0, keying, Pin::Verified)?;
+        let established = Self::establish(&mut block, geometry.0.get(), keying, Pin::Verified)?;
         let mut fs = Self::bootstrap(block, geometry, established);
         // Set before anything is read as metadata, so a read-only handle's
         // mount repairs nothing.
@@ -2919,16 +2867,15 @@ impl<B: Block> ARXFS<B> {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::Unsupported`] if the handle is read-only, the device
-    ///   block size has changed, or the device is now *smaller* than the
-    ///   committed filesystem size (an attempted online shrink).
+    /// * [`DriverError::ReadOnly`] if the handle is read-only.
+    /// * [`DriverError::Unsupported`] if the device block size has changed,
+    ///   or the device is now *smaller* than the committed filesystem size
+    ///   (an attempted online shrink).
     /// * [`DriverError::DeviceFault`] / [`DriverError::NoSpace`] on an
     ///   unrecoverable failure while committing the new size (fail-closed) — the in-memory geometry is restored so the
     ///   handle stays consistent with the still-committed on-disk size.
     pub fn grow(&mut self) -> Result<u64, DriverError> {
-        if self.read_only {
-            return Err(DriverError::Unsupported);
-        }
+        self.deny_if_read_only()?;
         let geo = self.block.geometry()?;
         if geo.block_size as usize != self.block_size {
             return Err(DriverError::Unsupported);
@@ -4490,7 +4437,7 @@ impl<B: Block> ARXFS<B> {
     ///
     /// # Errors
     ///
-    /// * [`DriverError::PermissionDenied`] if the handle is read-only — the
+    /// * [`DriverError::ReadOnly`] if the handle is read-only — the
     ///   refusal is returned **before** any state is touched, so a read-only
     ///   `/System` mount never dirties the device.
     /// * [`DriverError::NotFound`] if `node` does not name a live inode.

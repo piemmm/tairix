@@ -154,6 +154,7 @@ members = [
     "lib/vt",
     "lib/wallpaper",
     "lib/window",
+    "lib/writeback",
 
     # Drivers — display
     "drivers/display/vesa",

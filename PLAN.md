@@ -127,6 +127,9 @@ plan's ledger. A `blocked` row names its blocker.
 | NEW-NAMESPACE | Boot namespace assembly from signed policy (`plans/NEW-NAMESPACE.md`) | planned |
 | FIX-IO | Storage I/O fault isolation (`plans/FIX-IO.md`) | in progress |
 | DEVICES | `lspci`/`lsusb`, USB mass storage, hotplug automount (`plans/DEVICES.md`) | done |
+| EXT4-RW | ext2/ext3/ext4 written as Linux leaves them: jbd2 journaling and crash replay, every checksum, lazily initialised groups, extent trees to full depth, indexed directories, POSIX ACLs, over the shared `lib/writeback` core | done |
+| EXFAT | An exFAT driver, for the removable drives other systems format | planned |
+| FS-USERSPACE | Serve the filesystem drivers that parse removable media from user space (`plans/OPEN-DEFECTS.md`) | planned |
 
 ### Drivers, devices and graphics hardware
 
@@ -416,10 +419,14 @@ fail-closed `Metadata::authorize` that never branches on `uid == 0`, and mounts
 `/System` read-only with `Logs` and `Settings` writable. The OS authors only the
 four root-view names; the VFS reserves no error for a legacy name, and a
 top-level create is ordinary write permission on `/`. Drivers: `arxfs`
-(native), `ext4` (read and write, with `metadata_csum` validated against
-`mke2fs`/`e2fsck`), `fat32`, and `adfs` (every Acorn FileCore format, with RISC
-OS metadata carried by `lib/fsmeta`'s `acorn.*` keys). Each ships a first-party
-`format` and fails with `NoSpace` on exhaustion. Coverage: the `posix_fs_suite`
+(native), `ext4` (ext2, ext3 and ext4 read and written as Linux leaves them —
+journaled, with crash replay, every checksum maintained and POSIX ACLs honoured
+— validated against `mke2fs`/`e2fsck`), `fat32`, and `adfs` (every Acorn
+FileCore format, with RISC OS metadata carried by `lib/fsmeta`'s `acorn.*`
+keys). Each ships a first-party `format` and fails with `NoSpace` on
+exhaustion. The write-back core ARXFS and ext4 share — the dirty set with
+per-operation undo, the machine-wide bound, the commit window — is
+`lib/writeback`. Coverage: the `posix_fs_suite`
 (pjdfstest-equivalent), `fs_soak` (`cargo xtask fssoak`, every formatter over a
 1 GiB `RamBlock`), and the ARXFS-over-virtio-blk vertical.
 

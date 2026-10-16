@@ -17,10 +17,13 @@
 //!    through to the mode bits.
 //! 3. **Mode bits.** The owner / owning-group / other triad is selected by
 //!    the caller's identity and the requested `rwx` bit is checked.
+//!
+//! A POSIX access ACL ([`PosixAcl`]) replaces the second and third layers
+//! with POSIX.1e's own order.
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::filesystem::{NodeSecurity, SecuritySubject};
+use tairix_abi::driver::filesystem::{AclModel, NodeSecurity, SecuritySubject, MAX_ACL_ENTRIES};
 use tairix_abi::CapabilityId;
 use tairix_abi::CapabilityQuery;
 use tairix_kernel_sec::{GroupId, UserId};
@@ -161,6 +164,33 @@ pub struct Metadata {
     pub required_cap: Option<CapabilityId>,
     /// Explicit allow/deny entries, consulted before the mode bits.
     pub acl: Vec<AclEntry>,
+    /// The node's POSIX access ACL, which, when present, decides alone below
+    /// the capability gate.
+    pub posix: Option<PosixAcl>,
+}
+
+/// A POSIX access ACL: the owning group's own entry, the named users' and
+/// groups' entries, and the mask every named entry and the group class are
+/// held under, each an `rwx` triad.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PosixAcl {
+    /// The owning group's entry.
+    pub group_obj: u16,
+    /// The mask.
+    pub mask: u16,
+    /// The named entries, each kept whole: one granting nothing still decides
+    /// its principal's access. Sized as the driver's record is, so every
+    /// entry it holds has a slot.
+    pub named: [Option<PosixEntry>; MAX_ACL_ENTRIES],
+}
+
+/// One named entry of a [`PosixAcl`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PosixEntry {
+    /// The user or group it names.
+    pub who: AclWho,
+    /// What it grants, before the mask.
+    pub rwx: u16,
 }
 
 impl Metadata {
@@ -174,6 +204,7 @@ impl Metadata {
             mode,
             required_cap: None,
             acl: Vec::new(),
+            posix: None,
         }
     }
 
@@ -183,27 +214,45 @@ impl Metadata {
     /// This is the bridge that lets a driver such as `arxfs`, which stores
     /// full per-inode ownership, mode bits, an ACL, and an optional
     /// capability gate, drive the decision instead of a uniform
-    /// mount-point template. Each grant-only driver ACL entry expands into
-    /// one *allow* [`AclEntry`] per `rwx` bit it grants; the driver surface
-    /// carries no explicit deny.
+    /// mount-point template. Each additive driver ACL entry expands into one
+    /// *allow* [`AclEntry`] per `rwx` bit it carries; the driver surface
+    /// carries no explicit deny. A POSIX record becomes a [`PosixAcl`].
     #[must_use]
     pub fn from_node_security(sec: &NodeSecurity) -> Self {
         let mode = Mode::from_bits(u16::try_from(sec.mode & 0o7777).unwrap_or(0));
         let mut meta = Self::new(UserId(sec.uid), GroupId(sec.gid), mode);
         meta.required_cap = sec.required_cap;
-        for entry in sec.acl() {
-            let who = match entry.subject {
-                SecuritySubject::User(id) => AclWho::User(UserId(id)),
-                SecuritySubject::Group(id) => AclWho::Group(GroupId(id)),
-            };
-            for access in [Access::Read, Access::Write, Access::Execute] {
-                if u16::from(entry.perms) & access.bit() != 0 {
-                    meta.acl.push(AclEntry {
-                        who,
-                        access,
-                        allow: true,
+        let who = |subject| match subject {
+            SecuritySubject::User(id) => AclWho::User(UserId(id)),
+            SecuritySubject::Group(id) => AclWho::Group(GroupId(id)),
+        };
+        match sec.acl_model {
+            AclModel::Additive => {
+                for entry in sec.acl() {
+                    for access in [Access::Read, Access::Write, Access::Execute] {
+                        if u16::from(entry.perms) & access.bit() != 0 {
+                            meta.acl.push(AclEntry {
+                                who: who(entry.subject),
+                                access,
+                                allow: true,
+                            });
+                        }
+                    }
+                }
+            }
+            AclModel::Posix { group_obj, mask } => {
+                let mut named = [None; MAX_ACL_ENTRIES];
+                for (slot, entry) in named.iter_mut().zip(sec.acl()) {
+                    *slot = Some(PosixEntry {
+                        who: who(entry.subject),
+                        rwx: u16::from(entry.perms) & 0b111,
                     });
                 }
+                meta.posix = Some(PosixAcl {
+                    group_obj: u16::from(group_obj) & 0b111,
+                    mask: u16::from(mask) & 0b111,
+                    named,
+                });
             }
         }
         meta
@@ -220,6 +269,14 @@ impl Metadata {
             if !cred.caps.holds(cap) {
                 return Err(VfsError::PermissionDenied);
             }
+        }
+
+        if let Some(acl) = self.posix {
+            return if self.posix_rwx(&acl, cred) & access.bit() != 0 {
+                Ok(())
+            } else {
+                Err(VfsError::PermissionDenied)
+            };
         }
 
         match self.acl_decision(cred, access) {
@@ -250,6 +307,34 @@ impl Metadata {
             allowed = Some(true);
         }
         allowed
+    }
+
+    /// What a POSIX access ACL grants `cred`, in POSIX.1e's order: the owner
+    /// by the owner triad alone; a named user by its entry under the mask; a
+    /// caller in the owning group or a named group by the union of those
+    /// entries under the mask, which is then final; anyone else by the other
+    /// triad.
+    fn posix_rwx(&self, acl: &PosixAcl, cred: &Credentials<'_>) -> u16 {
+        if cred.uid == self.owner {
+            return self.mode.owner_rwx();
+        }
+        let granted = |names: &dyn Fn(AclWho) -> bool| -> Option<u16> {
+            acl.named
+                .iter()
+                .flatten()
+                .filter(|entry| names(entry.who))
+                .map(|entry| entry.rwx)
+                .reduce(|a, b| a | b)
+        };
+        if let Some(rwx) = granted(&|who| matches!(who, AclWho::User(uid) if uid == cred.uid)) {
+            return rwx & acl.mask;
+        }
+        let owning = cred.is_in_group(self.group).then_some(acl.group_obj);
+        let named = granted(&|who| matches!(who, AclWho::Group(gid) if cred.is_in_group(gid)));
+        match owning.into_iter().chain(named).reduce(|a, b| a | b) {
+            Some(rwx) => rwx & acl.mask,
+            None => self.mode.other_rwx(),
+        }
     }
 
     /// `true` if `who` names a principal the caller acts as.
@@ -436,5 +521,125 @@ mod tests {
             meta.authorize(&member, Access::Execute),
             Err(VfsError::PermissionDenied)
         );
+    }
+
+    /// A POSIX access ACL as `setfacl` would leave it: owner `rw-`, owning
+    /// group `r--`, named user 20 `rwx`, named group 30 `-w-`, mask `r-x`,
+    /// other `r--` — so the mode's group triad mirrors the mask.
+    fn posix_meta() -> Metadata {
+        use tairix_abi::driver::filesystem::{NodeSecurity, SecurityAcl, SecuritySubject};
+
+        let mut sec = NodeSecurity::new(0o654, 7, 3);
+        sec.acl_model = AclModel::Posix {
+            group_obj: 0b100,
+            mask: 0b101,
+        };
+        for (subject, perms) in [
+            (SecuritySubject::User(20), 0b111),
+            (SecuritySubject::Group(30), 0b010),
+        ] {
+            sec.push_acl(SecurityAcl { subject, perms }).expect("acl");
+        }
+        Metadata::from_node_security(&sec)
+    }
+
+    fn rwx(meta: &Metadata, cred: &Credentials<'_>) -> [bool; 3] {
+        [Access::Read, Access::Write, Access::Execute].map(|a| meta.authorize(cred, a).is_ok())
+    }
+
+    #[test]
+    fn a_posix_named_user_is_held_to_the_mask_not_its_own_entry() {
+        let caps = CapabilitySet::empty();
+        let meta = posix_meta();
+        // rwx & mask r-x: write is masked away.
+        assert_eq!(rwx(&meta, &creds(20, 99, &[], &caps)), [true, false, true]);
+    }
+
+    #[test]
+    fn a_posix_owner_is_decided_by_the_owner_triad_alone() {
+        let caps = CapabilitySet::empty();
+        let meta = posix_meta();
+        // In the named group too, the owner still gets exactly `rw-`.
+        assert_eq!(
+            rwx(&meta, &creds(7, 3, &[GroupId(30)], &caps)),
+            [true, true, false]
+        );
+    }
+
+    #[test]
+    fn the_owning_group_gets_its_own_entry_under_the_mask_not_the_mask() {
+        let caps = CapabilitySet::empty();
+        let meta = posix_meta();
+        // group_obj r-- & mask r-x = r--, though the mode's group triad is
+        // r-x: the mirrored mask must not be read as the group's grant.
+        assert_eq!(rwx(&meta, &creds(8, 3, &[], &caps)), [true, false, false]);
+    }
+
+    #[test]
+    fn a_matched_group_class_never_falls_through_to_other() {
+        let caps = CapabilitySet::empty();
+        let meta = posix_meta();
+        // Named group 30 has -w-, masked to nothing; other would grant r--
+        // but a member of a matching group is refused rather than let
+        // through as other.
+        assert_eq!(
+            rwx(&meta, &creds(8, 1, &[GroupId(30)], &caps)),
+            [false, false, false]
+        );
+        // Anyone matching nothing gets the other triad.
+        assert_eq!(rwx(&meta, &creds(8, 1, &[], &caps)), [true, false, false]);
+    }
+
+    /// A POSIX record with `u:21:---` and `g:31:---` beside an other triad of
+    /// `r--`.
+    fn posix_meta_with_empty_entries() -> Metadata {
+        use tairix_abi::driver::filesystem::{NodeSecurity, SecurityAcl, SecuritySubject};
+
+        let mut sec = NodeSecurity::new(0o644, 7, 3);
+        sec.acl_model = AclModel::Posix {
+            group_obj: 0b100,
+            mask: 0b111,
+        };
+        for subject in [SecuritySubject::User(21), SecuritySubject::Group(31)] {
+            sec.push_acl(SecurityAcl { subject, perms: 0 })
+                .expect("acl");
+        }
+        Metadata::from_node_security(&sec)
+    }
+
+    /// An entry granting nothing is still the entry that names its user:
+    /// dropping it let that user through as other.
+    #[test]
+    fn a_posix_named_user_granted_nothing_is_refused_not_let_through_as_other() {
+        let caps = CapabilitySet::empty();
+        let meta = posix_meta_with_empty_entries();
+        assert_eq!(
+            rwx(&meta, &creds(21, 99, &[], &caps)),
+            [false, false, false]
+        );
+        assert_eq!(rwx(&meta, &creds(22, 99, &[], &caps)), [true, false, false]);
+    }
+
+    #[test]
+    fn a_posix_named_group_granted_nothing_is_refused_not_let_through_as_other() {
+        let caps = CapabilitySet::empty();
+        let meta = posix_meta_with_empty_entries();
+        assert_eq!(
+            rwx(&meta, &creds(22, 99, &[GroupId(31)], &caps)),
+            [false, false, false]
+        );
+        // In the owning group as well, its own entry still grants.
+        assert_eq!(
+            rwx(&meta, &creds(22, 3, &[GroupId(31)], &caps)),
+            [true, false, false]
+        );
+    }
+
+    #[test]
+    fn a_posix_record_still_answers_to_the_capability_gate() {
+        let caps = CapabilitySet::empty();
+        let mut meta = posix_meta();
+        meta.required_cap = Some(CapabilityId::AUDIT_READ);
+        assert_eq!(rwx(&meta, &creds(7, 3, &[], &caps)), [false, false, false]);
     }
 }

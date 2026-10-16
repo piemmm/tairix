@@ -198,7 +198,10 @@ answers which window has the keyboard and performs the raise.
 This is how the file manager keeps one window per folder: asked to show a
 folder a window of its own already shows — from its slot, its slot's menu, or
 a folder opened on the desktop — it activates that window rather than opening
-a second. A refused activation still shows the folder, in a new window.
+a second. The comparison is made again when a window's first listing lands,
+so a window that fell back from a folder it could not list to one already
+shown raises that window instead, stating why there. A refused activation
+still shows the folder, in a new window.
 
 ## An overlay is a popup surface, never pixels in the app's own window
 
@@ -622,12 +625,15 @@ tool** (a read-only command's position is unchanged whether or not write tools
 follow). The `files.app` `Run`
 binary routes a click on the tool — and the **Ctrl+Shift+N** keyboard
 equivalent — to a new folder: `NewEntry::suggest_name` names a
-non-clashing placeholder, `Browser::create_entry` creates it through the
-`fs_mkdir` seam under the user's own identity (**no new capability** — the
-per-inode owner/mode/ACL model gates it), and the inline rename opens on the
-new folder so the user names it at once. A refused create states its reason on
-`stderr` and leaves the listing put — an answer, not a crash (`AGENTS.md`
-§2.24, §5.4).
+non-clashing placeholder, `Browser::prepare_entry` spells it, and the reader
+thread makes it with `fs_mkdir` under the user's own identity (**no new
+capability** — the per-inode owner/mode/ACL model gates it); once it has, the
+inline rename opens on the new folder so the user names it at once. A refused
+create states its reason in the window and leaves the listing put — an answer,
+not a crash (`AGENTS.md` §2.24, §5.4). **Empty Trash** asks the reader to read
+what the Trash holds now, so the confirmation names exactly what a confirmed
+empty removes, never a listing on show that lags behind the Trash; it opens
+only if the window still shows the Trash with nothing else open over it.
 
 ### Activating an entry
 
@@ -769,7 +775,10 @@ was.
 - **The drop runs as a paste.** Dropped on one of its windows, the manager
   pastes into the folder at the point, in that window; dropped on the desktop,
   into the desktop folder, in the window the drag began in — through the same
-  interleaved, cancellable transfer Paste uses, after asking the policy again.
+  cancellable transfer Paste uses on the operations worker, after asking the
+  policy again. A drop that cannot begin — the folder no longer takes it, the
+  window is running an operation or still making a change — is stated in the
+  window, as a refused paste is.
 - **One file dropped on an application** is opened for it through the very
   `launch_viewer` path "Open With" uses, so the application receives the same
   authority whichever gesture chose it.
@@ -1760,8 +1769,8 @@ shared `render::build_delete_dialog` from the captured `DeletePlan`: the title
 names a single target or reports the honest count, and the message warns that
 folders (and their contents) are removed when the plan includes a directory
 (`AGENTS.md` §2.24). The honest Action Warmth sits on the safe **Cancel**
-(recommended), never on the destructive **Delete**. `render::delete_dialog_rect`
-centres and clamps the dialog to the window and `render::delete_dialog_action_at`
+(recommended), never on the destructive **Delete**. `render::modal_dialog_rect`
+centres and clamps the dialog to the window and `render::modal_dialog_action_at`
 mirrors its button geometry so a click resolves to exactly the button pressed
 (`AGENTS.md` §2.2); `Escape` (or Cancel) dismisses it, `Enter` (or Delete)
 confirms. On confirm a *recoverable* removal is a move to Trash (the
@@ -1772,27 +1781,30 @@ directory with the same capability-checked listing call and shared decode the
 browser navigates with, and `fs_unlink`-ing each node depth-first (with
 `UnlinkFlags::DIRECTORY` for a directory-backed target) under the launching
 user's own identity, no new capability. The removal is bounded and fail closed:
-the first refused read or unlink stops it, states the reason on `stderr` (fail
-loud, `AGENTS.md` §2.24), and leaves whatever was already removed removed rather
-than a fabricated success; the view is then re-listed so a partial removal is
-shown honestly (`AGENTS.md` §5.4). Only the file manager builds and drives this
+the first refused read or unlink stops it, states the reason in the window
+naming the item and the volume's own answer (fail loud, `AGENTS.md` §2.24), and
+leaves whatever was already removed removed rather than a fabricated success;
+the view is then re-listed so a partial removal is shown honestly (`AGENTS.md`
+§5.4). Only the file manager builds and drives this
 — the read-only picker never deletes.
 
 A long removal — and a long copy/paste — shows **progress** and can be
-**cancelled**. Rather than driving the walk to completion in one blocking pass,
-the confirmed operation is handed to an *interleaved operation* the event loop
-advances a bounded slice at a time (`advance_operation`, up to
-`OPERATION_STEP_BUDGET` units of work per turn — one directory read, one unlink,
-one `fs_mkdir`, one copy chunk, or one rename), for half a desktop frame per
-turn (`OPERATION_SLICE_NS`): between turns it drains the event mailbox
-*non-blocking* for a mid-run cancel, a close, or another window's input, and
-the modal progress panel is presented once a desktop frame however many steps
-the frame carried, so even a large recursive delete or a multi-gigabyte copy
-never freezes the window, never paces its own work by its presents, and never
-busy-spins — continuously stepping the walk
-is genuine pending work, not a spin (`AGENTS.md` §2.23). A single `Operation`
-carries either a `DeleteWalk` (a delete) or a `Paste` state machine (a
-copy/move), so both drive through one interleaving path (`AGENTS.md` §2.2). The
+**cancelled**, and none of it runs on the window's loop. The confirmed operation
+is handed to an **operations worker**, a thread of its own beside the reader so
+a long copy never holds a listing up, which carries it out one bounded unit at
+a time — one directory read, one unlink, one `fs_mkdir`, one copy chunk, or one
+rename. Operations from several windows run one after another in the order they
+were asked (`operations::OperationDesk`, a host-tested desk holding a fixed
+number waiting): two copies over one disk finish no sooner side by side. The
+worker posts its count after each unit and checks for a cancel between units;
+the loop parks as usual, wakes on the worker's answer, and shows a new count at
+most once a desktop frame, holding the next until then rather than waking per
+unit (`AGENTS.md` §2.23, §28). An answer reaches only the window that asked: a
+window that closes cancels its own operation and its answer is dropped. A
+machine that refuses the thread carries an operation out on the loop to its
+end — slower and not cancellable, never wrong. A single `Job` carries a
+`DeleteWalk` (a delete), a `TrashRun` (a move to Trash) or a `Paste` state
+machine (a copy/move), so all three run through one path (`AGENTS.md` §2.2). The
 panel is the shared `lib/browse::progress` model (`ProgressModel` — the
 operation kind, the honest rising `DeleteWalk::removed` / paste-node count, and
 a *latched* cancel) drawn by `render::draw_progress_dialog` as a `lib/controls`
@@ -1807,10 +1819,16 @@ panel is painted in, so the drawn button and the clickable button cannot drift
 apart by the rail's width and a caller cannot hand the routing the wrong
 rectangle. A cancel is latched and stops the walk at the next unit boundary —
 never mid-node, and never mid-chunk — and a completed or cancelled/refused run
-alike re-lists so what actually remains is shown honestly. A cross-volume move's
-source-removal cleanup runs as a `Deleting` stage of the same interleaved
-`Paste`, over the shared delete walk, so a move's cleanup and an interactive
-delete share one removal definition (`AGENTS.md` §2.2).
+alike re-lists so what actually remains is shown honestly. A copy cancelled or
+stopped part-way through a file removes that destination file, which it created
+exclusively, rather than leaving it half-written — but only while its name
+still names that file, so a file another program has put there since is left
+alone. A run a refusal stopped states
+why in the window, in a notice naming the item and the volume's own answer —
+"its volume is read-only" is told apart from "it may not be moved". A
+cross-volume move's source-removal cleanup runs as a `Deleting` stage of the
+same `Paste`, over the shared delete walk, so a move's cleanup and an
+interactive delete share one removal definition (`AGENTS.md` §2.2).
 
 ### The move-to-Trash model
 
@@ -1855,10 +1873,12 @@ resolves each target's collision-free `trash_dest_path`. If all of that holds
 the removal is a recoverable **move to Trash**: `render::build_delete_dialog` is
 built with `trash::DeleteDisposition::Trash` (a safe, recommended *Move to
 Trash* action and a "you can restore them" message), and on confirm the app
-drives a `Job::Trash` operation that renames each target into its captured Trash
-destination — one `fs_rename` per item through the same interleaved
-progress/cancel runner as a delete or paste (`ProgressOp::Trash`), so even a
-large selection stays responsive and cancellable (`AGENTS.md` §2.23). Anything
+hands a `Job::Trash` to the operations worker, which renames each target into
+its captured Trash destination — one `fs_rename` per item, as a delete or paste
+is carried out (`ProgressOp::Trash`), so even a large selection stays
+responsive and cancellable (`AGENTS.md` §2.23). Whether the removal can be a
+move to Trash is asked of the reader when Delete is pressed, and the
+confirmation opens worded for what its answer found. Anything
 that makes the move impossible — an unset or root `HOME`, a Trash directory that
 cannot be created or stat'd, or a cross-volume target (a mounted volume under
 the current directory) — falls back, fail closed, to the irreversible
@@ -1896,10 +1916,10 @@ so the Trash's contents are shown like any other directory. **Empty Trash**
 (`ManagerTool::EmptyTrash`) renders disabled — muted, never hidden — unless the
 current directory *is* the user's Trash and it is non-empty (a `ManagerToolModel`
 the app computes from `HOME`, since the engine does not know it); when it is
-enabled, clicking it re-reads the Trash, builds `trash::empty_trash_plan`,
-confirms it with the `DeleteDisposition::Permanent` dialog, and — on confirm —
-drives the plan's `DeleteWalk` through the same interleaved progress/cancel
-runner an ordinary delete uses (`ProgressOp::Delete`), under the launching
+enabled, clicking it builds `trash::empty_trash_plan` from the listing the
+window shows, confirms it with the `DeleteDisposition::Permanent` dialog, and —
+on confirm — hands the plan's `DeleteWalk` to the operations worker an
+ordinary delete uses (`ProgressOp::Delete`), under the launching
 user's own `fs_readdir`/`fs_unlink` (no new capability). A stale click recomputes
 the Trash location and refuses to empty anything else (fail closed, `AGENTS.md`
 §5.4).
@@ -1940,23 +1960,22 @@ current selection (`Browser::clipboard(op)`); with nothing selected the verb is
 simply unavailable (fail closed). Because the clipboard holds absolute paths it
 survives navigating to the paste target. **`Ctrl+V`** pastes it into the
 current directory: `plan_paste` validates the plan (a paste of a folder into
-itself is refused outright and nothing is enqueued), the app stats the
-destination directory for its `execute::VolumeId`, and hands the plan to an
-interleaved `Paste` operation the event loop then carries out a bounded slice at
-a time (see the progress + cancel description above), so a large copy never
-freezes the window. Every item runs under the launching user's own identity —
+itself is refused outright and nothing is enqueued), and the plan is handed to
+the operations worker as a `Paste` (see the progress + cancel description
+above), which reads the destination directory's `execute::VolumeId` first, so a
+large copy never freezes the window. Every item runs under the launching user's own identity —
 **no new capability**, every operation an ordinary §5.3-checked VFS call the
 user could perform themselves. `execute::paste_strategy` chooses the mechanism
 per item from the two nodes' volume ids: a same-volume move is one `fs_rename`,
 a cross-volume move is copy-then-delete (the source removed through the shared
-delete walk, as a `Deleting` stage of the same interleaved `Paste`, only once
+delete walk, as a `Deleting` stage of the same `Paste`, only once
 its copy has fully succeeded), and a copy streams — a single file through an
 `execute::CopyCursor` and a directory (or sealed `.app` bundle) through an
 `execute::CopyWalk`, both driven over `fs_read`/`fs_write`/`fs_mkdir`/`fs_readdir`
 with one reused, fixed-size (`FS_IO_MAX`) buffer so a copy of any size holds no
 unbounded buffer and never spins (`AGENTS.md` §2.23, §26.6). It is bounded and
-fail closed: the first refused operation stops the paste, states the reason on
-`stderr` naming the item (fail loud, `AGENTS.md` §2.24), and leaves whatever
+fail closed: the first refused operation stops the paste, states the reason in
+the window naming the item (fail loud, `AGENTS.md` §2.24), and leaves whatever
 already landed in place rather than a fabricated success (`AGENTS.md` §5.4); the
 view is then re-listed so a partial paste is shown honestly. Initiating a `Cut`
 paste clears the clipboard (its sources are being moved, so re-pasting the same
@@ -1970,18 +1989,19 @@ file manager builds and drives this; the read-only picker never pastes.
 ### The New ▸ model
 
 Creating a folder or a blank document (`plans/FILES-INTERACTION.md` FI10) is
-modelled purely in `lib/browse::create` plus `Browser::create_entry`.
-`validate_new_entry_name` spells the name through the one shared
-`tairix_path::validate_file_name` rule and refuses one a sibling holds
-(`CreateError::Clash`), both *before* any syscall. `Browser::create_entry`
-spells the absolute path through the same `spell_child` the launch/open
-targets use, then applies it through an injected seam under the launching
-user's own identity — `fs_mkdir` for a folder, and for a document an
-`fs_open` with `CREATE | EXCLUSIVE`, so an existing file is never truncated.
-A refusal (a read-only mount, an unwritable parent, a lost race) leaves the
-listing as it was and is surfaced as `CreateError::Refused`. On success the
-directory is re-listed and the selection follows onto the new entry, ready for
-its inline rename. The model reads nothing and holds no authority, so the
+modelled purely in `lib/browse::create` plus `Browser::prepare_entry` and
+`Browser::finish_entry`. `validate_new_entry_name` spells the name through the
+one shared `tairix_path::validate_file_name` rule and refuses one a sibling
+holds (`CreateError::Clash`), both *before* any syscall. `prepare_entry` spells
+the absolute path through the same `spell_child` the launch/open targets use,
+making nothing; the app has the reader thread make it under the launching
+user's own identity — `fs_mkdir` for a folder, and for a document an `fs_open`
+with `CREATE | EXCLUSIVE`, so an existing file is never truncated — and hands
+the answer to `finish_entry`. A refusal (a read-only mount, an unwritable
+parent, a lost race) leaves the listing as it was and is surfaced as
+`CreateError::Refused`. On success, if the view is still where the entry was
+made, the directory is re-listed and the selection follows onto the new entry,
+ready for its inline rename. The model reads nothing and holds no authority, so the
 trusted picker composes the same `Browser` and never calls the write path.
 
 `NewEntry::suggest_name` names the new entry: `New Folder` or
@@ -2165,13 +2185,13 @@ exactly as the properties view model landed ahead of the drawn panel.
 `validate_mode` fails closed on any bit above `tairix_abi::fs::FS_MODE_MASK` —
 the settable `rwx`/setuid/setgid/sticky word — refusing it rather than masking
 it into a lesser mode, so the mode committed is always exactly the one asked
-for and never silently a different one (`AGENTS.md` §2.24, §5.4). `set_mode`
-validates the mode *before* any syscall and applies it through an injected
-`fs_set_mode` seam under the user's own identity — an ordinary
-permission-checked VFS call, no new capability (`AGENTS.md` §4, §5.3). A VFS
+for and never silently a different one (`AGENTS.md` §2.24, §5.4). The file
+manager validates the mode *before* it asks the reader for the `fs_set_mode`
+call, made under the user's own identity — an ordinary permission-checked VFS
+call, no new capability (`AGENTS.md` §4, §5.3). A VFS
 refusal (the user does not own the node, a read-only mount, a lost race) leaves
-the node's mode exactly as it was and is surfaced as `ModeError::Refused` for
-an honest in-UI answer (`AGENTS.md` §2.24). The model reads nothing and holds
+the node's mode exactly as it was, and the app words the kernel's own answer for
+an honest in-UI one (`AGENTS.md` §2.24). The model reads nothing and holds
 no authority, so the trusted picker never calls the write path.
 
 ### The drawn permission control
@@ -2225,9 +2245,11 @@ current setuid/setgid/sticky bits (the settable word masked by `FS_MODE_MASK`,
 dropping the non-settable file-type bits `fs_stat` also reports) — and commits
 the new mode over `fs_set_mode` under the user's own identity. On success the
 node is re-read, so what the window shows is what the kernel applied rather
-than what was asked for; a refusal is stated on `stderr` and leaves both the
-node's mode and the shown value exactly as they were (`AGENTS.md` §2.24,
-§5.4). The setuid/setgid/sticky bits stay visible in the octal and symbolic
+than what was asked for, and no further flip is computed until it has been: a
+flip of the mode still shown would quietly undo the one before it. A refusal —
+the volume's, or a flip asked while the last is still landing — is stated in a
+notice over the window, naming why, and leaves both the node's mode and the
+shown value exactly as they were (`AGENTS.md` §2.24, §5.4). The setuid/setgid/sticky bits stay visible in the octal and symbolic
 spelling and are edited through the `chmod` command — a deliberate scope
 boundary for a bloat-free surface, not an omission.
 
@@ -2254,9 +2276,9 @@ The engine models none of that policy. `OwnerChange` names *what* to change —
 each of `uid`/`gid` is either `None` (leave unchanged) or `Some(id)` (set) —
 and `validate_owner` fails closed on a field set to the reserved
 `FS_OWNER_UNCHANGED` sentinel as an explicit target, refusing it before any
-syscall rather than misreading it as "unchanged". `set_owner` validates before
-any syscall, maps `None` onto the sentinel, and applies through an injected
-`fs_set_owner` seam under the user's own identity; a VFS refusal — including
+syscall rather than misreading it as "unchanged". `owner_ids` validates and
+maps `None` onto the sentinel, giving the ids the file manager asks the reader
+to call `fs_set_owner` with under the user's own identity; a VFS refusal — including
 the `PermissionDenied` a caller without `CAP_FS_CHOWN` receives — leaves the
 ownership exactly as it was and is surfaced as `OwnerError::Refused` for an
 honest in-UI answer (`AGENTS.md` §2.24, §5.4). The model holds no authority, so

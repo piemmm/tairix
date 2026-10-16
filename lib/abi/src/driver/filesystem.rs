@@ -868,16 +868,36 @@ pub enum SecuritySubject {
 /// One inline access-control-list entry of a node's security record.
 ///
 /// `perms` is a POSIX-style `rwx` triad in its low three bits (`0b100`
-/// read, `0b010` write, `0b001` execute/search) **granted** to `subject`.
-/// The surface is grant-only — the POSIX ACL model — so a driver never
-/// surfaces an explicit deny; the VFS composes these grants with the mode
-/// bits when it applies the model.
+/// read, `0b010` write, `0b001` execute/search) for `subject`. How it
+/// composes with the mode bits is the record's [`AclModel`]: added to them,
+/// or as a POSIX access-ACL entry under its mask.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SecurityAcl {
     /// The user or group the entry grants rights to.
     pub subject: SecuritySubject,
     /// The `rwx` permission bits granted to `subject`.
     pub perms: u8,
+}
+
+/// How a [`NodeSecurity`] record's ACL entries combine with its mode bits.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum AclModel {
+    /// Each entry grants its permissions on top of the mode bits.
+    #[default]
+    Additive,
+    /// A POSIX.1e access ACL, as ext4, XFS and btrfs store one: the owner is
+    /// decided by the owner triad alone, a named user by its entry under
+    /// `mask`, a member of the owning group or of a named group by the union
+    /// of those entries under `mask` — and refused if they do not grant it,
+    /// never falling through to the other triad — and anyone else by the
+    /// other triad. `group_obj` is the owning group's own entry; the mode's
+    /// group triad then mirrors `mask`. Each is an `rwx` triad.
+    Posix {
+        /// The owning group's entry.
+        group_obj: u8,
+        /// The ceiling on every named entry and on the group class.
+        mask: u8,
+    },
 }
 
 /// The complete security record a filesystem driver stores for one
@@ -898,6 +918,8 @@ pub struct NodeSecurity {
     /// An optional capability the caller must hold to access the node at
     /// all, on top of the mode/ACL checks (`None` = no capability gate).
     pub required_cap: Option<CapabilityId>,
+    /// How the ACL entries combine with the mode bits.
+    pub acl_model: AclModel,
     acl: [SecurityAcl; MAX_ACL_ENTRIES],
     acl_len: usize,
 }
@@ -912,6 +934,7 @@ impl NodeSecurity {
             uid,
             gid,
             required_cap: None,
+            acl_model: AclModel::Additive,
             acl: [SecurityAcl {
                 subject: SecuritySubject::User(0),
                 perms: 0,

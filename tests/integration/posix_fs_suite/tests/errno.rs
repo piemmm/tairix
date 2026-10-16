@@ -1,8 +1,8 @@
 //! Errno conformance: the stable user/kernel [`Errno`] a failed operation
 //! surfaces at the syscall boundary. The refusals a tool must tell apart
 //! carry dedicated codes (`AlreadyExists`, `NotADirectory`, `IsADirectory`,
-//! `NotEmpty`, `TooManyLinks`, and `DeviceFault` — the `EIO` analogue an
-//! unrecoverable backing fault reports); `abi-v1` still has no dedicated
+//! `NotEmpty`, `TooManyLinks`, `ReadOnly`, and `DeviceFault` — the `EIO`
+//! analogue an unrecoverable backing fault reports); `abi-v1` still has no dedicated
 //! `EINVAL`, so a malformed path or attribute key — and a rename that would
 //! make a directory its own descendant — remains many-to-one (documented on
 //! `VfsError::to_errno`). This suite pins the contract so a future change
@@ -17,7 +17,7 @@ fn vfs_error_maps_to_the_documented_stable_errno() {
         VfsError::PermissionDenied.to_errno(),
         Errno::PermissionDenied
     );
-    assert_eq!(VfsError::ReadOnly.to_errno(), Errno::PermissionDenied);
+    assert_eq!(VfsError::ReadOnly.to_errno(), Errno::ReadOnly);
     assert_eq!(VfsError::InvalidPath.to_errno(), Errno::OutOfRange);
     assert_eq!(VfsError::NotADirectory.to_errno(), Errno::NotADirectory);
     assert_eq!(VfsError::IsADirectory.to_errno(), Errno::IsADirectory);

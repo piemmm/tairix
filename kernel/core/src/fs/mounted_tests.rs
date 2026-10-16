@@ -974,12 +974,12 @@ fn a_directory_open_of_a_regular_file_fails_closed() {
 #[test]
 fn a_write_to_a_read_only_mount_fails_closed() {
     // The mount carries `READ_ONLY`, so the secured write is refused before
-    // the driver is touched; `ReadOnly` collapses onto `PermissionDenied`.
+    // the driver is touched.
     let svc = service(true, true, true);
     let caps = caps();
     assert_eq!(
         svc.write(TEST_UID, &caps, &path("x"), 0, false, b"nope"),
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     );
 }
 
@@ -1159,7 +1159,6 @@ fn rename_of_a_missing_source_fails_closed() {
 
 #[test]
 fn rename_on_a_read_only_mount_fails_closed() {
-    // `ReadOnly` collapses onto `PermissionDenied` at the ABI boundary.
     let svc = service(true, true, true);
     let caps = caps();
     assert_eq!(
@@ -1170,7 +1169,7 @@ fn rename_on_a_read_only_mount_fails_closed() {
             &path("b"),
             RenameFlags::empty()
         ),
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     );
 }
 
@@ -1211,12 +1210,11 @@ fn set_mode_above_the_permission_mask_fails_closed() {
 
 #[test]
 fn set_mode_on_a_read_only_mount_fails_closed() {
-    // `ReadOnly` collapses onto `PermissionDenied` at the ABI boundary.
     let svc = service(true, true, true);
     let caps = caps();
     assert_eq!(
         svc.set_mode(TEST_UID, &caps, &path("a"), 0o600),
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     );
 }
 
@@ -1415,7 +1413,6 @@ fn set_owner_leaving_both_unchanged_is_a_noop_even_unprivileged() {
 
 #[test]
 fn set_owner_on_a_read_only_mount_fails_closed() {
-    // `ReadOnly` collapses onto `PermissionDenied` at the ABI boundary.
     let svc = service(true, true, true);
     assert_eq!(
         svc.set_owner(
@@ -1425,7 +1422,7 @@ fn set_owner_on_a_read_only_mount_fails_closed() {
             2000,
             FS_OWNER_UNCHANGED
         ),
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     );
 }
 
@@ -1601,6 +1598,40 @@ fn mount_snapshot_reports_each_online_volume_once() {
     assert_eq!(usage.total_blocks, 4096);
     assert!(usage.avail_blocks <= usage.free_blocks);
     assert!(usage.free_blocks <= usage.total_blocks);
+}
+
+/// A volume busy with a long operation does not hold the mount list up: it
+/// is reported with the figures it last gave, and its fresh ones once free.
+///
+/// Regression: the list waited on every volume's driver lock in turn, so one
+/// volume in the middle of a long write stalled every caller of the System
+/// Information service past its timeout.
+#[test]
+fn a_busy_volume_is_listed_with_its_last_figures_without_waiting() {
+    let handle = DriverHandle::from_raw(23).expect("handle");
+    let vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
+    {
+        let mut mounts = vfs.mounts_write();
+        mounts
+            .attach(Attachment::new(handle, None, MountFlags::default()))
+            .expect("attach");
+        mounts.back_root(handle).expect("back /");
+    }
+    let cell: &'static LateFilesystem<RwMockFs> = crate::forever(Box::new(LateFilesystem::new()));
+    cell.install_vfs(vfs).expect("install vfs");
+    let identity: &'static LateIdentity = crate::forever(Box::new(LateIdentity::new()));
+    identity.install(identity_table()).expect("identity");
+    let svc = MountedFilesystemService::new(cell, identity);
+    let driver = cell
+        .register(handle, driver(), "root", "memfs", [7; 16], None)
+        .expect("register");
+    let free = svc.mount_snapshot()[0].usage();
+    assert_eq!(free.total_blocks, 4096, "measured while free");
+    let busy = driver.try_lock().expect("held by a long operation");
+    let listed = svc.mount_snapshot();
+    assert_eq!(listed.len(), 1, "still listed");
+    assert_eq!(listed[0].usage(), free, "with the figures it last gave");
+    drop(busy);
 }
 
 /// A volume shown at several view paths is one volume: the mount list reports
@@ -2045,11 +2076,11 @@ fn attr_mutation_on_a_read_only_mount_fails_closed() {
     );
     assert_eq!(
         svc.attr_set(TEST_UID, &caps, path, b"user.comment", b"x"),
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     );
     assert_eq!(
         svc.attr_remove(TEST_UID, &caps, path, b"user.comment"),
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     );
 }
 
@@ -2310,7 +2341,7 @@ fn symlink_on_a_read_only_mount_is_refused() {
     let caps = caps();
     assert_eq!(
         svc.symlink(TEST_UID, &caps, "/target", &path("alias")),
-        Err(Errno::PermissionDenied)
+        Err(Errno::ReadOnly)
     );
 }
 

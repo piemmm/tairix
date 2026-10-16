@@ -77,8 +77,9 @@ normalisation policy likewise belong to the VFS, not the driver.
 - `CAP_DRV_LOAD` at `register` time.
 - The `FilesystemRead`/`FilesystemWrite` methods are reached only through
   the `DriverHandle` the host minted at load time, and the VFS only
-  delegates a write to a non-`READ_ONLY` mount. The driver runs in user
-  space; it does not request `CAP_DRV_KERNEL`.
+  delegates a write to a non-`READ_ONLY` mount. The kernel's runtime
+  volume service links the driver and serves it in-kernel; serving it from
+  user space is open work (`plans/OPEN-DEFECTS.md`).
 
 ## Test surface
 

@@ -27,7 +27,7 @@ use tairix_abi::driver::filesystem::{
     NodeSecurity,
 };
 use tairix_abi::{DriverError, Errno};
-use tairix_kernel_core::{SleepLock, UserAdminBacking, VfsError};
+use tairix_kernel_core::{SleepLock, UserAdminBacking};
 use tairix_users::{provision_home_shape, HomeShapeError, HOME_MODE};
 
 /// The production [`UserAdminBacking`]: commits the engine's edits to the
@@ -88,7 +88,7 @@ where
                     // provisioning is idempotent and never rewrites
                     // existing data. A non-directory in the path is not a
                     // home and is refused rather than replaced.
-                    let info = fs.node_info(node).map_err(driver_errno)?;
+                    let info = fs.node_info(node).map_err(DriverError::as_errno)?;
                     if info.kind != NodeKind::Directory {
                         return Err(Errno::AlreadyExists);
                     }
@@ -97,14 +97,14 @@ where
                 Err(DriverError::NotFound) => {
                     let node = fs
                         .create(dir, component.as_bytes(), NodeKind::Directory)
-                        .map_err(driver_errno)?;
+                        .map_err(DriverError::as_errno)?;
                     if is_leaf {
                         fs.set_security(node, NodeSecurity::new(HOME_MODE, uid, gid))
-                            .map_err(driver_errno)?;
+                            .map_err(DriverError::as_errno)?;
                     }
                     dir = node;
                 }
-                Err(err) => return Err(driver_errno(err)),
+                Err(err) => return Err(err.as_errno()),
             }
             if is_leaf {
                 leaf = Some(dir);
@@ -119,13 +119,13 @@ where
         // already exists; creating directories for the new account inside
         // somebody else's home would be provisioning one principal's
         // storage into another's.
-        if fs.security(home).map_err(driver_errno)?.uid == uid {
+        if fs.security(home).map_err(DriverError::as_errno)?.uid == uid {
             provision_home_shape(fs, home, uid, gid).map_err(|err| match err {
-                HomeShapeError::Driver(err) => driver_errno(err),
+                HomeShapeError::Driver(err) => err.as_errno(),
                 HomeShapeError::Occupied => Errno::AlreadyExists,
             })?;
         }
-        fs.flush().map_err(driver_errno)
+        fs.flush().map_err(DriverError::as_errno)
     }
 }
 
@@ -149,7 +149,7 @@ where
         b"Groups.tmp",
         groups_text.as_bytes(),
     )?;
-    fs.flush().map_err(driver_errno)
+    fs.flush().map_err(DriverError::as_errno)
 }
 
 /// Resolve `/System/Security` on the root volume's own tree.
@@ -157,8 +157,11 @@ fn resolve_security_dir<F>(fs: &mut F) -> Result<NodeId, Errno>
 where
     F: FilesystemRead + ?Sized,
 {
-    let system = fs.lookup(fs.root(), b"System").map_err(driver_errno)?;
-    fs.lookup(system, b"Security").map_err(driver_errno)
+    let system = fs
+        .lookup(fs.root(), b"System")
+        .map_err(DriverError::as_errno)?;
+    fs.lookup(system, b"Security")
+        .map_err(DriverError::as_errno)
 }
 
 /// Replace `dir/name` with `data`, crash-safely: the bytes are written
@@ -177,41 +180,33 @@ fn replace_file<F>(
 where
     F: FilesystemRead + FilesystemWrite + FilesystemSecurity + ?Sized,
 {
-    let existing = fs.lookup(dir, name).map_err(driver_errno)?;
-    let security = fs.security(existing).map_err(driver_errno)?;
+    let existing = fs.lookup(dir, name).map_err(DriverError::as_errno)?;
+    let security = fs.security(existing).map_err(DriverError::as_errno)?;
 
     // Clear any stale temporary from an interrupted earlier commit.
     match fs.remove(dir, tmp_name) {
         Ok(()) | Err(DriverError::NotFound) => {}
-        Err(err) => return Err(driver_errno(err)),
+        Err(err) => return Err(err.as_errno()),
     }
 
     let tmp = fs
         .create(dir, tmp_name, NodeKind::RegularFile)
-        .map_err(driver_errno)?;
+        .map_err(DriverError::as_errno)?;
     // The whole database or none of it: a driver may store less than it was
     // handed as back-pressure, so the write resumes rather than being read as
     // a failure — but a genuine refusal still drops the temp instead of
     // letting a truncated database be renamed over the live one.
     if let Err(err) = fs.write_all(dir, tmp_name, 0, data) {
         let _ = fs.remove(dir, tmp_name);
-        return Err(driver_errno(err));
+        return Err(err.as_errno());
     }
-    fs.set_security(tmp, security).map_err(driver_errno)?;
+    fs.set_security(tmp, security)
+        .map_err(DriverError::as_errno)?;
     // Land the temp durably before it replaces the original, so the rename
     // can never expose a half-written database.
-    fs.flush().map_err(driver_errno)?;
-    fs.rename(dir, tmp_name, dir, name).map_err(driver_errno)
-}
-
-/// Map a driver refusal onto the stable [`Errno`] the syscall reports.
-fn driver_errno(err: DriverError) -> Errno {
-    match err {
-        DriverError::NotFound => Errno::NotFound,
-        DriverError::PermissionDenied => Errno::PermissionDenied,
-        DriverError::NoSpace => Errno::NoSpace,
-        _ => VfsError::Io.to_errno(),
-    }
+    fs.flush().map_err(DriverError::as_errno)?;
+    fs.rename(dir, tmp_name, dir, name)
+        .map_err(DriverError::as_errno)
 }
 
 #[cfg(test)]

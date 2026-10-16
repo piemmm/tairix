@@ -75,7 +75,7 @@ event loop** inherits the freeze:
 | File manager folder cues | `userland/apps/files/src/run.rs` (`resolve_occupancy` **inside the render**) | `open_dir` + `read` + `close` per newly-visible folder, while painting. Fixed in DESK-11. |
 | File manager "Open With…" | `userland/apps/files/src/run.rs` (`RtBundleSource`) | Three whole program stores walked, one `AppInfo` per bundle, on the click that opened the chooser. Fixed in DESK-11. |
 | File manager icon artwork | `userland/apps/files/src/icons.rs` | One bounded read plus a sandbox round trip **on the event loop**, once per turn. Already outside the paint and interleaved with input service, but still I/O the loop performs. Fixed in DESK-12. |
-| File manager writes | `userland/apps/files/src/run.rs` (New ▸, the Properties commits, the Trash folder, the `stat`s that plan a paste or a move to Trash, and every operation step) | One bounded filesystem call each **on the event loop**, so a slow or failing volume stalls every window for it. The rename runs on the reader thread. Open: `plans/OPEN-DEFECTS.md` D815. |
+| File manager writes | `userland/apps/files/src/run.rs` (New ▸, the Properties commits, the Trash folder, the `stat`s that plan a paste or a move to Trash, and every operation step) | One bounded filesystem call each **on the event loop**, so a slow or failing volume stalls every window for it. Fixed: every one-shot write rides the reader by ticket, and every operation step runs on the operations worker (`plans/NEW-FILEMANAGER.md` FM20). |
 | Statistics reported to `sysinfod` | `lib/rt/src/cachereport.rs`, `userland/gui/session/src/frames.rs` | Up to **eight blocking cross-process round trips a second** on the compositor's own frame path, and on the file manager's and `fontd`'s loops, purely to report counters. `ipc_call` parks the caller off the run queue, so a gesture stuttered four times a second and every app blocked in a window call waited behind it. Fixed in DESK-15. |
 | Terminal settings sheet — the sheet's own pixels | `userland/apps/terminal/src/run.rs` (`present_overlay`) | The damage its controls reported was **computed and discarded**: every pointer sample allocated a sheet-sized surface, re-rendered every tab, row, label and swatch, and presented the whole popup. Fixed in DESK-16. |
 | Desktop listing + wallpaper workers | `lib/browse/src/desk.rs`, `userland/gui/session/src/wallpaper.rs` | A **runaway**: the job hand-out cloned the request instead of taking it, so an answered job was immediately workable again and the worker re-ran it for ever — 1030 directory reads of one folder in 13 s, ~150/s, each waking the compositor. A core and a disk spent continuously, contending with every frame. Fixed in DESK-17. |
@@ -1090,12 +1090,9 @@ Each stage is independently reviewable and must leave the whole-project
   request set is finite and refilled only by the user asking again.
   - **Listings** go through `ListingDesk<FilesClient>` and a
     `DirectorySource` that records and answers `Listing::Pending`;
-    `Browser::resume` commits the answer on the wake. The one read left on the
-    app's own task is `first_listable`, which answers *which location to open* —
-    a question a deferred source cannot answer, since its first answer is always
-    "not yet" and every candidate would look listable. The first window's read
-    comes before any window exists; a later window's is taken on the loop
-    (`plans/OPEN-DEFECTS.md` D454).
+    `Browser::resume` commits the answer on the wake. A window opens once its
+    first listing lands, falling back down its ladder when that listing is
+    refused (`plans/NEW-FILEMANAGER.md` FM20).
   - **Folder cues** gained a "not yet" (`tairix_browse::Probe`), so
     `Browser::resolve_occupancy` may be called from inside a paint without the
     paint performing any I/O: the ask records, the answer is drawn a frame
@@ -1113,9 +1110,8 @@ Each stage is independently reviewable and must leave the whole-project
 ### DESK-12 — The file manager's icon decode off its loop
 - **Done.** The last read the file manager's loop performed every turn — one
   bounded artwork read plus one parser-sandbox round trip — now runs on the
-  DESK-11 reader thread. Its writes still run on the loop
-  (`plans/OPEN-DEFECTS.md` D815), as a later window's first listing does
-  (D454).
+  DESK-11 reader thread. Its writes and operations followed
+  (`plans/NEW-FILEMANAGER.md` FM20).
 - **Where the split falls, and why there.** `IconPipeline` is the paint side
   alone: the reclaim-governed `ArtworkCache` and the resolver its misses go to.
   The `ArtworkDesk` moved into the reader's `Work` set and is the only thing
@@ -1328,7 +1324,8 @@ Each stage is independently reviewable and must leave the whole-project
 - **DESK-11 — done.** Every unbounded read the file manager makes — listings,
   folder cues, and the "Open With…" bundle scan — runs on one reader thread.
 - **DESK-12 — done.** The file manager's icon decode runs on the DESK-11
-  reader thread; its writes are `plans/OPEN-DEFECTS.md` D815.
+  reader thread; its writes and operations run off its loop too
+  (`plans/NEW-FILEMANAGER.md` FM20).
 - **DESK-15 — done.** No interactive or serve loop waits on a statistics
   report; `tairix_rt::submit::Submission` is the one shape both publishers hand
   them over with.

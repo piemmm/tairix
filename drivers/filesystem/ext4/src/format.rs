@@ -1,37 +1,31 @@
 //! First-party ext4 formatter (mkfs).
 //!
-//! [`write_volume`] lays a fresh, empty ext4 volume onto a [`Block`]
-//! device that [`crate::Ext4::open`] then mounts. It writes the
-//! conservative feature set the read/write path fully supports
-//! (`filetype` + `extent` + `extra_isize`, 256-byte inodes, 32-byte group
-//! descriptors, no checksum or `64bit` feature) and **materialises every
-//! block group** — no lazy/`UNINIT` groups — so the volume can be filled
-//! to exhaustion by the soak harness. The enlarged inode is what gives
-//! every stamp its nanoseconds, its birth time, and the range to 2446.
-//!
-//! The on-disk shape mirrors the hand-built test fixture in
-//! `tests.rs`, generalised to an arbitrary device size and any number
-//! of block groups. There is no `mkfs` shell-out; the layout is computed here and handed straight to the
-//! single source of truth for the on-disk format, [`crate::Ext4::open`].
+//! [`write_volume`] lays a fresh, empty, unjournaled ext4 volume onto a
+//! [`Block`] device for [`crate::Ext4::open`] to mount: `filetype`,
+//! `extent` and `extra_isize`, 256-byte inodes (whose enlarged record holds
+//! nanosecond stamps, a birth time and the range to 2446), 32-byte group
+//! descriptors, and every group materialised, so a volume can be filled to
+//! exhaustion. Only group 0 carries a superblock and descriptor table,
+//! which `sparse_super2` with no backup groups declares.
 
-use super::{
-    device_write, put_le16, put_le32, u16_of, u32_of, usize_of, EXT_MAGIC, FT_DIR,
-    INCOMPAT_FILETYPE, INODE_FLAG_EXTENTS, I_BLOCK_OFFSET, I_EXTRA_ISIZE_OFFSET, MAX_BLOCK_SIZE,
-    NEW_EXTRA_ISIZE, ROOT_INODE, SUPERBLOCK_OFFSET, S_IFDIR,
-};
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 
-/// `s_feature_incompat`: extents are in use on this volume.
-const INCOMPAT_EXTENTS: u32 = 0x0040;
+use crate::bytes::{align4, put_le16, put_le32, u16_of, u32_of, usize_of};
+use crate::extent::EXTENT_MAGIC;
+use crate::io::Device;
+use crate::superblock::{
+    COMPAT_SPARSE_SUPER2, EXT_MAGIC, INCOMPAT_EXTENTS, INCOMPAT_FILETYPE, RO_COMPAT_EXTRA_ISIZE,
+    SUPERBLOCK_LEN, SUPERBLOCK_OFFSET,
+};
+use crate::{
+    DIRENT_HEADER, FT_DIR, INODE_FLAG_EXTENTS, I_BLOCK_OFFSET, MAX_BLOCK_SIZE, NEW_EXTRA_ISIZE,
+    ROOT_INODE, S_IFDIR,
+};
 
 /// On-disk inode record size the formatter writes: the classic 128 bytes
 /// and the enlarged region the extended timestamps live in.
 const INODE_SIZE: u32 = 256;
-
-/// `s_feature_ro_compat`: inodes carry `i_extra_isize` bytes past the
-/// classic record.
-const RO_COMPAT_EXTRA_ISIZE: u32 = 0x0040;
 
 /// Group-descriptor record size (the legacy 32-byte descriptor; the
 /// formatter never sets the `64bit` feature).
@@ -44,12 +38,6 @@ const MIN_INODES_PER_GROUP: u32 = 16;
 /// First inode available to user files; inodes 1..=10 are reserved
 /// (`s_first_ino`), with the root directory at inode 2.
 const FIRST_INODE: u32 = 11;
-
-/// Extent-tree node header magic (`eh_magic`).
-const EXTENT_MAGIC: u16 = 0xF30A;
-
-/// Directory-entry header length (ino + `rec_len` + `name_len` + `file_type`).
-const DIRENT_HEADER: usize = 8;
 
 /// Block-size threshold: volumes at least this large are formatted with
 /// 4096-byte blocks, smaller ones with 1024-byte blocks. A 4096-byte
@@ -196,79 +184,23 @@ fn count_free_bits(buf: &[u8], bits: usize) -> usize {
     free
 }
 
-/// A block-aligned writer over the device, mapping filesystem blocks to
-/// device byte offsets through the existing read-modify-write
-/// [`device_write`] path.
-struct Writer<'a, B: Block> {
-    block: &'a mut B,
-    dev_block_size: u32,
-    dev_block_count: u64,
-    fs_block_size: u32,
-}
-
-impl<B: Block> Writer<'_, B> {
-    /// Write `buf` (one filesystem block) at filesystem block `block_no`.
-    fn write_fs_block(&mut self, block_no: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let offset = block_no
-            .checked_mul(u64::from(self.fs_block_size))
-            .ok_or(DriverError::DeviceFault)?;
-        device_write(
-            self.block,
-            self.dev_block_size,
-            self.dev_block_count,
-            offset,
-            buf,
-        )
-    }
-
-    /// Write `len` bytes at device byte `offset`.
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), DriverError> {
-        device_write(
-            self.block,
-            self.dev_block_size,
-            self.dev_block_count,
-            offset,
-            buf,
-        )
-    }
-}
-
-/// Validate the device geometry a fresh volume is laid onto, returning
-/// `(dev_block_size, dev_block_count, total_bytes)`.
-fn formatting_geometry<B: Block>(block: &mut B) -> Result<(u32, u64, u64), DriverError> {
-    let geo = block.geometry()?;
-    let dev_block_size = geo.block_size;
-    if dev_block_size == 0 || dev_block_size > MAX_BLOCK_SIZE || !dev_block_size.is_power_of_two() {
-        return Err(DriverError::DeviceFault);
-    }
-    let dev_block_count = geo.block_count;
-    let total_bytes = u64::from(dev_block_size)
-        .checked_mul(dev_block_count)
-        .ok_or(DriverError::DeviceFault)?;
-    Ok((dev_block_size, dev_block_count, total_bytes))
-}
-
 /// Format a fresh ext4 volume onto `block`, sized from its geometry and
 /// hosting at least `inode_count` inodes, stamped with the caller-minted
 /// volume `uuid` (the reserved all-zero identity is refused — a volume
-/// without an identity cannot be published).
+/// without an identity cannot be published), and hand the device back once
+/// the volume is durable.
 pub(crate) fn write_volume<B: Block>(
-    block: &mut B,
+    block: B,
     inode_count: u32,
     uuid: [u8; 16],
-) -> Result<(), DriverError> {
+) -> Result<B, DriverError> {
     if uuid == [0u8; 16] {
         return Err(DriverError::OutOfRange);
     }
-    let (dev_block_size, dev_block_count, total_bytes) = formatting_geometry(block)?;
-
+    let mut dev = Device::new(block)?;
+    let total_bytes = dev.bytes().ok_or(DriverError::DeviceFault)?;
     let plan = plan(total_bytes, inode_count)?;
-    let mut writer = Writer {
-        block,
-        dev_block_size,
-        dev_block_count,
-        fs_block_size: plan.block_size,
-    };
+    dev.set_fs_block(plan.block_size);
 
     let mut free_blocks_total: u64 = 0;
     let mut free_inodes_total: u64 = 0;
@@ -285,7 +217,7 @@ pub(crate) fn write_volume<B: Block>(
     {
         let zero = [0u8; MAX_BLOCK_SIZE as usize];
         for b in 0..plan.gdt_blocks {
-            writer.write_fs_block(gdt_start_block + b, &zero[..bs_usize])?;
+            dev.write_blocks(gdt_start_block + b, &zero[..bs_usize])?;
         }
     }
 
@@ -320,7 +252,7 @@ pub(crate) fn write_volume<B: Block>(
         }
         let group_free_blocks = count_free_bits(&bbm, bpg);
         free_blocks_total += group_free_blocks as u64;
-        writer.write_fs_block(bbm_block, &bbm[..bs_usize])?;
+        dev.write_blocks(bbm_block, &bbm[..bs_usize])?;
 
         // --- Inode bitmap. ---
         let mut ibm = [0u8; MAX_BLOCK_SIZE as usize];
@@ -336,7 +268,7 @@ pub(crate) fn write_volume<B: Block>(
         }
         let group_free_inodes = count_free_bits(&ibm, ipg);
         free_inodes_total += group_free_inodes as u64;
-        writer.write_fs_block(ibm_block, &ibm[..bs_usize])?;
+        dev.write_blocks(ibm_block, &ibm[..bs_usize])?;
 
         // --- Inode table (zeroed; group 0 carries the root inode). ---
         let mut itable = [0u8; MAX_BLOCK_SIZE as usize];
@@ -347,7 +279,7 @@ pub(crate) fn write_volume<B: Block>(
             if group == 0 && b == 0 {
                 write_root_inode(&mut itable, plan.block_size, first_data)?;
             }
-            writer.write_fs_block(itable_block + b, &itable[..bs_usize])?;
+            dev.write_blocks(itable_block + b, &itable[..bs_usize])?;
         }
 
         // --- Group descriptor. ---
@@ -359,24 +291,19 @@ pub(crate) fn write_volume<B: Block>(
         put_le16(&mut desc, 0x0E, u16_of(group_free_inodes)?);
         put_le16(&mut desc, 0x10, u16::from(group == 0));
         let desc_off = gdt_start_block * bs + group * u64::from(DESC_SIZE);
-        writer.write_at(desc_off, &desc)?;
+        dev.write_bytes(desc_off, &desc)?;
 
         // --- Root directory data block (group 0). ---
         if group == 0 {
             let mut root = [0u8; MAX_BLOCK_SIZE as usize];
             write_root_dir_block(&mut root, plan.block_size)?;
-            writer.write_fs_block(first_data, &root[..bs_usize])?;
+            dev.write_blocks(first_data, &root[..bs_usize])?;
         }
     }
 
-    write_superblock(
-        &mut writer,
-        &plan,
-        free_blocks_total,
-        free_inodes_total,
-        uuid,
-    )?;
-    Ok(())
+    write_superblock(&mut dev, &plan, free_blocks_total, free_inodes_total, uuid)?;
+    dev.flush()?;
+    Ok(dev.into_inner())
 }
 
 /// Stamp the root directory inode (#2) into the first inode-table block
@@ -392,7 +319,7 @@ fn write_root_inode(
     put_le16(itable, base + 0x1A, 2); // i_links_count ("." + child "..")
     put_le32(itable, base + 0x1C, block_size / 512); // i_blocks_lo (sectors)
     put_le32(itable, base + 0x20, INODE_FLAG_EXTENTS); // i_flags
-    put_le16(itable, base + I_EXTRA_ISIZE_OFFSET, NEW_EXTRA_ISIZE);
+    put_le16(itable, base + crate::inode::EXTRA_ISIZE, NEW_EXTRA_ISIZE);
 
     // Extent-tree root in i_block: header + one extent covering logical
     // block 0.
@@ -431,20 +358,15 @@ fn write_root_dir_block(block: &mut [u8], block_size: u32) -> Result<(), DriverE
     Ok(())
 }
 
-/// Round `n` up to the next multiple of 4 (directory-entry alignment).
-fn align4(n: usize) -> usize {
-    n.div_ceil(4) * 4
-}
-
 /// Write the 1024-byte superblock at its fixed device offset.
 fn write_superblock<B: Block>(
-    writer: &mut Writer<'_, B>,
+    dev: &mut Device<B>,
     plan: &Plan,
     free_blocks: u64,
     free_inodes: u64,
     uuid: [u8; 16],
 ) -> Result<(), DriverError> {
-    let mut sb = [0u8; super::SUPERBLOCK_LEN];
+    let mut sb = [0u8; SUPERBLOCK_LEN];
     let log_block_size = plan.block_size.trailing_zeros() - 10; // log2(bs/1024)
     put_le32(&mut sb, 0x00, u32_of(plan.total_inodes())?); // s_inodes_count
     put_le32(&mut sb, 0x04, u32_of(plan.blocks_count)?); // s_blocks_count_lo
@@ -458,13 +380,16 @@ fn write_superblock<B: Block>(
     put_le32(&mut sb, 0x28, plan.inodes_per_group); // s_inodes_per_group
     put_le16(&mut sb, 0x38, EXT_MAGIC); // s_magic
     put_le16(&mut sb, 0x3A, 1); // s_state = clean
+    put_le16(&mut sb, 0x3C, 1); // s_errors = continue
     put_le32(&mut sb, 0x4C, 1); // s_rev_level = dynamic
     put_le32(&mut sb, 0x54, FIRST_INODE); // s_first_ino
     put_le16(&mut sb, 0x58, u16_of(usize_of(u64::from(INODE_SIZE))?)?); // s_inode_size
+                                                                        // No backup superblock or descriptor table: `s_backup_bgs` stays zero.
+    put_le32(&mut sb, 0x5C, COMPAT_SPARSE_SUPER2); // s_feature_compat
     put_le32(&mut sb, 0x60, INCOMPAT_FILETYPE | INCOMPAT_EXTENTS); // s_feature_incompat
     put_le32(&mut sb, 0x64, RO_COMPAT_EXTRA_ISIZE); // s_feature_ro_compat
     sb[0x68..0x78].copy_from_slice(&uuid); // s_uuid
     put_le16(&mut sb, 0x15C, NEW_EXTRA_ISIZE); // s_min_extra_isize
     put_le16(&mut sb, 0x15E, NEW_EXTRA_ISIZE); // s_want_extra_isize
-    writer.write_at(SUPERBLOCK_OFFSET, &sb)
+    dev.write_bytes(SUPERBLOCK_OFFSET, &sb)
 }

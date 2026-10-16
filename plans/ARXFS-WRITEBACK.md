@@ -182,8 +182,9 @@ stage 20), FEC commit witnesses (stage 21) — is now unblocked.
 
 ## 3. Where it sits
 
-One module, `drivers/filesystem/arxfs/src/wcache.rs`, entirely beneath the
-driver's single existing device-write seam:
+The format-neutral pieces — the dirty set, the bound, the commit scheduler —
+live in `lib/writeback`, which ext4 shares; ARXFS drives them entirely beneath
+its single existing device-write seam:
 
 ```text
 VFS operation
@@ -324,7 +325,7 @@ letting it wait out a window measured when memory was plentiful.
 
 ## 6. The bound — done
 
-`WritebackBound` (`wcache.rs`), installed by `ARXFS::with_writeback_bound` and
+`WritebackBound` (`lib/writeback`), installed by `ARXFS::with_writeback_bound` and
 assembled per mount by `kernel/tairix-kernel::writeback_bound`.
 
 - **Ceiling** derived from discovered RAM (`AGENTS.md` §24.1), not a constant:
@@ -433,7 +434,7 @@ it was measured on.
 
 ### WB1 — dirty block set and the commit barrier. **done**
 
-`wcache.rs` holds the physical-block-keyed `DirtySet`: sealed blocks, replaced
+`lib/writeback` holds the physical-block-keyed `DirtySet`: sealed blocks, replaced
 on rewrite, dropped unwritten when the transaction frees the block again, wiped
 as they leave, and handed to the drain in ascending device order. It performs no
 I/O and is host-unit-tested, exactly as `pagecache.rs`. `write_meta` and
@@ -554,7 +555,7 @@ so nothing can erode that reservation before a remount reads it.
 
 ### WB4 — commit scheduler. **done**
 
-`CommitScheduler` (`wcache.rs`) holds the open transaction's start reading, the
+`CommitScheduler` (`lib/writeback`) holds the open transaction's start reading, the
 class window, and the count of operations already reported into it. `begin`
 joins or opens; `end_operation` publishes when the window has expired, when the
 operation widened the incompatible-feature word, or when there is no clock to

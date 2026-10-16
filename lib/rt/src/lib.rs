@@ -2092,7 +2092,9 @@ pub fn file_unmap(base: u64, len: u64) -> i64 {
 /// as grants, the probed partition extent, the filesystem type, and the
 /// catalog name. Requires `CAP_FS_MOUNT`; the kernel re-validates every
 /// field against live state and fails closed. Returns `0` on success or
-/// `-errno` (recover the [`tairix_abi::Errno`] discriminant as `-ret`).
+/// `-errno` (recover the [`tairix_abi::Errno`] discriminant as `-ret`):
+/// `AlreadyExists` when the catalog name is taken, which another name may
+/// answer, and `Busy` when the volume is attached already, which none will.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno-result encoding (0, else -errno).
 pub fn volume_attach(request: &[u8]) -> i64 {

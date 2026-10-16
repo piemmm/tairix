@@ -9,7 +9,6 @@ use alloc::collections::BTreeSet;
 
 use super::*;
 use crate::pagecache::MAX_CACHED_PAGES;
-use crate::wcache::TestVolumeHost;
 use tairix_abi::driver::block::{DeviceHealth, DiscardCapability, HealthSnapshot};
 use tairix_abi::driver::filesystem::clock::TestClock;
 use tairix_abi::driver::filesystem::listing::{first_listed, listed};
@@ -18,6 +17,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_fsmeta::preset;
 use tairix_reclaim::{PressureBand, ReportedPressure};
+use tairix_writeback::TestVolumeHost;
 
 /// In-memory block device. Optionally drops writes once a budget is reached,
 /// modelling a power loss mid-commit: a dropped write simply never reaches the
@@ -569,28 +569,25 @@ fn a_read_only_mount_refuses_every_mutation_fail_closed() {
     let root = ro.root();
     assert_eq!(
         ro.create(root, b"new", NodeKind::RegularFile),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     );
     assert_eq!(
         ro.write_at(root, b"file", 0, b"clobber!"),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     );
-    assert_eq!(ro.remove(root, b"file"), Err(DriverError::PermissionDenied));
-    assert_eq!(
-        ro.truncate(root, b"file", 0),
-        Err(DriverError::PermissionDenied)
-    );
+    assert_eq!(ro.remove(root, b"file"), Err(DriverError::ReadOnly));
+    assert_eq!(ro.truncate(root, b"file", 0), Err(DriverError::ReadOnly));
     // The inherent mutators (not part of a `Filesystem*` trait) fail closed
     // too — they must early-deny, not rely on the `commit` backstop after
     // dirtying the device.
     assert_eq!(
         ro.reflink(root, b"file", b"clone"),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     );
     let node = ro.lookup(root, b"file").expect("the original file exists");
     assert_eq!(
         ro.set_security(node, Security::new(0o600, 0, 0)),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     );
     // The refused create never appeared, and the existing file is intact.
     assert!(ro.lookup(root, b"new").is_err());
@@ -3825,10 +3822,7 @@ fn a_read_only_mount_refuses_check_before_touching_the_device() {
     let bytes = populated().into_block().expect("the volume closes").bytes();
     let mut fs = ARXFS::open_read_only(MemBlock::from_bytes(bytes.clone(), 4096, 512), TEST_KEYING)
         .expect("read-only mount");
-    assert_eq!(
-        fs.check(&GrantAll, &NullSink),
-        Err(DriverError::PermissionDenied)
-    );
+    assert_eq!(fs.check(&GrantAll, &NullSink), Err(DriverError::ReadOnly));
     let after = fs.into_block().expect("the volume closes");
     assert_eq!(after.writes, 0, "no write was issued");
     assert_eq!(after.bytes(), bytes, "the device is untouched");
@@ -3845,10 +3839,7 @@ fn a_read_only_mount_never_trims() {
         TEST_KEYING,
     )
     .expect("read-only mount");
-    assert_eq!(
-        fs.trim(&GrantAll, &NullSink),
-        Err(DriverError::PermissionDenied)
-    );
+    assert_eq!(fs.trim(&GrantAll, &NullSink), Err(DriverError::ReadOnly));
     let after = fs.into_block().expect("the volume closes");
     assert!(
         after.discarded.is_empty(),
@@ -6184,7 +6175,7 @@ fn a_failed_slot_write_freezes_the_handle_and_publishes_nothing() {
         );
         assert_eq!(
             fs.write_at(root, b"new", 0, b"again"),
-            Err(DriverError::PermissionDenied),
+            Err(DriverError::ReadOnly),
             "a frozen handle accepts no further mutation"
         );
         assert_eq!(
@@ -7830,12 +7821,9 @@ fn a_read_only_mount_refuses_attribute_mutation() {
     // Mutating one fails closed.
     assert_eq!(
         ro.set_attr(node, b"user.k", b"w"),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     );
-    assert_eq!(
-        ro.remove_attr(node, b"user.k"),
-        Err(DriverError::PermissionDenied)
-    );
+    assert_eq!(ro.remove_attr(node, b"user.k"), Err(DriverError::ReadOnly));
 }
 
 #[test]
@@ -8646,16 +8634,16 @@ fn a_read_only_mount_builds_no_allocation_state_at_all() {
     let root = fs.root();
     assert_eq!(
         fs.create(root, b"nope", NodeKind::RegularFile),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     );
     assert_eq!(
         fs.write_at(root, b"f0", 0, b"nope"),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     );
-    assert_eq!(fs.remove(root, b"f0"), Err(DriverError::PermissionDenied));
+    assert_eq!(fs.remove(root, b"f0"), Err(DriverError::ReadOnly));
     assert!(matches!(
         fs.trim(&GrantAll, &NullSink),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     ));
     // And it still serves reads.
     let node = fs.lookup(root, b"f0").expect("lookup");
@@ -10483,7 +10471,7 @@ fn a_commit_that_loses_reported_operations_freezes_the_handle() {
     );
     assert_eq!(
         fs.create(root, b"more", NodeKind::RegularFile),
-        Err(DriverError::PermissionDenied)
+        Err(DriverError::ReadOnly)
     );
     // The volume itself is untouched: the abandoned batch published nothing.
     fs.block_mut().write_fault_after = None;

@@ -115,7 +115,7 @@ impl SoakFs for Ext4<RamBlock> {
     }
 
     fn remount(self, (): ()) -> Result<Self, DriverError> {
-        Ext4::open(self.into_block())
+        Ext4::open(self.into_block()?)
     }
 }
 

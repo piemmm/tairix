@@ -22,10 +22,19 @@ tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # Fallible zeroed buffers: block-sized scratch lives on the heap, not on the
 # small kernel stack the driver's paths nest on.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The budget, pressure gauge and pinned-memory ledger the open transaction
+# is bounded by.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The shared write-back core: the staged-block set with per-operation undo,
+# the commit window and the machine-wide bound.
+tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0" }
 
 [dev-dependencies]
 # The shared driver listing fixtures (`listing::listed`, `first_listed`).
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", features = ["test-util"] }
+tairix-writeback = { path = "../../../lib/writeback", version = "=0.0.0", features = ["test-util"] }
+# The seeded PRNG and budget the mount fuzz harness draws from.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 [lints]
 workspace = true

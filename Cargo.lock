@@ -2002,6 +2002,7 @@ dependencies = [
  "tairix-hash",
  "tairix-log",
  "tairix-reclaim",
+ "tairix-writeback",
  "zeroize",
 ]
 
@@ -2012,8 +2013,11 @@ dependencies = [
  "tairix-abi",
  "tairix-crc32c",
  "tairix-fsprobe",
+ "tairix-fuzzseed",
  "tairix-hash",
+ "tairix-reclaim",
  "tairix-util",
+ "tairix-writeback",
 ]
 
 [[package]]
@@ -8274,6 +8278,15 @@ dependencies = [
  "tairix-reclaim",
  "tairix-theme",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-writeback"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-reclaim",
+ "zeroize",
 ]
 
 [[package]]

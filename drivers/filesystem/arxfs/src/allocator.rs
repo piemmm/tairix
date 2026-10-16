@@ -56,8 +56,8 @@ use crate::dedupe::DedupeIndex;
 use crate::header::{BlockHeader, BlockType, HEADER_LEN};
 use crate::pagecache::{page_payload_len, BlockCache, MAX_CACHED_PAGES};
 use crate::superblock::RING_BLOCKS;
-use crate::wcache::WritePhase;
 use crate::{as_u32, ARXFS, MAX_BLOCK_SIZE};
+use tairix_writeback::WritePhase;
 
 /// Upper bound on the transient pending-discard queue, in **runs**. The queue
 /// batches freed-but-not-yet-trimmed runs; it is rebuildable,
@@ -309,18 +309,18 @@ impl Allocator {
 }
 
 impl<B: Block> ARXFS<B> {
-    /// The allocator, or [`DriverError::PermissionDenied`] on a read-only
+    /// The allocator, or [`DriverError::ReadOnly`] on a read-only
     /// handle. This is the structural backstop behind the entry-point
     /// read-only guards: a write path that somehow reached this far still
     /// fails closed rather than inventing allocation state.
     pub(crate) fn allocator(&self) -> Result<&Allocator, DriverError> {
-        self.alloc.as_ref().ok_or(DriverError::PermissionDenied)
+        self.alloc.as_ref().ok_or(DriverError::ReadOnly)
     }
 
     /// Mutable access to the allocator; fails closed exactly as
     /// [`Self::allocator`].
     pub(crate) fn allocator_mut(&mut self) -> Result<&mut Allocator, DriverError> {
-        self.alloc.as_mut().ok_or(DriverError::PermissionDenied)
+        self.alloc.as_mut().ok_or(DriverError::ReadOnly)
     }
 
     /// The mounted map's layout, or an error on a read-only handle.

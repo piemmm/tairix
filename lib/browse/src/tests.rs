@@ -1373,7 +1373,7 @@ fn a_rename_selects_the_stem_and_keeps_the_ending() {
 #[test]
 fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     use crate::render::{
-        chrome_height, delete_dialog_rect, grid_metrics, open_with_chooser_extent, row_height,
+        chrome_height, grid_metrics, modal_dialog_rect, open_with_chooser_extent, row_height,
         scrollbar_bounds, sidebar_view, toolbar_height,
     };
 
@@ -1409,8 +1409,8 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     // plates are the desktop's, placed by the one shared rule that reads the
     // desktop's own density.
     assert!(
-        delete_dialog_rect(vp, hidpi, &theme).height
-            > delete_dialog_rect(vp, Scale::ONE, &theme).height
+        modal_dialog_rect(vp, hidpi, &theme).height
+            > modal_dialog_rect(vp, Scale::ONE, &theme).height
     );
     // The chooser is its own popup, sized to its content, so what scales with
     // the density is the extent it asks that popup to be — in both axes, since
@@ -3895,6 +3895,29 @@ mod create_model {
     }
 
     #[test]
+    fn an_entry_made_after_the_view_moved_on_leaves_the_view_where_it_went() {
+        let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
+        let pending = browser.prepare_entry("Downloads").expect("a free name");
+        assert_eq!(pending.path(), "/Downloads");
+        browser
+            .navigate_to(alloc::vec!["System".to_string()])
+            .expect("lists");
+        let before: alloc::vec::Vec<alloc::string::String> =
+            names(&browser).iter().map(ToString::to_string).collect();
+        assert_eq!(browser.finish_entry(&pending, Ok(())), Ok(false));
+        assert_eq!(
+            names(&browser),
+            before,
+            "the folder the user moved to is untouched"
+        );
+        assert_eq!(
+            browser.finish_entry(&pending, Err(Errno::ReadOnly)),
+            Err(CreateError::Refused(Errno::ReadOnly)),
+            "a refusal is the volume's whatever the view"
+        );
+    }
+
+    #[test]
     fn commit_creates_the_folder_and_follows_the_selection_onto_it() {
         // Root sorts to [Archive, Storage, System, Users]; create Downloads.
         let fs = fs_with_refreshed_root(alloc::vec![
@@ -3907,7 +3930,7 @@ mod create_model {
         let mut browser = Browser::open_root(fs).expect("root");
 
         let seen = RefCell::new(None);
-        let result = browser.create_entry("Downloads", |path| {
+        let result = browser.create_now("Downloads", |path| {
             *seen.borrow_mut() = Some(path.to_string());
             Ok(())
         });
@@ -3933,7 +3956,7 @@ mod create_model {
             ("a/b", CreateError::Separator),
             ("bad:name", CreateError::Invalid),
         ] {
-            let result = browser.create_entry(name, |_| {
+            let result = browser.create_now(name, |_| {
                 panic!("the VFS must not be touched for an invalid name");
             });
             assert_eq!(result, Err(expected));
@@ -3945,7 +3968,7 @@ mod create_model {
     #[test]
     fn a_clash_with_an_existing_sibling_is_refused_before_any_syscall() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        let result = browser.create_entry("System", |_| {
+        let result = browser.create_now("System", |_| {
             panic!("a clashing create must not reach the VFS");
         });
         assert_eq!(result, Err(CreateError::Clash));
@@ -3955,7 +3978,7 @@ mod create_model {
     #[test]
     fn a_vfs_refusal_is_surfaced_and_leaves_the_listing_unchanged() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        let result = browser.create_entry("Downloads", |_| Err(Errno::PermissionDenied));
+        let result = browser.create_now("Downloads", |_| Err(Errno::PermissionDenied));
         assert_eq!(result, Err(CreateError::Refused(Errno::PermissionDenied)));
         // No refresh happened: the original listing stands.
         assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
@@ -3964,7 +3987,7 @@ mod create_model {
     #[test]
     fn a_name_the_volume_finds_taken_is_a_clash() {
         let mut browser = Browser::open_root(MockFs::fixture()).expect("root");
-        let result = browser.create_entry("SYSTEM", |_| Err(Errno::AlreadyExists));
+        let result = browser.create_now("SYSTEM", |_| Err(Errno::AlreadyExists));
         assert_eq!(result, Err(CreateError::Clash));
         assert_eq!(names(&browser), ["Archive", "Storage", "System", "Users"]);
     }
@@ -3980,7 +4003,7 @@ mod create_model {
         assert_eq!(focused(&browser).map(Entry::name), None);
 
         let seen = RefCell::new(None);
-        let result = browser.create_entry("New Folder", |path| {
+        let result = browser.create_now("New Folder", |path| {
             *seen.borrow_mut() = Some(path.to_string());
             Ok(())
         });
@@ -3995,7 +4018,7 @@ mod create_model {
         // directory that becomes unreadable between the create and the refresh.
         fs.deny_after_first.insert("/".to_string());
         let mut browser = Browser::open_root(fs).expect("root");
-        let result = browser.create_entry("Downloads", |_| Ok(()));
+        let result = browser.create_now("Downloads", |_| Ok(()));
         assert_eq!(result, Err(CreateError::Source(Errno::PermissionDenied)));
     }
 
@@ -4040,45 +4063,13 @@ mod create_model {
 
 // --- FM8b: the permission-edit model (validate + commit a new mode) --------
 //
-// Every validation, transactional, and fail-closed branch of `set_mode` runs
-// in `cargo test` without a kernel.
+// Every validation branch of a new mode runs in `cargo test` without a
+// kernel.
 
 mod mode_edit_model {
-    use core::cell::RefCell;
-
-    use alloc::string::ToString;
-
     use tairix_abi::fs::FS_MODE_MASK;
-    use tairix_abi::Errno;
 
-    use crate::mode_edit::{set_mode, validate_mode, ModeError};
-
-    #[test]
-    fn commit_applies_the_mode_to_the_named_node() {
-        let seen = RefCell::new(None);
-        let result = set_mode("/Archive", 0o750, |path, mode| {
-            *seen.borrow_mut() = Some((path.to_string(), mode));
-            Ok(())
-        });
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(*seen.borrow(), Some(("/Archive".to_string(), 0o750)));
-    }
-
-    #[test]
-    fn a_mode_carrying_a_bit_above_the_mask_is_refused_before_any_syscall() {
-        // A file-type bit (above the 0o7777 permission word) is not settable.
-        let result = set_mode("/Archive", FS_MODE_MASK + 1, |_, _| {
-            panic!("the VFS must not be touched for an invalid mode");
-        });
-        assert_eq!(result, Err(ModeError::Invalid));
-    }
-
-    #[test]
-    fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
-        let result = set_mode("/Archive", 0o644, |_, _| Err(Errno::PermissionDenied));
-        assert_eq!(result, Err(ModeError::Refused(Errno::PermissionDenied)));
-    }
+    use crate::mode_edit::{validate_mode, InvalidMode};
 
     #[test]
     fn validate_mode_accepts_the_whole_mask_and_refuses_above_it() {
@@ -4088,93 +4079,51 @@ mod mode_edit_model {
         assert_eq!(validate_mode(FS_MODE_MASK), Ok(()));
         assert_eq!(validate_mode(0o755), Ok(()));
         // One bit above the mask fails closed, never masked into a lesser word.
-        assert_eq!(validate_mode(FS_MODE_MASK + 1), Err(ModeError::Invalid));
-        assert_eq!(validate_mode(0xFFFF_F000), Err(ModeError::Invalid));
-    }
-
-    #[test]
-    fn every_mode_error_has_a_nonempty_message() {
-        for err in [
-            ModeError::Invalid,
-            ModeError::Refused(Errno::PermissionDenied),
-        ] {
-            assert!(!err.message().is_empty());
-        }
+        assert_eq!(validate_mode(FS_MODE_MASK + 1), Err(InvalidMode));
+        assert_eq!(validate_mode(0xFFFF_F000), Err(InvalidMode));
+        assert!(!InvalidMode.message().is_empty());
     }
 }
 
 // --- FM8b: the ownership-edit model (validate + commit a new owner) --------
 //
-// Every validation, transactional, and fail-closed branch of `set_owner`
-// runs in `cargo test` without a kernel. The authority rule itself
+// Every validation branch of an ownership change runs in `cargo test`
+// without a kernel. The authority rule itself
 // (`CAP_FS_CHOWN`, group membership, set-*id* strip) is the kernel's and is
 // proven in `kernel/core`; here the engine only names the change and surfaces
 // the seam's outcome.
 
 mod owner_edit_model {
-    use core::cell::RefCell;
-
-    use alloc::string::ToString;
-
     use tairix_abi::fs::FS_OWNER_UNCHANGED;
     use tairix_abi::Errno;
 
-    use crate::owner_edit::{set_owner, validate_owner, OwnerChange, OwnerError};
+    use crate::owner_edit::{owner_ids, validate_owner, OwnerChange, OwnerError};
 
     #[test]
-    fn commit_applies_the_owner_to_the_named_node() {
-        let seen = RefCell::new(None);
-        let result = set_owner(
-            "/Archive",
-            OwnerChange {
-                uid: Some(1000),
-                gid: Some(50),
-            },
-            |path, uid, gid| {
-                *seen.borrow_mut() = Some((path.to_string(), uid, gid));
-                Ok(())
-            },
+    fn a_change_of_both_spells_both_ids() {
+        let change = OwnerChange {
+            uid: Some(1000),
+            gid: Some(50),
+        };
+        assert_eq!(owner_ids(change), Ok((1000, 50)));
+    }
+
+    #[test]
+    fn an_unchanged_field_is_spelt_as_the_sentinel() {
+        // A group-only change leaves the uid to the reserved sentinel, never
+        // a fabricated id.
+        assert_eq!(
+            owner_ids(OwnerChange::group(7)),
+            Ok((FS_OWNER_UNCHANGED, 7))
         );
-
-        assert_eq!(result, Ok(()));
-        assert_eq!(*seen.borrow(), Some(("/Archive".to_string(), 1000, 50)));
     }
 
     #[test]
-    fn an_unchanged_field_marshals_the_sentinel() {
-        let seen = RefCell::new(None);
-        // Group-only change: the uid field must reach the seam as the
-        // reserved "unchanged" sentinel, never a fabricated id.
-        let result = set_owner("/Archive", OwnerChange::group(7), |_, uid, gid| {
-            *seen.borrow_mut() = Some((uid, gid));
-            Ok(())
-        });
-        assert_eq!(result, Ok(()));
-        assert_eq!(*seen.borrow(), Some((FS_OWNER_UNCHANGED, 7)));
-    }
-
-    #[test]
-    fn a_sentinel_target_is_refused_before_any_syscall() {
-        // The reserved sentinel is not a real id: naming it as a target is
-        // refused rather than misread as "leave unchanged".
-        let result = set_owner(
-            "/Archive",
-            OwnerChange::user(FS_OWNER_UNCHANGED),
-            |_, _, _| {
-                panic!("the VFS must not be touched for an invalid id");
-            },
+    fn a_sentinel_target_is_refused_before_any_call() {
+        assert_eq!(
+            owner_ids(OwnerChange::user(FS_OWNER_UNCHANGED)),
+            Err(OwnerError::Invalid)
         );
-        assert_eq!(result, Err(OwnerError::Invalid));
-    }
-
-    #[test]
-    fn a_vfs_refusal_is_surfaced_and_the_node_is_unchanged() {
-        // The missing-`CAP_FS_CHOWN` denial (or any VFS refusal) surfaces as
-        // `Refused`, leaving the node as it was.
-        let result = set_owner("/Archive", OwnerChange::user(0), |_, _, _| {
-            Err(Errno::PermissionDenied)
-        });
-        assert_eq!(result, Err(OwnerError::Refused(Errno::PermissionDenied)));
     }
 
     #[test]
@@ -9858,7 +9807,7 @@ fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
 // --- FM7b: the delete-confirmation dialog ---------------------------------
 
 use crate::render::{
-    build_delete_dialog, delete_dialog_action_at, delete_dialog_rect, draw_delete_dialog,
+    build_delete_dialog, draw_modal_dialog, modal_dialog_action_at, modal_dialog_rect,
     DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
 };
 use crate::trash::DeleteDisposition;
@@ -9923,7 +9872,7 @@ fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
     let theme = Theme::dark();
 
     let vp = Rect::new(0, 0, 480, 320);
-    let rect = delete_dialog_rect(vp, Scale::ONE, &theme);
+    let rect = modal_dialog_rect(vp, Scale::ONE, &theme);
     assert!(rect.width > 0 && rect.height > 0);
     assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
     assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
@@ -9938,7 +9887,7 @@ fn delete_dialog_rect_is_centered_and_clamped_within_the_viewport() {
     // A window smaller than the dialog would like still yields a drawable rect
     // clamped to the window, never a zero or over-size rectangle (no panic).
     let tiny = Rect::new(0, 0, 20, 16);
-    let small = delete_dialog_rect(tiny, Scale::ONE, &theme);
+    let small = modal_dialog_rect(tiny, Scale::ONE, &theme);
     assert!(small.width >= 1 && small.width <= tiny.width);
     assert!(small.height >= 1 && small.height <= tiny.height);
 }
@@ -9953,12 +9902,12 @@ fn draw_delete_dialog_paints_into_the_surface_without_panicking() {
 
     let mut surface = Surface::new(vp.width, vp.height).expect("surface");
     let before = surface.pixels().to_vec();
-    draw_delete_dialog(&mut surface, &dialog, Scale::ONE, &theme, vp);
+    draw_modal_dialog(&mut surface, &dialog, Scale::ONE, &theme, vp);
     assert_ne!(surface.pixels().to_vec(), before);
 
     // A degenerate viewport draws nothing and does not panic.
     let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_delete_dialog(
+    draw_modal_dialog(
         &mut tiny,
         &dialog,
         Scale::ONE,
@@ -9982,7 +9931,7 @@ fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
         let mut x = 0;
         while x < i32::try_from(vp.width).unwrap() {
             if let Some(index) =
-                delete_dialog_action_at(&dialog, vp, Scale::ONE, &theme, Point::new(x, y))
+                modal_dialog_action_at(&dialog, vp, Scale::ONE, &theme, Point::new(x, y))
             {
                 assert!(
                     index == DELETE_CONFIRM_INDEX || index == DELETE_CANCEL_INDEX,
@@ -10003,15 +9952,46 @@ fn delete_dialog_action_at_mirrors_both_buttons_and_fails_closed_off_grid() {
 
     // A click well outside the dialog resolves nothing (fail closed).
     assert_eq!(
-        delete_dialog_action_at(&dialog, vp, Scale::ONE, &theme, Point::new(-5, -5)),
+        modal_dialog_action_at(&dialog, vp, Scale::ONE, &theme, Point::new(-5, -5)),
         None
     );
     // On a window too small for the dialog buttons, nothing resolves (fail
     // closed) rather than placing a phantom button.
     let tiny = Rect::new(0, 0, 20, 16);
     assert_eq!(
-        delete_dialog_action_at(&dialog, tiny, Scale::ONE, &theme, Point::new(5, 5)),
+        modal_dialog_action_at(&dialog, tiny, Scale::ONE, &theme, Point::new(5, 5)),
         None
+    );
+}
+
+#[test]
+fn a_refusal_dialog_states_its_reason_and_offers_one_ok() {
+    use crate::render::{build_refusal_dialog, REFUSAL_DISMISS_INDEX};
+    use tairix_controls::state::ControlRole;
+    let dialog = build_refusal_dialog("Copy stopped", "the destination is full");
+    assert_eq!(dialog.title(), "Copy stopped");
+    assert_eq!(dialog.message(), Some("the destination is full"));
+    let actions = dialog.actions();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        actions[REFUSAL_DISMISS_INDEX].role(),
+        ControlRole::Recommended
+    );
+    let theme = Theme::dark();
+    let vp = Rect::new(0, 0, 480, 360);
+    let rects = dialog.action_rects(
+        modal_dialog_rect(vp, Scale::ONE, &theme),
+        Scale::ONE,
+        &theme,
+    );
+    let ok = rects[REFUSAL_DISMISS_INDEX];
+    let centre = Point::new(
+        ok.left() + i32::try_from(ok.width / 2).expect("fits"),
+        ok.top() + i32::try_from(ok.height / 2).expect("fits"),
+    );
+    assert_eq!(
+        modal_dialog_action_at(&dialog, vp, Scale::ONE, &theme, centre),
+        Some(REFUSAL_DISMISS_INDEX)
     );
 }
 
@@ -10096,6 +10076,15 @@ fn progress_model_reports_the_honest_count_and_never_a_percentage() {
     trash.set_done(1);
     assert_eq!(trash.status_line(), "1 item moved to Trash");
     assert!(trash.title().starts_with("Moving to Trash"));
+
+    // A move says it moves, not that it copies.
+    let mut moving = ProgressModel::new(ProgressOp::Move);
+    moving.set_done(2);
+    assert_eq!(moving.status_line(), "2 items moved");
+    assert_eq!(moving.title(), "Moving\u{2026}");
+    // A refusal's notice names the operation it stopped.
+    assert_eq!(moving.stopped_title(), "Move stopped");
+    assert_eq!(trash.stopped_title(), "Move to Trash stopped");
 }
 
 #[test]

@@ -28,9 +28,11 @@ use alloc::string::String;
 pub enum ProgressOp {
     /// A recursive removal (driven by [`DeleteWalk`](crate::DeleteWalk)).
     Delete,
-    /// A recursive copy or cross-volume move (driven by
-    /// [`CopyWalk`](crate::CopyWalk)).
+    /// A recursive copy (driven by [`CopyWalk`](crate::CopyWalk)).
     Copy,
+    /// A move: a rename on one volume, or a copy then a removal of the source
+    /// across two.
+    Move,
     /// A move to Trash: a recoverable delete carried out as same-volume
     /// renames into the user's Trash directory (`plans/NEW-FILEMANAGER.md`
     /// `FM10`), one item per step.
@@ -101,8 +103,21 @@ impl ProgressModel {
             match self.op {
                 ProgressOp::Delete => "Deleting\u{2026}",
                 ProgressOp::Copy => "Copying\u{2026}",
+                ProgressOp::Move => "Moving\u{2026}",
                 ProgressOp::Trash => "Moving to Trash\u{2026}",
             }
+        }
+    }
+
+    /// The title of the notice a refusal that stopped this operation is
+    /// stated in.
+    #[must_use]
+    pub const fn stopped_title(&self) -> &'static str {
+        match self.op {
+            ProgressOp::Delete => "Delete stopped",
+            ProgressOp::Copy => "Copy stopped",
+            ProgressOp::Move => "Move stopped",
+            ProgressOp::Trash => "Move to Trash stopped",
         }
     }
 
@@ -115,6 +130,7 @@ impl ProgressModel {
         let verb = match self.op {
             ProgressOp::Delete => "removed",
             ProgressOp::Copy => "copied",
+            ProgressOp::Move => "moved",
             ProgressOp::Trash => "moved to Trash",
         };
         let noun = if self.done == 1 { "item" } else { "items" };

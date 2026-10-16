@@ -35,12 +35,13 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
-use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, RUN_BYTES, VOLUME_KEY_LEN};
+use tairix_drv_fs_arxfs::{EntropySource, Keying, VolumeKey, ARXFS, VOLUME_KEY_LEN};
 use tairix_fuzzseed::Prng;
 use tairix_reclaim::{
     CacheBudget, FreeMemorySource, MemoryPressure, PinnedAccounting, PinnedLedger, PinnedShare,
     PressureBand, ReclaimOwner, ReportedPressure,
 };
+use tairix_writeback::RUN_BYTES;
 
 /// Stand in for the kernel's per-boot publication, so the volume's dedupe
 /// index is keyed here exactly as it is on a booted system. A second call is
@@ -1352,10 +1353,7 @@ fn a_read_only_mount_pins_nothing() {
         .expect("the volume mounts read-only")
         .with_writeback_bound(SMALL_MACHINE_BYTES, gauge, Arc::clone(&pinned))
         .expect("a read-only mount is bounded like any other");
-    assert_eq!(
-        fs.write_at(root, FILE, 0, b"x"),
-        Err(DriverError::PermissionDenied)
-    );
+    assert_eq!(fs.write_at(root, FILE, 0, b"x"), Err(DriverError::ReadOnly));
     assert_eq!(fs.writeback_pinned_bytes(), 0);
     assert_eq!((pinned.bytes(), pinned.entries()), (0, 0));
 }

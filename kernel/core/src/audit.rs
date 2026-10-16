@@ -66,6 +66,7 @@
 //! | 4266 | Warn | `TASK_LATENCY_OVERRUN` | log | An interactive surface overran the frame budget it declared with `latency_watch`. The `budget_ms`/`elapsed_ms`/`blocked_ms`/`calls` fields say where the budget went, `blocked_in` names the syscall that carried the span over, `top_calls` names the syscalls the span made most (which is what a stall spent in thousands of short calls has instead of one culprit), and `pc`/`bt` carry the stalling code as offsets into the program's own load base. Debug images only. |
 //! | 4267 | Warn | `VOLUME_RESERVE_ENTERED` | audit | A mounted volume is down to its reserve: ordinary writes may be refused while the system's own writes and deletes go on into it. `volume` names the mount handle and `source` the volume. |
 //! | 4268 | Info | `VOLUME_RESERVE_LEFT` | audit | A volume that was down to its reserve has room outside it again. `volume` names the mount handle and `source` the volume. |
+//! | 4269 | Warn | `WALL_CLOCK_SET_REFUSED` | audit | A wall-clock write was refused because the stored reading came from a better source than the writer claims; the clock is untouched. `caller` names the writing process, and `attempted` and `stored` the two provenance states. |
 //!
 //! "audit" events route through the `audit_sink` channel
 //! (security-relevant decisions); "log" events
@@ -767,6 +768,9 @@ pub enum AuditEvent {
     VolumeReserveEntered,
     /// A volume that was down to its reserve has room outside it again.
     VolumeReserveLeft,
+    /// A wall-clock write lost to its provenance ladder: the stored reading
+    /// came from a better source, so a weaker one cannot roll it back.
+    WallClockSetRefused,
     /// An interactive surface overran the frame budget it declared
     /// (`plans/FIX-STALLTRACE.md`).
     ///
@@ -876,6 +880,7 @@ impl AuditEvent {
             Self::TaskLatencyOverrun => 4266,
             Self::VolumeReserveEntered => 4267,
             Self::VolumeReserveLeft => 4268,
+            Self::WallClockSetRefused => 4269,
         })
     }
 
@@ -966,6 +971,7 @@ impl AuditEvent {
             Self::VolumeWritebackFailed => "volume write-back publish failed",
             Self::VolumeReserveEntered => "volume down to its reserve",
             Self::VolumeReserveLeft => "volume has room outside its reserve again",
+            Self::WallClockSetRefused => "wall clock write refused by its provenance ladder",
             Self::TaskLatencyOverrun => "interactive surface overran its frame budget",
         }
     }
@@ -1078,6 +1084,7 @@ mod tests {
         AuditEvent::TaskLatencyOverrun,
         AuditEvent::VolumeReserveEntered,
         AuditEvent::VolumeReserveLeft,
+        AuditEvent::WallClockSetRefused,
     ];
 
     #[test]
@@ -1085,7 +1092,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 82, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 83, "a new event belongs in `ALL`");
     }
 
     #[test]

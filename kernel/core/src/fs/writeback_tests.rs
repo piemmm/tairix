@@ -446,6 +446,25 @@ fn a_volume_reporting_nothing_open_leaves_no_deadline_armed() {
     assert_eq!(flushes(mounts, volumes[0]), 0);
 }
 
+/// The flusher consumes a deadline before it publishes, so what the driver
+/// still holds is read from the driver's own report, which only the driver
+/// clears.
+#[test]
+fn a_transaction_is_held_until_its_driver_reports_it_published() {
+    let mounts = registry();
+    let volumes = dirty_volumes(mounts, 1, 1_000, 0);
+    assert!(mounts.holds_unpublished(volumes[0]));
+    let taken = mounts.take_writeback_due(1_000);
+    assert_eq!(taken.len(), 1);
+    assert!(
+        mounts.holds_unpublished(volumes[0]),
+        "a deadline taken for publishing is not yet a transaction published"
+    );
+    mounts.note_writeback_due(volumes[0], None);
+    assert!(!mounts.holds_unpublished(volumes[0]));
+    assert!(!mounts.holds_unpublished(handle(99)));
+}
+
 #[test]
 fn a_report_against_an_unregistered_handle_records_nothing() {
     let mounts = registry();

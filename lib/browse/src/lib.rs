@@ -87,7 +87,7 @@
 //! * [`create`](mod@create) — the New ▸ model: what a new folder or blank
 //!   document is first called ([`NewEntry`]) and whether a name may be created
 //!   ([`CreateError`]/[`validate_new_entry_name`]).
-//! * [`mode_edit`](mod@mode_edit) — the [`ModeError`]/[`validate_mode`]
+//! * [`mode_edit`](mod@mode_edit) — the [`InvalidMode`]/[`validate_mode`]
 //!   permission-change model committed through the `fs_set_mode` seam
 //!   (`plans/NEW-FILEMANAGER.md` `FM8b`).
 //! * [`owner_edit`](mod@owner_edit) — the [`OwnerError`]/[`validate_owner`]
@@ -156,7 +156,7 @@ pub mod vfs;
 pub mod watch;
 
 pub use activate::{Activation, BundleIntent};
-pub use browser::{Browser, PendingRename};
+pub use browser::{Browser, PendingEntry, PendingRename};
 pub use chrome::{
     apply_command, context_choice_from_item, context_menu, ContextChoice, ContextCommand,
     ContextMenuModel, ContextQuick, ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand,
@@ -186,7 +186,7 @@ pub use media::{
     entry_icon, folder_sample, icon_for_entry, media_for_entry, media_for_name, BlankDocument,
     Ending, Family, MediaType,
 };
-pub use mode_edit::{validate_mode, ModeError};
+pub use mode_edit::{validate_mode, InvalidMode};
 pub use open_with::{
     applications_for, association_from_manifest, blank_documents, quick_applications,
     AppAssociation, OpenWithCandidate, OpenWithChooser,

@@ -303,10 +303,12 @@ enum Walk {
 /// this mapping is total and the same wherever a driver call is made: a
 /// taken name is [`VfsError::AlreadyExists`] whichever operation met it, a
 /// populated directory is [`VfsError::NotEmpty`], a move that would make a
-/// directory its own descendant is [`VfsError::DirectoryCycle`], and a full
+/// directory its own descendant is [`VfsError::DirectoryCycle`], a full
 /// volume and exhausted memory are [`VfsError::NoSpace`] and
-/// [`VfsError::OutOfMemory`]. Only an unrecoverable backing fault reaches
-/// [`VfsError::Io`].
+/// [`VfsError::OutOfMemory`], a volume that has stopped writing is
+/// [`VfsError::ReadOnly`], and a change the volume's own record forbids is
+/// [`VfsError::PermissionDenied`]. Only an unrecoverable backing fault
+/// reaches [`VfsError::Io`].
 ///
 /// A driver also answers [`DriverError::Unsupported`] for a node of the
 /// wrong kind, but every walk and operation here checks kinds before it
@@ -324,6 +326,10 @@ const fn map_driver_error(error: DriverError) -> VfsError {
         DriverError::TooManyLinks => VfsError::TooManyLinks,
         DriverError::NoSpace => VfsError::NoSpace,
         DriverError::OutOfMemory => VfsError::OutOfMemory,
+        DriverError::ReadOnly => VfsError::ReadOnly,
+        // The volume's own record forbids the change — a node `chattr` holds
+        // fixed — whatever the caller may do elsewhere.
+        DriverError::PermissionDenied => VfsError::PermissionDenied,
         _ => VfsError::Io,
     }
 }
@@ -776,6 +782,7 @@ const fn map_attr_driver_error(error: DriverError) -> VfsError {
         DriverError::NoSpace => VfsError::NoSpace,
         DriverError::OutOfMemory => VfsError::OutOfMemory,
         DriverError::OutOfRange | DriverError::LengthOutOfRange => VfsError::InvalidKey,
+        DriverError::ReadOnly => VfsError::ReadOnly,
         _ => VfsError::Io,
     }
 }

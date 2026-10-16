@@ -8,6 +8,7 @@
 //! meanwhile is thrown away and no refusal is stated against a name the user
 //! did not commit.
 
+use alloc::string::String;
 use tairix_browse::PendingRename;
 use tairix_controls::text::{TextAction, TextField};
 use tairix_geometry::{Rect, Region};
@@ -19,6 +20,9 @@ use tairix_input::{Key, Modifiers};
 pub struct RenameEdit {
     field: Option<TextField>,
     in_flight: Option<(u64, PendingRename)>,
+    /// Why the last name was refused, until the window states it. The editor
+    /// is one row tall, which leaves no room to draw a reason beneath it.
+    refusal: Option<String>,
 }
 
 impl RenameEdit {
@@ -103,6 +107,16 @@ impl RenameEdit {
             return None;
         }
         self.in_flight.take().map(|(_, pending)| pending)
+    }
+
+    /// Record why the name was refused, for the window to state.
+    pub fn refuse(&mut self, reason: String) {
+        self.refusal = Some(reason);
+    }
+
+    /// Take the refusal the window has yet to state, if there is one.
+    pub fn take_refusal(&mut self) -> Option<String> {
+        self.refusal.take()
     }
 }
 
@@ -196,5 +210,17 @@ mod tests {
         assert_eq!(edit.answered(6), None);
         assert!(edit.in_flight());
         assert!(edit.awaits(5));
+    }
+
+    #[test]
+    fn a_refusal_is_kept_until_the_window_takes_it_once() {
+        let mut edit = RenameEdit::default();
+        assert_eq!(edit.take_refusal(), None);
+        edit.refuse(alloc::string::String::from("its volume is read-only"));
+        assert_eq!(
+            edit.take_refusal().as_deref(),
+            Some("its volume is read-only")
+        );
+        assert_eq!(edit.take_refusal(), None, "stated once");
     }
 }

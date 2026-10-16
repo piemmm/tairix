@@ -1,9 +1,9 @@
-//! The write-back bound one writable ARXFS volume is mounted under
+//! The write-back bound a writable ARXFS or ext4 volume is mounted under
 //! (`plans/ARXFS-WRITEBACK.md` §6).
 //!
-//! A copy-on-write filesystem holds its transaction's sealed blocks in RAM
-//! until the commit sends them, so the commit costs one device write per
-//! block rather than one per rewrite. Those blocks are **pinned**: they
+//! Both drivers hold their open transaction's blocks in RAM until the
+//! commit sends them, so a commit costs one device write per block rather
+//! than one per rewrite. Those blocks are **pinned**: they
 //! exist nowhere else, so they can only be written out, never dropped —
 //! which makes them the opposite of the reclaimable caches beside them
 //! ([`crate::transform_cache`], [`crate::block_cache`]) and means nothing
@@ -29,12 +29,58 @@ use alloc::sync::Arc;
 use tairix_abi::driver::block::Block;
 use tairix_abi::DriverError;
 use tairix_drv_fs_arxfs::ARXFS;
+use tairix_drv_fs_ext4::Ext4;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level, Sink};
-use tairix_reclaim::{MemoryPressure, PinnedAccounting, PinnedLedger, PinnedShare, ReclaimOwner};
+use tairix_reclaim::{
+    MemoryPressure, PinnedAccounting, PinnedLedger, PinnedShare, PressureGauge, ReclaimOwner,
+};
 
-/// The label the volume's pinned write-back row carries in the
-/// System Information cache-ledger export.
-const PINNED_LABEL: &str = "arxfs.writeback";
+/// A filesystem whose open transaction can be bounded to the machine.
+pub trait WritebackBounded: Sized {
+    /// The label the volume's pinned write-back row carries in the System
+    /// Information cache-ledger export.
+    const PINNED_LABEL: &'static str;
+
+    /// Bound the volume to a share of `backing` RAM under `gauge`, its
+    /// footprint published through `pinned`.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when that share cannot hold one coalesced
+    /// device transfer.
+    fn bounded(
+        self,
+        backing: usize,
+        gauge: &'static dyn PressureGauge,
+        pinned: Arc<PinnedAccounting>,
+    ) -> Result<Self, DriverError>;
+}
+
+impl<B: Block> WritebackBounded for ARXFS<B> {
+    const PINNED_LABEL: &'static str = "arxfs.writeback";
+
+    fn bounded(
+        self,
+        backing: usize,
+        gauge: &'static dyn PressureGauge,
+        pinned: Arc<PinnedAccounting>,
+    ) -> Result<Self, DriverError> {
+        self.with_writeback_bound(backing, gauge, pinned)
+    }
+}
+
+impl<B: Block> WritebackBounded for Ext4<B> {
+    const PINNED_LABEL: &'static str = "ext4.writeback";
+
+    fn bounded(
+        self,
+        backing: usize,
+        gauge: &'static dyn PressureGauge,
+        pinned: Arc<PinnedAccounting>,
+    ) -> Result<Self, DriverError> {
+        self.with_writeback_bound(backing, gauge, pinned)
+    }
+}
 
 /// The one machine-wide total every mounted volume's dirty set draws on.
 ///
@@ -63,18 +109,18 @@ const WRITEBACK_BOUND_REFUSED: EventId = EventId(4146);
 /// cannot hold one coalesced device transfer. Refusing here is deliberate:
 /// a machine that cannot spare that much would otherwise mount and then
 /// commit after every record, which is a wedge dressed as success.
-pub fn bound_volume<B: Block>(
-    fs: ARXFS<B>,
+pub fn bound_volume<F: WritebackBounded>(
+    fs: F,
     volume: u64,
     pressure: &'static MemoryPressure,
     sink: &'static (dyn Sink + Sync),
-) -> Result<ARXFS<B>, DriverError> {
+) -> Result<F, DriverError> {
     let pinned = Arc::new(PinnedAccounting::within(&WRITEBACK_SHARE));
     // Budget from discovered physical RAM, exactly as the volume's clean
     // caches are (the growable kernel heap's bootstrap size is no longer the
     // memory to size anything against); falls back to the bootstrap size
     // before RAM is published.
-    let bounded = fs.with_writeback_bound(
+    let bounded = fs.bounded(
         tairix_kernel_core::memstats::cache_backing_bytes(),
         pressure,
         Arc::clone(&pinned),
@@ -82,7 +128,7 @@ pub fn bound_volume<B: Block>(
     match bounded {
         Ok(fs) => {
             tairix_kernel_core::memstats::MEM_STATS.register_pinned_ledger(PinnedLedger::new(
-                PINNED_LABEL,
+                F::PINNED_LABEL,
                 ReclaimOwner::FilesystemVolume { volume },
                 pinned,
             ));

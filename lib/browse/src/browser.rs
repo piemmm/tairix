@@ -70,6 +70,31 @@ impl PendingRename {
     }
 }
 
+/// A new entry, validated and spelled ([`Browser::prepare_entry`]) and
+/// awaiting the call that makes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingEntry {
+    path: String,
+    name: String,
+    /// The folder it was prepared in, which the view may have left by the
+    /// time it is made.
+    dir: Vec<String>,
+}
+
+impl PendingEntry {
+    /// The absolute path it is made at.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Its name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// A live view of one directory, with a selection cursor.
 ///
 /// `S` is the injected [`DirectorySource`]; on a running system it is backed
@@ -699,39 +724,61 @@ impl<S: DirectorySource> Browser<S> {
         })
     }
 
-    /// Create a new entry named `name` in the current directory through the
-    /// injected `make` seam, then re-list it and move the selection onto the
-    /// new entry.
-    ///
-    /// `make` receives the absolute path and performs the create (`fs_mkdir`,
-    /// or an exclusive `fs_open` for a blank document) under the caller's own
-    /// identity; the engine adds no authority. The name is validated before
-    /// `make` runs, and a refusal leaves the listing as it was.
+    /// Validate and spell a new entry named `name` in the current directory,
+    /// making nothing.
     ///
     /// # Errors
     ///
-    /// A [`CreateError`]: a spelling failure or clash decided before `make`,
-    /// [`CreateError::Refused`] when `make` fails, or [`CreateError::Source`]
-    /// when the re-list fails.
-    pub fn create_entry<M>(&mut self, name: &str, make: M) -> Result<(), CreateError>
-    where
-        M: FnOnce(&str) -> Result<(), Errno>,
-    {
+    /// A [`CreateError`] for a name that cannot be spelled or that the
+    /// listing already holds.
+    pub fn prepare_entry(&self, name: &str) -> Result<PendingEntry, CreateError> {
         validate_new_entry_name(name, &self.entries)?;
-
         let path = self.spell_child(name).map_err(|errno| match errno {
             Errno::LengthOutOfRange => CreateError::TooLong,
             _ => CreateError::Invalid,
         })?;
-        make(&path).map_err(|errno| match errno {
+        Ok(PendingEntry {
+            path,
+            name: String::from(name),
+            dir: self.components.clone(),
+        })
+    }
+
+    /// Take the volume's answer to making `pending`: on success, if the view
+    /// is still in the folder it was made in, re-list it and select the new
+    /// entry, answering whether it did.
+    ///
+    /// # Errors
+    ///
+    /// [`CreateError::Clash`] or [`CreateError::Refused`] for the volume's
+    /// refusal, or [`CreateError::Source`] when the re-list fails.
+    pub fn finish_entry(
+        &mut self,
+        pending: &PendingEntry,
+        made: Result<(), Errno>,
+    ) -> Result<bool, CreateError> {
+        made.map_err(|errno| match errno {
             Errno::AlreadyExists => CreateError::Clash,
             refused => CreateError::Refused(refused),
         })?;
-
+        if self.components != pending.dir {
+            return Ok(false);
+        }
         self.refresh()
             .map_err(|err| CreateError::Source(err.source_errno().unwrap_or(Errno::NotFound)))?;
-        self.follow(name);
-        Ok(())
+        self.follow(&pending.name);
+        Ok(true)
+    }
+
+    /// Prepare `name`, make it through `make` at once, and take the answer.
+    #[cfg(test)]
+    pub(crate) fn create_now<M>(&mut self, name: &str, make: M) -> Result<(), CreateError>
+    where
+        M: FnOnce(&str) -> Result<(), Errno>,
+    {
+        let pending = self.prepare_entry(name)?;
+        let outcome = make(pending.path());
+        self.finish_entry(&pending, outcome).map(drop)
     }
 
     /// Move the focus onto the entry `name`, now if the listing shows it, else

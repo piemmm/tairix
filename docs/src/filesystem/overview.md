@@ -141,8 +141,9 @@ Where that `Metadata` comes from is the one place the two policies differ:
   volume through these: [arxfs](./arxfs.md) stores full per-inode owner,
   mode, ACL, and capability gate — so a file marked owner-only or gated on a
   capability is enforced as stored regardless of the mount template — the
-  [ext4 driver](./ext4.md) reports each inode's stored owner and mode (its
-  ACLs live in xattr blocks not yet decoded), and FAT32, which stores no
+  [ext4 driver](./ext4.md) reports each inode's stored owner and mode with
+  its POSIX access ACL folded in, judged under the POSIX.1e model (named
+  entries under the mask, the owning group by its own entry), and FAT32, which stores no
   owner, reports the record its volume's storage-group identity map assigns,
   or its own restrictive system-owned posture where no map is provisioned.
 

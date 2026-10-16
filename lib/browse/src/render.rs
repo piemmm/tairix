@@ -3695,16 +3695,36 @@ fn build_permanent_delete_dialog(plan: &DeletePlan) -> Dialog {
         .with_actions(vec![delete, cancel])
 }
 
-/// The centered, clamped bounds of the delete-confirmation dialog within
-/// `viewport`.
+/// The action-button index of the one **OK** a refusal [`Dialog`]
+/// [`build_refusal_dialog`] produces.
+pub const REFUSAL_DISMISS_INDEX: usize = 0;
+
+/// A modal dialog stating why something the user asked for was not done:
+/// `title` names what stopped, `reason` says why, and OK dismisses it.
+///
+/// It reports a refusal in the window that asked rather than only on a log
+/// the user never reads, and performs nothing itself.
+#[must_use]
+pub fn build_refusal_dialog(title: impl Into<String>, reason: impl Into<String>) -> Dialog {
+    let ok = Button::new(
+        ButtonContent::Label(String::from("OK")),
+        ControlRole::Recommended,
+    );
+    Dialog::new(title)
+        .with_message(reason)
+        .with_actions(vec![ok])
+}
+
+/// The centered, clamped bounds of a modal dialog — the delete confirmation,
+/// a refusal — within `viewport`.
 ///
 /// Sized to comfortably show the title, the warning message, and the action
 /// button band, and clamped to the window so a small window still yields a
 /// drawable — if clipped — dialog rather than a panic. One definition so
-/// [`draw_delete_dialog`] and [`delete_dialog_action_at`] place and hit-test
+/// [`draw_modal_dialog`] and [`modal_dialog_action_at`] place and hit-test
 /// the same rectangle.
 #[must_use]
-pub fn delete_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+pub fn modal_dialog_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
     // Title bar, up to two message lines, and the action-button band, with
     // margins — generous so the buttons are not clipped at a normal size.
     centered_overlay_rect(viewport, scale, theme, 6)
@@ -3739,41 +3759,40 @@ fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_li
     Rect::new(x, y, width, height)
 }
 
-/// Draw the delete-confirmation `dialog` centered in `viewport`, on top of the
-/// current view.
+/// Draw the modal `dialog` centered in `viewport`, on top of the current view.
 ///
 /// Every blit clips, so a window too small for the whole dialog simply shows
 /// what fits rather than panicking. It reads only the passed-in dialog and
 /// draws — it performs no I/O and holds no authority.
-pub fn draw_delete_dialog(
+pub fn draw_modal_dialog(
     surface: &mut Surface,
     dialog: &Dialog,
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
 ) {
-    let bounds = delete_dialog_rect(viewport, scale, theme);
+    let bounds = modal_dialog_rect(viewport, scale, theme);
     dialog.render(surface, bounds, scale, theme);
 }
 
-/// The action-button index the delete-confirmation `dialog` draws at
-/// window-local pixel `point`, or `None` when the click is not on a button.
+/// The action-button index the modal `dialog` draws at window-local pixel
+/// `point`, or `None` when the click is not on a button.
 ///
-/// This mirrors [`draw_delete_dialog`]'s placement through the shared
-/// [`delete_dialog_rect`] and the dialog's own
+/// This mirrors [`draw_modal_dialog`]'s placement through the shared
+/// [`modal_dialog_rect`] and the dialog's own
 /// [`action_rects`](Dialog::action_rects) geometry, so a click resolves to
 /// exactly the button the user pressed — [`DELETE_CONFIRM_INDEX`] for Delete,
-/// [`DELETE_CANCEL_INDEX`] for Cancel. Only the file manager calls it; a click
-/// anywhere but a button returns `None`, changing nothing (fail closed).
+/// [`DELETE_CANCEL_INDEX`] for Cancel. A click anywhere but a button returns
+/// `None`, changing nothing (fail closed).
 #[must_use]
-pub fn delete_dialog_action_at(
+pub fn modal_dialog_action_at(
     dialog: &Dialog,
     viewport: Rect,
     scale: Scale,
     theme: &Theme,
     point: Point,
 ) -> Option<usize> {
-    let bounds = delete_dialog_rect(viewport, scale, theme);
+    let bounds = modal_dialog_rect(viewport, scale, theme);
     let rects = dialog.action_rects(bounds, scale, theme);
     for (i, rect) in rects.iter().enumerate() {
         if rect.width == 0 {

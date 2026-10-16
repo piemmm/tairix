@@ -4,9 +4,8 @@
 //! Whether a name is acceptable — the one shared spelling rule
 //! ([`tairix_path::validate_file_name`]) and a clash with a sibling — and what
 //! a new entry is first called are decided here with no kernel. The app
-//! supplies the create itself (`fs_mkdir`, or an exclusive `fs_open`); whether
-//! it is called, and on what path, is
-//! [`Browser::create_entry`](crate::Browser::create_entry)'s.
+//! makes the entry itself (`fs_mkdir`, or an exclusive `fs_open`) on the path
+//! [`Browser::prepare_entry`](crate::Browser::prepare_entry) spells.
 //!
 //! Validation is spelling only. The create is an ordinary permission-checked
 //! VFS call under the caller's own identity, which may still refuse an

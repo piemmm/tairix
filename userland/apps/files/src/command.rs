@@ -21,14 +21,15 @@
 //!
 //! The switch selects which of two things this program is ([`Role`]). Without
 //! it — from a shell, or when the desktop opens a folder — it is the ordinary
-//! file manager: one window, the shared icon-bar menu convention, and the
-//! process ends when that window closes. With it, the desktop session is
-//! starting the program as a **component of itself**: a permanent icon-bar
-//! slot offering the user's places and whatever is mounted, no window until
-//! one is asked for, and no way to quit. Only the session passes the switch,
-//! so a second component can never appear; and because a component opens no
-//! window at start, naming a starting location alongside it is a command line
-//! this program cannot act on rather than an argument silently ignored.
+//! file manager: a window at the starting location and the shared icon-bar
+//! menu convention, whose *Quit* ends it; closing its last window does not.
+//! With it, the desktop session is starting the program as a **component of
+//! itself**: a permanent icon-bar slot offering the user's places and whatever
+//! is mounted, no window until one is asked for, and no way to quit. Only the
+//! session passes the switch, so a second component can never appear; and
+//! because a component opens no window at start, naming a starting location
+//! alongside it is a command line this program cannot act on rather than an
+//! argument silently ignored.
 //!
 //! # Untrusted input, and the two different refusals
 //!
@@ -48,8 +49,10 @@
 //!
 //! Nothing here opens, lists, or writes anything: whether the accepted
 //! location can actually be listed is the filesystem's decision, made under
-//! the launching user's own identity by the program around this module.
+//! the launching user's own identity by the program around this module, which
+//! walks the [`Ladder`] of places to fall back to until one lists.
 
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -58,6 +61,9 @@ use core::fmt;
 use tairix_abi::fs::FS_PATH_MAX;
 use tairix_abi::Errno;
 use tairix_browse::vfs::{absolute_path, components_from_absolute_path};
+use tairix_browse::BrowseError;
+
+use crate::operation::device_refusal;
 
 /// The usage banner a usage error is reported with, and the fallback the
 /// short-help switches print when `files`'s own Help tree is unavailable.
@@ -66,9 +72,9 @@ pub const USAGE: &str = "usage: files [--desktop] [directory] [-h | -?]";
 /// Which of the two things a `files` process is.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum Role {
-    /// The ordinary file manager: one window at the starting location, the
-    /// shared icon-bar menu convention on its slot, and the process ends when
-    /// the window closes.
+    /// The ordinary file manager: a window at the starting location, and the
+    /// shared icon-bar menu convention on its slot, whose *Quit* ends the
+    /// process; closing its last window does not.
     #[default]
     Window,
     /// A component of the desktop, as the session's own bring-up asks for
@@ -285,20 +291,99 @@ fn refused(spelling: &str, detail: &str) -> String {
 const FALLBACK: &str = "opening your own files instead";
 
 /// The sentence to state when a location a window was to open at turns out
-/// not to be listable — a directory that does not exist, is not a directory,
-/// or that the launching user may not read — naming the place tried `instead`.
+/// not to be listable, saying `why` and naming the place tried `instead`.
 ///
 /// It lives here, with the rest of the command line's vocabulary, so the
 /// wording of every "we are opening somewhere else" message is decided in one
 /// place and can be read by a test.
 #[must_use]
-pub fn unlistable_reason(location: &[String], instead: &[String]) -> String {
+pub fn unlistable_reason(location: &[String], why: &str, instead: &[String]) -> String {
     let spell = |path: &[String]| absolute_path(path).unwrap_or_else(|_| String::from("/"));
     format!(
-        "could not list {}; opening {} instead",
+        "could not list {} ({why}); opening {} instead",
         spell(location),
         spell(instead)
     )
+}
+
+/// Why a folder could not be listed, from the listing's refusal.
+#[must_use]
+pub const fn listing_refusal(err: BrowseError) -> &'static str {
+    match err {
+        BrowseError::Source(Errno::PermissionDenied) => "you may not read it",
+        BrowseError::Source(Errno::NotFound) | BrowseError::NoSuchEntry => "it does not exist",
+        BrowseError::Source(Errno::NotADirectory) | BrowseError::NotADirectory => {
+            "it is not a folder"
+        }
+        BrowseError::OutOfMemory => "there was not enough memory to list it",
+        BrowseError::Source(errno) => device_refusal(errno, "it could not be read"),
+    }
+}
+
+/// The places a window may open at, tried in order until one lists: the one
+/// named, then the bare-open places beneath home
+/// ([`tairix_browse::bare_open_places`]), then the root view, which the
+/// namespace always has.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ladder {
+    /// The places not yet refused, the one being tried first.
+    places: VecDeque<Vec<String>>,
+    /// Where the window was asked to open: the first place tried.
+    asked: Vec<String>,
+    /// Why that place was refused, once it has been.
+    asked_why: Option<&'static str>,
+}
+
+impl Ladder {
+    /// The ladder from `named` (a bare open when `None`) for a user whose home
+    /// is `home`. A place reached twice — `named` *is* home, say — is tried
+    /// once: trying it again after its refusal could only be refused again,
+    /// and would say so twice.
+    #[must_use]
+    pub fn new(named: Option<Vec<String>>, home: Option<&[String]>) -> Self {
+        let beneath_home = home
+            .map(tairix_browse::bare_open_places)
+            .into_iter()
+            .flatten();
+        let mut places: VecDeque<Vec<String>> = VecDeque::new();
+        for place in named.into_iter().chain(beneath_home).chain([Vec::new()]) {
+            if !places.contains(&place) {
+                places.push_back(place);
+            }
+        }
+        let asked = places.front().cloned().unwrap_or_default();
+        Self {
+            places,
+            asked,
+            asked_why: None,
+        }
+    }
+
+    /// The place being tried, or `None` once every place has been refused.
+    #[must_use]
+    pub fn place(&self) -> Option<&[String]> {
+        self.places.front().map(Vec::as_slice)
+    }
+
+    /// The place being tried was refused, for `why`: move on to the next,
+    /// answering the sentence that states the move, or `None` when no place is
+    /// left.
+    pub fn step(&mut self, why: &'static str) -> Option<String> {
+        let refused = self.places.pop_front()?;
+        self.asked_why.get_or_insert(why);
+        let next = self.places.front()?;
+        Some(unlistable_reason(&refused, why, next))
+    }
+
+    /// Why the window is not opening where it was asked — the place asked for,
+    /// why it was refused, and the one it opens at instead — or `None` while it
+    /// still is.
+    #[must_use]
+    pub fn moved(&self) -> Option<String> {
+        let why = self.asked_why?;
+        let place = self.places.front()?;
+        Some(unlistable_reason(&self.asked, why, place))
+    }
 }
 
 #[cfg(test)]

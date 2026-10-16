@@ -15,14 +15,14 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::block::Block;
-use tairix_abi::driver::filesystem::{DirEntry, DirVisit, NodeId};
+use tairix_abi::driver::filesystem::{DirEntry, DirVisit};
 use tairix_abi::DriverError;
 use tairix_hash::{HashSeed, SipHash13};
 
 use super::htree::{self, Entries, EntriesMut, Level, NameHash, CONTINUED};
 use super::{
-    align4, le32, put_le16, u16_of, Child, Ext4, Inode, Located, DIRENT_HEADER, INODE_FLAG_INDEX,
-    MAX_BLOCK_SIZE, MAX_NAME_LEN,
+    align4, le32, put_le16, u16_of, Child, Ext4, Inode, Located, DIRENT_HEADER,
+    INODE_FLAG_CASEFOLD, INODE_FLAG_ENCRYPT, INODE_FLAG_INDEX, MAX_BLOCK_SIZE, MAX_NAME_LEN,
 };
 
 /// Most live entries one leaf holds: no record is shorter than twelve bytes.
@@ -307,6 +307,11 @@ impl<B: Block> Ext4<B> {
         if !self.layout.dir_index || dir.flags & INODE_FLAG_INDEX == 0 {
             return Ok(IndexUse::Linear);
         }
+        // A casefolded directory's index hashes the folded name, which an
+        // exact-name lookup cannot reproduce: it is read linearly.
+        if dir.flags & INODE_FLAG_CASEFOLD != 0 {
+            return Ok(IndexUse::Unusable(DriverError::Unsupported));
+        }
         let seed = self.dir_seed(dir_ino, dir);
         let Some(root) = self.map_block(dir, 0)? else {
             return Ok(IndexUse::Unusable(DriverError::DeviceFault));
@@ -563,9 +568,10 @@ impl<B: Block> Ext4<B> {
     ) -> Result<Option<u32>, DriverError> {
         let mut leaf = self.block_scratch()?;
         let bs = self.layout.block_size as usize;
-        Ok(self
-            .locate_indexed(dir, ix, name, index, &mut leaf[..bs])?
-            .map(|(_, found)| found.ino))
+        match self.locate_indexed(dir, ix, name, index, &mut leaf[..bs])? {
+            Some((_, found)) => self.named_child(found.ino).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Remove `name` from indexed directory `dir`, its root in `index`,
@@ -623,13 +629,10 @@ impl<B: Block> Ext4<B> {
         name: &[u8],
         visit: &mut dyn FnMut(&DirEntry, &[u8]) -> DirVisit,
     ) -> Result<DirVisit, DriverError> {
-        let child = self.read_inode(ino)?;
-        let entry = DirEntry {
-            node: NodeId::from_raw(u64::from(ino)),
-            info: self.inode_info(&child)?,
-            next_cursor: cursor_after(name),
-        };
-        Ok(visit(&entry, name))
+        match self.child_entry(ino, cursor_after(name))? {
+            Some(entry) => Ok(visit(&entry, name)),
+            None => Ok(DirVisit::Take),
+        }
     }
 
     /// Hand `visit` the children of indexed directory `dir`, its root in
@@ -792,6 +795,74 @@ impl<B: Block> Ext4<B> {
             hash,
         };
         self.split_leaf(dir_ino, &dir, &mut ix, target, child)
+    }
+
+    /// Whether linear directory `dir` may be given an index: its volume
+    /// indexes directories, it names nothing an exact lookup cannot hash,
+    /// and the volume's default hash is one this driver computes.
+    pub(super) fn can_index(&self, dir: &Inode) -> bool {
+        self.layout.dir_index
+            && dir.flags & (INODE_FLAG_INDEX | INODE_FLAG_CASEFOLD | INODE_FLAG_ENCRYPT) == 0
+            && NameHash::new(
+                self.layout.def_hash_version,
+                self.layout.hash_signed,
+                self.layout.hash_seed,
+            )
+            .is_ok()
+    }
+
+    /// Give linear directory `dir_ino`, whose one block is full, an index,
+    /// and add `child` through it: its names move to a new leaf, block 0
+    /// becomes the root naming that leaf, and the leaf splits as `child`
+    /// needs — the shape Linux gives a directory outgrowing its first block.
+    pub(super) fn index_directory(
+        &mut self,
+        dir_ino: u32,
+        dir: &Inode,
+        child: Child<'_>,
+    ) -> Result<(), DriverError> {
+        let bs = self.layout.block_size as usize;
+        let end = self.dir_data_end();
+        let seed = self.dir_seed(dir_ino, dir);
+        let root = self.map_block(dir, 0)?.ok_or(DriverError::DeviceFault)?;
+        let mut block = self.block_scratch()?;
+        self.read_dir_block(seed, root, &mut block[..bs])?;
+        let (dot_dot, parent) = self.dot_dot(&block[..bs])?;
+        let mut live =
+            tairix_util::fallible::filled(MAX_LEAF_ENTRIES, 0u16).ok_or(DriverError::NoSpace)?;
+        let (count, _) = self.live_records(&block[..end], &mut live)?;
+        if count < 2 || live[0] != 0 || usize::from(live[1]) != dot_dot {
+            return Err(DriverError::DeviceFault);
+        }
+        let mut leaf = self.block_scratch()?;
+        self.lay_records(
+            &block[..end],
+            live[2..count].iter().copied(),
+            &mut leaf[..end],
+        )?;
+        if let Some(seed) = seed {
+            Self::seal_leaf(seed, &mut leaf[..bs])?;
+        }
+        let mut blocks = 1;
+        self.append_dir_block(dir_ino, &mut blocks, &leaf[..bs])?;
+        htree::init_root(
+            &mut block[..bs],
+            dir_ino,
+            parent,
+            self.layout.def_hash_version,
+            self.layout.filetype,
+            seed.is_some(),
+        )?;
+        if let Some(seed) = seed {
+            htree::seal(&mut block[..bs], Level::Root, seed);
+        }
+        self.write_fs_block(root, &block[..bs])?;
+        let mut raw = self.inode_scratch()?;
+        self.read_inode_raw(dir_ino, &mut raw)?;
+        let flags = le32(&raw, crate::INODE_FLAGS) | INODE_FLAG_INDEX;
+        crate::bytes::put_le32(&mut raw, crate::INODE_FLAGS, flags);
+        self.write_inode_raw(dir_ino, &mut raw)?;
+        self.insert_child(dir_ino, child)
     }
 
     /// Add `child` to leaf `phys` when it has room, packing its records first
