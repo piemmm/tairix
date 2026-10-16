@@ -19,8 +19,9 @@
 //! attaching a SLAAC router-advertisement peer to its NIC; the host drives the
 //! desktop blind through the QEMU monitor: unlock, log in, start the desktop,
 //! open the library, click the map's row, photograph the window once it wears
-//! the title it takes on its first read, then *Quit* it. Only the audit sink is
-//! swapped, for the PASS witnesses below.
+//! the title it takes on its first read, then *Quit* it. Only the audit and
+//! diagnostic sinks are swapped, for observers that replay to serial and latch
+//! the PASS witnesses below.
 //!
 //! # The PASS gate
 //!
@@ -31,24 +32,27 @@
 //! 2. **Its window opened.** A `WINDOW_CREATE_REPLY_LEN` reply on the reserved
 //!    window endpoint after that load. `netmap` opens one window, and the
 //!    desktop's own surfaces never call the window channel.
-//! 3. **Its active probe reached a host.** A netmap audit record (its id in
-//!    netmap's own event range) carrying a reachable count of at least one,
-//!    after the window opened — the gateway answering the live ICMP-echo sweep.
-//!    This is what no host test can show: the probe actually reaching the real
-//!    network the guest booted onto.
+//! 3. **Its active probe reached a host.** A netmap record (its id in netmap's
+//!    own event range) carrying a reachable count of at least one, after the
+//!    window opened — the gateway answering the live ICMP-echo sweep. The
+//!    record is emitted through `log_emit`, which delivers to the kernel's
+//!    diagnostic sink and never its audit sink, so this is the one witness the
+//!    diagnostic observer latches. This is what no host test can show: the
+//!    probe actually reaching the real network the guest booted onto.
 //! 4. **The map exited cleanly.** A `SyscallInvoked` record naming the exit
 //!    syscall from [`NETMAP_COMM`], after the window opened — the *Quit* the
-//!    host injects as its final gesture, which it gates on the probe's own audit
-//!    line, so the probe reaches a host before the map is quit.
+//!    host injects as its final gesture, which it gates on the finished probe's
+//!    own line, so the probe is in before the map is quit.
 //!
 //! # Why the guest cannot false-pass
 //!
 //! The screendump the tier assertion reads is gated by the host on the window
 //! on screen wearing its post-first-read title. A map that failed before
 //! drawing data exits too, but no dump is taken, so the tier assertion fails
-//! the run; and a map whose probing never reached a host never latches (3), so
-//! the host never quits it and the run times out. A panic parks the CPU and the
-//! runner reports a timeout. None is a false pass.
+//! the run; and a map whose probe reached no host is quit all the same, since
+//! the host gates the quit on the finished probe's line whatever it counted, so
+//! its exit fails the run at once with its own code. A panic parks the CPU and
+//! the runner reports a timeout. None is a false pass.
 
 #![cfg_attr(itest_aarch64, no_std)]
 #![cfg_attr(itest_aarch64, no_main)]
@@ -58,10 +62,12 @@
 
 #[cfg(itest_aarch64)]
 mod kernel {
+    use core::num::NonZeroU16;
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
+    use tairix_itest_finisher::fail_point;
     use tairix_itest_witness::{field_str, field_u64, names_bundle};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
@@ -86,9 +92,11 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// Audit observer that replays the whole trail to serial and latches the
-    /// ordered PASS witnesses described in the module docs.
-    struct NetMapSink {
+    /// The map exited with no probe of its having reached a host.
+    const FAIL_EXITED_UNREACHED: NonZeroU16 = fail_point!(1);
+
+    /// The ordered PASS witnesses described in the module docs.
+    struct Witnesses {
         /// The map bundle was loaded.
         launched: AtomicBool,
         /// Its window was created after that.
@@ -99,8 +107,8 @@ mod kernel {
         exited: AtomicBool,
     }
 
-    impl NetMapSink {
-        /// A sink with no witness latched.
+    impl Witnesses {
+        /// No witness latched.
         const fn new() -> Self {
             Self {
                 launched: AtomicBool::new(false),
@@ -147,11 +155,11 @@ mod kernel {
             }
         }
 
-        /// Latch the probe witness from a netmap audit record carrying a
+        /// Latch the probe witness from a netmap record carrying a
         /// reachable-host count of at least one, once the window has opened.
         /// The record is identified by its id falling in netmap's own event
         /// range and its carrying the `live` field only `PROBE_FINISHED` has, so
-        /// no other service's audit matches. Proving a host was reached — not
+        /// no other service's record matches. Proving a host was reached — not
         /// merely that a campaign ran — is what witnesses that active probing
         /// reached the live map (the gateway answers the sweep).
         fn note_probe(&self, event: &Event<'_>) {
@@ -178,39 +186,62 @@ mod kernel {
             }
         }
 
-        /// Whether every witness is in: launch, then window, then a probe that
-        /// reached a host, then a clean exit. The host gates the quit gesture on
-        /// the probe's audit line, so the probe is in before the exit.
-        fn passed(&self) -> bool {
-            self.probe_reached.load(Ordering::Acquire) && self.exited.load(Ordering::Acquire)
+        /// End the run once the map has exited: a pass when a probe of its
+        /// reached a host first, a named failure otherwise. The host quits the
+        /// map on the finished probe's line whatever it counted, so a probe
+        /// that reached nothing ends here rather than in a timeout.
+        fn finish(&self) {
+            if !self.exited.load(Ordering::Acquire) {
+                return;
+            }
+            if self.probe_reached.load(Ordering::Acquire) {
+                qemu_exit::exit_success();
+            }
+            qemu_exit::exit_failure(FAIL_EXITED_UNREACHED);
         }
     }
 
-    impl Sink for NetMapSink {
+    static WITNESSES: Witnesses = Witnesses::new();
+
+    /// Audit observer: replays the trail to serial and latches the witnesses
+    /// the kernel attests — the load, the window's create reply, the exit.
+    struct AuditObserver;
+
+    impl Sink for AuditObserver {
         fn write_event(&self, event: &Event<'_>) {
             // Replay through the serial sink first, so the QEMU transcript
             // records the full boot → unlock → desktop → map timeline and the
             // host can gate its injection on it.
             SerialSink::new().write_event(event);
             if event.id.0 == tairix_appload::events::APP_LOADED.0 {
-                self.note_bundle_loaded(event);
+                WITNESSES.note_bundle_loaded(event);
             } else if event.id.0 == tairix_kernel_ipc::AuditEvent::CallReplied.id().0 {
-                self.note_call_replied(event);
+                WITNESSES.note_call_replied(event);
             } else if event.id.0 == tairix_kernel_syscall::AuditEvent::SyscallInvoked.id().0 {
-                self.note_syscall(event);
-            } else if tairix_log::registry::NETMAP.contains(event.id) {
-                self.note_probe(event);
-            } else {
-                return;
-            }
-            if self.passed() {
-                qemu_exit::exit_success();
+                WITNESSES.note_syscall(event);
+                WITNESSES.finish();
             }
         }
     }
 
-    /// The audit observer the boot pipeline is handed.
-    static AUDIT_SINK: NetMapSink = NetMapSink::new();
+    static AUDIT_SINK: AuditObserver = AuditObserver;
+
+    /// Diagnostic observer: latches the probe witness, then replays the record
+    /// to serial as the production log sink does. The kernel delivers what
+    /// userland emits here and never to the audit sink, and the latch comes
+    /// first so the line the host quits the map on cannot precede it.
+    struct DiagnosticObserver;
+
+    impl Sink for DiagnosticObserver {
+        fn write_event(&self, event: &Event<'_>) {
+            if tairix_log::registry::NETMAP.contains(event.id) {
+                WITNESSES.note_probe(event);
+            }
+            SerialSink::new().write_event(event);
+        }
+    }
+
+    static DIAGNOSTIC_SINK: DiagnosticObserver = DiagnosticObserver;
 
     /// Forward to the shared aarch64 panic bridge. A panic before the PASS
     /// finisher parks the CPU, the run times out, and the harness reports
@@ -224,15 +255,15 @@ mod kernel {
     /// (via `tairix_arch_aarch64_main`).
     ///
     /// QEMU hands no DTB pointer (`_dtb == 0`), so the embedded `virt` blob's
-    /// address is forwarded to the production boot pipeline with the audit
-    /// observer in place.
+    /// address is forwarded to the production boot pipeline with both
+    /// observers in place.
     #[no_mangle]
     pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         let dtb = DTB_BLOB.as_ptr() as u64;
         boot_aarch64::boot(
             dtb,
             &ALLOCATOR,
-            &SERIAL_SINK,
+            &DIAGNOSTIC_SINK,
             &AUDIT_SINK,
             // `SyscallInvoked` (`EventId(5000)`) is `Debug`, below the default
             // `Info` filter; it carries the exit witness and the host waits for

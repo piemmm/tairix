@@ -363,8 +363,11 @@ minimalism test is met by *not* minting anything.
   plate clears that count and counts toward no other tier, and that every hue
   the map draws lies more than twice the tolerance from each tier's ramp.
 - The guest passes on `APP_LOADED` naming the bundle, then the window's create
-  reply, then `netmap`'s own `exit`. A map that dies before drawing data exits
-  without a dump, so it cannot pass.
+  reply, then NM3's finished probe reaching a host, then `netmap`'s own `exit`.
+  The probe record is the map's own, which `log_emit` delivers to the kernel's
+  diagnostic sink and never its audit sink, so the guest latches it there; an
+  exit with no host reached fails the run at once. A map that dies before
+  drawing data exits without a dump, so it cannot pass.
 
 ### NM2d — services folded into their host
 

@@ -19,7 +19,7 @@ rules, it points to them.
 
 ## How long `cargo xtask ci` takes, and how to run it under a tool cap
 
-Budget **about 46 minutes** on a warm `target/` and a two-dozen-core host —
+Budget **about 52 minutes** on a warm `target/` and a two-dozen-core host —
 the sum of the stage costs below — and substantially longer on a cold one,
 where `-Z build-std` recompiles `core`/`alloc` per target and every image
 profile links from scratch.
@@ -28,7 +28,8 @@ Every stage reports its own wall clock. `grep 'stage:' ci.log` gives the
 per-stage totals the pipeline is ordered by; `grep 'done in' ci.log` gives the
 finer per-command lines inside them — sequential steps and concurrent jobs
 alike, so a job running at most of its budget is visible before a slower host
-turns it into a kill. A measured warm run:
+turns it into a kill. A job that is killed still prints the output it had
+produced, which names the test it was in. A measured warm run:
 
 | Stage | Cost | Shape |
 | --- | --- | --- |
@@ -43,42 +44,50 @@ turns it into a kill. A measured warm run:
 | `image` gate | 193 s over 319 spawns | sequential |
 | `clippy` host + 2 feature-lane + 17 target passes | 330 s | sequential |
 | `test --qemu` (host matrix + 226 guests + 3 fixture cross-compiles) | 681 s | guests concurrent, `nproc/3` weighted budget |
-| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1470 s | one process per crate, concurrent; `kernel/mem`, `kernel/core`'s library, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores |
+| `miri` (the UB oracle over the hand-written `unsafe` cores, the userland runtime and its C stubs, the three paging ports, `kernel/mem`, `kernel/core`, the DMA translation unit families, `lib/virtio` with the drivers that drive its rings, and the GENET frame carve) | 1836 s | one process per crate, concurrent; `kernel/mem`, `kernel/core`'s library, `lib/abi`, `lib/rt`, the aarch64 and x86_64 ports, the RISC-V, AMD-Vi and virtio-iommu families, and GENET dealt across the host's cores, at most 64 tests a shard |
 
 Miri runs one interpreted thread at a time and reports a single CPU to the
 program, so libtest takes a crate's tests one after another whatever the host
 has. `kernel/mem`'s five hundred and more therefore came to twenty minutes in a single
 single-core process — most of the stage, against a forty-five-minute per-job
 budget it eventually overran on a slower runner, while the rest of the machine
-idled. That target is now `Spread::PerCore`: the stage enumerates it through
-the test binary's own `--list` and deals the names round-robin across one
-process per core, so the makespan is the heaviest shard rather than the sum.
-The partition comes from the binary rather than a hand-kept list, so a test
-added later cannot fall outside every shard and go uninterpreted.
+idled. Such a target is `Spread::Sharded`: the stage enumerates it through the
+test binary's own `--list` and deals the names round-robin across one process
+per core, or more where that would put over 64 tests in one, so the makespan is
+the heaviest shard rather than the sum. The partition comes from the binary
+rather than a hand-kept list, so a test added later cannot fall outside every
+shard and go uninterpreted.
 
-The deal is blind to cost, and where the names fall moves with the host's core
-count, so a shard's cost differs from host to host as well as its speed: a gate
-that passes on a developer machine can still overrun a slower runner's per-job
-budget. A test is therefore kept cheap to interpret. One that reaches
-its state through tens of thousands of operations where a few dozen reach the
-same state is restructured — the frame allocator's zone tests drain a zone a
-block at a time, not a frame at a time — rather than left for a slower host's
-budget to find.
+Dealt one per core alone, a shard's share grew with the suite and with every
+core the host lacked while its budget stayed fixed: `kernel/core`'s library,
+dealt 24 ways on a developer machine, went 16 ways on the runner, and four of
+its shards overran there (`plans/OPEN-DEFECTS.md` D1054). The bound gives a
+large suite the same shards on every host with fewer cores than it has shards,
+so the shard a runner overruns is the one a developer replays. The deal is still
+blind to cost, so a test is kept
+cheap to interpret. One that reaches its state through tens of thousands of
+operations where a few dozen reach the same state is restructured — the frame
+allocator's zone tests drain a zone a block at a time, not a frame at a time —
+and a fixture is carried rather than made where making it is the cost: one
+PBKDF2 derivation at the minimum accepted cost takes minutes interpreted, so
+the account suites decode precomputed password records and derive only where a
+login is the assertion.
 
 The cost that remains is the aliasing model, not the code: a zero-on-free clear
 is a volatile write per byte, and the same `dma` test costs 716 s under Stacked
 Borrows, 208 s under Tree Borrows and 44 s with the model off. Stacked Borrows
 stands — it is the stricter of the two, and the one intrusive pointer code is
 likeliest to violate — so where the interpreted extent is a sample rather than
-the assertion it is scaled under `cfg(miri)`. Four tests are excluded by name
-instead: two `dma` tests, one streaming thirteen 32-page device regions
-through a full-gigabyte window (four hours interpreted) and one carving a page
-past the largest 32 MiB buddy block (some twenty times that), whose `unsafe`
-the rest of their module reaches; `lib/abi`'s single-byte sweep of the 2.8 KiB
-machine report, seventeen thousand decodes through safe code, costing half an
-hour; and the aarch64 port's redistributor that never wakes, whose assertion is
-the exhaustion of a million-poll budget, also half an hour, through safe code.
-The registry carries every reason.
+the assertion it is scaled under `cfg(miri)`. Where the extent is the assertion
+and the `unsafe` it reaches is reached elsewhere, the test is excluded by name
+instead: `kernel/mem`'s two `dma` capacity tests, one streaming thirteen
+32-page device regions through a full-gigabyte window (four hours interpreted)
+and one carving a page past the largest 32 MiB buddy block (some twenty times
+that); `lib/abi`'s single-byte sweep of the 2.8 KiB machine report, seventeen
+thousand decodes through safe code, costing half an hour; and the aarch64
+port's redistributor that never wakes, whose assertion is the exhaustion of a
+million-poll budget, also half an hour, through safe code. The registry names
+every exclusion and carries its reason.
 
 Figures in this table are wall clock, taken from outside. Miri's own clock is
 virtual: the `finished in …` line a test binary prints under the interpreter is

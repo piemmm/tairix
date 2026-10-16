@@ -2062,7 +2062,9 @@ mod tests {
     fn a_death_raced_for_by_its_boundary_and_its_killer_is_taken_once() {
         extern crate std;
 
-        const ROUNDS: usize = 100_000;
+        // The interpreter preempts at random points in every round, so it
+        // needs far fewer rounds than hardware to reach the racing orders.
+        const ROUNDS: usize = if cfg!(miri) { 1_000 } else { 100_000 };
 
         let _g = running_kill_test_lock();
         let task = 0x00de_ad04;

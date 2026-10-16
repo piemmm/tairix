@@ -178,8 +178,6 @@ pub(crate) mod test_entropy;
 // publication first.
 #[cfg(test)]
 pub(crate) mod test_boot;
-// Shared host-test identity material: the one stored password every fixture
-// that models a login-capable account carries, derived once for the process.
 #[cfg(test)]
 pub(crate) mod test_identity;
 #[cfg(test)]

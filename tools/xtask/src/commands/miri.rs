@@ -117,19 +117,34 @@ impl Scope {
 pub enum Spread {
     /// One process for the whole target.
     OneProcess,
-    /// Enumerate the target's tests and deal them across one process per host
-    /// core, for the reason carried here.
+    /// Enumerate the target's tests and deal them across processes, for the
+    /// reason carried here: one per host core, and more wherever that would
+    /// put more than [`SHARD_TESTS`] in one.
     ///
     /// The partition comes from the test binary's own `--list`, so a test
     /// added later cannot fall outside every shard and go uninterpreted while
     /// the stage still reports success.
     ///
     /// The work stays that of one process; the makespan falls to the heaviest
-    /// shard. The deal is blind to cost and moves with the host's core count,
-    /// so expensive tests that share a shard on one host need not on another: a
+    /// shard. The deal is blind to cost, and where a target has fewer than
+    /// [`SHARD_TESTS`] tests a core it moves with the host's core count, so
+    /// expensive tests that share a shard on one host need not on another: a
     /// test is kept cheap to interpret, never left for a slower host's budget
     /// to find.
-    PerCore(&'static str),
+    Sharded(&'static str),
+}
+
+/// The most tests one shard holds.
+///
+/// Dealt one per core alone, a shard's share grows with the suite and with
+/// every core the host lacks while its budget stays fixed; bounded, it holds no
+/// more than this however few cores the host has, and the runner keeps every
+/// core busy across the extra shards.
+const SHARD_TESTS: usize = 64;
+
+/// How many shards `tests` are dealt into on a host with `cores`.
+fn shard_count(tests: usize, cores: usize) -> usize {
+    cores.max(tests.div_ceil(SHARD_TESTS))
 }
 
 /// One crate the oracle is pointed at.
@@ -273,7 +288,7 @@ pub const TARGETS: &[Target] = &[
                      crate's integration targets are excluded too: the loom model does not build \
                      under the interpreter and the fuzz harnesses are budgeted elsewhere",
         },
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "over five hundred tests, and interpreted they cost twenty minutes and more end to \
              end — half the pipeline's whole wall clock in one single-core process, against a \
              budget only twice that. The runner overran it",
@@ -291,9 +306,9 @@ pub const TARGETS: &[Target] = &[
             "the library holds all but one test, and naming it is what lets them be dealt \
              across cores; the integration test is enrolled beside it",
         ),
-        spread: Spread::PerCore(
-            "over two thousand tests, and interpreted they cost over three and a half hours in \
-             one single-core process",
+        spread: Spread::Sharded(
+            "over two thousand tests, and interpreted they cost two and a half hours in one \
+             single-core process",
         ),
     },
     Target {
@@ -328,7 +343,7 @@ pub const TARGETS: &[Target] = &[
                      code: interpreted that costs half an hour, it passes when run, and the \
                      report's round-trip tests reach the same decoder",
         },
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "over fifteen hundred tests, and interpreted they cost five minutes end to end in \
              one single-core process",
         ),
@@ -343,7 +358,7 @@ pub const TARGETS: &[Target] = &[
             "the library is the crate's only test target; naming it is what lets its tests be \
              dealt across cores",
         ),
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "280 tests, and interpreted they cost over three minutes in one single-core \
              process",
         ),
@@ -389,7 +404,7 @@ pub const TARGETS: &[Target] = &[
                      blob from disk, which the interpreter refuses under isolation before the \
                      test's own absent-file skip can run",
         },
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "interpreted, its tests cost eleven minutes in one process, most of it the \
              interrupt controllers' models walking their register files and the tables they \
              read from memory",
@@ -421,10 +436,9 @@ pub const TARGETS: &[Target] = &[
                      `fuzz_acpi` harness beside the lib drives only the safe firmware-table \
                      parsers, which the fuzz stage runs",
         },
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "interpreted, its tests cost thirteen minutes in one process and over twenty on a \
-             slower runner, and a whole job is admitted behind every sharded one, so whole it \
-             would run last and set the stage's tail",
+             slower runner",
         ),
     },
     Target {
@@ -462,7 +476,7 @@ pub const TARGETS: &[Target] = &[
             "the library is the crate's only test target; naming it is what lets its tests be \
              dealt across cores",
         ),
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "interpreted, its tests cost two minutes in one process, most of it the fault \
              queue's overflow and the two conformance suites",
         ),
@@ -491,7 +505,7 @@ pub const TARGETS: &[Target] = &[
                      accessors the kept tests interpret, and all nine run in full under the \
                      ordinary test matrix",
         },
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "interpreted, the kept tests take tens of minutes in one process, most of it the \
              conformance suites and the one remapping switch kept",
         ),
@@ -506,7 +520,7 @@ pub const TARGETS: &[Target] = &[
             "the library is the crate's only test target; naming it is what lets its tests be \
              dealt across cores",
         ),
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "interpreted, its tests cost four and a half minutes in one process, most of it \
              the two conformance suites and the report queue's repeated rounds",
         ),
@@ -573,7 +587,7 @@ pub const TARGETS: &[Target] = &[
             "the library holds every test; naming it is what lets its tests be dealt across \
              cores",
         ),
-        spread: Spread::PerCore(
+        spread: Spread::Sharded(
             "interpreted, its tests cost six minutes in one process, each bringing a device up \
              over a frame carve of half a mebibyte",
         ),
@@ -682,17 +696,18 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // concurrently under the shared bounded runner rather than paying the sum
     // of the interpreter's costs.
     //
-    // Sharded targets are emitted first. Every job weighs one unit, so the
-    // runner admits them in the order given, and these carry the longest runs:
-    // started while the runner is still empty their tail lands inside the
-    // stage rather than after everything else has drained.
+    // Whole runs are emitted first. Every job weighs one unit, so the runner
+    // admits them in the order given; a shard is a bounded slice of a crate
+    // where a whole run is not, so started while the runner is still empty the
+    // longest runs' tails land inside the stage rather than after everything
+    // else has drained.
     let mut jobs: Vec<Job> = Vec::new();
-    let mut deferred: Vec<Job> = Vec::new();
+    let mut shards: Vec<Job> = Vec::new();
     for (index, target) in targets.iter().enumerate() {
         let seed = seed::job_seed(opts.seed, index);
         match target.spread {
-            Spread::PerCore(_) => match shard_jobs(ctx, target, seed) {
-                Ok(shards) => jobs.extend(shards),
+            Spread::Sharded(_) => match shard_jobs(ctx, target, seed) {
+                Ok(dealt) => shards.extend(dealt),
                 // Carried into the runner as a failing job rather than
                 // returned from here, so a crate whose listing cannot be read
                 // does not hide every other crate's result.
@@ -700,10 +715,10 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
                     jobs.push(Job::closure(scope_label(target), 1, move || Err(why)));
                 }
             },
-            Spread::OneProcess => deferred.push(whole_job(ctx, target, seed)),
+            Spread::OneProcess => jobs.push(whole_job(ctx, target, seed)),
         }
     }
-    jobs.append(&mut deferred);
+    jobs.append(&mut shards);
     let concurrency = parallel::default_concurrency(jobs.len());
     parallel::run(jobs, concurrency)
 }
@@ -768,15 +783,15 @@ fn whole_job(ctx: &Context, target: &Target, seed: u64) -> Job {
     Job::new(format!("{} (seed {seed})", scope_label(target)), cmd)
 }
 
-/// One job per shard of `target`'s tests, dealt across the host's cores.
+/// One job per shard of `target`'s tests.
 ///
-/// Every shard of a target carries the *same* seed: the shard count comes
+/// Every shard of a target carries the *same* seed: the shard count can come
 /// from the host, so a per-shard seed would make a reported failure replay
 /// only on a machine with the same core count.
 fn shard_jobs(ctx: &Context, target: &Target, seed: u64) -> Result<Vec<Job>, String> {
     let names = enumerate(ctx, target, seed)?;
     let found = names.len();
-    let shards = deal(names, parallel::host_parallelism());
+    let shards = deal(names, shard_count(found, parallel::host_parallelism()));
     eprintln!(
         "xtask: [{}] {found} tests dealt across {} processes",
         scope_label(target),
@@ -901,7 +916,9 @@ fn capture(label: &str, mut cmd: Command) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{deal, parse, parse_listing, selected, Scope, Spread, TARGETS};
+    use super::{
+        deal, parse, parse_listing, selected, shard_count, Scope, Spread, SHARD_TESTS, TARGETS,
+    };
     use std::ffi::OsString;
 
     fn args(items: &[&str]) -> Vec<OsString> {
@@ -996,7 +1013,7 @@ mod tests {
     #[test]
     fn a_sharded_target_carries_its_reason() {
         for target in TARGETS {
-            if let Spread::PerCore(reason) = target.spread {
+            if let Spread::Sharded(reason) = target.spread {
                 assert!(
                     !reason.trim().is_empty(),
                     "{} is sharded with no reason",
@@ -1012,7 +1029,7 @@ mod tests {
     #[test]
     fn a_sharded_target_is_confined_to_one_test_binary() {
         for target in TARGETS {
-            if matches!(target.spread, Spread::PerCore(_)) {
+            if matches!(target.spread, Spread::Sharded(_)) {
                 assert!(
                     target.scope.is_one_binary(),
                     "{} is sharded but its scope builds more than one test binary",
@@ -1099,6 +1116,42 @@ mod tests {
         let longest = shards.iter().map(Vec::len).max().unwrap_or(0);
         let shortest = shards.iter().map(Vec::len).min().unwrap_or(0);
         assert!(longest - shortest <= 1, "{shortest}..{longest}");
+    }
+
+    /// However few cores the host has, no shard holds more than the bound, and
+    /// every core still gets a shard wherever there are tests enough.
+    #[test]
+    fn a_shard_never_holds_more_than_its_bound() {
+        for tests in [1usize, 63, 64, 65, 500, 2279, 10_000] {
+            let names: Vec<String> = (0..tests).map(|n| format!("m::t{n}")).collect();
+            for cores in [1usize, 2, 4, 16, 24, 128] {
+                let shards = deal(names.clone(), shard_count(tests, cores));
+                assert!(
+                    shards.iter().all(|shard| shard.len() <= SHARD_TESTS),
+                    "{tests} tests on {cores} cores"
+                );
+                assert!(
+                    shards.len() >= cores.min(tests),
+                    "{tests} tests on {cores} cores"
+                );
+            }
+        }
+    }
+
+    /// A suite dealt by its size is dealt alike on every host with fewer
+    /// cores than it has shards, so the shard a slower runner overruns is the
+    /// one a developer replays.
+    #[test]
+    fn a_large_suite_is_dealt_alike_whatever_the_host() {
+        let names: Vec<String> = (0..2279).map(|n| format!("m::t{n}")).collect();
+        let reference = deal(names.clone(), shard_count(names.len(), 1));
+        for cores in [2usize, 4, 16, 24] {
+            assert_eq!(
+                deal(names.clone(), shard_count(names.len(), cores)),
+                reference,
+                "{cores} cores"
+            );
+        }
     }
 
     /// A single name still yields a runnable shard whatever the host reports,

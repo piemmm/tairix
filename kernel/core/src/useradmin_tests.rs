@@ -15,8 +15,7 @@ use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_sync::SpinLock;
 use tairix_users::{
-    AccountState, Gid, GroupRecord, GroupsDb, Identity, PasswordRecord, Salt, Uid, UserRecord,
-    UsersDb, MIN_ITERATIONS, SALT_LEN,
+    AccountState, Gid, GroupRecord, GroupsDb, Identity, StoredPassword, Uid, UserRecord, UsersDb,
 };
 
 use crate::fs::LateIdentity;
@@ -25,7 +24,19 @@ use crate::test_sink::TestSink;
 use crate::useradmin::{UserAdminBacking, UserAdminEngine, UsersAdmin};
 use crate::users::{HeldUsersDbSource, LateUsersDb, UsersDbSource};
 
-const SALT: Salt = [0x22; SALT_LEN];
+// Each password's stored record under a `0x22` salt at the minimum accepted
+// cost, carried rather than derived: a derivation costs minutes under the UB
+// oracle, and the engine only ever decodes the records it is handed.
+const ROOT_RECORD: &str = "pbkdf2-sha256$1000$22222222222222222222222222222222$\
+                           37660a26bd970e33d69e92877cb69ffb51026b036371d60523ed518ac733de6d";
+const BYRON_RECORD: &str = "pbkdf2-sha256$1000$22222222222222222222222222222222$\
+                            3f9195e27c4edaa84488da91edb6e6665a46d0e14e45cdaa01241f07d1800260";
+const LOVELACE_RECORD: &str = "pbkdf2-sha256$1000$22222222222222222222222222222222$\
+                               ad69b426cc22ca1ccb87551738dc3d717fd88c3f9c5c62f69975cce8452bbbe9";
+const PW_RECORD: &str = "pbkdf2-sha256$1000$22222222222222222222222222222222$\
+                         a32365b35089aa50c3ad560acf535829dfaf7dac2e82c5eb679458e13218d66d";
+const NEW_SECRET_RECORD: &str = "pbkdf2-sha256$1000$22222222222222222222222222222222$\
+                                 70423014b07e8bf6d36e7ddf3b53fd934644b06eae49f93b6100ecf606a3cf60";
 
 /// A caller holding the debug administrator's effective set.
 struct AdminCaller;
@@ -80,8 +91,8 @@ impl UserAdminBacking for RecordingBacking {
     }
 }
 
-fn record(username: &str, uid: u32, grants: CapabilitySet, password: &[u8]) -> UserRecord {
-    UserRecord::with_password(
+fn record(username: &str, uid: u32, grants: CapabilitySet, stored: &str) -> UserRecord {
+    UserRecord::new(
         Identity {
             username,
             uid: Uid(uid),
@@ -93,9 +104,7 @@ fn record(username: &str, uid: u32, grants: CapabilitySet, password: &[u8]) -> U
             capabilities: grants,
             state: AccountState::Active,
         },
-        password,
-        SALT,
-        MIN_ITERATIONS,
+        StoredPassword::decode(stored).expect("a fixture record decodes"),
     )
     .expect("valid record")
 }
@@ -119,8 +128,8 @@ fn fixture() -> Fixture {
         baseline.insert(*cap);
     }
     let users = UsersDb::new(alloc::vec![
-        record("root", 1000, admin_grants, b"root"),
-        record("ada", 1001, baseline, b"byron"),
+        record("root", 1000, admin_grants, ROOT_RECORD),
+        record("ada", 1001, baseline, BYRON_RECORD),
     ])
     .expect("valid users db");
     let groups = GroupsDb::new(alloc::vec![
@@ -161,12 +170,6 @@ fn fixture() -> Fixture {
     }
 }
 
-fn password_record(password: &[u8]) -> String {
-    PasswordRecord::new(password, SALT, MIN_ITERATIONS)
-        .expect("valid password")
-        .encode()
-}
-
 fn served_db(users_cell: &LateUsersDb) -> UsersDb {
     let text = users_cell.text().expect("served text");
     let text = String::from(core::str::from_utf8(&text).expect("utf8"));
@@ -188,7 +191,6 @@ fn create_user_provisions_home_persists_and_binds_at_next_resolution() {
     .expect("fits");
     let mut gid_backing = [0u8; 4];
     let supplementary_gids = gid_list_into(&[1001], &mut gid_backing).expect("fits");
-    let password = password_record(b"lovelace");
     let request = UsersAdminRequest::CreateUser(CreateUser {
         username: "grace",
         uid: 1002,
@@ -198,7 +200,7 @@ fn create_user_provisions_home_persists_and_binds_at_next_resolution() {
         home: "/Users/grace",
         shell: "/System/Commands/elsh.app/Run",
         grants,
-        password_record: &password,
+        password_record: LOVELACE_RECORD,
     });
     assert_eq!(handle(&f, &request), Ok(0));
 
@@ -237,7 +239,6 @@ fn a_grant_the_caller_does_not_hold_is_never_minted() {
     let grants = grant_list_into(&[CapabilityId::TIME_SET], &mut grant_backing).expect("fits");
     let mut gid_backing = [0u8; 0];
     let supplementary_gids = gid_list_into(&[], &mut gid_backing).expect("fits");
-    let password = password_record(b"pw");
     let request = UsersAdminRequest::CreateUser(CreateUser {
         username: "mallory",
         uid: 2000,
@@ -247,7 +248,7 @@ fn a_grant_the_caller_does_not_hold_is_never_minted() {
         home: "/Users/mallory",
         shell: "/System/Commands/elsh.app/Run",
         grants,
-        password_record: &password,
+        password_record: PW_RECORD,
     });
     assert_eq!(
         f.engine.handle(1001, &BaselineCaller, &request, &mut []),
@@ -365,13 +366,12 @@ fn delete_user_removes_the_account_and_missing_targets_fail_closed() {
 #[test]
 fn set_password_replaces_the_stored_record_and_rejects_malformed_ones() {
     let f = fixture();
-    let password = password_record(b"new-secret");
     assert_eq!(
         handle(
             &f,
             &UsersAdminRequest::SetPassword {
                 username: "ada",
-                password_record: &password,
+                password_record: NEW_SECRET_RECORD,
             },
         ),
         Ok(0)
@@ -399,7 +399,6 @@ fn duplicate_accounts_and_groups_are_refused() {
     let grants = grant_list_into(&[], &mut grant_backing).expect("fits");
     let mut gid_backing = [0u8; 0];
     let supplementary_gids = gid_list_into(&[], &mut gid_backing).expect("fits");
-    let password = password_record(b"pw");
     // Same name as an existing account.
     let request = UsersAdminRequest::CreateUser(CreateUser {
         username: "ada",
@@ -410,7 +409,7 @@ fn duplicate_accounts_and_groups_are_refused() {
         home: "/Users/ada2",
         shell: "/System/Commands/elsh.app/Run",
         grants,
-        password_record: &password,
+        password_record: PW_RECORD,
     });
     assert_eq!(handle(&f, &request), Err(Errno::AlreadyExists));
     // Same gid as an existing group.

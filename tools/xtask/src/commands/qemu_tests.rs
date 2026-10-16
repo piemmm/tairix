@@ -1004,11 +1004,11 @@ const WINDOW_SHOWN_MARKER: &str = tairix_desktop_session::WINDOW_SHOWN_MESSAGE;
 /// the title carries everything it presented before asking for it.
 const WINDOW_RETITLED_MARKER: &str = tairix_desktop_session::WINDOW_RETITLED_MESSAGE;
 
-/// Serial marker the netmap vertical's quit gesture waits on: the live system's
-/// own audit line for a finished reachability probe. Gating the quit on it holds
-/// the map open until its active probe has run against the real network, so the
-/// map cannot be quit before the probe reaches the gateway. Imported from
-/// netmap's own event definitions.
+/// Serial marker the netmap vertical's quit gesture waits on: the map's own
+/// record of a finished reachability probe. Gating the quit on it holds the map
+/// open until its active probe has run against the real network, so the guest's
+/// probe witness is in before its exit witness. Imported from netmap's own
+/// event definitions.
 const NETMAP_PROBE_FINISHED_MARKER: &str = tairix_netmap::events::PROBE_FINISHED_MESSAGE;
 
 /// Serial marker a size-state dump or keystroke waits on: the session's
@@ -9992,10 +9992,13 @@ static TESTS: &[QemuTest] = &[
     // raise the marker three times, and the keyboard's arming is among them.
     //
     // PASS needs the guest's witnesses in order: an `APP_LOADED` naming the map
-    // bundle, the create reply of its window, and the map's own clean exit — the
-    // *Quit* the runner sends only once the dump is read back. A map that failed
-    // before drawing data exits too, but no dump is captured (the host gates it
-    // on the retitle a failed map never reaches), so the tier assertion fails.
+    // bundle, the create reply of its window, a finished probe that reached a
+    // host — read off the diagnostic sink, where the map's own records arrive —
+    // and the map's own clean exit, the *Quit* the runner sends once the dump is
+    // read back and the probe's line is out. An exit with no host reached fails
+    // at once. A map that failed before drawing data exits too, but no dump is
+    // captured (the host gates it on the retitle a failed map never reaches), so
+    // the tier assertion fails.
     //
     // Single CPU and the same 300-second *inactivity* budget its siblings carry.
     QemuTest {
@@ -16549,10 +16552,10 @@ fn netmap_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     pen.click(LIBRARY_SHOWN_MARKER, 1, MouseButton::Primary, entry_row);
     // Off the bar and clear of the window before the frame the dump reads.
     pen.aim(LIBRARY_SHOWN_MARKER, 1, rest);
-    // The quit waits on the finished-probe audit line, not just the retitle, so
-    // the active probe has reached the gateway before the map is closed — the
-    // guest's probe witness lands before its exit witness. The dump is still
-    // gated on the retitle, which precedes this.
+    // The quit waits on the finished probe's line, not just the retitle, so the
+    // active probe has run before the map is closed — the guest's probe witness
+    // lands before its exit witness. The dump is still gated on the retitle,
+    // which precedes this.
     pen.click(
         NETMAP_PROBE_FINISHED_MARKER,
         1,

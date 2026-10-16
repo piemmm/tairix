@@ -2,27 +2,22 @@
 //!
 //! An [`AccountState::Active`](tairix_users::AccountState) record must be
 //! login-shaped — home, shell, and a real stored password — so a fixture
-//! modelling a human account cannot skip the password. Deriving one costs a
-//! PBKDF2 run at the minimum accepted cost, and every fixture that needs one
-//! needs the *same* one, so it is derived once for the process.
+//! modelling a human account cannot skip the password.
 
-use tairix_sync::Once;
-use tairix_users::{PasswordRecord, StoredPassword, MIN_ITERATIONS};
+use tairix_users::StoredPassword;
+
+/// The password [`shared_password`] verifies.
+pub(crate) const SHARED_SECRET: &[u8] = b"correct horse";
+
+/// [`SHARED_SECRET`]'s stored record under a `0x42` salt at the minimum
+/// accepted cost.
+///
+/// Carried rather than derived: a derivation costs minutes under the UB
+/// oracle, and a fixture needs the record, not the work of making it.
+const SHARED_RECORD: &str = "pbkdf2-sha256$1000$42424242424242424242424242424242$\
+                             ffcd5f876e3c20b48baefb6a808b7f5cc4bb3e2fd0325981a6d09c9fc6e01739";
 
 /// The stored password every host-test human account carries.
-///
-/// Derived on first use and cloned thereafter: the suites that build these
-/// records assert on identity and group resolution, never on the hash, so
-/// paying the derivation per record buys nothing.
 pub(crate) fn shared_password() -> StoredPassword {
-    static PASSWORD: Once<StoredPassword> = Once::new();
-    PASSWORD
-        .call_once_infallible(|| {
-            StoredPassword::Password(
-                PasswordRecord::new(b"correct horse", [0x42; 16], MIN_ITERATIONS)
-                    .expect("the minimum accepted cost is a valid record"),
-            )
-        })
-        .expect("a fresh cell")
-        .clone()
+    StoredPassword::decode(SHARED_RECORD).expect("the fixture record decodes")
 }

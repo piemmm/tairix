@@ -28,7 +28,9 @@
 //! - The **guest** kernel's audit sink sees kernel audit records only, so it
 //!   gates on those: the bundle a load names, the window channel's create
 //!   reply, and the map's own clean exit — the user's *Quit*, the last gesture
-//!   the host injects, and the only one it injects after reading the dump.
+//!   the host injects, and the only one it injects after reading the dump. What
+//!   the map itself emits reaches the kernel's diagnostic sink alone, so the
+//!   probe's finished record is latched there.
 //!
 //! Neither side infers the other's facts, and neither counts a cumulative
 //! event an unrelated subsystem's cadence could shift under it

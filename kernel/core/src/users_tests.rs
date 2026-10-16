@@ -11,11 +11,11 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::{CapabilityId, DriverError};
 use tairix_users::{
-    AccountState, Gid, Identity, LocatedError, ParseError, Salt, Uid, UserRecord, UsersDb,
-    MAX_DB_LEN, MIN_ITERATIONS, SALT_LEN,
+    AccountState, Gid, Identity, LocatedError, ParseError, Uid, UserRecord, UsersDb, MAX_DB_LEN,
 };
 
 use crate::fs::VfsError;
+use crate::test_identity::{shared_password, SHARED_SECRET};
 use crate::test_sink::TestSink;
 use crate::users::{
     load_users_db, load_users_db_source, LateUsersDb, UsersDbAlreadyInstalled, UsersDbSource,
@@ -155,8 +155,7 @@ impl FilesystemSecurity for MockRoot {
 /// A valid single-account `users-v1` database, serialised by the same
 /// `lib/users` code the loader parses with.
 fn valid_db_text() -> String {
-    let salt: Salt = [0x11; SALT_LEN];
-    let record = UserRecord::with_password(
+    let record = UserRecord::new(
         Identity {
             username: "ada",
             uid: Uid(1000),
@@ -168,9 +167,7 @@ fn valid_db_text() -> String {
             capabilities: tairix_caps::CapabilitySet::empty(),
             state: AccountState::Active,
         },
-        b"correct horse",
-        salt,
-        MIN_ITERATIONS,
+        shared_password(),
     )
     .expect("valid record");
     UsersDb::new(alloc::vec![record])
@@ -217,7 +214,7 @@ fn the_source_load_holds_the_exact_text_and_authenticates() {
     let served = core::str::from_utf8(&served_text).expect("utf8");
     let db = UsersDb::parse(served).expect("served text re-parses");
     assert_eq!(db.records().len(), 1);
-    db.authenticate("ada", b"correct horse")
+    db.authenticate("ada", SHARED_SECRET)
         .expect("planted account authenticates");
     assert!(
         db.authenticate("ada", b"wrong").is_err(),
@@ -449,7 +446,7 @@ fn the_late_users_db_serves_the_installed_text() {
     let served_text = late.text().expect("served text");
     let served = core::str::from_utf8(&served_text).expect("utf8");
     let db = UsersDb::parse(served).expect("served text re-parses");
-    db.authenticate("ada", b"correct horse")
+    db.authenticate("ada", SHARED_SECRET)
         .expect("planted account authenticates against the served database");
 }
 

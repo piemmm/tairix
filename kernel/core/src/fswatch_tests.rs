@@ -86,7 +86,10 @@ fn journal_bytes(watch: &VolumeWatch) -> usize {
 fn a_name_changed_many_times_is_one_record() {
     let watch = table(1);
     let w = arm(&watch, DIR);
-    for _ in 0..10_000 {
+    // One more change than the journal holds as separate records, so a
+    // journal that failed to coalesce them would ask for a rescan.
+    let changes = JOURNAL_BYTES / name_cost(b"build.log".len()) + 1;
+    for _ in 0..changes {
         watch.entry_changed(DIR, b"build.log", Some(FILE));
     }
     watch.entries_changed(DIR, b"new.o", None);
@@ -234,16 +237,16 @@ fn a_journal_holds_no_more_than_its_share_of_a_small_machine() {
     );
 }
 
-/// A machine whose journals together may hold 128 KiB.
+/// A machine whose journals together may hold 8 KiB.
 struct SmallMachine;
 
 impl FreeMemorySource for SmallMachine {
     fn free_bytes(&self) -> usize {
-        32 << 20
+        2 << 20
     }
 
     fn total_bytes(&self) -> usize {
-        64 << 20
+        4 << 20
     }
 }
 
@@ -253,6 +256,7 @@ impl FreeMemorySource for SmallMachine {
 #[test]
 fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
     static SOURCE: SmallMachine = SmallMachine;
+    const NAMES: usize = 64;
     let gauge: &'static MemoryPressure = crate::forever(Box::new(MemoryPressure::over(&SOURCE)));
     let registry = registry();
     let volume = [0xE8; 16];
@@ -262,10 +266,13 @@ fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
     let table = claim.table();
     let on = |node: u64| FileId { volume, node };
     let (budget, _) = table.journal_limits();
+    // Directories enough to want the whole budget four times over, first come
+    // first served.
+    let directories = 4 * budget / (NAMES * name_cost(8)) + 1;
     let mut hogs = Vec::new();
     // Names across ever more directories, stopping the moment every
     // journal's budget is full, if equal shares ever let it be.
-    'fill: for node in 100..164 {
+    'fill: for node in (100..).take(directories) {
         hogs.push(
             ArmedWatch::arm(
                 registry,
@@ -277,7 +284,7 @@ fn a_watcher_that_never_drains_crowds_out_no_other_journal() {
             )
             .expect("arms"),
         );
-        for i in 0..64u32 {
+        for i in 0..NAMES {
             if registry.journal_bytes.load(Ordering::Relaxed) >= budget {
                 break 'fill;
             }

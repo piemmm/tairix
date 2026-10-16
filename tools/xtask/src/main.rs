@@ -87,8 +87,8 @@
 //!   another document (a plan, a `docs/` page, an RFC, a hardware manual)
 //!   passes when that document is named beside the section number
 //! - `miri`         — interpret the crates whose safety rests on a
-//!   hand-written `unsafe` core (`lib/collections`, `lib/hash`) under Miri,
-//!   the undefined-behaviour oracle a test suite cannot be: it checks that a
+//!   hand-written `unsafe` core (the registry in `commands/miri.rs`) under
+//!   Miri, the undefined-behaviour oracle a test suite cannot be: it checks that a
 //!   raw pointer stayed in bounds, that a slot was initialised before it was
 //!   read, and that two `&mut` never aliased
 //! - `model-check` — exhaustively model-check the Silver capability +
@@ -299,8 +299,13 @@ impl Context {
             .map_err(|err| format!("{label} could not be spawned: {err}"))?;
         let pid = child.id();
         let started = Instant::now();
-        let status = await_within(label, pid, budget, move || child.wait())?;
-        report_elapsed(label, status.success(), started.elapsed());
+        let outcome = await_within(label, pid, budget, move || child.wait());
+        report_elapsed(
+            label,
+            matches!(&outcome, Ok(status) if status.success()),
+            started.elapsed(),
+        );
+        let status = outcome?;
         if status.success() {
             Ok(())
         } else {
@@ -325,6 +330,22 @@ pub(crate) fn spawn_in_own_group(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
+/// Why a bounded wait ended without the value it was waiting for.
+pub(crate) struct WaitFailure<T> {
+    /// What happened, naming the step.
+    pub(crate) message: String,
+    /// What the wait yielded once a timed-out group was killed and reaped:
+    /// for a captured job, the output it had produced, which is what names
+    /// the work its budget ran out on.
+    pub(crate) reaped: Option<T>,
+}
+
+impl<T> From<WaitFailure<T>> for String {
+    fn from(failure: WaitFailure<T>) -> Self {
+        failure.message
+    }
+}
+
 /// Races `wait` against `budget`, killing the process group led by `pid` when
 /// the budget expires first.
 ///
@@ -342,7 +363,11 @@ pub(crate) fn await_within<T: Send + 'static>(
     pid: u32,
     budget: Duration,
     wait: impl FnOnce() -> std::io::Result<T> + Send + 'static,
-) -> Result<T, String> {
+) -> Result<T, WaitFailure<T>> {
+    let failure = |message: String| WaitFailure {
+        message,
+        reaped: None,
+    };
     let (done_tx, done_rx) = mpsc::channel();
     let waiter = thread::Builder::new().spawn(move || {
         // The receiver may already have moved on past a timeout; a send with
@@ -353,10 +378,10 @@ pub(crate) fn await_within<T: Send + 'static>(
         Ok(handle) => handle,
         Err(err) => {
             kill_process_tree(pid);
-            return Err(format!(
+            return Err(failure(format!(
                 "{label}: could not start the wait thread ({err}); \
                  pid {pid} was killed"
-            ));
+            )));
         }
     };
 
@@ -367,13 +392,13 @@ pub(crate) fn await_within<T: Send + 'static>(
         }
         Ok(Err(err)) => {
             let _ = waiter.join();
-            Err(format!("{label} could not be awaited: {err}"))
+            Err(failure(format!("{label} could not be awaited: {err}")))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             let _ = waiter.join();
-            Err(format!(
+            Err(failure(format!(
                 "{label}: the wait thread ended without reporting a status"
-            ))
+            )))
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             kill_process_tree(pid);
@@ -382,11 +407,17 @@ pub(crate) fn await_within<T: Send + 'static>(
             // this call returns. A process stuck in an uninterruptible kernel
             // sleep would block the underlying wait regardless of what we do
             // here, so this stays bounded rather than joining unconditionally.
-            let _ = done_rx.recv_timeout(KILL_REAP_GRACE);
-            Err(format!(
-                "{label} exceeded its {budget:?} timeout and was killed \
-                 (SIGTERM, then SIGKILL, to its process group)"
-            ))
+            let reaped = done_rx
+                .recv_timeout(KILL_REAP_GRACE)
+                .ok()
+                .and_then(Result::ok);
+            Err(WaitFailure {
+                message: format!(
+                    "{label} exceeded its {budget:?} timeout and was killed \
+                     (SIGTERM, then SIGKILL, to its process group)"
+                ),
+                reaped,
+            })
         }
     }
 }
@@ -702,6 +733,54 @@ mod tests {
             "run_with_timeout should return promptly once the process group \
              is killed, took {:?}",
             started.elapsed()
+        );
+    }
+
+    /// A killed job's output is the only record of what it was doing when its
+    /// budget ran out — for a test binary, the name of the test in progress.
+    #[test]
+    fn a_timed_out_wait_hands_back_what_the_killed_group_produced() {
+        use std::io::{BufRead as _, BufReader};
+        use std::process::Stdio;
+
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "echo test reached::the_hang ... ; echo started >&2; exec sleep 600",
+        ]);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = spawn_in_own_group(&mut cmd).expect("sh spawns");
+        // Wait on the child's own word that the line is in the pipe, so the
+        // budget below cannot expire before it is written however busy the
+        // host is.
+        let mut started = String::new();
+        BufReader::new(child.stderr.take().expect("stderr is piped"))
+            .read_line(&mut started)
+            .expect("the child reports that it started");
+        assert_eq!(started.trim(), "started");
+
+        let pid = child.id();
+        let failure = await_within(
+            "unit-test-partial-output",
+            pid,
+            Duration::from_millis(200),
+            move || child.wait_with_output(),
+        )
+        .expect_err("a command that outlives its budget must fail, never pass");
+        assert!(
+            failure.message.contains("unit-test-partial-output")
+                && failure.message.contains("timeout"),
+            "unexpected message: {}",
+            failure.message
+        );
+        let output = failure
+            .reaped
+            .expect("a killed group is reaped within the grace");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test reached::the_hang ..."),
+            "the output before the kill must survive it: {output:?}"
         );
     }
 

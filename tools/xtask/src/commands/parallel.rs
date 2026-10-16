@@ -38,7 +38,8 @@
 //!
 //! When more than one job can run at once, each job's output is serialised
 //! into an atomic block so concurrent jobs never interleave their lines: a
-//! [`Work::Command`] job has its stdio captured and printed on completion;
+//! [`Work::Command`] job has its stdio captured and printed when it ends, a
+//! job killed at its budget included;
 //! a [`Work::Closure`] job prints a start marker and, on completion, its
 //! verdict and wall-clock duration (the QEMU closures keep their serial logs
 //! inside the returned error, so a failure's log is printed once, by
@@ -61,7 +62,7 @@ use std::time::{Duration, Instant};
 
 use crate::{
     await_within, effective_timeout, report_elapsed, soak_deadline, spawn_in_own_group,
-    DEFAULT_COMMAND_TIMEOUT,
+    WaitFailure, DEFAULT_COMMAND_TIMEOUT,
 };
 
 /// What a [`Job`] actually does when run.
@@ -300,7 +301,7 @@ fn run_streaming(job: Job) -> Option<String> {
             match outcome {
                 Ok(status) if status.success() => None,
                 Ok(status) => Some(format!("{label} failed with {status}")),
-                Err(err) => Some(err),
+                Err(failure) => Some(failure.message),
             }
         }
         Work::Closure(work) => {
@@ -340,30 +341,38 @@ fn run_captured(job: Job, stdio_lock: &Mutex<()>) -> Result<(), String> {
             };
             let pid = child.id();
             let started = Instant::now();
-            let output = await_within(&label, pid, budget, move || child.wait_with_output())?;
+            let awaited = await_within(&label, pid, budget, move || child.wait_with_output());
             let elapsed = started.elapsed();
+            // A killed job's output is printed like any other: it is what
+            // names the work its budget ran out on.
+            let (output, failure) = match awaited {
+                Ok(output) => {
+                    let failure = (!output.status.success())
+                        .then(|| format!("{label} failed with {}", output.status));
+                    (Some(output), failure)
+                }
+                Err(WaitFailure { message, reaped }) => (reaped, Some(message)),
+            };
 
             {
                 let _guard = stdio_lock.lock().expect("stdio lock");
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
                 eprintln!("xtask: [{label}] ----- output -----");
-                if !stdout.trim().is_empty() {
-                    eprint!("{stdout}");
-                }
-                if !stderr.trim().is_empty() {
-                    eprint!("{stderr}");
+                if let Some(output) = &output {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    if !stdout.trim().is_empty() {
+                        eprint!("{stdout}");
+                    }
+                    if !stderr.trim().is_empty() {
+                        eprint!("{stderr}");
+                    }
                 }
                 // Closes the captured block as well as reporting the cost, so
                 // the output above it has an unambiguous end.
-                report_elapsed(&label, output.status.success(), elapsed);
+                report_elapsed(&label, failure.is_none(), elapsed);
             }
 
-            if output.status.success() {
-                Ok(())
-            } else {
-                Err(format!("{label} failed with {}", output.status))
-            }
+            failure.map_or(Ok(()), Err)
         }
         Work::Closure(work) => {
             {

@@ -5883,6 +5883,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appload",
  "tairix-arch-aarch64",
+ "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-itest-witness",
  "tairix-kalloc",

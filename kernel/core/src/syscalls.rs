@@ -15601,7 +15601,7 @@ mod tests {
     use tairix_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT, THREAD_STACK_DEFAULT};
     use tairix_caps::CapabilitySet;
     use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port, RecvCall};
-    use tairix_kernel_irq::{IrqTable, UnsupportedController};
+    use tairix_kernel_irq::{FireOutcome, IrqTable, UnsupportedController};
     use tairix_kernel_mem::{
         AddressSpace, AnonError, BootMemoryMap, DmaError, DmaMapping, Frame, FrameAllocator,
         FrozenAddressSpace, HostPageTable, LiveSpaceError, LiveUserSpace, MapFlags, MemoryRegion,
@@ -18270,8 +18270,7 @@ mod tests {
         // Storm the line (bounded so the test can never hang) until the
         // safety net quarantines it, independent of the exact budget.
         let mut fired = 0u32;
-        while !irq.is_quarantined(handle, ctx.process()) && fired < 1_000_000 {
-            let _ = irq.fire(5, &permissive);
+        while irq.fire(5, &permissive) != Ok(FireOutcome::Quarantined) && fired < 1_000_000 {
             fired += 1;
         }
         assert!(
@@ -51889,10 +51888,9 @@ mod tests {
     /// drives per refresh: a timed `stream_read` whose bound elapses with
     /// no input, an `ipc_call` round trip to the broker's endpoint, and a
     /// `sysinfo_introspect` process walk. Hammered for thousands of
-    /// iterations against this test's own live-byte balance
-    /// (`crate::test_alloc`), it asserts the kernel side of the cycle
-    /// retains no memory per iteration (any real per-iteration leak, even a
-    /// single byte, dwarfs the fixed slack) and that every ticket is
+    /// iterations (hundreds under the interpreter) against this test's own
+    /// live-byte balance (`crate::test_alloc`), it asserts the kernel side of
+    /// the cycle retains no memory per iteration and that every ticket is
     /// retired.
     ///
     /// The loop-time sinks are the no-op [`NullLogSink`], modelling the
@@ -51932,11 +51930,14 @@ mod tests {
         }
 
         const WARMUP: usize = 64;
-        const MEASURED: usize = 4096;
+        // Each round hands a call to the server thread and back, which is
+        // dear to interpret; there the soak resolves a leak of three bytes a
+        // round rather than one.
+        const MEASURED: usize = if cfg!(miri) { 512 } else { 4096 };
         // Zero per-iteration budget: the slack only absorbs sampling jitter
         // (the server thread's in-flight transients at the baseline sample
-        // and one-time wait-queue capacity growth). A real leak of even one
-        // byte per iteration overshoots it four-fold.
+        // and one-time wait-queue capacity growth). Natively a real leak of
+        // even one byte per iteration overshoots it four-fold.
         const SLACK_BYTES: isize = 1024;
         static COUNTER: crate::test_alloc::LiveBytes = crate::test_alloc::LiveBytes::new();
 
