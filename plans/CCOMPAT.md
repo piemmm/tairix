@@ -830,6 +830,9 @@ OS-provided shared-library class. Per `AGENTS.md` §16.4, adding a class
   crt0 startup/teardown (CC3). It is deliberately minimal (no sprawling libc):
   it marshals to the kernel and starts/stops the program; everything else a
   program wants it brings itself (§16.5) or links from another curated class.
+  The Rust toolchain's C runtime (`plans/RUST.md` R8) is such a brought-along
+  library, linked statically into the toolchain's own binaries; it does not
+  widen this class.
 - It is **dynamically linked** like every other curated library, so one
   security update covers every consumer; OS-bundled programs must not vendor
   it.

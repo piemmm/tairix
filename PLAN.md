@@ -224,6 +224,7 @@ plan's ledger. A `blocked` row names its blocker.
 | OPEN-DEFECTS | The core-kernel defect tracker (`plans/OPEN-DEFECTS.md`) | in progress |
 | CODEVERIFY | The recurring code-quality sweeps (`plans/CODEVERIFY.md`) | in progress |
 | WAFFLE | The comment-discipline sweep (`plans/WAFFLE.md`) | planned |
+| RUST | The Rust toolchain on TAIRiX, and TAIRiX building itself (`plans/RUST.md`) | planned |
 
 ## Stage 0 — Repository foundation
 

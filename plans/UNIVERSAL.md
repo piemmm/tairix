@@ -53,7 +53,9 @@ already in the tree, and this plan fixes the answers:
   `unsafe` exists, and TAIRiX already refuses to trust language-level claims —
   third-party native code is hostile by assumption (§16.4, §19); the real
   boundary is hardware isolation + capabilities (§4, §5), not the compiler
-  that produced the binary.
+  that produced the binary. The developer toolchain `plans/RUST.md` puts on
+  TAIRiX is a build host like any other, not a channel: what it builds reaches
+  another machine only as a signed bundle.
 - **Safety is not a format property.** Native slices get no trust from being
   "written in Rust": they are hostile code confined by the MMU, the capability
   manifest intersection, PIE/W^X/CFI (§19.2), and fail-closed load gates. A
@@ -134,4 +136,5 @@ scoping.
 - A bespoke TAIRiX bytecode or first-party VM/verifier.
 - A multi-arch fat `rxe` *file* format (the bundle is the fat unit).
 - A runtime in-process JIT as the default execution mode for the Wasm tier.
-- An in-OS Rust compiler / source distribution as the app channel.
+- An in-OS Rust compiler / source distribution as the app channel (the
+  `plans/RUST.md` toolchain is a build host, not a channel).
